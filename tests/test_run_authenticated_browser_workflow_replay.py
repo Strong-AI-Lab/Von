@@ -125,6 +125,97 @@ def test_workflow_capability_preflight_waits_through_transient_build(
     assert sleeps == [0.5]
 
 
+def test_workflow_capability_preflight_expiry_is_pending_not_blocked(
+    monkeypatch,
+) -> None:
+    monotonic_values = iter((0.0, 2.0, 2.0))
+    monkeypatch.setattr(
+        replay,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "ready": False,
+            "workflow_discovery_available": False,
+            "status": "building",
+            "build_in_progress": True,
+        },
+    )
+    monkeypatch.setattr(replay.time, "monotonic", lambda: next(monotonic_values))
+
+    preflight = replay.build_workflow_capability_preflight(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://von.test",
+        timeout_seconds=1.0,
+        poll_interval_seconds=0.2,
+    )
+
+    assert preflight["observation_pending"] is True
+    assert preflight["preflight_wait"]["observation_pending"] is True
+    assert preflight["reconciliation"]["build_left_running"] is True
+
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        database_preflight={"database_runtime_available": True},
+        llm_preflight={"llm_runtime_available": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        workflow_capability_preflight=preflight,
+        task_evidence={"last_task_status": {}},
+        selected_workflow_ids=[],
+        observed_workflow_ids=[],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+    assert analysis["verdict"] == "inconclusive"
+    assert analysis["reconciliation"]["build_left_running"] is True
+
+
+def test_poll_observer_expiry_leaves_live_task_for_reconciliation(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    monotonic_values = iter((0.0, 0.0, 2.0))
+
+    def _fake_request_json(_session, method, url, **_kwargs):
+        calls.append((method, url))
+        if "/task/status/" in url:
+            return {"status": "running", "task_id": "task-1"}
+        return {"status": "thinking", "request_id": "request-1"}
+
+    monkeypatch.setattr(replay, "_request_json", _fake_request_json)
+    monkeypatch.setattr(replay.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(replay.time, "sleep", lambda _seconds: None)
+
+    evidence = replay.poll_replay_task(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://von.test",
+        task_id="task-1",
+        request_id="request-1",
+        timeout_seconds=1.0,
+        poll_interval_seconds=0.2,
+    )
+
+    assert evidence["observation_pending"] is True
+    assert evidence["reconciliation"]["task_left_running"] is True
+    assert evidence["reconciliation"]["task_id"] == "task-1"
+    assert evidence["reconciliation"]["request_id"] == "request-1"
+    assert not any(method == "POST" and "/cancel/" in url for method, url in calls)
+
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence=evidence,
+        selected_workflow_ids=[],
+        observed_workflow_ids=[],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+    assert analysis["verdict"] == "inconclusive"
+    assert analysis["blocker"] is None
+
+
 def test_extract_progress_facts_from_nested_progress_payloads() -> None:
     payload = {
         "progress_snapshots": [

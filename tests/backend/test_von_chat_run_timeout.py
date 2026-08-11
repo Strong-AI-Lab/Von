@@ -7,7 +7,7 @@ import time
 from types import SimpleNamespace
 
 from src.backend.mcp_server.mcp_stdio_server import (
-    VonChatRunTimeout,
+    VonChatRunCapacityUnavailable,
     _run_blocking_with_timeout,
 )
 
@@ -42,42 +42,40 @@ def _access_profile() -> dict[str, object]:
     }
 
 
-def test_run_blocking_with_timeout_returns_without_waiting_for_late_thread() -> None:
-    async def _runner() -> VonChatRunTimeout:
-        def _block() -> None:
-            time.sleep(0.3)
+def test_run_blocking_with_timeout_retains_result_after_advisory() -> None:
+    async def _runner() -> str:
+        def _block() -> str:
+            time.sleep(0.08)
+            return "late usable result"
 
-        try:
-            await _run_blocking_with_timeout(_block, timeout_seconds=0.03)
-        except VonChatRunTimeout as exc:
-            return exc
-        raise AssertionError("expected timeout")
+        return await _run_blocking_with_timeout(_block, timeout_seconds=0.03)
 
     started = time.perf_counter()
-    exc = asyncio.run(_runner())
+    result = asyncio.run(_runner())
     elapsed = time.perf_counter() - started
 
-    assert elapsed < 0.15
-    assert exc.pid > 0
-    assert exc.thread_id is None or exc.thread_id > 0
+    assert elapsed >= 0.07
+    assert result == "late usable result"
 
 
-def test_repeated_timeouts_use_a_bounded_shared_worker_pool() -> None:
+def test_repeated_advisory_crossings_use_a_bounded_shared_worker_pool() -> None:
     async def _runner() -> list[object]:
         async def _timed_call() -> object:
-            try:
-                return await _run_blocking_with_timeout(
-                    lambda: time.sleep(0.2),
-                    timeout_seconds=0.01,
-                )
-            except VonChatRunTimeout as exc:
-                return exc
+            return await _run_blocking_with_timeout(
+                lambda: (time.sleep(0.05), "completed")[1],
+                timeout_seconds=0.01,
+            )
 
-        return await asyncio.gather(*(_timed_call() for _ in range(8)))
+        outcomes: list[object] = []
+        for _batch in range(2):
+            outcomes.extend(
+                await asyncio.gather(*(_timed_call() for _ in range(4)))
+            )
+        return outcomes
 
     outcomes = asyncio.run(_runner())
 
-    assert all(isinstance(outcome, VonChatRunTimeout) for outcome in outcomes)
+    assert outcomes == ["completed"] * 8
     live_workers = [
         thread
         for thread in threading.enumerate()
@@ -85,6 +83,63 @@ def test_repeated_timeouts_use_a_bounded_shared_worker_pool() -> None:
     ]
     assert len(live_workers) <= 4
     time.sleep(0.25)
+
+
+def test_worker_pool_saturation_rejects_excess_work_without_queuing() -> None:
+    release = threading.Event()
+    all_started = threading.Event()
+    fifth_called = threading.Event()
+    count_lock = threading.Lock()
+    started_count = 0
+
+    def _blocked(index: int) -> int:
+        nonlocal started_count
+        with count_lock:
+            started_count += 1
+            if started_count == 4:
+                all_started.set()
+        release.wait(timeout=2.0)
+        return index
+
+    async def _runner() -> tuple[bool, float, list[object]]:
+        active = [
+            asyncio.create_task(
+                _run_blocking_with_timeout(
+                    lambda index=index: _blocked(index),
+                    timeout_seconds=0.01,
+                )
+            )
+            for index in range(4)
+        ]
+        deadline = time.monotonic() + 1.0
+        while not all_started.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+
+        rejected = False
+        started_at = time.perf_counter()
+        try:
+            await _run_blocking_with_timeout(
+                lambda: (fifth_called.set(), "unexpected")[1],
+                timeout_seconds=60.0,
+            )
+        except VonChatRunCapacityUnavailable:
+            rejected = True
+        elapsed = time.perf_counter() - started_at
+
+        release.set()
+        outcomes = await asyncio.gather(*active)
+        return rejected, elapsed, outcomes
+
+    try:
+        rejected, elapsed, outcomes = asyncio.run(_runner())
+    finally:
+        release.set()
+
+    assert all_started.is_set()
+    assert rejected is True
+    assert elapsed < 0.1
+    assert fifth_called.is_set() is False
+    assert outcomes == [0, 1, 2, 3]
 
 
 def test_restricted_gateway_forwards_adaptive_read_transport_options() -> None:
@@ -217,7 +272,7 @@ def test_handle_von_chat_run_projects_trusted_operator_scope_to_adaptive_turn(
         return _adaptive_result()
 
     async def _run_blocking(func, *, timeout_seconds):
-        assert timeout_seconds == 91.0
+        assert timeout_seconds == 13.0
         return func()
 
     async def _runner() -> dict[str, object]:
@@ -227,6 +282,7 @@ def test_handle_von_chat_run_projects_trusted_operator_scope_to_adaptive_turn(
                 "user_namespace": "#V#operator@trusted_org",
                 "auxiliary_system_prompt": "Supplementary material",
                 "gmail_profile": "represented-profile",
+                "advisory_seconds": 12,
             }
         )
         return json.loads(payload[0].text)
@@ -281,6 +337,11 @@ def test_handle_von_chat_run_projects_trusted_operator_scope_to_adaptive_turn(
     assert response["allow_writes"] is False
     assert response["dry_run"] is True
     assert response["delegation"] == "read_only"
+    assert response["elapsed_time_enforcement"] == "advisory"
+    assert response["advisory_seconds_requested"] == 12.0
+    assert response["advisory_seconds"] == 13.0
+    assert response["hard_timeout_seconds"] is None
+    assert captured["turn_budget_seconds"] == 12.0
     assert captured["user_namespace"] == "#V#operator@trusted_org"
     assert captured["user_concept_id"] == "#V#operator"
     assert captured["org_concept_id"] == "#V#trusted_org"
@@ -292,6 +353,67 @@ def test_handle_von_chat_run_projects_trusted_operator_scope_to_adaptive_turn(
     context = captured["context"]
     assert isinstance(context, list)
     assert [item["role"] for item in context] == ["system", "user"]
+
+
+def test_handle_von_chat_run_reports_retryable_capacity_exhaustion(monkeypatch) -> None:
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
+    )
+    from src.backend.mcp_server import mcp_stdio_server as mod
+
+    class _StubGateway:
+        enabled = True
+
+    async def _capacity_unavailable(_func, *, timeout_seconds):
+        assert timeout_seconds == 13.0
+        raise mod.VonChatRunCapacityUnavailable("all worker slots are active")
+
+    async def _runner() -> dict[str, object]:
+        payload = await mod._handle_von_chat_run(
+            {
+                "prompt": "Hello",
+                "user_namespace": "#V#operator@trusted_org",
+                "advisory_seconds": 12,
+            }
+        )
+        return json.loads(payload[0].text)
+
+    monkeypatch.setenv("VON_INTERNAL_MCP_ENABLE", "1")
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_name",
+        lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_llm_client",
+        lambda: object(),
+    )
+    monkeypatch.setattr(mod, "build_default_catalogue", lambda: object())
+    monkeypatch.setattr(mod, "InternalMCPTransport", lambda: object())
+    monkeypatch.setattr(mod, "InternalMCPGateway", lambda **_kwargs: _StubGateway())
+    monkeypatch.setattr(
+        mod,
+        "_evaluate_stdio_write_access",
+        lambda *_args, **_kwargs: (True, _access_profile(), {}),
+    )
+    monkeypatch.setattr(mod, "get_preferred_language", lambda: "en-NZ")
+    monkeypatch.setattr(
+        mod,
+        "_run_blocking_with_timeout",
+        _capacity_unavailable,
+    )
+
+    with bind_internal_mcp_actor_context_source(
+        "trusted_operator_payload_fallback"
+    ):
+        response = asyncio.run(_runner())
+
+    assert response["success"] is False
+    assert response["error_code"] == "von_chat_run_capacity_exhausted"
+    assert response["retryable"] is True
+    assert response["capacity_boundary"] == "bounded_worker_admission"
+    assert response["active_worker_limit"] == 4
+    assert response["elapsed_time_enforcement"] == "advisory"
+    assert response["hard_timeout_seconds"] is None
 
 
 def test_handle_von_chat_run_rejects_unrepresented_gmail_profile_before_model(

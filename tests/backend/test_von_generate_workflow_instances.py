@@ -221,7 +221,9 @@ def test_ordinary_generate_does_not_run_disabled_buttonify_model(
     from src.backend.server.routes import von_routes
 
     def _unexpected_buttonify(*_args: Any, **_kwargs: Any) -> str:
-        raise AssertionError("disabled buttonify must not make a post-answer model call")
+        raise AssertionError(
+            "disabled buttonify must not make a post-answer model call"
+        )
 
     monkeypatch.setattr(von_routes, "_llm_generate_buttonify", _unexpected_buttonify)
 
@@ -240,6 +242,39 @@ def test_ordinary_generate_does_not_run_disabled_buttonify_model(
     )
     assert buttonify_event["status"] == "skipped"
     assert buttonify_event["suppression_reason"] == "buttonify_disabled"
+    assert buttonify_event["model_id"] is None
+
+
+def test_ordinary_generate_requires_per_turn_opt_in_for_buttonify(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    monkeypatch.setattr(von_routes, "get_buttonify_model_enabled", lambda: True)
+
+    def _unexpected_buttonify(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError(
+            "default generation must deliver before optional decoration"
+        )
+
+    monkeypatch.setattr(von_routes, "_llm_generate_buttonify", _unexpected_buttonify)
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Return the completed answer without post-answer work."},
+    )
+
+    assert response.status_code == 200
+    llm_debug = response.get_json()["llm_debug"]
+    assert llm_debug["buttonify"] is None
+    buttonify_event = next(
+        event
+        for event in llm_debug["response_transformations"]["transformations"]
+        if event.get("transform_name") == "buttonify"
+    )
+    assert buttonify_event["status"] == "skipped"
+    assert buttonify_event["suppression_reason"] == "foreground_delivery_priority"
     assert buttonify_event["model_id"] is None
 
 
@@ -475,7 +510,8 @@ def test_pending_effect_answer_reaches_presenter_channels(app: Flask) -> None:
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["success"] is False
+    assert payload["success"] is True
+    assert payload["terminal_status"] == "effect_partially_completed"
     assert payload["response"] == (
         f"The work is still running. Exact workflow instance: {instance_id}."
     )

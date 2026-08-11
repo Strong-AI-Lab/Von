@@ -136,6 +136,8 @@ def test_chat_history_read_adds_comment_and_records_operation(monkeypatch):
     assert coll.kwargs["comment"]["service"] == "chat_history_service"
     assert coll.kwargs["comment"]["collection"] == "chat_history"
     assert coll.kwargs["comment"]["operation"] == "find_one"
+    assert "max_time_ms" not in coll.kwargs
+    assert "maxTimeMS" not in coll.kwargs
     snapshot = get_mongo_operation_audit_snapshot(reset=True)
     assert snapshot["operations"][0]["count"] == 1
 

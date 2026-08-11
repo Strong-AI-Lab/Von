@@ -56,6 +56,31 @@ def test_workflow_discovery_observation_records_timeout_learning_signal():
     assert after.get("workflow_discovery_timeout_budget_seconds_avg") is not None
 
 
+def test_workflow_discovery_advisory_is_not_counted_as_timeout_failure():
+    before = get_workflow_baseline_telemetry_snapshot()
+    before_timeouts = int(before.get("workflow_discovery_budget_exhausted_total", 0))
+    before_advisories = int(
+        before.get("workflow_discovery_advisory_crossing_total", 0)
+    )
+
+    record_workflow_discovery_observation(
+        discovered_match_count=0,
+        executable_match_count=0,
+        budget_exhausted=True,
+        budget_exhaustion_stage="semantic_search",
+        timeout_budget_seconds=10.0,
+        elapsed_time_enforcement="advisory",
+    )
+
+    after = get_workflow_baseline_telemetry_snapshot()
+    assert int(after.get("workflow_discovery_budget_exhausted_total", 0)) == (
+        before_timeouts
+    )
+    assert int(after.get("workflow_discovery_advisory_crossing_total", 0)) == (
+        before_advisories + 1
+    )
+
+
 def test_fallback_and_write_policy_counters_increment():
     before = get_workflow_baseline_telemetry_snapshot()
     before_invocations = int(before.get("generic_fallback_mcp_invocations_total", 0))

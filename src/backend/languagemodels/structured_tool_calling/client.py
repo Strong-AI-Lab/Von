@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 import logging
+import time
 
 from ...services.model_registry_service import (
     resolve_model_parameter_policy,
@@ -22,10 +23,15 @@ from .types import ToolDefinition, LLMResponse
 logger = logging.getLogger(__name__)
 
 
-def split_request_timeout_from_llm_params(
+def split_request_advisory_from_llm_params(
     raw_params: Any,
 ) -> tuple[dict[str, Any], float | None]:
-    """Separate the caller-owned request deadline from model parameters."""
+    """Separate a legacy request-duration advisory from model parameters.
+
+    The timeout-shaped aliases are retained for compatibility, but providers
+    must not turn them into transport cancellation deadlines. Higher-level
+    turn supervision may adapt the advisory from observed successful calls.
+    """
 
     params = dict(raw_params) if isinstance(raw_params, Mapping) else {}
     raw_timeout = params.pop("request_timeout_seconds", None)
@@ -38,6 +44,37 @@ def split_request_timeout_from_llm_params(
     if timeout_seconds is not None:
         timeout_seconds = max(0.0, min(600.0, timeout_seconds))
     return params, timeout_seconds
+
+
+def split_request_timeout_from_llm_params(
+    raw_params: Any,
+) -> tuple[dict[str, Any], float | None]:
+    """Compatibility alias for :func:`split_request_advisory_from_llm_params`."""
+
+    return split_request_advisory_from_llm_params(raw_params)
+
+
+def observe_request_advisory(
+    *,
+    provider: str,
+    advisory_seconds: float | None,
+    started_monotonic: float,
+    event_logger: logging.Logger,
+) -> None:
+    """Log a slow provider call without discarding its completed result."""
+
+    if advisory_seconds is None or advisory_seconds <= 0.0:
+        return
+    elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+    if elapsed_seconds <= advisory_seconds:
+        return
+    event_logger.warning(
+        "llm_request_advisory_crossed provider=%s advisory_seconds=%.3f "
+        "elapsed_seconds=%.3f action=result_preserved",
+        provider,
+        advisory_seconds,
+        elapsed_seconds,
+    )
 
 
 def model_supports_custom_temperature(model: str) -> bool:

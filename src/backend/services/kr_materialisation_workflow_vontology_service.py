@@ -78,7 +78,7 @@ _PROMPT_SEED_ASSET_PATHS = {
     ),
 }
 _REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION = {
-    "8": {
+    "9": {
         PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID: {
             "7": (
                 "cfadd26376e176bbd87bffce74cab180edcd12b03d1e10ca9ba2bfb7501ed8a2",

@@ -49,7 +49,7 @@ def test_await_workflow_terminal_state_retries_transient_get_instance() -> None:
     assert manager.get_instance.call_count == 2
 
 
-def test_await_workflow_terminal_state_does_not_sleep_past_observation_deadline(
+def test_await_workflow_terminal_state_reports_advisory_observation_crossing(
 ) -> None:
     manager = SimpleNamespace(
         get_instance=MagicMock(return_value=SimpleNamespace(status="running"))
@@ -72,6 +72,8 @@ def test_await_workflow_terminal_state_does_not_sleep_past_observation_deadline(
         )
 
     assert result.timed_out is True
+    assert result.elapsed_time_enforcement == "advisory"
+    assert result.advisory_exceeded is True
     assert manager.get_instance.call_count == 2
     sleep_mock.assert_called_once_with(90.0)
 

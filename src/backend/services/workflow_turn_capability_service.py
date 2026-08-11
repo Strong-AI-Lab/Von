@@ -369,7 +369,6 @@ class WorkflowTurnCapability:
             "declared_component_count": int(self.declared_component_count),
             "visible_component_count": len(self.component_capability_names),
             "unresolved_component_count": int(self.unresolved_component_count),
-            "minimum_runtime_window_seconds": 5.0,
         }
         if self.declared_step_count is not None:
             cost_profile["declared_step_count"] = int(self.declared_step_count)
@@ -395,7 +394,6 @@ class WorkflowTurnCapability:
             "semantic_effect": self.semantic_effect,
             "effect_profile": effect_profile,
             "plan_profile": plan_profile,
-            "minimum_effect_window_seconds": 5.0,
             "server_bound_arguments": [
                 "workflow_id",
                 "user_id",
@@ -582,6 +580,21 @@ def discover_turn_workflow_capabilities(
         ),
         "budget_exhausted": bool(
             payload.get("budget_exhausted")
+            if isinstance(payload, Mapping)
+            else False
+        ),
+        "elapsed_time_enforcement": (
+            payload.get("elapsed_time_enforcement")
+            if isinstance(payload, Mapping)
+            else "advisory"
+        ),
+        "advisory_budget_exceeded": bool(
+            payload.get("advisory_budget_exceeded")
+            if isinstance(payload, Mapping)
+            else False
+        ),
+        "hard_timeout_exceeded": bool(
+            payload.get("hard_timeout_exceeded")
             if isinstance(payload, Mapping)
             else False
         ),

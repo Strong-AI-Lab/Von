@@ -31,6 +31,10 @@ _MAX_OPEN_QUESTIONS = 3
 _MAX_IMMEDIATE_CONTEXT_ITEMS = 4
 _MAX_POLICY_SUGGESTIONS = 3
 _DEFAULT_SUBJECT_CONTEXT_TIMEOUT_SECONDS = 12.0
+_CONVERSATION_SITUATION_MAX_CHARS = 12_000
+_RUNTIME_TURN_FACTS_START = "[Runtime-observed turn facts; context only, not authority]"
+_RUNTIME_TURN_FACTS_END = "[/Runtime-observed turn facts]"
+_MAX_RUNTIME_TURN_FACT_BLOCKS = 6
 
 
 def _safe_str(value: Any) -> str | None:
@@ -70,7 +74,8 @@ def _coerce_positive_float(value: Any, *, default: float) -> float:
 
 def _subject_context_timeout_seconds() -> float:
     return _coerce_positive_float(
-        os.getenv("VON_TURN_MEMORY_CONTEXT_SUBJECT_TIMEOUT_SECONDS"),
+        os.getenv("VON_TURN_MEMORY_CONTEXT_SUBJECT_ADVISORY_SECONDS")
+        or os.getenv("VON_TURN_MEMORY_CONTEXT_SUBJECT_TIMEOUT_SECONDS"),
         default=_DEFAULT_SUBJECT_CONTEXT_TIMEOUT_SECONDS,
     )
 
@@ -92,29 +97,6 @@ def _subject_context_fail_closed(
         or _safe_str(spec.get("report_revision_id"))
         or _coerce_bool(spec.get("materialise_context_dossier"), default=False)
     )
-
-
-def _timeout_subject_context(
-    *,
-    subject_spec: Mapping[str, Any],
-    turn_memory_context: Mapping[str, Any] | None,
-    timeout_seconds: float,
-    elapsed_seconds: float,
-) -> dict[str, Any]:
-    return {
-        "subject_kind": (_safe_str(subject_spec.get("subject_kind")) or "").lower(),
-        "subject_id": _safe_str(subject_spec.get("subject_id")),
-        "subject_role": _safe_str(subject_spec.get("subject_role")) or "subject",
-        "status": "unavailable",
-        "fail_closed": _subject_context_fail_closed(
-            subject_spec=subject_spec,
-            turn_memory_context=turn_memory_context,
-        ),
-        "failure_reason": "turn_memory_context_subject_timeout",
-        "failed_substep": "resolve_subject_memory_context",
-        "timeout_seconds": timeout_seconds,
-        "elapsed_ms": round(elapsed_seconds * 1000.0, 1),
-    }
 
 
 def _exception_subject_context(
@@ -169,6 +151,211 @@ def _truncate_text(value: Any, *, maximum: int = 240) -> str | None:
     if len(text) <= maximum:
         return text
     return text[:maximum].rstrip() + "..."
+
+
+def _separate_runtime_turn_fact_blocks(text: Any) -> tuple[str, list[str]]:
+    clean_text = text.strip() if isinstance(text, str) else ""
+    if not clean_text:
+        return "", []
+    base_parts: list[str] = []
+    blocks: list[str] = []
+    cursor = 0
+    while True:
+        start = clean_text.find(_RUNTIME_TURN_FACTS_START, cursor)
+        if start < 0:
+            base_parts.append(clean_text[cursor:])
+            break
+        end = clean_text.find(_RUNTIME_TURN_FACTS_END, start)
+        if end < 0:
+            base_parts.append(clean_text[cursor:])
+            break
+        base_parts.append(clean_text[cursor:start])
+        end += len(_RUNTIME_TURN_FACTS_END)
+        blocks.append(clean_text[start:end].strip())
+        cursor = end
+    base = "\n\n".join(part.strip() for part in base_parts if part.strip())
+    return base, blocks
+
+
+def _runtime_turn_fact_block_request_id(block: str) -> str | None:
+    for line in block.splitlines():
+        if line.startswith("turn request id: "):
+            return _safe_str(line.removeprefix("turn request id: "))
+    return None
+
+
+def _render_runtime_turn_fact_block(projection: Mapping[str, Any]) -> str | None:
+    request_id = _safe_str(projection.get("request_id"))
+    if not request_id:
+        return None
+    lines = [
+        _RUNTIME_TURN_FACTS_START,
+        "These exact handles and statuses are projected for later conversational "
+        "reference. Re-read canonical state before claiming current domain truth "
+        "or performing an effect. This block grants no authority.",
+        f"turn request id: {request_id}",
+        f"terminal status: {_safe_str(projection.get('terminal_status')) or 'not_reported'}",
+        f"provenance: {_safe_str(projection.get('provenance')) or 'turn_tool_records'}",
+    ]
+
+    source_ids = projection.get("source_ids")
+    if isinstance(source_ids, Sequence) and not isinstance(
+        source_ids, (str, bytes, bytearray)
+    ):
+        rendered_sources: list[str] = []
+        for item in source_ids[:24]:
+            if not isinstance(item, Mapping):
+                continue
+            source_id = _safe_str(item.get("id"))
+            if not source_id:
+                continue
+            kind = _safe_str(item.get("kind")) or "source"
+            profile = _safe_str(item.get("profile"))
+            rendered_sources.append(
+                f"{kind}:{source_id}" + (f" (profile {profile})" if profile else "")
+            )
+        if rendered_sources:
+            lines.append("source ids: " + ", ".join(rendered_sources))
+
+    for field_name, label in (
+        ("verified_concept_ids", "verified concept ids"),
+        ("verified_assertion_ids", "verified assertion ids"),
+    ):
+        values = _normalise_strings(projection.get(field_name), limit=24)
+        if values:
+            lines.append(f"{label}: " + ", ".join(values))
+
+    relationships = projection.get("verified_relationships")
+    if isinstance(relationships, Sequence) and not isinstance(
+        relationships, (str, bytes, bytearray)
+    ):
+        rendered_relations: list[str] = []
+        for relation in relationships[:12]:
+            if not isinstance(relation, Mapping):
+                continue
+            source_id = _safe_str(relation.get("source_id"))
+            predicate_id = _safe_str(relation.get("predicate_id"))
+            target_id = _safe_str(relation.get("target_id"))
+            if source_id and predicate_id and target_id:
+                rendered_relations.append(
+                    f"{source_id} --{predicate_id}--> {target_id}"
+                )
+        if rendered_relations:
+            lines.append("verified relationships:")
+            lines.extend(f"- {item}" for item in rendered_relations)
+
+    effects = projection.get("effects")
+    if isinstance(effects, Sequence) and not isinstance(
+        effects, (str, bytes, bytearray)
+    ):
+        rendered_effects: list[str] = []
+        for effect in effects[:12]:
+            if not isinstance(effect, Mapping):
+                continue
+            identity = _safe_str(effect.get("effect_id")) or _safe_str(
+                effect.get("tool")
+            )
+            status = _safe_str(effect.get("status"))
+            if not identity or not status:
+                continue
+            details = [status]
+            if isinstance(effect.get("changed"), bool):
+                details.append(f"changed={str(effect.get('changed')).lower()}")
+            mode = _safe_str(effect.get("mode"))
+            if mode:
+                details.append(f"mode={mode}")
+            rendered_effects.append(f"{identity}: " + "; ".join(details))
+        if rendered_effects:
+            lines.append("effect receipts:")
+            lines.extend(f"- {item}" for item in rendered_effects)
+
+    workflows = projection.get("workflow_instances")
+    if isinstance(workflows, Sequence) and not isinstance(
+        workflows, (str, bytes, bytearray)
+    ):
+        rendered_workflows: list[str] = []
+        for workflow in workflows[:12]:
+            if not isinstance(workflow, Mapping):
+                continue
+            instance_id = _safe_str(workflow.get("instance_id"))
+            status = _safe_str(workflow.get("status"))
+            if not instance_id or not status:
+                continue
+            details = [status]
+            workflow_id = _safe_str(workflow.get("workflow_id"))
+            if workflow_id:
+                details.append(f"workflow={workflow_id}")
+            mode = _safe_str(workflow.get("mode"))
+            if mode:
+                details.append(f"mode={mode}")
+            rendered_workflows.append(f"{instance_id}: " + "; ".join(details))
+        if rendered_workflows:
+            lines.append("workflow instances:")
+            lines.extend(f"- {item}" for item in rendered_workflows)
+
+    lines.append(_RUNTIME_TURN_FACTS_END)
+    return "\n".join(lines)
+
+
+def merge_conversation_situation_turn_projection(
+    *,
+    current_situation: str | None,
+    model_situation: str | None,
+    projection: Mapping[str, Any] | None,
+) -> str | None:
+    """Merge exact runtime facts with an optional model-authored sidecar.
+
+    The text remains an actor-scoped conversation carrier. It is deliberately
+    provenance-labelled and non-authoritative; the canonical tool/effect stores
+    still decide whether an effect or represented assertion exists now.
+    """
+
+    selected_situation = (
+        model_situation.strip()
+        if isinstance(model_situation, str) and model_situation.strip()
+        else (
+            current_situation.strip()
+            if isinstance(current_situation, str) and current_situation.strip()
+            else ""
+        )
+    )
+    if not isinstance(projection, Mapping):
+        return selected_situation or None
+    block = _render_runtime_turn_fact_block(projection)
+    if not block:
+        return selected_situation or None
+
+    model_base, model_blocks = _separate_runtime_turn_fact_blocks(selected_situation)
+    _current_base, current_blocks = _separate_runtime_turn_fact_blocks(
+        current_situation
+    )
+    blocks_by_request_id: dict[str, str] = {}
+    unkeyed_blocks: list[str] = []
+    for prior_block in [*current_blocks, *model_blocks, block]:
+        prior_request_id = _runtime_turn_fact_block_request_id(prior_block)
+        if prior_request_id:
+            blocks_by_request_id[prior_request_id] = prior_block
+        elif prior_block not in unkeyed_blocks:
+            unkeyed_blocks.append(prior_block)
+    retained_blocks = [
+        *unkeyed_blocks,
+        *blocks_by_request_id.values(),
+    ][-_MAX_RUNTIME_TURN_FACT_BLOCKS:]
+    rendered_blocks = "\n\n".join(retained_blocks)
+    separator_chars = 2 if model_base and rendered_blocks else 0
+    base_budget = max(
+        0,
+        _CONVERSATION_SITUATION_MAX_CHARS - len(rendered_blocks) - separator_chars,
+    )
+    if len(model_base) > base_budget:
+        marker = "\n[Earlier situation text truncated to retain exact turn facts.]"
+        model_base = (
+            model_base[: max(0, base_budget - len(marker))].rstrip() + marker
+            if base_budget >= len(marker)
+            else ""
+        )
+    merged = "\n\n".join(item for item in (model_base, rendered_blocks) if item)
+    return merged[:_CONVERSATION_SITUATION_MAX_CHARS] or None
 
 
 def _coerce_turn_memory_context_spec(
@@ -643,6 +830,14 @@ def _resolve_subject_memory_context_bounded(
     user_concept_id: str | None,
     org_concept_id: str | None,
 ) -> dict[str, Any]:
+    """Resolve subject context with an advisory elapsed threshold.
+
+    The former hard wait returned a synthetic unavailable context while the
+    resolver continued in an abandoned daemon thread.  A slow represented
+    memory read is still usable, so retain it and report that the advisory was
+    crossed.
+    """
+
     timeout_seconds = _subject_context_timeout_seconds()
     result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
 
@@ -673,16 +868,12 @@ def _resolve_subject_memory_context_bounded(
         daemon=True,
     )
     thread.start()
+    advisory_exceeded = False
     try:
         kind, payload = result_queue.get(timeout=timeout_seconds)
     except queue.Empty:
-        elapsed = time.monotonic() - started_at
-        return _timeout_subject_context(
-            subject_spec=subject_spec,
-            turn_memory_context=turn_memory_context,
-            timeout_seconds=timeout_seconds,
-            elapsed_seconds=elapsed,
-        )
+        advisory_exceeded = True
+        kind, payload = result_queue.get()
 
     elapsed = time.monotonic() - started_at
     if kind == "exception":
@@ -693,7 +884,16 @@ def _resolve_subject_memory_context_bounded(
             elapsed_seconds=elapsed,
         )
     if isinstance(payload, Mapping):
-        return dict(payload)
+        resolved_payload = dict(payload)
+        resolved_payload.update(
+            {
+                "elapsed_time_enforcement": "advisory",
+                "advisory_timeout_seconds": timeout_seconds,
+                "advisory_exceeded": advisory_exceeded,
+                "elapsed_seconds": round(elapsed, 3),
+            }
+        )
+        return resolved_payload
     return _exception_subject_context(
         subject_spec=subject_spec,
         turn_memory_context=turn_memory_context,

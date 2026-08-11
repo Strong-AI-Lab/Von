@@ -1055,9 +1055,18 @@ def build_turn_execution_correctness_summary(
     )
     false_success = failure_mode in _FALSE_SUCCESS_FAILURE_MODES
     successful_completion = failure_mode == "completed_verified"
-    workflow_discovery_timeout = bool(discovery.get("budget_exhausted")) or (
-        (_safe_str(discovery.get("match_absence_reason")) or "").lower()
-        == "workflow_discovery_budget_exhausted"
+    discovery_elapsed_time_enforcement = (
+        _safe_str(discovery.get("elapsed_time_enforcement")) or "legacy_hard"
+    ).lower()
+    workflow_discovery_timeout = bool(discovery.get("hard_timeout_exceeded")) or (
+        discovery_elapsed_time_enforcement != "advisory"
+        and (
+            bool(discovery.get("budget_exhausted"))
+            or (
+                (_safe_str(discovery.get("match_absence_reason")) or "").lower()
+                == "workflow_discovery_budget_exhausted"
+            )
+        )
     )
     required_evidence_missing = bool(
         unresolved_effect_count > 0
@@ -1352,9 +1361,7 @@ def _build_tool_evidence(
             invocation.get("method")
         )
         is_search_read = _is_search_evidence_tool(tool_name)
-        is_verification_read = bool(
-            tool_name and is_tool_verification_read(tool_name)
-        )
+        is_verification_read = bool(tool_name and is_tool_verification_read(tool_name))
         if not (
             (include_search_reads and is_search_read)
             or (include_verification_reads and is_verification_read)
@@ -3814,6 +3821,11 @@ def _derive_discovery_match_absence_reason(
             str(item).strip() for item in discovery_errors if str(item).strip()
         }
         if (
+            "capability_index_advisory_wait_elapsed" in error_set
+            and "capability_index_build_in_progress" in error_set
+        ):
+            return "capability_index_build_in_progress"
+        if (
             "capability_index_wait_timed_out" in error_set
             and "capability_index_build_in_progress" in error_set
         ):
@@ -4486,6 +4498,16 @@ def build_workflow_routing_diagnostics(
             ),
             "budget_exhausted": bool(workflow_discovery_payload.get("budget_exhausted"))
             or discovery_match_absence_reason == "workflow_discovery_budget_exhausted",
+            "elapsed_time_enforcement": _safe_str(
+                workflow_discovery_payload.get("elapsed_time_enforcement")
+            )
+            or "legacy_hard",
+            "advisory_budget_exceeded": bool(
+                workflow_discovery_payload.get("advisory_budget_exceeded")
+            ),
+            "hard_timeout_exceeded": bool(
+                workflow_discovery_payload.get("hard_timeout_exceeded")
+            ),
             "budget_exhaustion_stage": _safe_str(
                 workflow_discovery_payload.get("budget_exhaustion_stage")
             ),
@@ -5357,9 +5379,7 @@ def _summarise_tool_invocations(
             include_results=False,
         )
         if argument_relation_tuples:
-            serialised_invocation["argument_relation_tuples"] = (
-                argument_relation_tuples
-            )
+            serialised_invocation["argument_relation_tuples"] = argument_relation_tuples
         result_relation_tuples = _extract_tool_invocation_relation_tuples(
             invocation,
             include_arguments=False,
@@ -7790,15 +7810,20 @@ def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[s
                     "target_id",
                 }:
                     raw_targets.append(item)
-                elif key in {
-                    "concept_ids",
-                    "created_concept_ids",
-                    "relation_ids",
-                    "source_ids",
-                    "target_ids",
-                } and isinstance(item, Sequence) and not isinstance(
-                    item,
-                    (str, bytes, bytearray),
+                elif (
+                    key
+                    in {
+                        "concept_ids",
+                        "created_concept_ids",
+                        "relation_ids",
+                        "source_ids",
+                        "target_ids",
+                    }
+                    and isinstance(item, Sequence)
+                    and not isinstance(
+                        item,
+                        (str, bytes, bytearray),
+                    )
                 ):
                     raw_targets.extend(list(item)[:100])
                 if key in {
@@ -8014,6 +8039,420 @@ def _extract_tool_invocation_relation_tuples(
     for source in sources:
         collect(source)
     return relations
+
+
+CONVERSATION_SITUATION_TURN_PROJECTION_SCHEMA_VERSION = (
+    "conversation_situation_turn_projection.v1"
+)
+_CONVERSATION_SITUATION_PROJECTION_MAX_IDS = 24
+_CONVERSATION_SITUATION_PROJECTION_MAX_RELATIONS = 12
+_CONVERSATION_SITUATION_PROJECTION_MAX_EFFECTS = 12
+
+
+def _turn_projection_result_payload(
+    invocation: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return result data without mistaking echoed call arguments for evidence."""
+
+    for field_name in ("effective_payload", "result", "output"):
+        value = invocation.get(field_name)
+        if isinstance(value, Mapping):
+            return value
+    evidence = invocation.get("evidence")
+    if isinstance(evidence, Mapping):
+        # Adaptive turns move large tool results into a bounded evidence
+        # envelope. ``projected_payload`` is the structured, provenance-bearing
+        # result view; unlike ``preview`` it contains no arbitrary raw text.
+        projected_payload = evidence.get("projected_payload")
+        if isinstance(projected_payload, Mapping):
+            return projected_payload
+    value = invocation.get("payload")
+    if isinstance(value, Mapping) and any(
+        key in value
+        for key in (
+            "success",
+            "status",
+            "effect_status",
+            "concept_id",
+            "created_concept_ids",
+            "assertion_id",
+            "instance_id",
+            "message_id",
+            "results",
+        )
+    ):
+        return value
+    return {}
+
+
+def _turn_projection_collect_named_strings(
+    value: Any,
+    *,
+    singular_fields: frozenset[str],
+    sequence_fields: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> list[str]:
+    if depth > 5:
+        return []
+    collected: list[str] = []
+    if isinstance(value, Mapping):
+        for raw_key, item in list(value.items())[:100]:
+            key = str(raw_key).strip().lower()
+            if key in singular_fields:
+                cleaned = _safe_str(item)
+                if cleaned:
+                    collected.append(cleaned)
+            elif (
+                key in sequence_fields
+                and isinstance(item, Sequence)
+                and not isinstance(item, (str, bytes, bytearray))
+            ):
+                collected.extend(
+                    cleaned
+                    for cleaned in (_safe_str(candidate) for candidate in item[:100])
+                    if cleaned
+                )
+            if isinstance(item, Mapping) or (
+                isinstance(item, Sequence)
+                and not isinstance(item, (str, bytes, bytearray))
+            ):
+                collected.extend(
+                    _turn_projection_collect_named_strings(
+                        item,
+                        singular_fields=singular_fields,
+                        sequence_fields=sequence_fields,
+                        depth=depth + 1,
+                    )
+                )
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in list(value)[:100]:
+            collected.extend(
+                _turn_projection_collect_named_strings(
+                    item,
+                    singular_fields=singular_fields,
+                    sequence_fields=sequence_fields,
+                    depth=depth + 1,
+                )
+            )
+    return _dedupe_string_sequence(collected)
+
+
+def _turn_projection_effect_mode(
+    *,
+    invocation: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    status: str,
+) -> str | None:
+    raw_status = (
+        _safe_str(payload.get("status"))
+        or _safe_str(invocation.get("final_status"))
+        or ""
+    ).lower()
+    if status in {"partial", "indeterminate", "not_started", "timeout", "error"}:
+        return status
+    if (
+        payload.get("created_new") is True
+        or _safe_non_negative_int(payload.get("created")) > 0
+        or bool(payload.get("created_concept_ids"))
+        or raw_status == "created"
+    ):
+        return "created"
+    if (
+        payload.get("reused") is True
+        or payload.get("reused_existing") is True
+        or _safe_non_negative_int(payload.get("already_existed")) > 0
+        or raw_status in {"reused", "reused_existing"}
+    ):
+        return "reused"
+    changed = invocation.get("changed")
+    if not isinstance(changed, bool):
+        changed = payload.get("changed")
+    if changed is False:
+        return "reused"
+    return None
+
+
+def _turn_projection_value_mentions(value: Any, token: str, *, depth: int = 0) -> bool:
+    if depth > 5 or not token:
+        return False
+    if isinstance(value, str):
+        return token in value
+    if isinstance(value, Mapping):
+        return any(
+            _turn_projection_value_mentions(item, token, depth=depth + 1)
+            for item in list(value.values())[:100]
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(
+            _turn_projection_value_mentions(item, token, depth=depth + 1)
+            for item in list(value)[:100]
+        )
+    return False
+
+
+def build_conversation_situation_turn_projection(
+    *,
+    request_id: Any,
+    terminal_status: Any,
+    response_text: Any,
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Project exact turn handles without promoting them to domain truth.
+
+    Only successful tool-returned identifiers are eligible for the verified
+    sets. Concept identifiers must also have been material to the visible
+    answer, which prevents a broad search result from becoming conversation
+    state merely because it was inspected. Partial effects retain only their
+    stable receipt identity and status; they never imply successful mutation.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    invocations = [
+        item for item in (tool_invocations or ()) if isinstance(item, Mapping)
+    ]
+    if not clean_request_id or not invocations:
+        return None
+
+    answer_concept_ids = {
+        concept_id.lower(): concept_id
+        for concept_id in extract_vontology_concept_ids_from_text(
+            response_text if isinstance(response_text, str) else ""
+        )
+    }
+    verified_concept_ids: list[str] = []
+    verified_assertion_ids: list[str] = []
+    source_ids: list[dict[str, str]] = []
+    verified_relationships: list[dict[str, str]] = []
+    effects: list[dict[str, Any]] = []
+    workflow_instances: list[dict[str, Any]] = []
+    effect_material_values: list[Any] = []
+    for invocation in invocations:
+        payload = _turn_projection_result_payload(invocation)
+        if not bool(
+            _safe_str(invocation.get("effect_id"))
+            or _safe_str(invocation.get("effect_status"))
+            or _safe_str(invocation.get("mutation_outcome"))
+            or isinstance(invocation.get("changed"), bool)
+            or _safe_str(payload.get("effect_status"))
+            or _safe_str(payload.get("mutation_outcome"))
+            or isinstance(payload.get("changed"), bool)
+        ):
+            continue
+        effect_material_values.extend(
+            (
+                invocation.get("effective_arguments"),
+                invocation.get("arguments"),
+                payload,
+            )
+        )
+
+    def append_unique(values: list[str], value: str) -> None:
+        if value.lower() not in {item.lower() for item in values}:
+            values.append(value)
+
+    for invocation in invocations:
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not tool_name:
+            continue
+        payload = _turn_projection_result_payload(invocation)
+        status = _classify_tool_invocation_status(
+            invocation=invocation,
+            payload=payload,
+        )
+        successful = status == "ok"
+        # Adaptive effect invocations carry receipt metadata. Use that local
+        # evidence instead of consulting represented tool metadata during
+        # response finalisation (which would add an unrelated catalogue read).
+        is_write = bool(
+            _safe_str(invocation.get("effect_id"))
+            or _safe_str(invocation.get("effect_status"))
+            or _safe_str(invocation.get("mutation_outcome"))
+            or isinstance(invocation.get("changed"), bool)
+            or _safe_str(payload.get("effect_status"))
+            or _safe_str(payload.get("mutation_outcome"))
+            or isinstance(payload.get("changed"), bool)
+        )
+
+        if successful:
+            result_concept_ids = _turn_projection_collect_named_strings(
+                payload,
+                singular_fields=frozenset(
+                    {
+                        "canonical_concept_id",
+                        "computer_file_copy_concept_id",
+                        "concept_id",
+                        "created_concept_id",
+                        "existing_concept_id",
+                        "file_copy_concept_id",
+                        "predicate_concept_id",
+                        "source_concept_id",
+                        "target_concept_id",
+                    }
+                ),
+                sequence_fields=frozenset(
+                    {
+                        "concept_ids",
+                        "created_concept_ids",
+                        "existing_concept_ids",
+                    }
+                ),
+            )
+            for concept_id in result_concept_ids:
+                if (
+                    not is_write
+                    and concept_id.startswith("#V#")
+                    and concept_id.lower() in answer_concept_ids
+                ):
+                    append_unique(verified_concept_ids, concept_id)
+
+            if not is_write:
+                for assertion_id in _turn_projection_collect_named_strings(
+                    payload,
+                    singular_fields=frozenset({"assertion_id", "scoped_assertion_id"}),
+                    sequence_fields=frozenset(
+                        {"assertion_ids", "scoped_assertion_ids"}
+                    ),
+                ):
+                    if isinstance(response_text, str) and assertion_id in response_text:
+                        append_unique(verified_assertion_ids, assertion_id)
+
+            lowered_tool = tool_name.lower()
+            if lowered_tool in {"gmail_get_message", "gmail_get_thread"}:
+                arguments = invocation.get("effective_arguments")
+                if not isinstance(arguments, Mapping):
+                    arguments = invocation.get("arguments")
+                arguments = arguments if isinstance(arguments, Mapping) else {}
+                source_id = (
+                    _safe_str(payload.get("message_id"))
+                    or _safe_str(payload.get("id"))
+                    or _safe_str(arguments.get("message_id"))
+                )
+                profile = _safe_str(payload.get("profile")) or _safe_str(
+                    arguments.get("profile")
+                )
+                source_is_material = bool(
+                    source_id
+                    and (
+                        (isinstance(response_text, str) and source_id in response_text)
+                        or any(
+                            _turn_projection_value_mentions(value, source_id)
+                            for value in effect_material_values
+                        )
+                    )
+                )
+                if source_id and source_is_material:
+                    source_row = {"kind": "gmail_message", "id": source_id}
+                    if profile:
+                        source_row["profile"] = profile
+                    if source_row not in source_ids:
+                        source_ids.append(source_row)
+
+            if not is_write:
+                for relation in _extract_tool_invocation_relation_tuples(
+                    {"effective_payload": payload},
+                    include_arguments=False,
+                ):
+                    if not all(value.startswith("#V#") for value in relation.values()):
+                        continue
+                    if not answer_concept_ids or not any(
+                        value.lower() in answer_concept_ids
+                        for value in relation.values()
+                    ):
+                        continue
+                    if relation not in verified_relationships:
+                        verified_relationships.append(relation)
+
+        effect_id = _safe_str(invocation.get("effect_id"))
+        if is_write or effect_id:
+            effect_status = (
+                _safe_str(invocation.get("effect_status"))
+                or _safe_str(payload.get("effect_status"))
+                or status
+            )
+            changed = invocation.get("changed")
+            if not isinstance(changed, bool):
+                changed = payload.get("changed")
+            effect: dict[str, Any] = {
+                "tool": tool_name,
+                "status": effect_status,
+            }
+            if effect_id:
+                effect["effect_id"] = effect_id
+            if isinstance(changed, bool):
+                effect["changed"] = changed
+            mode = _turn_projection_effect_mode(
+                invocation=invocation,
+                payload=payload,
+                status=status,
+            )
+            if mode:
+                effect["mode"] = mode
+            effects.append(effect)
+
+        instance_id = _safe_str(invocation.get("instance_id")) or _safe_str(
+            payload.get("instance_id")
+        )
+        if instance_id:
+            workflow: dict[str, Any] = {
+                "instance_id": instance_id,
+                "status": (
+                    _safe_str(invocation.get("final_status"))
+                    or _safe_str(payload.get("final_status"))
+                    or _safe_str(payload.get("status"))
+                    or status
+                ),
+            }
+            workflow_id = (
+                _safe_str(invocation.get("workflow_id"))
+                or _safe_str(invocation.get("represented_workflow_id"))
+                or _safe_str(payload.get("workflow_id"))
+            )
+            if workflow_id:
+                workflow["workflow_id"] = workflow_id
+            mode = _turn_projection_effect_mode(
+                invocation=invocation,
+                payload=payload,
+                status=status,
+            )
+            if mode in {"created", "reused", "partial", "indeterminate"}:
+                workflow["mode"] = mode
+            if workflow not in workflow_instances:
+                workflow_instances.append(workflow)
+
+    projection: dict[str, Any] = {
+        "schema_version": CONVERSATION_SITUATION_TURN_PROJECTION_SCHEMA_VERSION,
+        "request_id": clean_request_id,
+        "terminal_status": _safe_str(terminal_status) or "not_reported",
+        "provenance": "canonical_turn_tool_records",
+    }
+    if source_ids:
+        projection["source_ids"] = source_ids[
+            :_CONVERSATION_SITUATION_PROJECTION_MAX_IDS
+        ]
+    if verified_concept_ids:
+        projection["verified_concept_ids"] = verified_concept_ids[
+            :_CONVERSATION_SITUATION_PROJECTION_MAX_IDS
+        ]
+    if verified_assertion_ids:
+        projection["verified_assertion_ids"] = verified_assertion_ids[
+            :_CONVERSATION_SITUATION_PROJECTION_MAX_IDS
+        ]
+    if verified_relationships:
+        projection["verified_relationships"] = verified_relationships[
+            :_CONVERSATION_SITUATION_PROJECTION_MAX_RELATIONS
+        ]
+    if effects:
+        projection["effects"] = effects[:_CONVERSATION_SITUATION_PROJECTION_MAX_EFFECTS]
+    if workflow_instances:
+        projection["workflow_instances"] = workflow_instances[
+            :_CONVERSATION_SITUATION_PROJECTION_MAX_EFFECTS
+        ]
+
+    if len(projection) == 4:
+        return None
+    return projection
 
 
 def _normalise_representation_target_tokens(*raw_values: Any) -> list[str]:
@@ -9028,10 +9467,7 @@ def _effect_postcondition_readback(
         required_predicates = _dedupe_string_sequence(
             [
                 *required_predicates,
-                *(
-                    relation["predicate_id"]
-                    for relation in required_relation_tuples
-                ),
+                *(relation["predicate_id"] for relation in required_relation_tuples),
             ]
         )
     target_lookup = {value.lower() for value in required_targets}
@@ -9047,10 +9483,13 @@ def _effect_postcondition_readback(
         if not tool_name or not _is_verification_read_tool(tool_name):
             continue
         payload = _extract_tool_invocation_payload(invocation)
-        if _classify_tool_invocation_status(
-            invocation=invocation,
-            payload=payload,
-        ) != "ok":
+        if (
+            _classify_tool_invocation_status(
+                invocation=invocation,
+                payload=payload,
+            )
+            != "ok"
+        ):
             continue
         targets = _extract_tool_invocation_target_ids(invocation)
         predicates = _extract_tool_invocation_predicate_ids(invocation)
@@ -9075,9 +9514,7 @@ def _effect_postcondition_readback(
         )
 
     observed_targets = _dedupe_string_sequence(
-        target
-        for observation in observations
-        for target in observation["targets"]
+        target for observation in observations for target in observation["targets"]
     )
     observed_predicates = _dedupe_string_sequence(
         predicate
@@ -9283,8 +9720,7 @@ def _build_postcondition_checks(
                     check_status = "verified"
                     evidence = (
                         "Observed target-correlated postcondition read/check "
-                        "tool(s): "
-                        + ", ".join(readback["correlated_tools"][:3])
+                        "tool(s): " + ", ".join(readback["correlated_tools"][:3])
                     )
                     verification_mode = "state_requery_correlated"
                 else:
@@ -9321,8 +9757,7 @@ def _build_postcondition_checks(
                                 if _is_evidence_effect_type(effect_type)
                                 else (
                                     "effect_execution_observed"
-                                    if postcondition_strategy
-                                    == "execution_observed"
+                                    if postcondition_strategy == "execution_observed"
                                     else "predicate_exists"
                                 )
                             )
@@ -9336,17 +9771,13 @@ def _build_postcondition_checks(
                     "successful_verification_tools": list(
                         successful_verification_tools
                     ),
-                    "correlated_verification_tools": list(
-                        readback["correlated_tools"]
-                    ),
+                    "correlated_verification_tools": list(readback["correlated_tools"]),
                     "required_targets": list(readback["required_targets"]),
                     "required_predicates": list(readback["required_predicates"]),
                     "required_relation_tuples": list(
                         readback["required_relation_tuples"]
                     ),
-                    "observed_verification_targets": list(
-                        readback["observed_targets"]
-                    ),
+                    "observed_verification_targets": list(readback["observed_targets"]),
                     "observed_verification_predicates": list(
                         readback["observed_predicates"]
                     ),
@@ -10225,9 +10656,7 @@ def build_turn_execution_record(
         and isinstance(required_tool_effect, Mapping)
         and (
             not required_effects
-            or bool(
-                required_tool_blocking_codes - {BLOCKER_REQUIRED_TOOL_NOT_PLANNED}
-            )
+            or bool(required_tool_blocking_codes - {BLOCKER_REQUIRED_TOOL_NOT_PLANNED})
             or bool(unrepresented_unsatisfied_required_tools)
         )
     ):
@@ -11185,13 +11614,10 @@ def persist_failed_turn_execution_record(
             workflow_discovery=_debug_mapping("workflow_discovery"),
             workflow_routing=(
                 _debug_mapping("workflow_routing")
-                or infer_turn_execution_workflow_routing_from_debug(
-                    llm_debug=debug
-                )
+                or infer_turn_execution_workflow_routing_from_debug(llm_debug=debug)
             ),
             tool_invocations=(
-                _debug_list("tool_invocations")
-                or _debug_list("invocations")
+                _debug_list("tool_invocations") or _debug_list("invocations")
             ),
             turn_execution_diagnostics=_debug_mapping("turn_execution_diagnostics"),
             aux_llm_calls=_debug_list("aux_llm_calls"),
@@ -11562,9 +11988,8 @@ def record_effect_observation_phase(
                     if isinstance(journal, Mapping)
                     else None
                 )
-                if (
-                    isinstance(effect_entry, Mapping)
-                    and isinstance(effect_entry.get(clean_phase), Mapping)
+                if isinstance(effect_entry, Mapping) and isinstance(
+                    effect_entry.get(clean_phase), Mapping
                 ):
                     return {
                         "updated": False,
@@ -11585,9 +12010,7 @@ def record_effect_observation_phase(
                         "user_id": 1,
                         "org_id": 1,
                     },
-                    operation=(
-                        "record_effect_observation_phase.find_scope_collision"
-                    ),
+                    operation=("record_effect_observation_phase.find_scope_collision"),
                     detail=f"{clean_effect_id}:{clean_phase}",
                 )
                 if request_id_collision is not None:
@@ -11839,9 +12262,8 @@ def reconcile_durable_workflow_terminal_effect(
         if isinstance(matched_turn_terminal.get("transport"), Mapping)
         else {}
     )
-    execution_id = (
-        _safe_str(matched_receipt.get("execution_id"))
-        or _safe_str(transport.get("execution_id"))
+    execution_id = _safe_str(matched_receipt.get("execution_id")) or _safe_str(
+        transport.get("execution_id")
     )
     changed = (
         matched_receipt.get("changed")
@@ -11850,14 +12272,10 @@ def reconcile_durable_workflow_terminal_effect(
     )
     completed = clean_terminal_status == "completed"
     effect_status = (
-        "succeeded"
-        if completed
-        else ("partial" if changed is True else "failed")
+        "succeeded" if completed else ("partial" if changed is True else "failed")
     )
     mutation_outcome = (
-        "succeeded"
-        if completed
-        else ("partial" if changed is True else "failed")
+        "succeeded" if completed else ("partial" if changed is True else "failed")
     )
     completed_at_value = (
         _iso_utc(completed_at)
@@ -11938,13 +12356,13 @@ def reconcile_durable_workflow_terminal_effect(
             if isinstance(prior_projection, Mapping)
             else None
         )
-        history_user_id = _safe_str(
-            record.get("history_owner_user_id")
-        ) or _safe_str(record.get("user_id"))
+        history_user_id = _safe_str(record.get("history_owner_user_id")) or _safe_str(
+            record.get("user_id")
+        )
         history_session_id = _safe_str(record.get("session_id"))
-        history_namespace = _safe_str(
-            record.get("history_namespace")
-        ) or _safe_str(record.get("namespace"))
+        history_namespace = _safe_str(record.get("history_namespace")) or _safe_str(
+            record.get("namespace")
+        )
         if prior_projection_id == conversation_observation_id:
             conversation_observation_outcome = {
                 "updated": False,
@@ -11987,9 +12405,7 @@ def reconcile_durable_workflow_terminal_effect(
                     or canonical_receipt.get("error_step")
                     else None
                 ),
-                "execution_trace_id": canonical_receipt.get(
-                    "execution_trace_id"
-                ),
+                "execution_trace_id": canonical_receipt.get("execution_trace_id"),
             }
             conversation_observation = {
                 key: value
@@ -12138,16 +12554,13 @@ def append_late_effect_observation(
         bounded_observation
     )
 
-    observed_at_utc = (
-        _safe_str(bounded_observation.get("observed_at_utc"))
-        or _iso_utc(_now_utc())
+    observed_at_utc = _safe_str(bounded_observation.get("observed_at_utc")) or _iso_utc(
+        _now_utc()
     )
     observation_identity = "\0".join(
         (clean_request_id, clean_effect_id, clean_execution_id)
     )
-    observation_id = hashlib.sha256(
-        observation_identity.encode("utf-8")
-    ).hexdigest()
+    observation_id = hashlib.sha256(observation_identity.encode("utf-8")).hexdigest()
     entry = dict(bounded_observation)
     entry.update(
         {
@@ -12308,9 +12721,7 @@ def append_late_effect_observation(
             final_observations = (
                 final_existing.get("late_effect_observations")
                 if isinstance(final_existing, Mapping)
-                and isinstance(
-                    final_existing.get("late_effect_observations"), list
-                )
+                and isinstance(final_existing.get("late_effect_observations"), list)
                 else []
             )
             duplicate = any(
@@ -13046,14 +13457,12 @@ def infer_turn_execution_workflow_routing_from_debug(
                 if isinstance(evidence.get("provenance"), Mapping)
                 else {}
             )
-            capability_kind = (
-                _safe_str(raw_invocation.get("capability_kind"))
-                or _safe_str(provenance.get("capability_kind"))
-            )
-            execution_method = (
-                _safe_str(raw_invocation.get("execution_method"))
-                or _safe_str(provenance.get("execution_method"))
-            )
+            capability_kind = _safe_str(
+                raw_invocation.get("capability_kind")
+            ) or _safe_str(provenance.get("capability_kind"))
+            execution_method = _safe_str(
+                raw_invocation.get("execution_method")
+            ) or _safe_str(provenance.get("execution_method"))
             represented_workflow_id = (
                 _safe_str(raw_invocation.get("represented_workflow_id"))
                 or _safe_str(raw_invocation.get("workflow_id"))

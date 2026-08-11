@@ -56,6 +56,9 @@ from ...services import chat_prompt_queue_service
 from ...services.adaptive_turn_service import (
     execute_adaptive_turn,
 )
+from ...services.conversation_turn_memory_context_service import (
+    merge_conversation_situation_turn_projection,
+)
 from ...services.background_task_service import background_task_registry
 from ...services.workflow_payload_store import is_workflow_payload_blob_ref
 from ...services.live_request_load import (
@@ -139,6 +142,7 @@ from ...services.turn_timing_telemetry_service import (
     merge_timing_spans,
 )
 from ...services.turn_execution_record_service import (
+    build_conversation_situation_turn_projection,
     build_search_tool_evidence,
     build_workflow_routing_diagnostics,
 )
@@ -10116,8 +10120,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "yes",
             "on",
         }
+    elif raw_skip_buttonify is None:
+        # Post-answer model work is optional decoration.  Require an explicit
+        # per-turn opt-in (``skip_buttonify: false``) so it cannot delay delivery
+        # merely because the represented global setting is enabled.
+        skip_buttonify = True
     else:
         skip_buttonify = bool(raw_skip_buttonify)
+    buttonify_requested = raw_skip_buttonify is not None and not skip_buttonify
 
     client_request_id = data.get("client_request_id")
     if (
@@ -10721,6 +10731,42 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     session_id,
                     request_id,
                 )
+
+    # Persisted history is the canonical transcript, not an instruction to
+    # replay every stored message into every provider round. Keep the recent
+    # conversational window here; the separately supplied conversation
+    # situation and observations carry older material objectives, referents,
+    # commitments, and exact observations. This also makes the existing
+    # persistence-side context limit effective after a process restart.
+    raw_history_context_count = len(context) if isinstance(context, list) else 0
+    normalised_history_context = [
+        dict(message)
+        for message in (context if isinstance(context, list) else [])
+        if isinstance(message, Mapping)
+    ]
+    context = _limit_context_size(
+        _truncate_large_tool_results(normalised_history_context)
+    )
+    if raw_history_context_count > len(context):
+        history_projection = {
+            "schema_version": "conversation_history_model_projection.v1",
+            "source_message_count": raw_history_context_count,
+            "projected_message_count": len(context),
+            "older_context_carrier": (
+                "conversation_situation_and_observations"
+                if conversation_situation_text or conversation_observations
+                else "recent_transcript_window_only"
+            ),
+        }
+        namespace_report["conversation_history_model_projection"] = history_projection
+        current_app.logger.info(
+            "Conversation history projected for model use: source_messages=%d "
+            "projected_messages=%d older_context_carrier=%s request_id=%s",
+            raw_history_context_count,
+            len(context),
+            history_projection["older_context_carrier"],
+            request_id,
+        )
 
     # ------------------------------------------------------------------
     # JVNAUTOSCI-1423: Persist user message to chat history immediately,
@@ -11474,9 +11520,48 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         effect_finality_fallback = bool(
             adaptive_turn_result.effect_finality_fallback
         )
+        adaptive_partial_delivery = (
+            adaptive_terminal_status == "effect_partially_completed"
+            and not effect_finality_fallback
+            and isinstance(response_text, str)
+            and bool(response_text.strip())
+        )
+        adaptive_delivery_success = adaptive_success or adaptive_partial_delivery
         tool_messages = [dict(msg) for msg in adaptive_turn_result.extra_messages]
         tool_invocations = list(adaptive_turn_result.tool_invocations)
         auxiliary_llm_calls.extend(adaptive_turn_result.aux_llm_calls)
+        try:
+            deterministic_situation_projection = (
+                build_conversation_situation_turn_projection(
+                    request_id=request_id,
+                    terminal_status=adaptive_terminal_status,
+                    response_text=response_text,
+                    tool_invocations=tool_invocations,
+                )
+            )
+            updated_conversation_situation_text = (
+                merge_conversation_situation_turn_projection(
+                    current_situation=conversation_situation_text,
+                    model_situation=updated_conversation_situation_text,
+                    projection=deterministic_situation_projection,
+                )
+            )
+            if isinstance(deterministic_situation_projection, Mapping):
+                auxiliary_llm_calls.append(
+                    {
+                        "type": "conversation_situation_turn_projection",
+                        **dict(deterministic_situation_projection),
+                    }
+                )
+        except Exception as exc:
+            # The visible answer and canonical effect records remain usable if
+            # this optional conversation-carrier projection is unavailable.
+            current_app.logger.warning(
+                "Conversation situation turn projection unavailable for "
+                "request_id=%s: %s",
+                request_id,
+                exc,
+            )
         raw_render_plan = adaptive_turn_result.render_plan
         if isinstance(raw_render_plan, dict):
             render_plan_debug = dict(raw_render_plan)
@@ -12559,7 +12644,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         ).strip().lower() in {"1", "true", "yes", "on"}
         buttonify_setting_enabled = get_buttonify_model_enabled()
         buttonify_enabled = (
-            buttonify_setting_enabled and not skip_buttonify and not agent_test_instance
+            buttonify_setting_enabled
+            and buttonify_requested
+            and not agent_test_instance
         )
         buttonify_allowed = not current_app.testing and not os.getenv(
             "PYTEST_CURRENT_TEST"
@@ -12576,7 +12663,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_model_attempted = False
         buttonify_filtering_boundary: dict[str, Any] | None = None
 
-        if skip_buttonify:
+        if not buttonify_setting_enabled:
+            buttonify_suppression_reason = "buttonify_disabled"
+        elif not buttonify_requested and raw_skip_buttonify is None:
+            buttonify_suppression_reason = "foreground_delivery_priority"
+        elif skip_buttonify:
             buttonify_suppression_reason = "buttonify_skipped_by_request"
         elif agent_test_instance:
             buttonify_suppression_reason = "agent_test_instance"
@@ -12802,6 +12893,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             context_concept_references = build_context_concept_reference_metadata(
                 sent_context_stats_messages,
                 source="sent_context_user_assistant",
+                resolve_references=False,
+                include_direct_supertypes=False,
+                include_stats=False,
             )
         except Exception as exc:
             current_app.logger.debug(
@@ -13120,17 +13214,33 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         if progress_updates_enabled:
             final_progress_payload = {
-                "status": "completed" if adaptive_success else "error",
-                "stage": "completed" if adaptive_success else "error",
-                "phase": "completed" if adaptive_success else "error",
-                "phase_label": "Complete" if adaptive_success else "Incomplete",
+                "status": "completed" if adaptive_delivery_success else "error",
+                "stage": (
+                    "partially_completed"
+                    if adaptive_partial_delivery
+                    else ("completed" if adaptive_success else "error")
+                ),
+                "phase": (
+                    "partially_completed"
+                    if adaptive_partial_delivery
+                    else ("completed" if adaptive_success else "error")
+                ),
+                "phase_label": (
+                    "Partially complete"
+                    if adaptive_partial_delivery
+                    else ("Complete" if adaptive_success else "Incomplete")
+                ),
                 "request_id": request_id,
-                "success": adaptive_success,
+                "success": adaptive_delivery_success,
                 "ordinary_turn_terminal_status": adaptive_terminal_status,
                 "result_summary": (
-                    "The direct adaptive turn produced a response."
-                    if adaptive_success
-                    else "The direct adaptive turn returned an honest non-success."
+                    "The direct adaptive turn produced a partial, deliverable response."
+                    if adaptive_partial_delivery
+                    else (
+                        "The direct adaptive turn produced a response."
+                        if adaptive_success
+                        else "The direct adaptive turn returned an honest non-success."
+                    )
                 ),
             }
             final_progress_payload["timing_spans"] = turn_timing_recorder.spans()
@@ -13158,7 +13268,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 created_conversation_session_name=created_conversation_session_name,
                 created_conversation_session=created_conversation_session,
                 response_text=response_text,
-                success=adaptive_success,
+                success=adaptive_delivery_success,
                 terminal_status=adaptive_terminal_status,
                 presenter_channels=(
                     presenter_channels if isinstance(presenter_channels, dict) else None
@@ -13173,7 +13283,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 ),
             )
         )
-        if adaptive_success:
+        if adaptive_delivery_success:
             _mark_background_generate_completed_if_ready(
                 background_task_id=background_task_id,
                 result_body=final_success_body,

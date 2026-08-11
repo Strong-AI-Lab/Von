@@ -7115,7 +7115,12 @@ describe('thinking card toggle accessibility', () => {
             success: false,
             terminal_status: 'failed',
             response: 'The requested effect was not completed'
-        }, 'Failed']
+        }, 'Failed'],
+        ['deliverable partial effect outcome', true, {
+            success: true,
+            terminal_status: 'effect_partially_completed',
+            response: 'Useful completed work, with one known-no-change failure.'
+        }, 'Complete']
     ])('terminalises a %s delivery before queue persistence finishes', async (_label, responseOk, responseData, badgeText) => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({

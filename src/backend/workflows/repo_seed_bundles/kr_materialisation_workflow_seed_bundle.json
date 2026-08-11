@@ -2,16 +2,24 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
+  "seed_version": "9",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#kr_design_concept_materialisation_item_workflow": {
       "6": [
         "c027e848fe7860016bdc91fd1efa5809c3cfb57e667eb021bc638d1cfb34d8d8"
       ]
     },
+    "#V#kr_design_relationship_assertion_item_workflow": {
+      "8": [
+        "69904fc11dd094666fc5c429329b923e834d18cce51ae099b541765cdd5352d7"
+      ]
+    },
     "#V#kr_design_materialisation_workflow": {
       "7": [
         "217607c88af869b891bba73bd4f776bec1297df91445c71ebff8aa84cbd41f1e"
+      ],
+      "8": [
+        "032a62452010744f5988f1e66e8781ff05032b1a0e537db62e7f3864489a16b5"
       ]
     }
   },
@@ -21,6 +29,8 @@
     "workflow_control.context_set",
     "workflow_control.context_template",
     "workflow_control.kr_materialisation_guard",
+    "workflow_control.kr_relationship_readback",
+    "workflow_control.kr_relationship_resolution",
     "workflow_control.for_each",
     "workflow_mcp.invoke_tool"
   ],
@@ -269,6 +279,12 @@
                 "tool_param": "created_by_concept_id"
               },
               {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_kr_concept_duplicate_resolution_mode_to_duplicate_resolution_mode_parameter",
+                "context_key": "kr_concept_duplicate_resolution_mode",
+                "required": false,
+                "tool_param": "duplicate_resolution_mode"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_org_concept_id_to_organisation_concept_id_parameter",
                 "context_key": "org_concept_id",
                 "required": false,
@@ -279,12 +295,6 @@
                 "context_key": "kr_concept_parent_id",
                 "required": true,
                 "tool_param": "parent_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_kr_concept_duplicate_resolution_mode_to_duplicate_resolution_mode_parameter",
-                "context_key": "kr_concept_duplicate_resolution_mode",
-                "required": false,
-                "tool_param": "duplicate_resolution_mode"
               }
             ],
             "execution_mode": "deterministic",
@@ -968,7 +978,7 @@
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
-          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"JVNAUTOSCI-2268 initial KR materialisation workflow publication\", \"review_state\": \"approved\", \"reviewed_by\": \"GitHub Copilot\", \"rollout_state\": \"published\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"2026-08-10 deterministic relationship resolution and exact read-back repair\", \"review_state\": \"approved\", \"reviewed_by\": \"Codex\", \"rollout_state\": \"published\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
           "lang": "en-NZ"
         },
         {
@@ -1258,7 +1268,7 @@
               }
             ],
             "execution_mode": "deterministic",
-            "next_state": "emit_relationship_payload",
+            "next_state": "validate_relationship_readback",
             "on_failure_state": "summarise_blocker",
             "retry_policy": {
               "backoff_policy": "fixed",
@@ -1292,6 +1302,52 @@
             "writes_context_keys": [
               "kr_relationship_target_readback_id",
               "kr_relationship_target_readback_relationships"
+            ]
+          },
+          {
+            "action_id": "workflow_control.kr_relationship_readback",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "expected": true,
+                  "key": "kr_relationship_readback_verified",
+                  "kind": "context_flag"
+                },
+                "reason": "exact_relationship_readback_verified",
+                "to_state": "emit_relationship_payload"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "exact_relationship_readback_failed",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "validate_relationship_readback",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_validate_relationship_readback_failure_code_to_kr_relationship_blocking_reason",
+                "context_key": "kr_relationship_blocking_reason",
+                "tool_output_field": "failure_code"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_validate_relationship_readback_verified_to_kr_relationship_readback_verified",
+                "context_key": "kr_relationship_readback_verified",
+                "tool_output_field": "verified"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_validate_relationship_readback_verified_relationship_to_kr_relationship_verified_relationship",
+                "context_key": "kr_relationship_verified_relationship",
+                "tool_output_field": "verified_relationship"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_relationship_readback_verified",
+              "kr_relationship_blocking_reason",
+              "kr_relationship_verified_relationship"
             ]
           },
           {
@@ -1335,6 +1391,14 @@
                   {
                     "key": "kr_relationship_target_readback_id",
                     "value_from_context": "kr_relationship_target_readback_id"
+                  },
+                  {
+                    "key": "kr_relationship_readback_verified",
+                    "value_from_context": "kr_relationship_readback_verified"
+                  },
+                  {
+                    "key": "kr_relationship_verified_relationship",
+                    "value_from_context": "kr_relationship_verified_relationship"
                   }
                 ]
               ]
@@ -1347,7 +1411,9 @@
               "kr_relationship_assert_success",
               "kr_relationship_assert_added",
               "kr_relationship_source_readback_id",
-              "kr_relationship_target_readback_id"
+              "kr_relationship_target_readback_id",
+              "kr_relationship_readback_verified",
+              "kr_relationship_verified_relationship"
             ]
           },
           {
@@ -1416,7 +1482,7 @@
         },
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
-          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"JVNAUTOSCI-2268 initial KR materialisation workflow publication\", \"review_state\": \"approved\", \"reviewed_by\": \"GitHub Copilot\", \"rollout_state\": \"published\", \"routing_eligible\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"2026-08-10 deterministic relationship resolution and exact read-back repair\", \"review_state\": \"approved\", \"reviewed_by\": \"Codex\", \"rollout_state\": \"published\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
           "lang": "en-NZ"
         },
         {
@@ -1426,7 +1492,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": true, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": false, \"schema_version\": \"workflow_routing_profile.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -1629,9 +1695,9 @@
             "conditional_transitions": [
               {
                 "condition_spec": {
+                  "expected": true,
                   "key": "kr_materialisation_guard_passed",
-                  "kind": "context_flag",
-                  "expected": true
+                  "kind": "context_flag"
                 },
                 "reason": "materialisation_plan_within_optional_guard",
                 "to_state": "materialise_concepts"
@@ -1655,11 +1721,6 @@
             ],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_guard_passed_to_kr_materialisation_guard_passed",
-                "context_key": "kr_materialisation_guard_passed",
-                "tool_output_field": "guard_passed"
-              },
-              {
                 "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_blocking_reason_to_kr_materialisation_blocking_reason",
                 "context_key": "kr_materialisation_blocking_reason",
                 "tool_output_field": "blocking_reason"
@@ -1668,6 +1729,11 @@
                 "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_duplicate_resolution_mode_to_kr_concept_duplicate_resolution_mode",
                 "context_key": "kr_concept_duplicate_resolution_mode",
                 "tool_output_field": "duplicate_resolution_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_guard_passed_to_kr_materialisation_guard_passed",
+                "context_key": "kr_materialisation_guard_passed",
+                "tool_output_field": "guard_passed"
               }
             ],
             "writes_context_keys": [
@@ -1743,16 +1809,16 @@
                 1
               ],
               [
-                "stop_on_error",
-                true
-              ],
-              [
                 "max_items",
                 24
               ],
               [
                 "max_transitions",
                 40
+              ],
+              [
+                "stop_on_error",
+                true
               ],
               [
                 "success_policy",
@@ -1799,7 +1865,7 @@
             ]
           },
           {
-            "action_id": "llm.action",
+            "action_id": "workflow_control.kr_relationship_resolution",
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1838,89 +1904,26 @@
                 "to_state": "summarise_blocker"
               }
             ],
-            "execution_mode": "llm",
-            "llm_policy": {
-              "allowed_tools": [
-                "concept_exists",
-                "fetch_concept"
-              ],
-              "context_fields": [
-                {
-                  "context_key": "kr_relationship_specs",
-                  "label": "Requested relationship specs"
-                },
-                {
-                  "context_key": "kr_concept_iteration_results",
-                  "label": "Verified concept materialisation results"
-                },
-                {
-                  "context_key": "kr_materialisation_plan_summary",
-                  "label": "Materialisation plan summary"
-                },
-                {
-                  "context_key": "kr_materialisation_guard",
-                  "label": "Caller-authored materialisation guard"
-                },
-                {
-                  "context_key": "kr_materialisation_guard_passed",
-                  "label": "Materialisation guard validation result"
-                },
-                {
-                  "context_key": "prompt",
-                  "label": "Original KR design request"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance"
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance"
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance"
-                }
-              ],
-              "max_tool_invocations": 12,
-              "policy_stage": "kr_relationship_endpoint_resolution",
-              "selection_policy": "adaptive",
-              "suppress_raw_io_logging": true,
-              "tool_argument_defaults": {
-                "fetch_concept": {
-                  "include_concept_preview": false,
-                  "include_relations_any_arg": false,
-                  "include_text_relations_arg1": false,
-                  "limit": 1
-                }
-              },
-              "tool_mode": "allowed"
-            },
+            "execution_mode": "deterministic",
             "on_failure_state": "summarise_blocker",
-            "prompt_concept_ids": [
-              "#V#prompt_kr_relationship_endpoint_resolution"
-            ],
             "state_id": "resolve_relationship_specs",
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_validated_json_blocking_reason_to_kr_relationship_resolution_blocking_reason",
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_blocking_reason_to_kr_relationship_resolution_blocking_reason",
                 "context_key": "kr_relationship_resolution_blocking_reason",
-                "tool_output_field": "validated_json.blocking_reason"
+                "tool_output_field": "blocking_reason"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_validated_json_decision_to_kr_relationship_resolution_decision",
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_decision_to_kr_relationship_resolution_decision",
                 "context_key": "kr_relationship_resolution_decision",
-                "tool_output_field": "validated_json.decision"
+                "tool_output_field": "decision"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_validated_json_resolved_relationship_specs_to_kr_resolved_relationship_specs",
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_resolved_relationship_specs_to_kr_resolved_relationship_specs",
                 "context_key": "kr_resolved_relationship_specs",
-                "tool_output_field": "validated_json.resolved_relationship_specs"
+                "tool_output_field": "resolved_relationship_specs"
               }
             ],
-            "validation_policy": {
-              "output_format": "json_value"
-            },
             "writes_context_keys": [
               "kr_relationship_resolution_decision",
               "kr_resolved_relationship_specs",
@@ -1932,9 +1935,9 @@
             "conditional_transitions": [
               {
                 "condition_spec": {
+                  "expected": true,
                   "key": "kr_materialisation_guard_passed",
-                  "kind": "context_flag",
-                  "expected": true
+                  "kind": "context_flag"
                 },
                 "reason": "resolved_relationships_within_optional_guard",
                 "to_state": "assert_relationships"
@@ -1958,14 +1961,14 @@
             ],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_resolved_relationships_guard_passed_to_kr_materialisation_guard_passed",
-                "context_key": "kr_materialisation_guard_passed",
-                "tool_output_field": "guard_passed"
-              },
-              {
                 "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_resolved_relationships_blocking_reason_to_kr_relationship_resolution_blocking_reason",
                 "context_key": "kr_relationship_resolution_blocking_reason",
                 "tool_output_field": "blocking_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_resolved_relationships_guard_passed_to_kr_materialisation_guard_passed",
+                "context_key": "kr_materialisation_guard_passed",
+                "tool_output_field": "guard_passed"
               }
             ],
             "writes_context_keys": [

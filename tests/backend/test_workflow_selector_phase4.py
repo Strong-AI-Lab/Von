@@ -126,6 +126,51 @@ def test_selection_experience_finalisation_persists_outcome_and_reward() -> None
     assert snapshot["aggregates"]["policy_direct"] == 0
 
 
+def test_selection_experience_read_has_no_elapsed_query_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = experience_module.record_selection_experience(
+        turn_id="turn-selection-read-advisory",
+        query="What should I work on?",
+        candidate_workflow_ids=[CHAT_ASSISTANT_WORKFLOW_ID],
+        selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+        verdict="rag_selected",
+        selection_source="selector",
+        selection_metadata={},
+        confidence_score=0.8,
+        reasoning="Test selection.",
+        model_name="phase4-test-model",
+        routing_duration_ms=10.0,
+    )
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.rows = [entry.to_dict()]
+
+        def sort(self, *_args):
+            return self
+
+        def limit(self, value: int):
+            self.rows = self.rows[:value]
+            return self
+
+        def max_time_ms(self, _value: int):
+            raise AssertionError("selection reads must not install a hard deadline")
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class _Collection:
+        def find(self, *_args):
+            return _Cursor()
+
+    monkeypatch.setattr(experience_module, "_get_collection", lambda: _Collection())
+
+    observed = experience_module.list_selection_experiences(limit=1)
+
+    assert [item.experience_id for item in observed] == [entry.experience_id]
+
+
 def test_policy_training_improves_held_out_benchmark_cases() -> None:
     for _ in range(4):
         _record_completed_example(

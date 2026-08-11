@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 
@@ -66,17 +65,6 @@ from .engine import (
 logger = logging.getLogger(__name__)
 
 WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY = "workflow_step_control_flow"
-_DEFAULT_WORKFLOW_POLICY_TEXT_MAX_TIME_MS = 15000
-_WORKFLOW_POLICY_TEXT_MAX_TIME_MS_ENV = "VON_WORKFLOW_POLICY_TEXT_MAX_TIME_MS"
-
-
-def _workflow_policy_text_max_time_ms() -> int:
-    raw = os.getenv(_WORKFLOW_POLICY_TEXT_MAX_TIME_MS_ENV)
-    try:
-        parsed = int(str(raw or "").strip())
-    except (TypeError, ValueError):
-        parsed = _DEFAULT_WORKFLOW_POLICY_TEXT_MAX_TIME_MS
-    return max(1000, min(parsed, 120000))
 
 # Canonical workflow graph predicates with legacy-compatible aliases.
 # The first entry in each tuple is the preferred canonical concept predicate.
@@ -2567,13 +2555,10 @@ def _get_cached_policy_text_rows(
     if text_cache is not None and concept_id in text_cache:
         return text_cache[concept_id]
 
-    try:
-        raw_texts = get_texts_for_concept(
-            concept_id,
-            max_time_ms=_workflow_policy_text_max_time_ms(),
-        )
-    except Exception:
-        raw_texts = []
+    # Policy is authoritative workflow state.  A slow or failed read must not
+    # be converted into an authoritative-looking empty policy set, so do not
+    # impose a per-operation elapsed deadline or catch transport failures here.
+    raw_texts = get_texts_for_concept(concept_id)
     texts: List[Mapping[str, Any]] = [
         cast(Mapping[str, Any], item)
         for item in raw_texts
@@ -2607,10 +2592,9 @@ def _prefetch_policy_text_rows(
         rows_by_concept = get_texts_for_concepts(
             missing_ids,
             limit_per_concept=50,
-            max_time_ms=_workflow_policy_text_max_time_ms(),
         )
     except Exception as exc:
-        # Leave missing IDs uncached so callers can fall back to the bounded
+        # Leave missing IDs uncached so callers can fall back to the
         # per-concept reader.  Caching an empty result here would turn a batch
         # transport failure into an authoritative "no policy" answer, which is
         # unsafe for publication lifecycle metadata such as published=false.

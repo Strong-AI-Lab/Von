@@ -208,6 +208,51 @@ def test_turn_workflow_discovery_memo_does_not_cache_operational_empty_result(
     )
 
 
+def test_turn_workflow_discovery_memo_caches_advisory_crossing_empty_result(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda *, latency_sensitive=False: _runtime_state("v1"),
+    )
+    calls = 0
+
+    def _discover(user_input: str, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "query": user_input,
+            "matches": [],
+            "candidates": [],
+            "candidate_count": 0,
+            "match_count": 0,
+            "budget_exhausted": True,
+            "elapsed_time_enforcement": "advisory",
+            "advisory_budget_exceeded": True,
+            "hard_timeout_exceeded": False,
+            "budget_exhaustion_stage": "semantic_search",
+            "budget_exhaustion_detail": "search continued after advisory",
+            "match_absence_reason": "no_discovery_candidates",
+        }
+
+    first = discover_workflows_for_turn_memoized(
+        "No represented workflow matches this request.",
+        namespace="#V#user@org",
+        turn_scope="turn-1",
+        discovery_func=_discover,
+    )
+    second = discover_workflows_for_turn_memoized(
+        "No represented workflow matches this request.",
+        namespace="#V#user@org",
+        turn_scope="turn-1",
+        discovery_func=_discover,
+    )
+
+    assert calls == 1
+    assert first["workflow_discovery_cache"]["cache_hit"] is False
+    assert second["workflow_discovery_cache"]["cache_hit"] is True
+
+
 def test_turn_workflow_discovery_memo_ranks_with_requested_query(
     monkeypatch,
 ) -> None:

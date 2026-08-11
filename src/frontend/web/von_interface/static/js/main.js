@@ -1499,89 +1499,83 @@ function startHealthPolling() {
                   let sessionIndexableTotal = null;
                   let sessionProcessed = 0;
                   const sessionChunks = [];
-                  // Adaptive timeout for slow embedding/indexing. Starts at 2 min, grows on AbortError.
-                  let timeoutMs = 120000;
-                  const maxTimeoutMs = 15 * 60 * 1000;
 
                   while (true) {
                     chunkNo += 1;
 
                     let res;
                     const chunkAttemptStarted = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-
-                    // Retry loop for slow chunks and transient HTTP errors.
-                    for (let attempt = 1; attempt <= 3; attempt++) {
-                      const controllerR = new AbortController();
-                      const timeoutR = setTimeout(() => controllerR.abort(), timeoutMs);
-                      try {
-                        res = await fetch(url, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                            reset_counters: (chunkNo === 1),
-                            dry_run: false,
-                            session_ids: [sid],
-                            chunk_start: chunkStart,
-                            chunk_size: chunkSize
-                          }),
-                          cache: 'no-store',
-                          signal: controllerR.signal
-                        });
-
-                        // Retry on transient server/proxy issues.
-                        if (!res.ok && (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504)) {
-                          const delayMs = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
-                          await new Promise(resolve => setTimeout(resolve, delayMs));
-                          continue;
+                    const observedMsPerMessage = processedTotal > 0
+                      ? (elapsedMsTotal / processedTotal)
+                      : null;
+                    // This crossing only updates the display. It never cancels or
+                    // resubmits a mutation whose outcome is not yet known.
+                    const requestAdvisoryMs = observedMsPerMessage === null
+                      ? 120000
+                      : Math.max(120000, Math.min(15 * 60 * 1000, Math.round(observedMsPerMessage * chunkSize * 2)));
+                    let requestAdvisoryExceeded = false;
+                    const advisoryR = setTimeout(() => {
+                      requestAdvisoryExceeded = true;
+                      if (msgProgressTextEl) {
+                        const current = String(msgProgressTextEl.textContent || '');
+                        const note = 'Still working; this request has not been cancelled or retried.';
+                        if (!current.includes(note)) {
+                          msgProgressTextEl.textContent = current ? `${current} • ${note}` : note;
                         }
-
-                        break;
-                      } catch (err) {
-                        const name = err && err.name ? err.name : '';
-                        if (name === 'AbortError') {
-                          // The server may still be processing; increase timeout and retry this same chunk.
-                          timeoutMs = Math.min(maxTimeoutMs, Math.max(timeoutMs * 2, 180000));
-                          const delayMs = Math.min(3000, 500 * attempt);
-                          await new Promise(resolve => setTimeout(resolve, delayMs));
-                          continue;
-                        }
-                        throw err;
-                      } finally {
-                        clearTimeout(timeoutR);
                       }
-                    }
+                    }, requestAdvisoryMs);
 
-                    if (!res) {
-                      const err = {
-                        type: 'timeout',
+                    try {
+                      res = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          reset_counters: (chunkNo === 1),
+                          dry_run: false,
+                          session_ids: [sid],
+                          chunk_start: chunkStart,
+                          chunk_size: chunkSize
+                        }),
+                        cache: 'no-store'
+                      });
+                    } catch (err) {
+                      const name = err && err.name ? err.name : 'Error';
+                      const message = err && err.message ? err.message : '';
+                      const failure = {
+                        type: 'network_outcome_indeterminate',
                         session_id: sid,
                         chunk_start: chunkStart,
                         chunk_no: chunkNo,
-                        message: 'Request timed out; server may still be processing.'
+                        name,
+                        message,
+                        advisory_exceeded: requestAdvisoryExceeded
                       };
-                      aggregate.errors.push(err);
-                      perSessionResults.push({ session_id: sid, ok: false, error: err, chunks: sessionChunks });
+                      aggregate.errors.push(failure);
+                      perSessionResults.push({ session_id: sid, ok: false, error: failure, chunks: sessionChunks });
 
                       window.__vonLastRagReindexJson = {
-                        status: 'error',
+                        status: 'outcome_indeterminate',
                         namespace: ns,
                         started_at: startedAt,
-                        failed_session_id: sid,
-                        failed_at_session_index: i,
-                        failed_chunk_no: chunkNo,
-                        failed_chunk_start: chunkStart,
+                        indeterminate_session_id: sid,
+                        indeterminate_at_session_index: i,
+                        indeterminate_chunk_no: chunkNo,
+                        indeterminate_chunk_start: chunkStart,
                         per_session_results: perSessionResults,
                         aggregate
                       };
 
-                      ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex timed out.</strong> Session ${escapeHtml(sid)} (chunk ${chunkNo}, start ${chunkStart}).</p><p><em>The server may still be processing this chunk. Reopen this status to see progress, then you can retry or resume reindex if needed.</em></p>`;
+                      ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex response unavailable.</strong> Session ${escapeHtml(sid)} (chunk ${chunkNo}, start ${chunkStart}).</p><p><em>The request may or may not have completed. Reopen this status to inspect canonical progress before starting another reindex.</em></p>`;
                       return;
+                    } finally {
+                      clearTimeout(advisoryR);
                     }
 
                     if (!res.ok) {
                       const txt = await res.text();
+                      const outcomeIndeterminate = res.status >= 500;
                       const err = {
-                        type: 'http_error',
+                        type: outcomeIndeterminate ? 'http_outcome_indeterminate' : 'http_error',
                         session_id: sid,
                         chunk_start: chunkStart,
                         chunk_no: chunkNo,
@@ -1592,25 +1586,42 @@ function startHealthPolling() {
                       perSessionResults.push({ session_id: sid, ok: false, error: err, chunks: sessionChunks });
 
                       window.__vonLastRagReindexJson = {
-                        status: 'error',
+                        status: outcomeIndeterminate ? 'outcome_indeterminate' : 'error',
                         namespace: ns,
                         started_at: startedAt,
-                        failed_session_id: sid,
-                        failed_at_session_index: i,
-                        failed_chunk_no: chunkNo,
-                        failed_chunk_start: chunkStart,
+                        ...(outcomeIndeterminate ? {
+                          indeterminate_session_id: sid,
+                          indeterminate_at_session_index: i,
+                          indeterminate_chunk_no: chunkNo,
+                          indeterminate_chunk_start: chunkStart
+                        } : {
+                          failed_session_id: sid,
+                          failed_at_session_index: i,
+                          failed_chunk_no: chunkNo,
+                          failed_chunk_start: chunkStart
+                        }),
                         per_session_results: perSessionResults,
                         aggregate
                       };
 
-                      ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex failed.</strong> Session ${escapeHtml(sid)} (chunk ${chunkNo}, start ${chunkStart}) returned HTTP ${res.status}.</p><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;">${escapeHtml(txt || '')}</pre>`;
+                      const heading = outcomeIndeterminate ? 'Reindex result not confirmed.' : 'Reindex failed.';
+                      const followUp = outcomeIndeterminate
+                        ? '<p><em>The server returned an upstream error, so inspect canonical progress before starting another reindex.</em></p>'
+                        : '';
+                      ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>${heading}</strong> Session ${escapeHtml(sid)} (chunk ${chunkNo}, start ${chunkStart}) returned HTTP ${res.status}.</p>${followUp}<pre style="white-space:pre-wrap;max-height:220px;overflow:auto;">${escapeHtml(txt || '')}</pre>`;
                       return;
                     }
 
                     const js = await res.json();
                     const chunkFinished = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                     const chunkElapsedMs = Math.max(0, Math.round(chunkFinished - chunkAttemptStarted));
-                    sessionChunks.push({ ...js, client_elapsed_ms: chunkElapsedMs, client_timeout_ms: timeoutMs, client_chunk_no: chunkNo });
+                    sessionChunks.push({
+                      ...js,
+                      client_elapsed_ms: chunkElapsedMs,
+                      client_advisory_ms: requestAdvisoryMs,
+                      client_advisory_exceeded: requestAdvisoryExceeded,
+                      client_chunk_no: chunkNo
+                    });
 
                     if (typeof js?.indexable_total === 'number') {
                       sessionIndexableTotal = js.indexable_total;
@@ -1742,16 +1753,13 @@ function startHealthPolling() {
                 } catch (e) {
                   const name = e && e.name ? e.name : 'Error';
                   const msg = e && e.message ? e.message : '';
-                  const timedOutNote = name === 'AbortError'
-                    ? '<p><em>Request timed out. The server may still be processing; reopen this status to see progress.</em></p>'
-                    : '';
-                  const errObj = { type: 'exception', name, message: msg };
+                  const errObj = { type: 'exception_outcome_indeterminate', name, message: msg };
                   window.__vonLastRagReindexJson = {
-                    status: 'error',
+                    status: 'outcome_indeterminate',
                     namespace: getCurrentNamespace() || null,
                     error: errObj
                   };
-                  ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex error.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p>${timedOutNote}<p><em>You can use “Copy JSON” to capture this failure.</em></p>`;
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex result not confirmed.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p><p><em>The request may have completed. Inspect canonical progress before starting another reindex; “Copy JSON” captures this indeterminate outcome.</em></p>`;
                 } finally {
                   reindexBtn.disabled = false;
                   try {
@@ -1786,7 +1794,12 @@ function startHealthPolling() {
                 } catch (e) {
                   const name = e && e.name ? e.name : 'Error';
                   const msg = e && e.message ? e.message : '';
-                  ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Resume error.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p>`;
+                  window.__vonLastRagReindexJson = {
+                    status: 'outcome_indeterminate',
+                    namespace: getCurrentNamespace() || null,
+                    error: { type: 'exception_outcome_indeterminate', name, message: msg }
+                  };
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Resume result not confirmed.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p><p><em>The request may have completed. Inspect canonical progress before trying again.</em></p>`;
                 } finally {
                   resumeBtn.disabled = false;
                   try {
@@ -2077,6 +2090,13 @@ function startHealthPolling() {
         if (ragChatBackfillBtn && !ragChatBackfillBtn._wired) {
           ragChatBackfillBtn._wired = true;
           ragChatBackfillBtn.addEventListener('click', async () => {
+            let advisoryB = null;
+            let advisoryExceededB = false;
+            const previousBackfillElapsedMs = Number(window.__vonLastRagBackfillJson?.client_elapsed_ms);
+            const backfillAdvisoryMs = Number.isFinite(previousBackfillElapsedMs) && previousBackfillElapsedMs > 0
+              ? Math.max(60000, Math.min(15 * 60 * 1000, Math.round(previousBackfillElapsedMs * 1.5)))
+              : 180000;
+            const backfillStartedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
             try {
               const ok = window.confirm('Backfill legacy conversation history into your current namespace and re-index to RAG? This may take a minute.');
               if (!ok) return;
@@ -2091,29 +2111,44 @@ function startHealthPolling() {
 
               ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Backfill running…</em></p>';
 
-              const controllerB = new AbortController();
-              const timeoutB = setTimeout(() => controllerB.abort(), 180000);
+              // Backfill is a mutation. Elapsed time is advisory only because
+              // aborting the client request cannot prove that the server stopped.
+              advisoryB = setTimeout(() => {
+                advisoryExceededB = true;
+                ragModalBody.innerHTML = ragModalBody.innerHTML + '<p><em>Backfill is taking longer than usual; it is still running and has not been cancelled or retried.</em></p>';
+              }, backfillAdvisoryMs);
               const resB = await fetch('/admin/chat_history_backfill', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ max_sessions: 25, max_messages: 2000, dry_run: false }),
-                cache: 'no-store',
-                signal: controllerB.signal
+                cache: 'no-store'
               });
-              clearTimeout(timeoutB);
 
               if (!resB.ok) {
                 const txt = await resB.text();
+                const outcomeIndeterminate = resB.status >= 500;
                 window.__vonLastRagBackfillJson = {
-                  status: 'error',
+                  status: outcomeIndeterminate ? 'outcome_indeterminate' : 'error',
                   http_status: resB.status,
-                  response_text: txt || ''
+                  response_text: txt || '',
+                  advisory_ms: backfillAdvisoryMs,
+                  advisory_exceeded: advisoryExceededB
                 };
-                ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill failed.</strong> ${txt}</p>`;
+                const heading = outcomeIndeterminate ? 'Backfill result not confirmed.' : 'Backfill failed.';
+                const followUp = outcomeIndeterminate
+                  ? '<p><em>The server returned an upstream error, so inspect canonical progress before starting another backfill.</em></p>'
+                  : '';
+                ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>${heading}</strong> ${txt}</p>${followUp}`;
                 return;
               }
               const js = await resB.json();
-              window.__vonLastRagBackfillJson = js;
+              const backfillFinishedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+              window.__vonLastRagBackfillJson = {
+                ...js,
+                client_elapsed_ms: Math.max(0, Math.round(backfillFinishedAt - backfillStartedAt)),
+                client_advisory_ms: backfillAdvisoryMs,
+                client_advisory_exceeded: advisoryExceededB
+              };
               const statusLine = js?.status ? `<p><strong>Status:</strong> ${js.status}</p>` : '';
               const errorLine = js?.error ? `<p><strong>Error:</strong> ${js.error}</p>` : '';
               const errors = Array.isArray(js?.errors) ? js.errors : [];
@@ -2146,15 +2181,19 @@ function startHealthPolling() {
             } catch (e) {
               const name = e && e.name ? e.name : 'Error';
               const msg = e && e.message ? e.message : '';
-              const timedOutNote = name === 'AbortError'
-                ? '<p><em>Request timed out. The server may still be processing; reopen this status to see progress.</em></p>'
-                : '';
               window.__vonLastRagBackfillJson = {
-                status: 'error',
-                error: { type: 'exception', name, message: msg }
+                status: 'outcome_indeterminate',
+                error: {
+                  type: 'network_outcome_indeterminate',
+                  name,
+                  message: msg,
+                  advisory_ms: backfillAdvisoryMs,
+                  advisory_exceeded: advisoryExceededB
+                }
               };
-              ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill error.</strong> ${name}${msg ? `: ${msg}` : ''}</p>${timedOutNote}`;
+              ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill response unavailable.</strong> ${name}${msg ? `: ${msg}` : ''}</p><p><em>The request may or may not have completed. Reopen this status to inspect canonical progress before starting another backfill.</em></p>`;
             } finally {
+              if (advisoryB !== null) clearTimeout(advisoryB);
               ragChatBackfillBtn.disabled = false;
               try {
                 const modalActions = ragModal.querySelector('.modal-actions');

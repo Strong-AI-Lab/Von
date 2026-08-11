@@ -81,25 +81,22 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     } <= methods
 
 
-def test_default_catalogue_exposes_calibrated_effect_admission_windows():
+def test_default_catalogue_has_no_inactive_effect_admission_windows():
     from src.backend.integrations.internal_mcp import build_default_catalogue
 
     catalogue = build_default_catalogue()
     snapshot = catalogue.snapshot()
 
     assert catalogue.get("create_concepts").effect_admission_window_sec is None
-    assert catalogue.get("upsert_text_relation").effect_admission_window_sec == 8.0
-    assert (
-        catalogue.get("retract_scoped_assertion").effect_admission_window_sec
-        == 8.0
-    )
-    assert catalogue.get("add_relationship").effect_admission_window_sec == 5.0
+    assert catalogue.get("upsert_text_relation").effect_admission_window_sec is None
+    assert catalogue.get("retract_scoped_assertion").effect_admission_window_sec is None
+    assert catalogue.get("add_relationship").effect_admission_window_sec is None
     assert snapshot["create_concepts"]["effect_admission_window_sec"] is None
-    assert snapshot["upsert_text_relation"]["effect_admission_window_sec"] == 8.0
-    assert snapshot["add_relationship"]["effect_admission_window_sec"] == 5.0
+    assert snapshot["upsert_text_relation"]["effect_admission_window_sec"] is None
+    assert snapshot["add_relationship"]["effect_admission_window_sec"] is None
 
 
-def test_remote_file_import_has_observed_liveness_headroom():
+def test_remote_file_import_has_observed_advisory_headroom():
     from src.backend.integrations.internal_mcp import (
         InternalMCPTransport,
         build_default_catalogue,
@@ -109,17 +106,15 @@ def test_remote_file_import_has_observed_liveness_headroom():
 
     assert definition.advisory_timeout_sec is None
     assert definition.timeout_sec is None
-    assert definition.hard_timeout_enabled is True
+    assert definition.hard_timeout_enabled is False
     assert definition.successful_duration_bootstrap_sec == pytest.approx(173.641)
     assert definition.resolved_advisory_timeout(
         InternalMCPTransport()
     ) == pytest.approx(173.641 * 1.25)
-    assert definition.resolved_timeout(InternalMCPTransport()) == pytest.approx(
-        173.641 * 2.0
-    )
+    assert definition.resolved_timeout(InternalMCPTransport()) is None
 
 
-def test_paper_download_cold_start_window_covers_observed_blob_rehydration():
+def test_paper_download_advisory_covers_observed_blob_rehydration():
     from src.backend.integrations.internal_mcp import (
         InternalMCPTransport,
         build_default_catalogue,
@@ -129,13 +124,22 @@ def test_paper_download_cold_start_window_covers_observed_blob_rehydration():
 
     assert definition.advisory_timeout_sec is None
     assert definition.timeout_sec is None
-    assert definition.hard_timeout_enabled is True
+    assert definition.hard_timeout_enabled is False
     assert definition.successful_duration_bootstrap_sec == pytest.approx(68.321)
     assert definition.resolved_advisory_timeout(
         InternalMCPTransport()
     ) == pytest.approx(68.321 * 1.25)
-    assert definition.resolved_timeout(InternalMCPTransport()) == pytest.approx(
-        68.321 * 2.0
+    assert definition.resolved_timeout(InternalMCPTransport()) is None
+
+
+def test_default_catalogue_has_no_elapsed_time_hard_boundaries():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    snapshot = build_default_catalogue().snapshot()
+
+    assert snapshot
+    assert all(
+        definition["hard_timeout_enabled"] is False for definition in snapshot.values()
     )
 
 
@@ -308,6 +312,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "retract_scoped_assertion",
         "upsert_scoped_assertion",
         "upsert_text_relation",
+        "upsert_uncertain_relationship_assertion",
         "add_relationship",
         "message_send_direct",
         "task_create",
@@ -342,7 +347,10 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }
     task_status_definition = catalogue.get("task_update_status")
     assert task_status_definition.ordinary_turn_effect is True
-    assert task_status_definition.ordinary_turn_mutation_subject_argument == "task_concept_id"
+    assert (
+        task_status_definition.ordinary_turn_mutation_subject_argument
+        == "task_concept_id"
+    )
     assert task_status_definition.ordinary_turn_trusted_argument_bindings == {
         "namespace": "turn_namespace",
         "acting_user_concept_id": "actor_user_concept_id",
@@ -350,7 +358,10 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }
     task_comment_definition = catalogue.get("task_add_comment")
     assert task_comment_definition.ordinary_turn_effect is True
-    assert task_comment_definition.ordinary_turn_mutation_subject_argument == "task_concept_id"
+    assert (
+        task_comment_definition.ordinary_turn_mutation_subject_argument
+        == "task_concept_id"
+    )
     assert task_comment_definition.ordinary_turn_trusted_argument_bindings == {
         "author_concept_id": "actor_user_concept_id",
         "namespace": "turn_namespace",
@@ -393,6 +404,11 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "canonical_publication": False,
     }
     assert scoped_definition.ordinary_turn_mutation_subject_argument is None
+    uncertain_definition = catalogue.get("upsert_uncertain_relationship_assertion")
+    assert uncertain_definition.ordinary_turn_effect is True
+    assert uncertain_definition.ordinary_turn_mutation_subject_argument == "source_id"
+    assert "possible duplicate" in uncertain_definition.description
+    assert "instead of creating a new predicate" in uncertain_definition.description
     retract_definition = catalogue.get("retract_scoped_assertion")
     assert retract_definition.input_schema.required == {"assertion_id": str}
     assert retract_definition.input_schema.optional == {}
@@ -915,6 +931,37 @@ def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
     assert captured_kwargs.get("bypass_profile_query_prefix") is False
 
 
+def test_gmail_list_messages_reports_grouped_profile_and_caller_query(monkeypatch):
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    captured_kwargs: dict = {}
+
+    def fake_list_messages(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"messages": [], "resultSizeEstimate": 0}
+
+    fake_profile = gs.GmailProfile(
+        profile_id="vonwitbrock-gmail",
+        token_path="/tmp/fake-token.json",
+        query_prefix="to:owner@example.test OR from:owner@example.test",
+    )
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="vonwitbrock-gmail",
+        query='newer_than:2d subject:"booking confirmation"',
+        max_results=3,
+    )
+
+    assert captured_kwargs["query"] == 'newer_than:2d subject:"booking confirmation"'
+    assert payload["effective_query"]["effective_query_string"] == (
+        "(to:owner@example.test OR from:owner@example.test) "
+        '(newer_than:2d subject:"booking confirmation")'
+    )
+
+
 def test_gmail_list_messages_bypass_profile_query_prefix_passes_through(
     monkeypatch,
 ):
@@ -973,6 +1020,14 @@ def test_gmail_list_messages_input_schema_accepts_bypass_flag():
     assert method.output_schema is not None
     output_description = method.output_schema.description or ""
     assert "effective_query" in output_description
+    assert "include_metadata" in output_description
+    assert "message bodies and MIME payloads are not returned" in output_description
+    assert "metadata_error" in output_description
+
+    input_description = method.input_schema.description or ""
+    assert "adjacent clauses mean AND" in input_description
+    assert "uppercase OR or braces express a union" in input_description
+    assert "accepted compatibility hints but are ignored" in input_description
 
 
 def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
@@ -1052,11 +1107,76 @@ def test_gmail_list_messages_handler_accepts_limit_alias_and_planning_hints(
         limit=10,
         order="desc",
         scope="received",
+        include_metadata=["sender", "subject", "date", "snippet"],
     )
 
     assert payload["messages"] == []
     assert captured_kwargs["profile_id"] == "zhan-gmail"
     assert captured_kwargs["max_results"] == 10
+    assert captured_kwargs["include_metadata"] == [
+        "sender",
+        "subject",
+        "date",
+        "snippet",
+    ]
+
+
+def test_gmail_list_messages_projection_narrows_follow_up_fields(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    def fake_list_messages(**_kwargs):
+        return {
+            "messages": [
+                {
+                    "id": "message-1",
+                    "message_id": "message-1",
+                    "threadId": "thread-1",
+                    "thread_id": "thread-1",
+                    "sender": "Airline <travel@example.test>",
+                    "subject": "Booking confirmation",
+                    "date": "Mon, 10 Aug 2026 18:00:00 +0000",
+                }
+            ],
+            "metadata_projection": {
+                "requested_fields": ["sender", "subject", "date"],
+                "metadata_format": "metadata",
+                "body_included": False,
+                "attempted_count": 1,
+                "succeeded_count": 1,
+                "failed_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.list_messages",
+        fake_list_messages,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_profile",
+        lambda _profile: SimpleNamespace(query_prefix=None, label_filter=[]),
+    )
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        max_results=1,
+        include_metadata=["from", "subject", "date"],
+    )
+
+    follow_up = payload["_tool_follow_up"]
+    assert follow_up["required_when_any_item_missing_fields"] == [
+        "sender",
+        "subject",
+        "date",
+    ]
+    assert follow_up["available_via_follow_up_fields"] == [
+        "sender",
+        "subject",
+        "date",
+        "snippet",
+    ]
+    assert "snippet" not in follow_up["required_when_any_item_missing_fields"]
 
 
 def test_gmail_list_messages_resolves_represented_profile_resource_alias(monkeypatch):
@@ -1179,24 +1299,28 @@ def test_source_processing_marker_tools_registered_as_vontology_surfaces():
         "source_item_id",
         "source_system",
     ]
-    assert "source_profile" in snapshot["get_source_processing_marker"][
-        "input_schema"
-    ]["optional"]
-    assert snapshot["record_source_processing_marker"]["input_schema"][
-        "required"
-    ] == ["source_item_id", "source_profile", "source_system"]
-    assert "historical profileless marker" in snapshot[
-        "get_source_processing_marker"
-    ]["input_schema"]["description"]
-    assert "exact stable profile identifier" in snapshot[
-        "record_source_processing_marker"
-    ]["input_schema"]["description"]
-    assert "do not omit, translate, canonicalise, or invent it" in snapshot[
-        "record_source_processing_marker"
-    ]["input_schema"]["description"]
-    assert snapshot["record_source_processing_marker"]["input_schema"][
-        "aliases"
-    ] == {
+    assert (
+        "source_profile"
+        in snapshot["get_source_processing_marker"]["input_schema"]["optional"]
+    )
+    assert snapshot["record_source_processing_marker"]["input_schema"]["required"] == [
+        "source_item_id",
+        "source_profile",
+        "source_system",
+    ]
+    assert (
+        "historical profileless marker"
+        in snapshot["get_source_processing_marker"]["input_schema"]["description"]
+    )
+    assert (
+        "exact stable profile identifier"
+        in snapshot["record_source_processing_marker"]["input_schema"]["description"]
+    )
+    assert (
+        "do not omit, translate, canonicalise, or invent it"
+        in snapshot["record_source_processing_marker"]["input_schema"]["description"]
+    )
+    assert snapshot["record_source_processing_marker"]["input_schema"]["aliases"] == {
         "profile": "source_profile",
         "profile_id": "source_profile",
     }

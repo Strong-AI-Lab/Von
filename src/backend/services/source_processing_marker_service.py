@@ -22,7 +22,6 @@ from .workflow_vontology_materialisation_helpers import (
 
 SOURCE_PROCESSING_MARKER_TYPE_ID = "#V#source_processing_marker"
 SOURCE_PROCESSING_EVIDENCE_PREDICATE_ID = "#V#hasSourceProcessingEvidenceJson"
-SOURCE_PROCESSING_MARKER_EXISTENCE_LOOKUP_MAX_TIME_MS = 3_000
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _ARXIV_ID_RE = re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b")
@@ -186,7 +185,6 @@ def _find_existing_concept_ids(concept_ids: Sequence[str]) -> set[str]:
             {"concept_id": {"$in": lookup_ids}},
             {"_id": 0, "concept_id": 1},
             limit=len(lookup_ids),
-            max_time_ms=SOURCE_PROCESSING_MARKER_EXISTENCE_LOOKUP_MAX_TIME_MS,
         )
         if isinstance(row, Mapping) and _clean_text(row.get("concept_id"))
     }

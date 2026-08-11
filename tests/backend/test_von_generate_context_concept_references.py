@@ -84,6 +84,13 @@ def app(monkeypatch):
         _get_history,
     )
     monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_session_state",
+        lambda user_id, session_id, **_kwargs: {
+            "session_id": session_id,
+            "history": _get_history(user_id, session_id),
+        },
+    )
+    monkeypatch.setattr(
         "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
         _add_to_history,
     )
@@ -94,11 +101,12 @@ def app(monkeypatch):
     flask_app.config["CONTEXT"] = []
     flask_app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
     flask_app.config["INTERNAL_MCP_GATEWAY"] = None
+    flask_app.config["_TEST_HISTORY_STORE"] = history_store
 
     return flask_app
 
 
-def test_generate_attaches_prior_turn_concept_reference_metadata(app):
+def test_generate_defers_prior_turn_concept_reference_resolution(app):
     client = app.test_client()
 
     with client.session_transaction() as sess:
@@ -117,6 +125,40 @@ def test_generate_attaches_prior_turn_concept_reference_metadata(app):
     by_id = {entry["concept_id"]: entry for entry in second_refs["concepts"]}
 
     assert "#V#person" in by_id
-    assert by_id["#V#person"]["exists"] is True
-    assert by_id["#V#person"]["kind"] == "type"
-    assert by_id["#V#person"]["name"] == "Person"
+    assert second_refs["resolution_status"] == "deferred"
+    assert by_id["#V#person"]["exists"] is None
+    assert by_id["#V#person"]["kind"] is None
+    assert by_id["#V#person"]["name"] is None
+    assert by_id["#V#person"]["resolution_status"] == "deferred"
+
+
+def test_generate_projects_long_history_before_model_use(app):
+    history_store = app.config["_TEST_HISTORY_STORE"]
+    history_store[("#V#test_user", "session-1")] = [
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"Earlier message {index}",
+        }
+        for index in range(30)
+    ]
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#test_user"
+        sess["session_id"] = "session-1"
+        sess["namespace"] = "#V#test_user@test_org"
+
+    response = client.post("/von/generate", json={"prompt": "Continue please"})
+
+    assert response.status_code == 200
+    debug = response.get_json()["llm_debug"]
+    projection = debug["namespace_report"][
+        "conversation_history_model_projection"
+    ]
+    assert projection == {
+        "schema_version": "conversation_history_model_projection.v1",
+        "source_message_count": 30,
+        "projected_message_count": 20,
+        "older_context_carrier": "recent_transcript_window_only",
+    }
+    assert debug["context_stats"]["sent_to_llm"]["total_messages"] <= 22

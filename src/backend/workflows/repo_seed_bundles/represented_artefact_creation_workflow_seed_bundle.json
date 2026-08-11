@@ -2,16 +2,25 @@
   "family_id": "represented_artefact_creation_workflow_seed_bundle",
   "managed_by": "represented_artefact_creation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "6",
+  "seed_version": "8",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#represented_artefact_creation_workflow": {
       "5": [
         "2061801c8da0d8437f021ef49dd3af40d405f98fdc5388752d0b831ce689bb48"
+      ],
+      "6": [
+        "8d8667342c20b0f97b99ee48bfb9e875568b28ba5ea022d17fd8a69891f3d2db"
+      ],
+      "7": [
+        "76a561b09bf0e4ae165ffb25e775373ef8afb1d79a7cee0859aac2212a28d0f9"
       ]
     },
     "#V#represented_artefact_item_creation_workflow": {
       "5": [
         "cc17479ee5df029a7baed2b1d21a1f0c098979afcda730c91a2e7acce624771e"
+      ],
+      "7": [
+        "39d510b47d947bcb5d6f77697fa68a770d6c8ed64b579d8f004f382d6d87e532"
       ]
     }
   },
@@ -62,7 +71,7 @@
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": true, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": false, \"schema_version\": \"workflow_routing_profile.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -72,7 +81,7 @@
         },
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
-          "text": "{\"phase\": \"published\", \"published\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\"}",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"2026-08-10 explicit-only generic represented-artefact routing repair\", \"review_state\": \"approved\", \"reviewed_by\": \"Codex\", \"rollout_state\": \"published\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
           "lang": "en-NZ"
         },
         {
@@ -958,12 +967,12 @@
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": true, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": false, \"schema_version\": \"workflow_routing_profile.v1\"}",
           "lang": "en-NZ"
         },
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
-          "text": "{\"phase\": \"published\", \"published\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\"}",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"2026-08-10 internal represented-artefact child routing boundary\", \"review_state\": \"approved\", \"reviewed_by\": \"Codex\", \"rollout_state\": \"support_subworkflow\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
           "lang": "en-NZ"
         },
         {

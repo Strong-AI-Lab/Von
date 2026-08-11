@@ -51,7 +51,6 @@ _ARG_INDEX_SUBJECT = 1  # Align with example payloads (1-based indexing)
 _ARG_INDEX_FIRST_OBJECT = 2
 _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 500
-_CANONICAL_EXACT_PREDICATE_FALLBACK_MAX_TIME_MS = 8_000
 _UNCERTAINTY_MODE_ASSERTED_ONLY = "asserted_only"
 _UNCERTAINTY_MODE_UNCERTAIN_ONLY = "uncertain_only"
 _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN = "include_uncertain"
@@ -617,7 +616,6 @@ def find_relations_with_argument(
                 exact_documents = ConceptsRepository.find(
                     exact_query,
                     exact_projection,
-                    max_time_ms=(_CANONICAL_EXACT_PREDICATE_FALLBACK_MAX_TIME_MS),
                 )
                 for document in exact_documents:
                     source_id = document.get("concept_id")

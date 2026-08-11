@@ -345,12 +345,14 @@ class BackgroundGenerateTaskError(RuntimeError):
         message: str,
         *,
         task_id: str | None = None,
+        request_id: str | None = None,
         status_payload: Mapping[str, Any] | None = None,
         cancellation_payload: Mapping[str, Any] | None = None,
         timeout_reconciliation: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.task_id = task_id
+        self.request_id = request_id
         self.status_payload = dict(status_payload or {})
         self.cancellation_payload = dict(cancellation_payload or {})
         self.timeout_reconciliation = dict(timeout_reconciliation or {})
@@ -358,9 +360,41 @@ class BackgroundGenerateTaskError(RuntimeError):
     def to_report(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
+            "request_id": self.request_id,
             "status_payload": self.status_payload,
             "cancellation_payload": self.cancellation_payload,
             "timeout_reconciliation": self.timeout_reconciliation,
+        }
+
+
+class BackgroundGenerateTaskPending(RuntimeError):
+    """The harness stopped observing a task that remains live on the server."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        task_id: str,
+        request_id: str,
+        status_payload: Mapping[str, Any] | None = None,
+        timeout_reconciliation: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.task_id = task_id
+        self.request_id = request_id
+        self.status_payload = dict(status_payload or {})
+        self.timeout_reconciliation = dict(timeout_reconciliation or {})
+
+    def to_report(self) -> dict[str, Any]:
+        return {
+            "schema_version": "background_generate_task_pending.v1",
+            "task_id": self.task_id,
+            "request_id": self.request_id,
+            "status_payload": self.status_payload,
+            "timeout_reconciliation": self.timeout_reconciliation,
+            "status_endpoint": f"/von/api/task/status/{self.task_id}",
+            "result_endpoint": f"/von/api/task/result/{self.task_id}",
+            "task_left_running": True,
         }
 
 
@@ -740,8 +774,8 @@ def _fetch_late_terminal_background_result(
     grace_seconds: float,
 ) -> dict[str, Any]:
     reconciliation: dict[str, Any] = {
-        "schema_version": "background_task_timeout_reconciliation.v1",
-        "timed_out_before_budget": True,
+        "schema_version": "background_task_observation_reconciliation.v1",
+        "observer_window_expired": True,
         "late_terminal_result_observed": False,
         "task_id": task_id,
         "timeout_status_payload": dict(timeout_status_payload or {}),
@@ -808,6 +842,7 @@ def _run_generate_background(
     poll_interval_seconds: float,
     include_status_payload: bool = False,
     late_terminal_grace_seconds: float | None = None,
+    cancel_on_observer_expiry: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     client_request_id = f"live-kb-prompt-{uuid.uuid4()}"
     request_payload: dict[str, Any] = {
@@ -839,10 +874,11 @@ def _run_generate_background(
     _assert(
         bool(task_id), f"Background submission did not return task_id: {submission!r}"
     )
+    request_id = _safe_text(submission.get("request_id")) or client_request_id
 
-    deadline = time.time() + max(float(timeout_seconds), 30.0)
+    deadline = time.monotonic() + max(float(timeout_seconds), 1.0)
     status_payload: dict[str, Any] | None = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         status_payload = _request_json(
             session,
             "GET",
@@ -856,6 +892,7 @@ def _run_generate_background(
                 "Background generate task did not complete successfully: "
                 f"{json.dumps(status_payload, ensure_ascii=True, sort_keys=True)}",
                 task_id=task_id,
+                request_id=request_id,
                 status_payload=status_payload,
             )
         time.sleep(max(float(poll_interval_seconds), 0.2))
@@ -892,18 +929,48 @@ def _run_generate_background(
                         final_status_payload
                     )
                 return task_id, generate_payload
-        cancellation_payload = _request_task_cancellation(
-            session=session,
-            base_url=base_url,
+        final_status = _safe_text(timeout_reconciliation.get("final_status"))
+        if final_status in {"failed", "cancelled"}:
+            raise BackgroundGenerateTaskError(
+                "Background generate task reached a non-success terminal state: "
+                f"{json.dumps(timeout_reconciliation, ensure_ascii=True, sort_keys=True)}",
+                task_id=task_id,
+                request_id=request_id,
+                status_payload=_as_mapping(
+                    timeout_reconciliation.get("final_status_payload")
+                ),
+                timeout_reconciliation=timeout_reconciliation,
+            )
+        if cancel_on_observer_expiry:
+            cancellation_payload = _request_task_cancellation(
+                session=session,
+                base_url=base_url,
+                task_id=task_id,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+            raise BackgroundGenerateTaskError(
+                "Background generate task was explicitly cancelled after the "
+                "observer window elapsed: "
+                f"{json.dumps(status_payload or {}, ensure_ascii=True, sort_keys=True)}",
+                task_id=task_id,
+                request_id=request_id,
+                status_payload=status_payload or {},
+                cancellation_payload=cancellation_payload,
+                timeout_reconciliation=timeout_reconciliation,
+            )
+        timeout_reconciliation = {
+            **timeout_reconciliation,
+            "request_id": request_id,
+            "status_endpoint": f"/von/api/task/status/{task_id}",
+            "result_endpoint": f"/von/api/task/result/{task_id}",
+            "task_left_running": True,
+        }
+        raise BackgroundGenerateTaskPending(
+            "The replay observation window elapsed while the background task "
+            "was still live. The task was not cancelled.",
             task_id=task_id,
-            poll_interval_seconds=poll_interval_seconds,
-        )
-        raise BackgroundGenerateTaskError(
-            "Background generate task did not complete before timeout: "
-            f"{json.dumps(status_payload or {}, ensure_ascii=True, sort_keys=True)}",
-            task_id=task_id,
+            request_id=request_id,
             status_payload=status_payload or {},
-            cancellation_payload=cancellation_payload,
             timeout_reconciliation=timeout_reconciliation,
         )
     task_result_payload = _request_json(
@@ -916,7 +983,9 @@ def _run_generate_background(
         60.0,
         max(30.0, float(poll_interval_seconds) * 3.0),
     )
-    diagnostic_settle_deadline = min(deadline, time.time() + diagnostic_settle_seconds)
+    diagnostic_settle_deadline = min(
+        deadline, time.monotonic() + diagnostic_settle_seconds
+    )
     while (
         isinstance(generate_payload.get("llm_debug"), Mapping)
         and not _as_mapping(
@@ -924,7 +993,7 @@ def _run_generate_background(
                 "turn_execution_diagnostics"
             )
         )
-        and time.time() < diagnostic_settle_deadline
+        and time.monotonic() < diagnostic_settle_deadline
     ):
         time.sleep(max(float(poll_interval_seconds), 0.2))
         task_result_payload = _request_json(
@@ -937,6 +1006,7 @@ def _run_generate_background(
         raise BackgroundGenerateTaskError(
             f"Background task result was empty: {task_result_payload!r}",
             task_id=task_id,
+            request_id=request_id,
             status_payload=status_payload or {},
         )
     if include_status_payload and isinstance(status_payload, Mapping):
@@ -1703,6 +1773,7 @@ def _run_prompt_replay_arm(
     arm_metadata: Mapping[str, Any] | None,
     presenter_mode: bool,
     gmail_profile: str | None,
+    cancel_on_observer_expiry: bool = False,
 ) -> dict[str, Any]:
     session = requests.Session()
     session_name = _build_arm_session_name(
@@ -1732,6 +1803,7 @@ def _run_prompt_replay_arm(
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
         include_status_payload=True,
+        cancel_on_observer_expiry=cancel_on_observer_expiry,
     )
     request_id, session_id = _extract_request_and_session_ids(
         task_id=task_id,
@@ -1808,9 +1880,22 @@ def _build_multi_arm_summary(
             }
         )
     arm_count = len(arm_summaries)
+    pending_arm_count = sum(
+        1
+        for arm_summary in arm_summaries
+        if _safe_text(_as_mapping(arm_summary).get("status")) == "pending"
+    )
     all_arms_collected = bool(arm_count) and collected_arm_count == arm_count
     summary = {
-        "status": "ok" if all_arms_collected else "partial",
+        "status": (
+            "ok"
+            if all_arms_collected
+            else (
+                "pending"
+                if pending_arm_count == arm_count and arm_count > 0
+                else "partial"
+            )
+        ),
         "mode": "multi_arm_comparison",
         "guidance": {
             "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
@@ -1828,7 +1913,10 @@ def _build_multi_arm_summary(
         "comparison": {
             "arm_count": arm_count,
             "collected_arm_count": collected_arm_count,
-            "error_arm_count": arm_count - collected_arm_count,
+            "pending_arm_count": pending_arm_count,
+            "error_arm_count": (
+                arm_count - collected_arm_count - pending_arm_count
+            ),
             "all_arms_collected": all_arms_collected,
             "arm_observations": arm_observations,
         },
@@ -1856,6 +1944,7 @@ def _run_replay_plan(
     prompt_variant_ids: Sequence[Any],
     presenter_mode: bool,
     gmail_profile: str | None,
+    cancel_on_observer_expiry: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     if len(replay_arms) == 1:
         summary = _run_prompt_replay_arm(
@@ -1876,6 +1965,7 @@ def _run_replay_plan(
             ),
             presenter_mode=presenter_mode,
             gmail_profile=gmail_profile,
+            cancel_on_observer_expiry=cancel_on_observer_expiry,
         )
         return summary, _safe_text(summary.get("status")) == "ok"
 
@@ -1898,6 +1988,7 @@ def _run_replay_plan(
                 arm_metadata=arm,
                 presenter_mode=presenter_mode,
                 gmail_profile=gmail_profile,
+                cancel_on_observer_expiry=cancel_on_observer_expiry,
             )
         except Exception as exc:
             arm_summary = _build_failed_replay_attempt_summary(
@@ -1935,6 +2026,40 @@ def _build_failed_replay_attempt_summary(
     requested_model: str | None,
     requested_model_arms: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
+    if isinstance(exc, BackgroundGenerateTaskPending):
+        pending = exc.to_report()
+        return {
+            "status": "pending",
+            "attempt": {"attempt_index": attempt_index},
+            "environment": dict(run_environment),
+            "selection": {
+                "requested_model": requested_model,
+                "requested_provider": _infer_provider_from_model_identifier(
+                    requested_model
+                ),
+            },
+            "prompt": _build_prompt_summary(prompt_entry),
+            "conversation": {
+                "background_task_id": pending.get("task_id"),
+                "request_id": pending.get("request_id"),
+            },
+            "response": {
+                "text": "",
+                "observation_pending": pending,
+            },
+            "telemetry": {
+                "requested_model": _safe_text(requested_model) or None,
+                "ordinary_turn_terminal_status": (
+                    _safe_text(
+                        _as_mapping(pending.get("status_payload")).get("status")
+                    )
+                    or "pending"
+                ),
+                "background_task_observations": pending,
+                "observation_inconclusive": True,
+            },
+        }
+
     failure: dict[str, Any] = {
         "type": type(exc).__name__,
         "message": str(exc),
@@ -2010,11 +2135,28 @@ def _build_repeated_replay_summary(
     minimum_collection_rate: float,
 ) -> dict[str, Any]:
     attempt_count = len(attempt_summaries)
+    pending_attempt_count = sum(
+        1
+        for attempt in attempt_summaries
+        if _safe_text(_as_mapping(attempt).get("status")) == "pending"
+    )
+    conclusive_attempt_count = attempt_count - pending_attempt_count
     collection_rate = (
-        (float(collection_count) / float(attempt_count)) if attempt_count else 0.0
+        (float(collection_count) / float(conclusive_attempt_count))
+        if conclusive_attempt_count
+        else None
+    )
+    meets_minimum_collection_rate = (
+        collection_rate >= minimum_collection_rate
+        if collection_rate is not None
+        else None
     )
     return {
-        "status": ("ok" if collection_rate >= minimum_collection_rate else "partial"),
+        "status": (
+            "pending"
+            if conclusive_attempt_count == 0 and pending_attempt_count > 0
+            else ("ok" if meets_minimum_collection_rate else "partial")
+        ),
         "mode": "repeated_replay_suite",
         "guidance": {
             "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
@@ -2032,12 +2174,12 @@ def _build_repeated_replay_summary(
         "repeat": {
             "attempt_count": attempt_count,
             "collected_attempt_count": collection_count,
-            "error_attempt_count": attempt_count - collection_count,
+            "pending_attempt_count": pending_attempt_count,
+            "conclusive_attempt_count": conclusive_attempt_count,
+            "error_attempt_count": conclusive_attempt_count - collection_count,
             "collection_rate": collection_rate,
             "minimum_collection_rate": minimum_collection_rate,
-            "meets_minimum_collection_rate": (
-                collection_rate >= minimum_collection_rate
-            ),
+            "meets_minimum_collection_rate": meets_minimum_collection_rate,
             "metric": "harness_collection_only_not_semantic_success",
         },
         "attempts": [
@@ -2127,8 +2269,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "answer-quality threshold. Default 0.95."
         ),
     )
-    parser.add_argument("--timeout-seconds", type=float, default=900.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=900.0,
+        help=(
+            "Background-task observation window. Elapsing it leaves the task "
+            "running and records a pending reconciliation receipt by default."
+        ),
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--cancel-on-observer-expiry",
+        action="store_true",
+        help=(
+            "Explicitly cancel a still-live server task after the sampler's "
+            "observation window. The default records it as pending and leaves "
+            "it available for reconciliation."
+        ),
+    )
     parser.add_argument("--user-concept-id", default=DEFAULT_USER_CONCEPT_ID)
     parser.add_argument(
         "--organisation-concept-id", default=DEFAULT_ORGANISATION_CONCEPT_ID
@@ -2474,6 +2633,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt_variant_ids=prompt_variant_ids,
                 presenter_mode=bool(args.presenter_mode),
                 gmail_profile=requested_gmail_profile,
+                cancel_on_observer_expiry=bool(
+                    args.cancel_on_observer_expiry
+                ),
             )
         except Exception as exc:
             summary = _build_failed_replay_attempt_summary(
@@ -2508,6 +2670,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     prompt_variant_ids=prompt_variant_ids,
                     presenter_mode=bool(args.presenter_mode),
                     gmail_profile=requested_gmail_profile,
+                    cancel_on_observer_expiry=bool(
+                        args.cancel_on_observer_expiry
+                    ),
                 )
                 attempt_summary = {
                     **attempt_summary,
@@ -2515,17 +2680,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 collected_attempt_count += 1 if attempt_success else 0
                 attempt_summaries.append(attempt_summary)
+                if _safe_text(attempt_summary.get("status")) == "pending":
+                    break
             except Exception as exc:
-                attempt_summaries.append(
-                    _build_failed_replay_attempt_summary(
-                        exc=exc,
-                        attempt_index=attempt_index,
-                        prompt_entry=prompt_entry,
-                        run_environment=run_environment,
-                        requested_model=requested_model,
-                        requested_model_arms=replay_arms,
-                    )
+                incomplete_summary = _build_failed_replay_attempt_summary(
+                    exc=exc,
+                    attempt_index=attempt_index,
+                    prompt_entry=prompt_entry,
+                    run_environment=run_environment,
+                    requested_model=requested_model,
+                    requested_model_arms=replay_arms,
                 )
+                attempt_summaries.append(incomplete_summary)
+                if _safe_text(incomplete_summary.get("status")) == "pending":
+                    break
         summary = _build_repeated_replay_summary(
             prompt_entry=prompt_entry,
             prompt_bank_schema_version=prompt_bank_schema_version,
@@ -2578,7 +2746,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if output_json:
         _write_json_output(output_json, summary)
     print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
-    return 0 if collection_complete else 1
+    return (
+        0
+        if collection_complete
+        or _safe_text(summary.get("status")) in {"pending", "inconclusive"}
+        else 1
+    )
 
 
 if __name__ == "__main__":

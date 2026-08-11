@@ -905,15 +905,36 @@ def build_workflow_capability_preflight(
             break
         time.sleep(max(float(poll_interval_seconds or 0.0), 0.2))
 
+    preflight_wait_timed_out = bool(
+        last_preflight.get("workflow_discovery_available") is not True
+        and time.monotonic() >= deadline
+    )
+    preflight_observation_pending = bool(
+        preflight_wait_timed_out
+        and (
+            last_preflight.get("build_in_progress") is True
+            or _safe_text(last_preflight.get("status")).lower()
+            in {"building", "rebuilding", "warming"}
+            or _safe_text(
+                _as_mapping(last_preflight.get("namespace_state")).get("status")
+            ).lower()
+            == "rebuild_in_progress"
+        )
+    )
+    last_preflight["observation_pending"] = preflight_observation_pending
+    if preflight_observation_pending:
+        last_preflight["reconciliation"] = {
+            "schema_version": "workflow_capability_preflight_reconciliation.v1",
+            "status_endpoint": "/api/workflows/capability-index/status",
+            "build_left_running": True,
+        }
     last_preflight["preflight_wait"] = {
         "timeout_seconds": effective_timeout,
         "poll_interval_seconds": max(float(poll_interval_seconds or 0.0), 0.2),
         "attempt_count": attempt_count,
         "completed": last_preflight.get("workflow_discovery_available") is True,
-        "timed_out": (
-            last_preflight.get("workflow_discovery_available") is not True
-            and time.monotonic() >= deadline
-        ),
+        "timed_out": preflight_wait_timed_out,
+        "observation_pending": preflight_observation_pending,
         "snapshots": snapshots[-8:],
     }
     return last_preflight
@@ -975,8 +996,16 @@ def poll_replay_task(
     request_id: str,
     timeout_seconds: float,
     poll_interval_seconds: float,
-    cancel_on_timeout: bool,
+    cancel_on_timeout: bool = False,
 ) -> dict[str, Any]:
+    """Observe a background task without treating elapsed time as authority.
+
+    ``timeout_seconds`` bounds this harness's current observation window.  It
+    does not bound the server task.  Unless cancellation was explicitly
+    requested by the caller, a still-live task is returned as pending with the
+    stable identifiers and canonical endpoints needed for later reconciliation.
+    """
+
     deadline = time.monotonic() + max(float(timeout_seconds), 1.0)
     task_statuses: list[dict[str, Any]] = []
     progress_snapshots: list[dict[str, Any]] = []
@@ -1014,6 +1043,9 @@ def poll_replay_task(
         time.sleep(max(float(poll_interval_seconds), 0.2))
 
     task_result: dict[str, Any] = {}
+    observer_window_expired = (
+        _safe_text(last_task_status.get("status")) not in TERMINAL_TASK_STATUSES
+    )
     if _safe_text(last_task_status.get("status")) == "completed":
         task_result = _request_json(
             session,
@@ -1024,12 +1056,13 @@ def poll_replay_task(
     elif _safe_text(last_task_status.get("status")) not in TERMINAL_TASK_STATUSES:
         if not cancel_on_timeout:
             task_result = {
-                "timeout_without_cancellation": True,
+                "observation_pending": True,
                 "message": (
-                    "Replay timeout reached; cancellation was skipped by "
-                    "harness option."
+                    "The replay observation window elapsed while the server "
+                    "task was still live. The task was not cancelled."
                 ),
                 "task_id": task_id,
+                "request_id": request_id,
             }
             return {
                 "task_statuses": task_statuses,
@@ -1037,6 +1070,19 @@ def poll_replay_task(
                 "last_task_status": last_task_status,
                 "last_progress": last_progress,
                 "task_result": task_result,
+                "observer_window_expired": True,
+                "observation_pending": True,
+                "task_id": task_id,
+                "request_id": request_id,
+                "reconciliation": {
+                    "schema_version": "replay_task_reconciliation.v1",
+                    "task_id": task_id,
+                    "request_id": request_id,
+                    "status_endpoint": f"/von/api/task/status/{task_id}",
+                    "result_endpoint": f"/von/api/task/result/{task_id}",
+                    "progress_endpoint": f"/von/progress/{request_id}",
+                    "task_left_running": True,
+                },
             }
         try:
             task_result = _request_json(
@@ -1065,6 +1111,10 @@ def poll_replay_task(
         "last_task_status": last_task_status,
         "last_progress": last_progress,
         "task_result": task_result,
+        "observer_window_expired": observer_window_expired,
+        "observation_pending": False,
+        "task_id": task_id,
+        "request_id": request_id,
     }
 
 
@@ -1525,6 +1575,29 @@ def analyse_gmail_arxiv_idempotence_sequence(
 
     reports = [dict(report) for report in turn_reports if isinstance(report, Mapping)]
     if len(reports) < 3:
+        pending_report = next(
+            (
+                report
+                for report in reports
+                if _safe_text(_as_mapping(report.get("analysis")).get("verdict"))
+                == "inconclusive"
+            ),
+            None,
+        )
+        if pending_report is not None:
+            return {
+                "verdict": "inconclusive",
+                "blocker": None,
+                "reason": (
+                    "A turn is still running, so later dependent turns were not "
+                    "submitted. Reconcile the recorded task before resuming."
+                ),
+                "pending_turn_id": _safe_text(pending_report.get("turn_id")) or None,
+                "reconciliation": dict(
+                    _as_mapping(pending_report.get("reconciliation"))
+                ),
+                "turn_count": len(reports),
+            }
         return _blocked_sequence_analysis(
             "sequence_incomplete",
             "The replay did not submit all three required turns.",
@@ -2180,8 +2253,23 @@ def classify_replay(
         else None
     )
 
+    task_observation_pending = bool(task_evidence.get("observation_pending")) and (
+        terminal_status not in TERMINAL_TASK_STATUSES
+    )
+    preflight_observation_pending = bool(
+        workflow_preflight.get("observation_pending")
+        and precondition_blockers
+        and all(
+            _safe_text(blocker.get("type"))
+            == "workflow_capability_index_blocker"
+            for blocker in precondition_blockers
+        )
+    )
+    observation_pending = task_observation_pending or preflight_observation_pending
     blocker: dict[str, Any] | None = None
-    if precondition_blockers:
+    if observation_pending:
+        blocker = None
+    elif precondition_blockers:
         blocker = dict(precondition_blockers[0])
     elif context_build_blocker is not None:
         blocker = context_build_blocker
@@ -2249,8 +2337,17 @@ def classify_replay(
         }
 
     return {
-        "verdict": "pass" if blocker is None else "blocked",
+        "verdict": (
+            "inconclusive"
+            if observation_pending
+            else ("pass" if blocker is None else "blocked")
+        ),
         "blocker": blocker,
+        "observation_pending": observation_pending,
+        "reconciliation": dict(
+            _as_mapping(task_evidence.get("reconciliation"))
+            or _as_mapping(workflow_preflight.get("reconciliation"))
+        ),
         "selected_expected_workflow": selected_expected_workflow,
         "selected_workflow_ids": list(selected_workflow_ids),
         "observed_workflow_ids": list(observed_workflow_ids),
@@ -2360,6 +2457,14 @@ def build_replay_report(
         "last_progress": _as_mapping(task_evidence.get("last_progress")),
         "last_task_status": _as_mapping(task_evidence.get("last_task_status")),
         "task_result": task_result,
+        "observation_pending": bool(analysis.get("observation_pending")),
+        "observer_window_expired": bool(
+            task_evidence.get("observer_window_expired")
+        ),
+        "reconciliation": dict(
+            _as_mapping(task_evidence.get("reconciliation"))
+            or _as_mapping(workflow_preflight.get("reconciliation"))
+        ),
         "analysis": analysis,
     }
 
@@ -2680,14 +2785,39 @@ def run_gmail_arxiv_idempotence_replay(
     chat_session: dict[str, Any] = {}
     turn_reports: list[dict[str, Any]] = []
     if active_precondition_blockers:
-        sequence_analysis = _blocked_sequence_analysis(
-            _safe_text(active_precondition_blockers[0].get("type"))
-            or "preflight_blocker",
-            _safe_text(active_precondition_blockers[0].get("reason"))
-            or "Replay preflight blocked submission.",
-            evidence={"precondition_blockers": active_precondition_blockers},
-            turn_reports=turn_reports,
+        only_workflow_preflight_pending = bool(
+            workflow_capability_preflight.get("observation_pending") is True
+            and active_precondition_blockers
+            and all(
+                _safe_text(blocker.get("type"))
+                == "workflow_capability_index_blocker"
+                for blocker in active_precondition_blockers
+            )
         )
+        if only_workflow_preflight_pending:
+            sequence_analysis = {
+                "verdict": "inconclusive",
+                "blocker": None,
+                "reason": (
+                    "Workflow discovery was still building when the preflight "
+                    "observation window elapsed. No turn was submitted."
+                ),
+                "reconciliation": dict(
+                    _as_mapping(
+                        workflow_capability_preflight.get("reconciliation")
+                    )
+                ),
+                "turn_count": 0,
+            }
+        else:
+            sequence_analysis = _blocked_sequence_analysis(
+                _safe_text(active_precondition_blockers[0].get("type"))
+                or "preflight_blocker",
+                _safe_text(active_precondition_blockers[0].get("reason"))
+                or "Replay preflight blocked submission.",
+                evidence={"precondition_blockers": active_precondition_blockers},
+                turn_reports=turn_reports,
+            )
     else:
         chat_session = create_replay_chat_session(
             session=session,
@@ -2747,9 +2877,10 @@ def run_gmail_arxiv_idempotence_replay(
             report["turn_id"] = turn.turn_id
             turn_reports.append(report)
 
-            if _safe_text(_as_mapping(report.get("analysis")).get("verdict")) == (
-                "blocked"
-            ):
+            if _safe_text(_as_mapping(report.get("analysis")).get("verdict")) in {
+                "blocked",
+                "inconclusive",
+            }:
                 break
 
         sequence_analysis = analyse_gmail_arxiv_idempotence_sequence(turn_reports)
@@ -2887,7 +3018,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--thinking-card-mode", default="debug")
     parser.add_argument("--presenter-mode", action="store_true")
-    parser.add_argument("--timeout-seconds", type=float, default=240.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=240.0,
+        help=(
+            "Task observation window. Elapsing it is inconclusive by default; "
+            "the live task is preserved for reconciliation."
+        ),
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     parser.add_argument("--auth-login-timeout-seconds", type=float, default=180.0)
     parser.add_argument(
@@ -2921,13 +3060,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Polling interval for the workflow capability preflight wait.",
     )
     parser.add_argument("--output-json", default=None)
-    parser.add_argument(
-        "--skip-cancel-on-timeout",
+    cancellation_group = parser.add_mutually_exclusive_group()
+    cancellation_group.add_argument(
+        "--cancel-on-observer-expiry",
+        "--cancel-on-timeout",
+        dest="cancel_on_timeout",
         action="store_true",
+        default=False,
         help=(
-            "Write the evidence report at timeout without calling the task "
-            "cancel endpoint. Useful when diagnosing cancellation/read-back hangs."
+            "Explicitly cancel a still-live server task when this harness's "
+            "observation window elapses. By default the task is left running "
+            "and reported as pending with reconciliation identifiers."
         ),
+    )
+    cancellation_group.add_argument(
+        "--skip-cancel-on-timeout",
+        dest="cancel_on_timeout",
+        action="store_false",
+        default=False,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--run-despite-gmail-preflight-blocker",
@@ -3011,11 +3162,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_despite_gmail_preflight_blocker=bool(
                 args.run_despite_gmail_preflight_blocker
             ),
-            cancel_on_timeout=not bool(args.skip_cancel_on_timeout),
+            cancel_on_timeout=bool(args.cancel_on_timeout),
         )
         _write_output(args.output_json, report)
         verdict = _safe_text(_as_mapping(report.get("analysis")).get("verdict"))
-        return 0 if verdict in {"pass", "blocked"} else 1
+        return 0 if verdict in {"pass", "blocked", "inconclusive"} else 1
 
     case = _resolve_case(
         args.case,
@@ -3058,11 +3209,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_despite_gmail_preflight_blocker=bool(
             args.run_despite_gmail_preflight_blocker
         ),
-        cancel_on_timeout=not bool(args.skip_cancel_on_timeout),
+        cancel_on_timeout=bool(args.cancel_on_timeout),
     )
     _write_output(args.output_json, report)
     verdict = _safe_text(_as_mapping(report.get("analysis")).get("verdict"))
-    return 0 if verdict in {"pass", "blocked"} else 1
+    return 0 if verdict in {"pass", "blocked", "inconclusive"} else 1
 
 
 if __name__ == "__main__":

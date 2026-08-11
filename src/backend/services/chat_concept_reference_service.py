@@ -333,6 +333,7 @@ def build_context_concept_reference_metadata(
     *,
     source: str = "sent_context_user_assistant",
     max_concepts: int | None = None,
+    resolve_references: bool = True,
     include_direct_supertypes: bool | None = None,
     max_direct_supertypes: int | None = None,
     include_stats: bool | None = None,
@@ -386,29 +387,44 @@ def build_context_concept_reference_metadata(
     parent_ids_needed: list[str] = []
     type_parent_map: dict[str, list[str]] = {}
 
-    for concept_id in concept_ids:
-        entry, parent_ids = _lookup_concept_entry(concept_id)
-        if entry is None:
-            entries.append(
-                {
-                    "concept_id": concept_id,
-                    "exists": False,
-                    "kind": None,
-                    "name": None,
-                }
-            )
-            continue
+    if not resolve_references:
+        # Keep the foreground response path free of database-backed decoration.
+        # Exact metadata remains available through the canonical concept APIs
+        # when a consumer actually opens or inspects a reference.
+        entries = [
+            {
+                "concept_id": concept_id,
+                "exists": None,
+                "kind": None,
+                "name": None,
+                "resolution_status": "deferred",
+            }
+            for concept_id in concept_ids
+        ]
+    else:
+        for concept_id in concept_ids:
+            entry, parent_ids = _lookup_concept_entry(concept_id)
+            if entry is None:
+                entries.append(
+                    {
+                        "concept_id": concept_id,
+                        "exists": False,
+                        "kind": None,
+                        "name": None,
+                    }
+                )
+                continue
 
-        entries.append(entry)
+            entries.append(entry)
 
-        if (
-            effective_include_supertypes
-            and entry.get("kind") == "type"
-            and bounded_max_supertypes > 0
-        ):
-            limited_parent_ids = parent_ids[:bounded_max_supertypes]
-            type_parent_map[concept_id] = limited_parent_ids
-            parent_ids_needed.extend(limited_parent_ids)
+            if (
+                effective_include_supertypes
+                and entry.get("kind") == "type"
+                and bounded_max_supertypes > 0
+            ):
+                limited_parent_ids = parent_ids[:bounded_max_supertypes]
+                type_parent_map[concept_id] = limited_parent_ids
+                parent_ids_needed.extend(limited_parent_ids)
 
     parent_name_map = (
         _resolve_parent_name_map(parent_ids_needed)
@@ -435,7 +451,7 @@ def build_context_concept_reference_metadata(
             ]
 
     stats_status = None
-    if effective_include_stats and concept_ids:
+    if resolve_references and effective_include_stats and concept_ids:
         try:
             from .vontology_concept_stats_service import get_vontology_concept_stats
 
@@ -473,6 +489,7 @@ def build_context_concept_reference_metadata(
         "concept_count": len(entries),
         "concept_count_capped": concept_count_capped,
         "max_concepts": bounded_max_concepts,
+        "resolution_status": "resolved" if resolve_references else "deferred",
         "include_direct_supertypes": bool(effective_include_supertypes),
         "max_direct_supertypes": bounded_max_supertypes,
         "include_stats": bool(effective_include_stats),

@@ -285,8 +285,11 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
     assert result["timeout_policy"] == {
         "download_timeout_seconds": 12.5,
         "registration_timeout_seconds": 7.5,
+        "registration_advisory_seconds": 7.5,
         "download_phase": "remote_download",
         "registration_phase": "file_copy_registration",
+        "download_elapsed_time_enforcement": "hard_external_resource",
+        "registration_elapsed_time_enforcement": "advisory",
     }
     assert captured["original_filename"] == "paper.pdf"
     assert captured["organisation_concept_id"] == "#V#org"
@@ -325,7 +328,7 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
     )
 
 
-def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
+def test_import_remote_url_file_copy_retains_registration_after_advisory(monkeypatch):
     from src.backend.services import remote_file_copy_ingestion_service as svc
 
     monkeypatch.setattr(
@@ -365,16 +368,15 @@ def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
         namespace="#V#user@org",
         namespace_source="request.namespace",
         timeout_seconds=5,
-        registration_timeout_seconds=0.02,
+        registration_advisory_seconds=0.02,
     )
 
-    assert result["success"] is False
-    assert result["error"] == "remote_file_copy_timeout"
-    assert result["timeout_phase"] == "file_copy_registration"
+    assert result["success"] is True
+    assert result["concept_id"] == "#V#late_file"
     assert result["timeout_seconds"] == 5.0
     assert result["download_timeout_seconds"] == 5.0
     assert result["registration_timeout_seconds"] == 0.02
-    assert result["download"]["status"] == "completed"
+    assert result["registration_advisory_seconds"] == 0.02
     expected_lookup = {
         "sha256": (
             "d23c47e2668cdbc7f204ad3988579fb541ac7ca8abf6038d07236b8a2ba02c1f"
@@ -395,18 +397,11 @@ def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
         "source_uri": "https://cdn.example.com/paper.pdf",
     }
     assert result["registration_lookup"] == expected_lookup
-    assert result["registration"] == {
-        "status": "timed_out",
-        "timeout_seconds": 0.02,
-        "may_complete_late": True,
-        "recovery_affordance": (
-            "Read back the file-copy result or retry the registration phase "
-            "before re-downloading the remote artefact."
-        ),
-        "readback_affordance": {
-            "lookup": expected_lookup,
-            "retriable_without_policy_change": True,
-        },
+    assert result["registration_timing"] == {
+        "elapsed_time_enforcement": "advisory",
+        "advisory_timeout_seconds": 0.02,
+        "advisory_exceeded": True,
+        "hard_timeout_seconds": None,
     }
     assert result["requested_url"] == "https://example.com/paper"
     assert result["response"]["status_code"] == 200

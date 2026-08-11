@@ -767,14 +767,10 @@ def list_selection_experiences(
         query["outcome"] = {"$ne": None}
 
     safe_limit = max(1, min(limit, 5000))
-    # Server-side time budget: a long-running scan should fail fast with
-    # ExecutionTimeout (which names the collection and operation) rather than
-    # be killed by the opaque socketTimeout at the driver layer.
     cursor = (
         coll.find(query, {"_id": 0})
         .sort("timestamp", DESCENDING)
         .limit(safe_limit)
-        .max_time_ms(8000)
     )
     entries: list[SelectionExperienceTuple] = []
     for payload in cursor:

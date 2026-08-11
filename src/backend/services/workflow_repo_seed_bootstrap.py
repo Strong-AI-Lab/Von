@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,19 +53,6 @@ _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_SCHEMA_VERSION = (
 _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE = (
     "workflow_support_concept_materialisation_receipt"
 )
-_DEFAULT_REPO_SEED_VERSION_TEXT_MAX_TIME_MS = 15000
-_REPO_SEED_VERSION_TEXT_MAX_TIME_MS_ENV = "VON_WORKFLOW_POLICY_TEXT_MAX_TIME_MS"
-
-
-def _repo_seed_version_text_max_time_ms() -> int:
-    raw = os.getenv(_REPO_SEED_VERSION_TEXT_MAX_TIME_MS_ENV)
-    try:
-        parsed = int(str(raw or "").strip())
-    except (TypeError, ValueError):
-        parsed = _DEFAULT_REPO_SEED_VERSION_TEXT_MAX_TIME_MS
-    return max(1000, min(parsed, 120000))
-
-
 def _normalise_support_concept_targets(raw_value: Any) -> list[str]:
     if isinstance(raw_value, str):
         raw_items: Sequence[Any] = (raw_value,)
@@ -1274,11 +1260,12 @@ def _load_live_workflow_seed_partial_authority_payload(
 def _load_workflow_repo_seed_version_marker(
     workflow_id: str,
 ) -> dict[str, Any] | None:
+    # The marker decides whether represented authority may be republished.  Do
+    # not let an arbitrary query duration masquerade as a missing marker.
     rows = get_texts_for_concept(
         workflow_id,
         predicate=_REPO_SEED_VERSION_TEXT_PREDICATE,
         limit=5,
-        max_time_ms=_repo_seed_version_text_max_time_ms(),
     )
     for row in rows:
         raw_text = row.get("text") if isinstance(row, Mapping) else None

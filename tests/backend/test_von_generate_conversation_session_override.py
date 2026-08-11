@@ -439,6 +439,116 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
     assert assistant_event_index < situation_event_index
 
 
+def test_generate_persists_runtime_situation_when_model_sidecar_is_omitted(
+    monkeypatch,
+):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    set_calls: list[dict[str, Any]] = []
+    persisted_text: dict[str, str] = {}
+
+    def _session_state(**kwargs: Any) -> dict[str, Any]:
+        text = persisted_text.get("text")
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": (
+                {
+                    "text": text,
+                    "revision": 1,
+                    "source": "adaptive_turn",
+                    "updated_by": "#V#user",
+                    "updated_at": "2026-08-10T22:30:00+00:00",
+                    "source_request_id": set_calls[0]["source_request_id"],
+                }
+                if text
+                else None
+            ),
+            "conversation_observations": [],
+        }
+
+    def _set_situation(**kwargs: Any) -> dict[str, Any]:
+        set_calls.append(dict(kwargs))
+        persisted_text["text"] = kwargs["text"]
+        return {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": kwargs["expected_revision"] + 1,
+            "session_id": kwargs["session_id"],
+        }
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        _session_state,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "set_chat_history_conversation_situation",
+        _set_situation,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "execute_adaptive_turn",
+        lambda **_kwargs: AdaptiveTurnResult(
+            response_text="The design uses #V#trip and #V#has_trip_component.",
+            extra_messages=(),
+            tool_invocations=(
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "payload": {
+                        "name": "search_concepts",
+                        "arguments": {"query": "trip"},
+                    },
+                    "evidence": {
+                        "schema_version": "turn_evidence_envelope.v1",
+                        "status": "ok",
+                        "projected_payload": {
+                            "results": [
+                                {"concept_id": "#V#trip"},
+                                {"concept_id": "#V#has_trip_component"},
+                                {"concept_id": "#V#unselected"},
+                            ],
+                        },
+                    },
+                },
+            ),
+            aux_llm_calls=(),
+            conversation_situation=None,
+        ),
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "What is the smallest existing trip design?",
+            "conversation_session_id": "session-runtime-situation",
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert len(set_calls) == 1
+    assert set_calls[0]["expected_revision"] == 0
+    assert set_calls[0]["source"] == "adaptive_turn"
+    assert set_calls[0]["source_request_id"]
+    assert (
+        "verified concept ids: #V#trip, #V#has_trip_component" in set_calls[0]["text"]
+    )
+    assert "#V#unselected" not in set_calls[0]["text"]
+    assert "turn request id: " in set_calls[0]["text"]
+    body = response.get_json()
+    assert body["conversation_situation"]["text"] == set_calls[0]["text"]
+    assert (
+        body["conversation_situation"]["source_request_id"]
+        == set_calls[0]["source_request_id"]
+    )
+
+
 def test_generate_returns_answer_when_situation_revision_conflicts(monkeypatch):
     from src.backend.server.routes import von_routes
 

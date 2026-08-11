@@ -1639,6 +1639,34 @@ def test_warm_query_surface_accepts_at_least_one_represented_match() -> None:
     assert runtime_state["query_surface_last_error"] is None
 
 
+def test_warm_query_surface_continues_after_elapsed_advisory() -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+
+    class _SlowWarmIndex:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def search(self, query: str, *_args: Any, **_kwargs: Any) -> list[Any]:
+            self.queries.append(query)
+            time.sleep(0.01)
+            return [{"workflow_id": "#V#some_represented_workflow"}]
+
+    index = _SlowWarmIndex()
+    capability_service._warm_workflow_capability_query_surface(
+        cast(Any, index), timeout_seconds=0.001
+    )
+
+    assert len(index.queries) == len(
+        capability_service._WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES
+    )
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert runtime_state["query_surface_ready"] is True
+
+
 def test_index_sync_trims_backend_document_metadata(
     _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
 ) -> None:

@@ -240,7 +240,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "display_template": "{count} uncertain relationship assertion(s)",
         "planner_hint": (
             "Use with source_id set to the focal concept when a request asks "
-            "for uncertain, inferred, or fact-vs-inference relationship evidence."
+            "for uncertain, inferred, or fact-vs-inference relationship evidence. "
+            "This is the review and read-back half of the lifecycle; when authorised "
+            "intent is to mark or update a candidate for later review, inspect "
+            "upsert_uncertain_relationship_assertion and reuse the represented "
+            "predicate rather than minting one merely to encode uncertainty."
         ),
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
@@ -252,6 +256,23 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_source": "focal_concept",
         "target_concept_max_count": 2,
         "default_payload": {"include_legacy": True},
+    },
+    "upsert_uncertain_relationship_assertion": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Recorded uncertain relationship for review",
+        "planner_hint": (
+            "Use when a candidate relationship should be marked as possible or "
+            "proposed for later review rather than asserted as fact. Reuse an "
+            "existing represented predicate, including one returned by "
+            "list_uncertain_relationship_assertions or the relevant represented "
+            "lifecycle; do not mint a predicate merely to express uncertainty. "
+            "Read back with list_uncertain_relationship_assertions."
+        ),
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "write",
     },
     "add_relationship": {
         "salience": "high",

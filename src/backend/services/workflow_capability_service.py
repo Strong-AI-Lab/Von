@@ -83,8 +83,11 @@ _CAPABILITY_INDEX_AUTO_REBUILD_MIN_INTERVAL_SECONDS = _get_positive_float_env(
     300.0,
 )
 _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = _get_positive_float_env(
-    "VON_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS",
-    45.0,
+    "VON_WORKFLOW_CAPABILITY_INDEX_STARTUP_ADVISORY_SECONDS",
+    _get_positive_float_env(
+        "VON_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS",
+        45.0,
+    ),
 )
 _WORKFLOW_CAPABILITY_BACKEND_RESET_LOCK_TIMEOUT_SECONDS = _get_positive_float_env(
     "VON_WORKFLOW_CAPABILITY_BACKEND_RESET_LOCK_TIMEOUT_SECONDS",
@@ -2515,15 +2518,19 @@ def _warm_workflow_capability_query_surface(
     warm_started_at = time.perf_counter()
     warm_failures: list[str] = []
     warm_match_count = 0
+    advisory_crossed = False
     for warm_query in _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES:
         if (
             timeout_seconds is not None
             and timeout_seconds > 0.0
             and (time.perf_counter() - warm_started_at) >= timeout_seconds
+            and not advisory_crossed
         ):
-            raise TimeoutError(
-                "workflow capability query surface warm-up timed out after "
-                f"{timeout_seconds:.3f}s"
+            advisory_crossed = True
+            logger.warning(
+                "workflow capability query surface warm-up crossed its %.3fs "
+                "advisory; remaining warm queries will continue",
+                timeout_seconds,
             )
         try:
             warm_matches = index.search(warm_query, max_results=1)
@@ -2558,9 +2565,11 @@ def _warm_workflow_capability_query_surface(
         warmed_monotonic=time.monotonic(),
     )
     logger.info(
-        "[workflow_capability_index] %s query surface warmed in %.1fms.",
+        "[workflow_capability_index] %s query surface warmed in %.1fms "
+        "(advisory_exceeded=%s).",
         mode,
         (time.perf_counter() - warm_started_at) * 1000.0,
+        advisory_crossed,
     )
 
 
@@ -2901,7 +2910,7 @@ def run_workflow_capability_index_startup_check(
     timeout_seconds: float = _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS,
     workflow_registry: Any | None = None,
 ) -> Dict[str, Any]:
-    """Perform a bounded startup readiness check for the capability index."""
+    """Observe startup readiness without cancelling an in-progress index build."""
 
     try:
         effective_timeout = max(0.0, float(timeout_seconds))
@@ -2911,10 +2920,8 @@ def run_workflow_capability_index_startup_check(
     started_at = time.perf_counter()
     checked_at_utc = _utc_now_iso()
 
-    # Startup readiness must stay bounded even when an invalidated, older
-    # generation still owns the rebuild lock. Start or join the background
-    # build and wait only for the declared startup interval; routed request
-    # paths can continue to use their existing explicit blocking policy.
+    # Start or join the background build and observe it only for the declared
+    # startup advisory interval. The build remains live after this check returns.
     ensure_workflow_capability_index_populated(
         block=False,
         max_wait_seconds=effective_timeout,
@@ -2950,8 +2957,11 @@ def run_workflow_capability_index_startup_check(
         status = "ready"
         summary = "Workflow capability index ready after startup check."
     elif build_in_progress:
-        status = "timeout"
-        summary = "Workflow capability index still not ready after startup check."
+        status = "building"
+        summary = (
+            "Workflow capability index is still building after the startup "
+            "advisory interval."
+        )
     elif last_error:
         status = "error"
         summary = "Workflow capability index failed startup readiness check."
@@ -2966,6 +2976,9 @@ def run_workflow_capability_index_startup_check(
         "summary": summary,
         "detail": readiness_report.get("detail"),
         "timeout_seconds": effective_timeout,
+        "elapsed_time_enforcement": "advisory",
+        "advisory_seconds": effective_timeout,
+        "hard_timeout_seconds": None,
         "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 3),
         "checked_at_utc": checked_at_utc,
     }

@@ -34,6 +34,12 @@ MAX_PROMPT_RAW_CHARS = 100_000
 MAX_SESSION_NAME_CHARS = 500
 STALE_IN_PROGRESS_TIMEOUT_SECONDS = 24 * 60 * 60
 RECENT_FAILED_VISIBILITY_SECONDS = 24 * 60 * 60
+STALE_IN_PROGRESS_ADVISORY_REASON = (
+    "Prompt queue record has remained in progress for more than 24 hours; "
+    "reconcile its exact turn or task receipt before retrying or terminalising it."
+)
+# Retained for compatibility with persisted historical failures and callers that
+# display their original diagnostic text. Age alone no longer creates this error.
 STALE_IN_PROGRESS_LAST_ERROR = (
     "Prompt queue record expired after being in progress for more than 24 hours."
 )
@@ -276,10 +282,17 @@ def expire_stale_in_progress_records(
     now: datetime | None = None,
     stale_after_seconds: int = STALE_IN_PROGRESS_TIMEOUT_SECONDS,
 ) -> int:
-    """Mark old in-progress records terminal so active queue state cannot persist forever."""
+    """Mark old in-progress records advisory without changing their outcome.
+
+    Claimed age is not evidence that the represented turn stopped or failed. A
+    caller may explicitly cancel or requeue after reconciling the exact task or
+    turn receipt, but this maintenance pass must not manufacture that verdict.
+    The legacy function name is retained for API compatibility.
+    """
 
     seconds = max(1, int(stale_after_seconds or STALE_IN_PROGRESS_TIMEOUT_SECONDS))
-    cutoff = (now or _now()) - timedelta(seconds=seconds)
+    observed_now = now or _now()
+    cutoff = observed_now - timedelta(seconds=seconds)
     result = _collection().update_many(
         {
             **_compatible_scope_query(scope),
@@ -292,10 +305,10 @@ def expire_stale_in_progress_records(
         {
             "$set": {
                 **_scope_query(scope),
-                "status": STATUS_FAILED,
-                "updated_at": now or _now(),
-                "completed_at": now or _now(),
-                "last_error": STALE_IN_PROGRESS_LAST_ERROR,
+                "stale_advisory": True,
+                "stale_advisory_at": observed_now,
+                "stale_advisory_reason": STALE_IN_PROGRESS_ADVISORY_REASON,
+                "reconciliation_required": True,
             }
         },
     )
@@ -327,6 +340,10 @@ def serialise_queue_record(doc: Mapping[str, Any] | None) -> dict[str, Any] | No
         "completed_at": _serialise_datetime(doc.get("completed_at")),
         "last_error": doc.get("last_error"),
         "source": doc.get("source"),
+        "stale_advisory": bool(doc.get("stale_advisory")),
+        "stale_advisory_at": _serialise_datetime(doc.get("stale_advisory_at")),
+        "stale_advisory_reason": doc.get("stale_advisory_reason"),
+        "reconciliation_required": bool(doc.get("reconciliation_required")),
     }
 
 
@@ -502,6 +519,12 @@ def claim_queue_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, 
                 "completed_at": None,
                 "last_error": None,
             },
+            "$unset": {
+                "stale_advisory": "",
+                "stale_advisory_at": "",
+                "stale_advisory_reason": "",
+                "reconciliation_required": "",
+            },
             "$inc": {"attempt_count": 1},
         },
         return_document=ReturnDocument.AFTER,
@@ -537,7 +560,13 @@ def requeue_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[st
                 "completed_at": None,
                 "last_error": None,
                 "source": "restart",
-            }
+            },
+            "$unset": {
+                "stale_advisory": "",
+                "stale_advisory_at": "",
+                "stale_advisory_reason": "",
+                "reconciliation_required": "",
+            },
         },
         return_document=ReturnDocument.AFTER,
     )
@@ -582,7 +611,13 @@ def finish_prompt_record(
                     required=False,
                     max_chars=4_000,
                 ),
-            }
+            },
+            "$unset": {
+                "stale_advisory": "",
+                "stale_advisory_at": "",
+                "stale_advisory_reason": "",
+                "reconciliation_required": "",
+            },
         },
         return_document=ReturnDocument.AFTER,
     )
@@ -615,7 +650,13 @@ def cancel_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str
                 "updated_at": now,
                 "completed_at": now,
                 "last_error": None,
-            }
+            },
+            "$unset": {
+                "stale_advisory": "",
+                "stale_advisory_at": "",
+                "stale_advisory_reason": "",
+                "reconciliation_required": "",
+            },
         },
         return_document=ReturnDocument.AFTER,
     )

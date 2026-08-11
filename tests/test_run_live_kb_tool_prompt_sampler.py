@@ -160,6 +160,55 @@ def test_run_generate_background_sends_only_user_and_runtime_inputs() -> None:
     assert "agent_test_selector_replay_mode" not in submitted
 
 
+def test_run_generate_background_observer_expiry_does_not_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _SequencedSession(
+        [
+            _FakeResponse(
+                {"task_id": "task-1", "request_id": "request-1"},
+                status_code=202,
+            ),
+            _FakeResponse({"status": "running", "task_id": "task-1"}),
+        ]
+    )
+    monotonic_values = iter((0.0, 2.0, 2.0, 3.0))
+    monkeypatch.setattr(
+        sampler.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    with pytest.raises(sampler.BackgroundGenerateTaskPending) as exc_info:
+        sampler._run_generate_background(
+            session=session,  # type: ignore[arg-type]
+            base_url="http://von.test",
+            prompt="Keep working.",
+            model=None,
+            gmail_profile=None,
+            presenter_mode=False,
+            timeout_seconds=1.0,
+            poll_interval_seconds=0.01,
+            late_terminal_grace_seconds=0.0,
+        )
+
+    pending = exc_info.value.to_report()
+    assert pending["task_id"] == "task-1"
+    assert pending["request_id"] == "request-1"
+    assert pending["task_left_running"] is True
+    assert not any("/cancel/" in request["url"] for request in session.requests)
+
+    summary = sampler._build_failed_replay_attempt_summary(
+        exc=exc_info.value,
+        attempt_index=1,
+        prompt_entry=_prompt_entry(),
+        run_environment={},
+        requested_model=None,
+    )
+    assert summary["status"] == "pending"
+    assert summary["telemetry"]["observation_inconclusive"] is True
+
+
 def test_task_result_debug_fallback_preserves_terminal_observations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

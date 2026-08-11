@@ -577,7 +577,7 @@ def test_truncated_actor_effective_relation_lookup_disables_offset_continuation(
     }
 
 
-def test_index_coverage_lower_bound_is_not_labelled_as_actor_overlay() -> None:
+def test_index_coverage_lower_bound_exposes_exact_predicate_restart() -> None:
     from src.backend.integrations.internal_mcp.catalogue import (
         _annotate_bounded_relation_lookup,
     )
@@ -599,6 +599,7 @@ def test_index_coverage_lower_bound_is_not_labelled_as_actor_overlay() -> None:
             "scoped_concept_query_truncated": False,
             "actor_effective_text_query_truncated": False,
             "incoming_asserted_binary": {
+                "requested": True,
                 "path": "relationship_extent_index_unavailable",
                 "complete": False,
             },
@@ -612,8 +613,29 @@ def test_index_coverage_lower_bound_is_not_labelled_as_actor_overlay() -> None:
         relation_kind="binary",
     )
 
-    assert result == payload
-    assert "continuation" not in result
+    assert result["paging"]["continuation_supported"] is False
+    assert result["paging"]["next_offset"] is None
+    assert result["paging"]["offset_semantics"] == "bounded_incoming_relation_snapshot"
+    continuation = result["continuation"]
+    assert continuation["status"] == "bounded_incoming_relation_coverage_incomplete"
+    assert continuation["can_continue_with_offset"] is False
+    recovery = continuation["recovery_options"][0]
+    assert recovery == {
+        "action": "narrow_and_restart",
+        "tool": "find_relations_with_argument",
+        "restart_offset": 0,
+        "preserve_arguments": {
+            "concept_id": "#V#subject",
+            "relation_kind": "binary",
+            "offset": 0,
+        },
+        "required_argument": "predicate_filter",
+        "required_value_kind": "exact_represented_predicate_ids",
+        "reason": (
+            "An exact predicate permits a bounded canonical incoming-"
+            "relationship lookup."
+        ),
+    }
 
 
 def test_text_assertion_receipt_includes_derived_maintenance_schedule(

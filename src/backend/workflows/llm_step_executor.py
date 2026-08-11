@@ -63,8 +63,8 @@ from .recovery_prompt_compaction import (
 )
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .conversation_turn_llm_timeout import (
-    coerce_conversation_turn_llm_timeout_sec,
-    default_conversation_turn_llm_timeout_sec,
+    coerce_conversation_turn_llm_advisory_sec,
+    default_conversation_turn_llm_advisory_sec,
 )
 from .action_registry import WorkflowActionRequest, WorkflowActionResult
 
@@ -143,9 +143,7 @@ def _hydrate_authored_runtime_context_fields(
         {
             str(tool_name).strip()
             for tool_name in (
-                method_catalogue.keys()
-                if isinstance(method_catalogue, Mapping)
-                else ()
+                method_catalogue.keys() if isinstance(method_catalogue, Mapping) else ()
             )
             if str(tool_name).strip()
         }
@@ -570,7 +568,9 @@ def _conversation_turn_llm_state_alias(value: Any) -> str | None:
 
 
 def _coerce_llm_timeout_override_sec(raw_timeout: Any) -> float | None:
-    return coerce_conversation_turn_llm_timeout_sec(raw_timeout)
+    """Interpret the legacy override as an advisory duration."""
+
+    return coerce_conversation_turn_llm_advisory_sec(raw_timeout)
 
 
 def _conversation_turn_llm_timeout_override_sec(
@@ -590,8 +590,9 @@ def _conversation_turn_llm_timeout_override_sec(
     if _conversation_turn_llm_state_alias(workflow_state_id) is None:
         return None
 
-    return default_conversation_turn_llm_timeout_sec(
-        os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
+    return default_conversation_turn_llm_advisory_sec(
+        os.getenv("VON_CONVERSATION_TURN_LLM_ADVISORY_SEC")
+        or os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
     )
 
 
@@ -781,12 +782,16 @@ def _model_parameters_with_timeout(
     model_parameters: Mapping[str, Any] | None,
     timeout_seconds: float | None,
 ) -> Mapping[str, Any] | None:
+    """Remove elapsed-time hard deadlines from provider parameters.
+
+    ``timeout_seconds`` remains an advisory used by the workflow wrapper. The
+    function name is retained for compatibility with older callers/tests.
+    """
+
     params = dict(model_parameters) if isinstance(model_parameters, Mapping) else {}
-    if timeout_seconds is not None and timeout_seconds > 0:
-        params["request_timeout_seconds"] = (
-            _conversation_turn_llm_fallback_guard_timeout_sec(timeout_seconds)
-            or timeout_seconds
-        )
+    params.pop("request_timeout_seconds", None)
+    params.pop("timeout_seconds", None)
+    params.pop("request_advisory_seconds", None)
     return params or None
 
 
@@ -1674,6 +1679,13 @@ def _positive_float_env(env_name: str, default: float) -> float:
     return parsed
 
 
+def _positive_float_env_aliases(env_names: Sequence[str], default: float) -> float:
+    for env_name in env_names:
+        if os.getenv(env_name) is not None:
+            return _positive_float_env(env_name, default)
+    return default
+
+
 def _append_workflow_llm_setup_diagnostic(
     request: WorkflowActionRequest,
     entry: Mapping[str, Any],
@@ -1694,8 +1706,14 @@ def _run_gateway_runtime_setup_step(
     step_label: str,
     operation: Any,
     timeout_seconds: float | None,
-    timeout_fallback: Any | None = None,
 ) -> Any:
+    """Run setup to completion while reporting an elapsed-time advisory.
+
+    A slow model-policy or registry read can still produce the best available
+    setup state, so crossing the threshold must not replace that result with a
+    synthetic timeout fallback.
+    """
+
     _check_request_cancellation(request)
     step_start = time.perf_counter()
     if timeout_seconds is None or timeout_seconds <= 0:
@@ -1721,11 +1739,13 @@ def _run_gateway_runtime_setup_step(
         daemon=True,
     )
     thread.start()
-    while not result_event.wait(timeout=0.25):
-        _check_request_cancellation(request)
-        if time.perf_counter() - step_start < timeout_seconds:
-            continue
-        duration_ms = int((time.perf_counter() - step_start) * 1000)
+    advisory_crossing_recorded = False
+
+    def _record_setup_advisory(elapsed_seconds: float) -> None:
+        nonlocal advisory_crossing_recorded
+        if advisory_crossing_recorded or elapsed_seconds < timeout_seconds:
+            return
+        advisory_crossing_recorded = True
         _append_workflow_llm_setup_diagnostic(
             request,
             {
@@ -1733,15 +1753,26 @@ def _run_gateway_runtime_setup_step(
                 "step_id": step_id,
                 "step_label": step_label,
                 "stage": "workflow_llm_step_setup",
-                "status": "timed_out",
-                "failure_reason": "workflow_llm_step_setup_timeout",
-                "timeout_seconds": timeout_seconds,
-                "duration_ms": duration_ms,
+                "status": "advisory_exceeded_continuing",
+                "advisory_timeout_seconds": timeout_seconds,
+                "hard_timeout_seconds": None,
+                "duration_ms": int(elapsed_seconds * 1000),
             },
         )
-        if timeout_fallback is not None:
-            return timeout_fallback(timeout_seconds)
-        raise TimeoutError(f"{step_label} timed out after {timeout_seconds:.1f}s")
+
+    while True:
+        elapsed_before_wait = time.perf_counter() - step_start
+        wait_seconds = (
+            0.25
+            if advisory_crossing_recorded
+            else min(0.25, max(0.001, timeout_seconds - elapsed_before_wait))
+        )
+        if result_event.wait(timeout=wait_seconds):
+            break
+        _check_request_cancellation(request)
+        elapsed_seconds = time.perf_counter() - step_start
+        _record_setup_advisory(elapsed_seconds)
+    _record_setup_advisory(time.perf_counter() - step_start)
     kind = result_holder.get("kind")
     payload = result_holder.get("payload")
     if kind == "exception":
@@ -1900,15 +1931,18 @@ def _run_llm_call_with_timeout(
     hard_guard_timeout_seconds: float | None = None,
     record_advisory_crossing: bool = True,
 ) -> Any:
+    """Run an LLM call with progress and an advisory elapsed threshold.
+
+    The hard-guard argument is accepted only for source compatibility. Elapsed
+    time never cancels the call or discards a late result; explicit request
+    cancellation and provider/resource failures still propagate.
+    """
+
     _check_request_cancellation(request)
     started_at = time.perf_counter()
     if timeout_seconds is None or timeout_seconds <= 0:
         return operation()
     advisory_timeout_seconds = timeout_seconds
-    hard_guard_timeout_seconds = hard_guard_timeout_seconds or (
-        _conversation_turn_llm_fallback_guard_timeout_sec(timeout_seconds)
-        or timeout_seconds
-    )
 
     emit_progress = (
         request.data.get("emit_progress")
@@ -1926,7 +1960,7 @@ def _run_llm_call_with_timeout(
                 "result_summary": "Running LLM call for workflow step.",
                 "workflow_state_id": telemetry_phase,
                 "llm_advisory_budget_seconds": advisory_timeout_seconds,
-                "llm_hard_guard_seconds": hard_guard_timeout_seconds,
+                "llm_hard_guard_seconds": None,
                 "prompt_id": prompt_id,
                 "model_name": selected_model,
                 "provider": (
@@ -1958,9 +1992,9 @@ def _run_llm_call_with_timeout(
     )
     thread.start()
     advisory_crossing_recorded = False
-    while not result_event.wait(timeout=0.25):
-        _check_request_cancellation(request)
-        elapsed_seconds = time.perf_counter() - started_at
+
+    def _record_llm_advisory(elapsed_seconds: float) -> None:
+        nonlocal advisory_crossing_recorded
         if (
             elapsed_seconds >= advisory_timeout_seconds
             and not advisory_crossing_recorded
@@ -1974,7 +2008,7 @@ def _run_llm_call_with_timeout(
                 "model_name": selected_model,
                 "status": "exceeded_continuing",
                 "advisory_timeout_seconds": advisory_timeout_seconds,
-                "hard_guard_timeout_seconds": hard_guard_timeout_seconds,
+                "hard_guard_timeout_seconds": None,
                 "duration_ms": elapsed_seconds * 1000.0,
                 "prompt_id": prompt_id,
             }
@@ -1990,64 +2024,30 @@ def _run_llm_call_with_timeout(
                     ),
                     "workflow_state_id": telemetry_phase,
                     "llm_advisory_budget_seconds": advisory_timeout_seconds,
-                    "llm_hard_guard_seconds": hard_guard_timeout_seconds,
+                    "llm_hard_guard_seconds": None,
                     "elapsed_ms": int(elapsed_seconds * 1000.0),
                     "prompt_id": prompt_id,
                     "model_name": selected_model,
                 }
             )
-        if elapsed_seconds < hard_guard_timeout_seconds:
-            continue
-        duration_ms = (time.perf_counter() - started_at) * 1000.0
-        provider = (
-            _context_string(selected_candidate.get("provider"))
-            if isinstance(selected_candidate, Mapping)
-            else None
-        )
-        timeout_entry: dict[str, Any] = {
-            "type": "llm.generate",
-            "stage": stage,
-            "workflow_stage_id": request.workflow_state_id,
-            "model_name": selected_model,
-            "duration_ms": duration_ms,
-            "status": "timed_out",
-            "success": False,
-            "error": "workflow_llm_step_timeout",
-            "error_class": "TimeoutError",
-            "failure_kind": "llm_call_timeout",
-            "timeout_seconds": hard_guard_timeout_seconds,
-            "advisory_timeout_seconds": advisory_timeout_seconds,
-            "hard_guard_timeout_seconds": hard_guard_timeout_seconds,
-            "advisory_budget_exceeded": (elapsed_seconds >= advisory_timeout_seconds),
-            "prompt_id": prompt_id,
-        }
-        if provider:
-            timeout_entry["provider"] = provider
-        if isinstance(selected_candidate, Mapping):
-            timeout_entry["candidate"] = dict(selected_candidate)
-        stamp_llm_call_timestamps(timeout_entry, duration_ms=duration_ms)
-        if not _has_llm_call_timeout_entry(
-            llm_calls,
-            stage=stage,
-            prompt_id=prompt_id,
-            workflow_state_id=request.workflow_state_id,
-        ):
-            llm_calls.append(timeout_entry)
-            _record_workflow_llm_duration_for_entry_async(
-                request,
-                timeout_entry,
-                stage=stage,
-                model_name=selected_model,
-                provider=provider,
-                duration_ms=duration_ms,
-                workflow_stage_id=request.workflow_state_id,
+
+    while True:
+        elapsed_before_wait = time.perf_counter() - started_at
+        wait_seconds = (
+            0.25
+            if advisory_crossing_recorded or not record_advisory_crossing
+            else min(
+                0.25,
+                max(0.001, advisory_timeout_seconds - elapsed_before_wait),
             )
-        raise TimeoutError(
-            f"LLM call exceeded the {advisory_timeout_seconds:.1f}s advisory "
-            f"budget and timed out at the {hard_guard_timeout_seconds:.1f}s "
-            "hard guard "
-            f"(stage={stage}, state={request.workflow_state_id}, model={selected_model})"
         )
+        if result_event.wait(timeout=wait_seconds):
+            break
+        _check_request_cancellation(request)
+        _record_llm_advisory(time.perf_counter() - started_at)
+        # Continue observing the running call. Only explicit cancellation or a
+        # provider/resource failure may end it.
+    _record_llm_advisory(time.perf_counter() - started_at)
     kind = result_holder.get("kind")
     payload = result_holder.get("payload")
     if kind == "exception":
@@ -2101,7 +2101,7 @@ def _run_llm_step_with_timeout(
                     _conversation_turn_llm_step_guard_timeout_sec(timeout_seconds)
                     or timeout_seconds
                 ),
-                record_advisory_crossing=False,
+                record_advisory_crossing=True,
             ),
         )
     except TimeoutError as exc:
@@ -2198,30 +2198,6 @@ def _build_gateway_runtime(
         }
 
     if _policy_state_needs_refresh(policy_state):
-
-        def _timeout_workflow_model_policy(
-            timeout_seconds: float,
-        ) -> tuple[Any, Mapping[str, Any]]:
-            return (
-                _WorkflowModelPolicyState(
-                    enabled=True,
-                    policy=None,
-                    policy_id=None,
-                    predicate_id=None,
-                    errors=("workflow_model_policy_timeout",),
-                ),
-                {
-                    "type": "workflow_model_policy",
-                    "enabled": True,
-                    "policy_id": "",
-                    "predicate_id": "",
-                    "loaded": False,
-                    "policy_source": "timeout",
-                    "errors": ["workflow_model_policy_timeout"],
-                    "timeout_seconds": timeout_seconds,
-                },
-            )
-
         refresh_reason = (
             "inherited_policy_timeout"
             if isinstance(policy_state, _WorkflowModelPolicyState)
@@ -2232,11 +2208,13 @@ def _build_gateway_runtime(
             step_id="workflow_model_policy",
             step_label="Load workflow LLM model policy",
             operation=lambda: orchestrator._load_workflow_model_policy(None),
-            timeout_seconds=_positive_float_env(
-                "VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS",
+            timeout_seconds=_positive_float_env_aliases(
+                (
+                    "VON_WORKFLOW_MODEL_POLICY_ADVISORY_SECONDS",
+                    "VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS",
+                ),
                 8.0,
             ),
-            timeout_fallback=_timeout_workflow_model_policy,
         )
         if isinstance(policy_telemetry, Mapping) and policy_telemetry:
             policy_telemetry_payload = dict(policy_telemetry)
@@ -2247,31 +2225,18 @@ def _build_gateway_runtime(
     if isinstance(registry_snapshot_raw, Mapping):
         registry_snapshot = registry_snapshot_raw
     else:
-
-        def _timeout_registry_snapshot(timeout_seconds: float) -> Mapping[str, Any]:
-            return {
-                "source": "timeout",
-                "models": [],
-                "loaded": False,
-                "errors": [
-                    {
-                        "failure_reason": "workflow_llm_step_setup_timeout",
-                        "step_id": "model_registry_snapshot",
-                        "timeout_seconds": timeout_seconds,
-                    }
-                ],
-            }
-
         registry_snapshot_result = _run_gateway_runtime_setup_step(
             request,
             step_id="model_registry_snapshot",
             step_label="Load workflow LLM model registry snapshot",
             operation=get_model_registry_snapshot,
-            timeout_seconds=_positive_float_env(
-                "VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS",
+            timeout_seconds=_positive_float_env_aliases(
+                (
+                    "VON_MODEL_REGISTRY_SNAPSHOT_ADVISORY_SECONDS",
+                    "VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS",
+                ),
                 12.0,
             ),
-            timeout_fallback=_timeout_registry_snapshot,
         )
         registry_snapshot = (
             registry_snapshot_result
@@ -3277,9 +3242,7 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
                 "workflow_state_id": telemetry_phase,
             },
         )
-    selection_policy = _context_string(
-        llm_policy_map.get("selection_policy")
-    ).lower()
+    selection_policy = _context_string(llm_policy_map.get("selection_policy")).lower()
     active_model_only = selection_policy in {
         "active_only",
         "active_model_only",

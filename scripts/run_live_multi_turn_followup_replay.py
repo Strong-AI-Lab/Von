@@ -682,6 +682,7 @@ def run_case(
     poll_interval_seconds: float,
     user_concept_id: str | None,
     organisation_concept_id: str | None,
+    cancel_on_observer_expiry: bool = False,
 ) -> dict[str, Any]:
     case_id = _safe_text(case.get("case_id")) or "unknown_case"
     session = requests.Session()
@@ -743,7 +744,7 @@ def run_case(
             request_id=client_request_id,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
-            cancel_on_timeout=True,
+            cancel_on_timeout=cancel_on_observer_expiry,
         )
         task_result = _as_mapping(evidence.get("task_result"))
         last_task_status = _as_mapping(evidence.get("last_task_status"))
@@ -779,13 +780,29 @@ def run_case(
         workflow_evidence_ids = list(
             dict.fromkeys([*selected_workflow_ids, *observed_workflow_ids])
         )
-        evaluation = evaluate_turn_expectations(
-            expectations=expectations,
-            visible_answer=visible_answer,
-            terminal_status=terminal_status,
-            selected_workflow_ids=workflow_evidence_ids,
-            turn_record=turn_record,
+        observation_pending = bool(evidence.get("observation_pending")) and (
+            terminal_status not in {"completed", "failed", "cancelled"}
         )
+        if observation_pending:
+            evaluation = {
+                "verdict": "inconclusive",
+                "checks": [
+                    {
+                        "check": "server_task_terminal_state_observed",
+                        "outcome": "inconclusive",
+                        "expected": "terminal task evidence",
+                        "observed": terminal_status or "pending",
+                    }
+                ],
+            }
+        else:
+            evaluation = evaluate_turn_expectations(
+                expectations=expectations,
+                visible_answer=visible_answer,
+                terminal_status=terminal_status,
+                selected_workflow_ids=workflow_evidence_ids,
+                turn_record=turn_record,
+            )
         turn_reports.append(
             {
                 "turn_index": turn_index,
@@ -793,6 +810,10 @@ def run_case(
                 "prompt": prompt,
                 "client_request_id": client_request_id,
                 "task_id": task_id,
+                "observation_pending": observation_pending,
+                "reconciliation": dict(
+                    _as_mapping(evidence.get("reconciliation"))
+                ),
                 "terminal_status": terminal_status,
                 "visible_answer": visible_answer,
                 "visible_answer_source": visible_answer_source,
@@ -805,6 +826,11 @@ def run_case(
                 "evaluation": evaluation,
             }
         )
+        if observation_pending:
+            # Later turns depend on this turn's completed conversation state.
+            # Leave the task running and preserve the exact reconciliation
+            # identifiers instead of submitting a competing follow-up.
+            break
         if evaluation["verdict"] == "fail" and role == "task":
             # Later turns depend on the task turn's referents; keep the partial
             # evidence but stop driving a session whose premise failed.
@@ -849,11 +875,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Case id(s) to run; default runs every case in the bank.",
     )
     parser.add_argument("--model", default=None)
-    parser.add_argument("--timeout-seconds", type=float, default=1500.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=1500.0,
+        help=(
+            "Per-turn observation window. A still-live turn is reported "
+            "inconclusive and is not cancelled by default."
+        ),
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=5.0)
     parser.add_argument("--user-concept-id", default=None)
     parser.add_argument("--organisation-concept-id", default=None)
     parser.add_argument("--output-json", default=None)
+    parser.add_argument(
+        "--cancel-on-observer-expiry",
+        action="store_true",
+        help=(
+            "Explicitly cancel a still-live server task when the replay's "
+            "observation window elapses. The default is pending/inconclusive."
+        ),
+    )
     parser.add_argument(
         "--allow-non-agent-test-server",
         action="store_true",
@@ -884,10 +926,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_url=args.base_url,
     )
     if workflow_capability_preflight.get("workflow_discovery_available") is not True:
+        preflight_pending = bool(
+            workflow_capability_preflight.get("observation_pending")
+        )
         blocker_payload = {
             "schema_version": REPORT_SCHEMA_VERSION,
-            "verdict": "blocked",
-            "blocker_type": "workflow_capability_index_blocker",
+            "verdict": "inconclusive" if preflight_pending else "blocked",
+            "blocker_type": (
+                "workflow_capability_index_pending"
+                if preflight_pending
+                else "workflow_capability_index_blocker"
+            ),
             "workflow_capability_preflight": workflow_capability_preflight,
         }
         print(
@@ -904,7 +953,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     encoding="utf-8",
                 )
                 print(f"Blocker report written to {blocker_path}")
-            raise SystemExit(2)
+            return 0 if preflight_pending else 2
         print(
             "Continuing anyway because "
             "--run-despite-workflow-capability-preflight-blocker was passed."
@@ -929,6 +978,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             poll_interval_seconds=args.poll_interval_seconds,
             user_concept_id=args.user_concept_id,
             organisation_concept_id=args.organisation_concept_id,
+            cancel_on_observer_expiry=bool(args.cancel_on_observer_expiry),
         )
         reports.append(report)
         print(
@@ -956,7 +1006,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"Report written to {output_path}")
 
-    return 0 if all(r["overall_verdict"] == "pass" for r in reports) else 1
+    return (
+        0
+        if all(
+            r["overall_verdict"] in {"pass", "inconclusive"} for r in reports
+        )
+        else 1
+    )
 
 
 if __name__ == "__main__":

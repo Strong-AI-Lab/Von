@@ -1,4 +1,4 @@
-"""Focused deadline tests for non-OpenAI structured-tool providers."""
+"""Provider request-duration advisories must not cancel usable late results."""
 
 from __future__ import annotations
 
@@ -18,10 +18,7 @@ from src.backend.languagemodels.structured_tool_calling.providers.gemini_client 
 from src.backend.languagemodels.structured_tool_calling.providers.ollama_client import (
     OllamaClient,
 )
-from src.backend.languagemodels.structured_tool_calling.types import (
-    ToolCallError,
-    ToolDefinition,
-)
+from src.backend.languagemodels.structured_tool_calling.types import ToolDefinition
 
 
 def _tool() -> ToolDefinition:
@@ -76,7 +73,7 @@ def _gemini_client(
             HttpOptions=_Options,
         ),
     )
-    client._client = None  # type: ignore[attr-defined]
+    client._client = types.SimpleNamespace(aio=_AioClient())  # type: ignore[attr-defined]
     client._client_kwargs = {"api_key": "test-key"}  # type: ignore[attr-defined]
     client._model_name = "gemini-test"  # type: ignore[attr-defined]
     client._temperature = None  # type: ignore[attr-defined]
@@ -85,13 +82,7 @@ def _gemini_client(
     return client
 
 
-def test_gemini_uses_native_timeout_and_keeps_it_out_of_model_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.backend.languagemodels.structured_tool_calling.providers import (
-        gemini_client as provider_module,
-    )
-
+def test_gemini_keeps_advisory_out_of_provider_request() -> None:
     captured: dict[str, Any] = {}
 
     async def generate_content(**kwargs: Any) -> Any:
@@ -102,13 +93,6 @@ def test_gemini_uses_native_timeout_and_keeps_it_out_of_model_request(
         generate_content=generate_content,
         captured=captured,
     )
-    monotonic_values = iter((100.0, 100.0, 100.0))
-    monkeypatch.setattr(
-        provider_module,
-        "monotonic",
-        lambda: next(monotonic_values),
-    )
-
     result = asyncio.run(
         client.generate_with_tools(
             prompt="Find evidence.",
@@ -120,18 +104,19 @@ def test_gemini_uses_native_timeout_and_keeps_it_out_of_model_request(
         )
     )
 
-    http_options = captured["client_kwargs"]["http_options"]
-    assert http_options.timeout == 2500
+    assert "client_kwargs" not in captured
     assert set(captured["request"]) == {"model", "contents", "config"}
     assert result.text_response == "grounded"
-    assert captured["closed"] is True
+    assert "closed" not in captured
 
 
-def test_gemini_absolute_deadline_cancels_native_request() -> None:
+def test_gemini_advisory_preserves_slow_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     captured: dict[str, Any] = {}
 
     async def generate_content(**_kwargs: Any) -> Any:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.02)
         return types.SimpleNamespace(text="too late", function_calls=None)
 
     client = _gemini_client(
@@ -139,8 +124,8 @@ def test_gemini_absolute_deadline_cancels_native_request() -> None:
         captured=captured,
     )
 
-    with pytest.raises(ToolCallError, match="deadline exhausted"):
-        asyncio.run(
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(
             client.generate_with_tools(
                 prompt="Find evidence.",
                 available_tools=[_tool()],
@@ -148,7 +133,10 @@ def test_gemini_absolute_deadline_cancels_native_request() -> None:
             )
         )
 
-    assert captured["closed"] is True
+    assert result.text_response == "too late"
+    assert "llm_request_advisory_crossed provider=gemini" in caplog.text
+    assert "action=result_preserved" in caplog.text
+    assert "closed" not in captured
 
 
 def _ollama_client(
@@ -182,13 +170,7 @@ def _ollama_client(
     return client
 
 
-def test_ollama_uses_native_timeout_and_keeps_it_out_of_model_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.backend.languagemodels.structured_tool_calling.providers import (
-        ollama_client as provider_module,
-    )
-
+def test_ollama_keeps_advisory_out_of_provider_request() -> None:
     captured: dict[str, Any] = {}
 
     async def chat(**kwargs: Any) -> Any:
@@ -202,13 +184,6 @@ def test_ollama_uses_native_timeout_and_keeps_it_out_of_model_request(
         return chunks()
 
     client = _ollama_client(chat=chat, captured=captured)
-    monotonic_values = iter((100.0, 100.0, 100.0))
-    monkeypatch.setattr(
-        provider_module,
-        "monotonic",
-        lambda: next(monotonic_values),
-    )
-
     result = asyncio.run(
         client.generate_with_tools(
             prompt="Find evidence.",
@@ -220,20 +195,19 @@ def test_ollama_uses_native_timeout_and_keeps_it_out_of_model_request(
         )
     )
 
-    assert captured["client_kwargs"] == {
-        "host": "http://ollama.test",
-        "timeout": 2.5,
-    }
+    assert captured["client_kwargs"] == {"host": "http://ollama.test"}
     assert set(captured["request"]) == {"model", "messages", "stream"}
     assert result.text_response == "grounded"
     assert captured["closed"] is True
 
 
-def test_ollama_absolute_deadline_cancels_native_request() -> None:
+def test_ollama_advisory_preserves_slow_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     captured: dict[str, Any] = {}
 
     async def chat(**_kwargs: Any) -> Any:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.02)
 
         async def chunks() -> Any:
             yield {"message": {"content": "too late"}}
@@ -242,8 +216,8 @@ def test_ollama_absolute_deadline_cancels_native_request() -> None:
 
     client = _ollama_client(chat=chat, captured=captured)
 
-    with pytest.raises(ToolCallError, match="deadline exhausted"):
-        asyncio.run(
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(
             client.generate_with_tools(
                 prompt="Find evidence.",
                 available_tools=[_tool()],
@@ -251,4 +225,7 @@ def test_ollama_absolute_deadline_cancels_native_request() -> None:
             )
         )
 
+    assert result.text_response == "too late"
+    assert "llm_request_advisory_crossed provider=ollama" in caplog.text
+    assert "action=result_preserved" in caplog.text
     assert captured["closed"] is True

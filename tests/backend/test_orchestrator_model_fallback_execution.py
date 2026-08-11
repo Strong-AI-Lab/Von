@@ -1264,8 +1264,7 @@ def test_run_llm_with_tools_fallbacks_retries_native_error_with_transport_eviden
     secret = "secret-provider-token-2583"
     native_error = RuntimeError(
         "transient provider timeout; Authorization: Bearer "
-        f"{secret}; token={secret}; "
-        + ("diagnostic-padding-" * 80)
+        f"{secret}; token={secret}; " + ("diagnostic-padding-" * 80)
     )
     native_error.structured_tool_transport_decision = transport_decision  # type: ignore[attr-defined]
     first_client = _RejectingStructuredToolClient(native_error)
@@ -2415,7 +2414,7 @@ def test_all_candidates_probe_failed_raises_named_failure_summary(
     assert "qwen3:8b" in message
 
 
-def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(
+def test_invoke_with_llm_heartbeat_uses_backfill_advisory_for_summariser(
     monkeypatch,
 ) -> None:
     orchestrator = object.__new__(InternalMCPChatOrchestrator)
@@ -2429,18 +2428,19 @@ def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(
         time.sleep(2.0)
         return "done"
 
-    with pytest.raises(TimeoutError, match=r"stage=summariser"):
-        orchestrator._invoke_with_llm_heartbeat(
-            call=_slow_call,
-            stage_name="summariser",
-            model_name="gpt-test",
-            emit_progress=lambda payload: progress_events.append(dict(payload)),
-        )
+    result = orchestrator._invoke_with_llm_heartbeat(
+        call=_slow_call,
+        stage_name="summariser",
+        model_name="gpt-test",
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+    )
 
-    assert progress_events, "expected heartbeat progress before timeout"
-    assert progress_events[-1]["status"] == "heartbeat"
-    assert progress_events[-1]["stage"] == "summariser"
-    assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
+    assert result == "done"
+    assert any(
+        event.get("status") == "llm_call_advisory_exceeded"
+        and event.get("stage") == "summariser"
+        for event in progress_events
+    )
 
 
 def test_invoke_with_llm_heartbeat_preserves_actor_context() -> None:
@@ -2465,7 +2465,7 @@ def test_invoke_with_llm_heartbeat_preserves_actor_context() -> None:
     assert result == ("#V#current_user", "#V#current_org")
 
 
-def test_invoke_with_llm_heartbeat_prefers_explicit_timeout_override(
+def test_invoke_with_llm_heartbeat_treats_explicit_override_as_advisory(
     monkeypatch,
 ) -> None:
     orchestrator = object.__new__(InternalMCPChatOrchestrator)
@@ -2478,19 +2478,20 @@ def test_invoke_with_llm_heartbeat_prefers_explicit_timeout_override(
         time.sleep(2.0)
         return "done"
 
-    with pytest.raises(TimeoutError, match=r"stage=classifier"):
-        orchestrator._invoke_with_llm_heartbeat(
-            call=_slow_call,
-            stage_name="classifier",
-            model_name="gemma4:26b",
-            emit_progress=lambda payload: progress_events.append(dict(payload)),
-            timeout_override_sec=1.0,
-        )
+    result = orchestrator._invoke_with_llm_heartbeat(
+        call=_slow_call,
+        stage_name="classifier",
+        model_name="gemma4:26b",
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        timeout_override_sec=1.0,
+    )
 
-    assert progress_events, "expected heartbeat progress before timeout"
-    assert progress_events[-1]["status"] == "heartbeat"
-    assert progress_events[-1]["stage"] == "classifier"
-    assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
+    assert result == "done"
+    assert any(
+        event.get("status") == "llm_call_advisory_exceeded"
+        and event.get("stage") == "classifier"
+        for event in progress_events
+    )
 
 
 def test_invoke_with_llm_heartbeat_checks_cancellation(monkeypatch) -> None:
@@ -4010,9 +4011,8 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
         "Tool-use limit reached: this turn reached "
         "`internal_mcp_max_tool_invocations=8` after 8 tool call(s)."
     )
-    assert (
-        "Partial final answer grounded in the completed tool results."
-        in (result.outputs["final_response"])
+    assert "Partial final answer grounded in the completed tool results." in (
+        result.outputs["final_response"]
     )
     assert len(prompts) == 2
     assert "internal_mcp_max_tool_invocations=8" in prompts[-1]

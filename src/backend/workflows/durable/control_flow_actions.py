@@ -30,6 +30,8 @@ from ..execution_contracts import (
     WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID,
     WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
+    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
+    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -63,6 +65,9 @@ from .nested_workflow_authority import (
 from ...services.kr_materialisation_guard_service import (
     validate_kr_materialisation_guard,
 )
+from ...services.kr_relationship_readback_service import (
+    verify_kr_relationship_readback,
+)
 
 
 _DEFAULT_FORK_BRANCH_LIMIT = 8
@@ -73,6 +78,8 @@ _DEFAULT_FOR_EACH_ITEM_LIMIT = 16
 _MAX_FOR_EACH_ITEM_LIMIT = 256
 _DEFAULT_FOR_EACH_MAX_CONCURRENCY = 1
 _MAX_FOR_EACH_MAX_CONCURRENCY = 16
+_MAX_KR_RELATIONSHIP_RESOLUTION_CONCEPT_RESULTS = 24
+_MAX_KR_RELATIONSHIP_RESOLUTION_SPECS = 40
 _FORK_BRANCH_LIMIT_ENV = "VON_WORKFLOW_FORK_MAX_BRANCHES"
 _FORK_BRANCH_TRANSITIONS_ENV = "VON_WORKFLOW_FORK_BRANCH_MAX_TRANSITIONS"
 _FOR_EACH_ITEM_LIMIT_ENV = "VON_WORKFLOW_FOR_EACH_MAX_ITEMS"
@@ -1130,6 +1137,263 @@ def _handle_kr_materialisation_guard(
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _kr_resolution_outcome(
+    *,
+    decision: str,
+    resolved_relationship_specs: Sequence[Mapping[str, Any]] = (),
+    blocking_reason: str | None = None,
+) -> WorkflowActionResult:
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "decision": decision,
+            "resolved_relationship_specs": [
+                dict(item) for item in resolved_relationship_specs
+            ],
+            "blocking_reason": blocking_reason,
+        },
+    )
+
+
+def _kr_sequence(value: Any) -> list[Any] | None:
+    if value is None:
+        return []
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return list(value)
+    return None
+
+
+def _kr_concept_spec_key(spec: Mapping[str, Any]) -> str:
+    return _normalise_text(
+        spec.get("key")
+        or spec.get("target_key")
+        or spec.get("target_name")
+        or spec.get("name")
+    )
+
+
+def _kr_verified_concept_ids(
+    concept_iteration_results: Any,
+) -> tuple[dict[str, str] | None, str | None]:
+    rows = _kr_sequence(concept_iteration_results)
+    if rows is None:
+        return None, "kr_relationship_resolution_concept_results_invalid"
+    if len(rows) > _MAX_KR_RELATIONSHIP_RESOLUTION_CONCEPT_RESULTS:
+        return None, "kr_relationship_resolution_concept_results_bound_exceeded"
+
+    verified: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("completed") is not True:
+            return None, "kr_relationship_resolution_concept_result_unverified"
+        item = row.get("item")
+        result = row.get("result")
+        if not isinstance(item, Mapping) or not isinstance(result, Mapping):
+            return None, "kr_relationship_resolution_concept_result_unverified"
+        item_key = _kr_concept_spec_key(item)
+        result_key = _normalise_text(result.get("kr_concept_key"))
+        key = result_key or item_key
+        concept_id = _normalise_text(result.get("kr_concept_id"))
+        readback_id = _normalise_text(result.get("kr_readback_concept_id"))
+        if (
+            not key
+            or key in verified
+            or (item_key and result_key and item_key != result_key)
+            or not concept_id.startswith("#V#")
+            or readback_id != concept_id
+        ):
+            return None, "kr_relationship_resolution_concept_result_unverified"
+        verified[key] = concept_id
+    return verified, None
+
+
+def _kr_resolve_endpoint(
+    spec: Mapping[str, Any],
+    *,
+    side: str,
+    verified_by_key: Mapping[str, str],
+) -> tuple[str | None, str | None]:
+    key = _normalise_text(spec.get(f"{side}_key"))
+    concept_id = _normalise_text(spec.get(f"{side}_id"))
+    if bool(key) == bool(concept_id):
+        return None, f"kr_relationship_resolution_{side}_reference_invalid"
+    if key:
+        resolved = _normalise_text(verified_by_key.get(key))
+        if not resolved:
+            return None, f"kr_relationship_resolution_{side}_key_unresolved"
+        return resolved, None
+    if not concept_id.startswith("#V#"):
+        return None, f"kr_relationship_resolution_{side}_id_invalid"
+    return concept_id, None
+
+
+def _kr_relationship_predicate(
+    spec: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    predicate = _normalise_text(spec.get("predicate"))
+    predicate_id = _normalise_text(spec.get("predicate_id"))
+    if predicate and predicate_id and predicate != predicate_id:
+        return None, "kr_relationship_resolution_predicate_conflict"
+    resolved = predicate or predicate_id
+    if resolved in {
+        "type_of",
+        "instance_of",
+        "is_a_type_of",
+        "is_an_instance_of",
+    } or resolved.startswith("#V#"):
+        return resolved, None
+    return None, "kr_relationship_resolution_predicate_invalid"
+
+
+def _handle_kr_relationship_resolution(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    """Resolve exact relationship specs against verified concept child results."""
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+
+    def _input_or_context(name: str, default_path: str) -> Any:
+        if name in inputs:
+            return inputs.get(name)
+        path = _normalise_text(inputs.get(f"{name}_context_key")) or default_path
+        found, value = resolve_context_path(context=request.data, path=path)
+        return value if found else None
+
+    raw_specs = _kr_sequence(
+        _input_or_context("relationship_specs", "kr_relationship_specs")
+    )
+    if raw_specs is None:
+        return _kr_resolution_outcome(
+            decision="block",
+            blocking_reason="kr_relationship_resolution_specs_invalid",
+        )
+    if len(raw_specs) > _MAX_KR_RELATIONSHIP_RESOLUTION_SPECS:
+        return _kr_resolution_outcome(
+            decision="block",
+            blocking_reason="kr_relationship_resolution_specs_bound_exceeded",
+        )
+    if not raw_specs:
+        return _kr_resolution_outcome(decision="skip")
+
+    verified_by_key, concept_error = _kr_verified_concept_ids(
+        _input_or_context(
+            "concept_iteration_results", "kr_concept_iteration_results"
+        )
+    )
+    if verified_by_key is None:
+        return _kr_resolution_outcome(
+            decision="block",
+            blocking_reason=(
+                concept_error
+                or "kr_relationship_resolution_concept_results_invalid"
+            ),
+        )
+
+    resolved_specs: list[dict[str, Any]] = []
+    seen_triples: set[tuple[str, str, str]] = set()
+    seen_keys: set[str] = set()
+    for index, raw_spec in enumerate(raw_specs):
+        if not isinstance(raw_spec, Mapping):
+            return _kr_resolution_outcome(
+                decision="block",
+                blocking_reason="kr_relationship_resolution_spec_invalid",
+            )
+        source_id, source_error = _kr_resolve_endpoint(
+            raw_spec,
+            side="source",
+            verified_by_key=verified_by_key,
+        )
+        target_id, target_error = _kr_resolve_endpoint(
+            raw_spec,
+            side="target",
+            verified_by_key=verified_by_key,
+        )
+        predicate, predicate_error = _kr_relationship_predicate(raw_spec)
+        if source_error or target_error or predicate_error:
+            return _kr_resolution_outcome(
+                decision="block",
+                blocking_reason=source_error or target_error or predicate_error,
+            )
+        if source_id is None or target_id is None or predicate is None:
+            return _kr_resolution_outcome(
+                decision="block",
+                blocking_reason="kr_relationship_resolution_spec_unresolved",
+            )
+        relationship_key = _normalise_text(
+            raw_spec.get("key") or raw_spec.get("relationship_key")
+        ) or f"relationship_{index + 1}"
+        triple = (source_id, predicate, target_id)
+        if relationship_key in seen_keys:
+            return _kr_resolution_outcome(
+                decision="block",
+                blocking_reason="kr_relationship_resolution_duplicate_key",
+            )
+        if triple in seen_triples:
+            return _kr_resolution_outcome(
+                decision="block",
+                blocking_reason="kr_relationship_resolution_duplicate_relationship",
+            )
+        seen_keys.add(relationship_key)
+        seen_triples.add(triple)
+        resolved_specs.append(
+            {
+                "key": relationship_key,
+                "source_id": source_id,
+                "predicate": predicate,
+                "target_id": target_id,
+                "rationale": _normalise_text(raw_spec.get("rationale")),
+            }
+        )
+
+    return _kr_resolution_outcome(
+        decision="assert",
+        resolved_relationship_specs=resolved_specs,
+    )
+
+
+def _handle_kr_relationship_readback(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    """Verify the exact relationship tuple after canonical endpoint read-back."""
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+
+    def _input_or_context(name: str, default_path: str) -> Any:
+        if name in inputs:
+            return inputs.get(name)
+        path = _normalise_text(inputs.get(f"{name}_context_key")) or default_path
+        found, value = resolve_context_path(context=request.data, path=path)
+        return value if found else None
+
+    outputs = verify_kr_relationship_readback(
+        expected_source_id=_input_or_context(
+            "expected_source_id", "kr_relationship_source_id"
+        ),
+        expected_predicate_id=_input_or_context(
+            "expected_predicate_id", "kr_relationship_predicate"
+        ),
+        expected_target_id=_input_or_context(
+            "expected_target_id", "kr_relationship_target_id"
+        ),
+        assertion_succeeded=_input_or_context(
+            "assertion_succeeded", "kr_relationship_assert_success"
+        ),
+        source_readback_id=_input_or_context(
+            "source_readback_id", "kr_relationship_source_readback_id"
+        ),
+        source_readback_relationships=_input_or_context(
+            "source_readback_relationships",
+            "kr_relationship_source_readback_relationships",
+        ),
+        target_readback_id=_input_or_context(
+            "target_readback_id", "kr_relationship_target_readback_id"
+        ),
+    )
+    outputs.setdefault("verified_relationship", None)
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def _normalise_field_name(value: Any) -> str:
     return str(value or "").strip()
 
@@ -1594,6 +1858,27 @@ def register_control_flow_actions(
                 "Validate an optional caller-supplied KR materialisation "
                 "contract before concept writes and resolved relationship "
                 "assertions. The action enforces only the generic guard schema."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
+            handler=_handle_kr_relationship_resolution,
+            description=(
+                "Deterministically resolve KR relationship endpoint keys "
+                "against verified concept materialisation results while "
+                "preserving exact concept IDs."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
+            handler=_handle_kr_relationship_readback,
+            description=(
+                "Verify that canonical endpoint read-back contains the exact "
+                "KR relationship tuple requested by the workflow."
             ),
         )
     )
