@@ -2184,7 +2184,7 @@ def test_workflow_execute_forwards_exact_required_worker_build(monkeypatch):
     assert captured["required_worker_build"] == exact_commit
 
 
-def test_workflow_execute_reports_queued_timeout_as_not_started(monkeypatch):
+def test_workflow_execute_reports_queued_advisory_crossing_as_pending(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
     monkeypatch.setattr(
@@ -2210,18 +2210,25 @@ def test_workflow_execute_reports_queued_timeout_as_not_started(monkeypatch):
             "namespace": "#V#user@org",
             "inputs": {"arxiv_id": "2406.15341"},
             "await_terminal": True,
-            "timeout_seconds": 0,
+            "advisory_seconds": 0,
             "poll_interval_seconds": 0,
         },
     ).payload
 
     execution = payload.get("workflow_execution") or {}
-    assert payload.get("success") is False
-    assert payload.get("error_code") == "workflow_worker_unavailable"
-    assert execution.get("execution_state") == "not_started"
-    assert execution.get("failure_family") == "workflow_instance_never_started"
+    assert payload.get("success") is True
+    assert payload.get("status") == "created"
+    assert payload.get("timed_out") is False
+    assert payload.get("elapsed_time_enforcement") == "advisory"
+    assert payload.get("advisory_exceeded") is True
+    assert payload.get("hard_timeout_seconds") is None
     assert execution.get("current_status") == "pending"
-    assert execution.get("durable_system_status", {}).get("worker_running") is False
+    assert execution.get("timed_out") is False
+    assert execution.get("elapsed_time_enforcement") == "advisory"
+    assert execution.get("advisory_exceeded") is True
+    assert execution.get("hard_timeout_seconds") is None
+    assert execution.get("execution_state") is None
+    assert execution.get("failure_family") is None
 
 
 def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
