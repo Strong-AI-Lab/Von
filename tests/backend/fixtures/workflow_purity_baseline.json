@@ -15,11 +15,19 @@
     "remaining_python_workflow_family_count": 0,
     "repo_seed_authority_drift_path_count": 0,
     "support_surface_policy_contract_violation_count": 0,
-    "synthesized_launch_contract_count": 0,
     "vontology_first_seed_fallback_violation_count": 0,
     "workflow_id_special_case_count": 0
   },
   "generated_at_utc": "2026-07-23T09:46:26.558960+00:00",
+  "measurement_provenance": {
+    "registry_enumeration_succeeded": true,
+    "registry_snapshot_scope": "empty",
+    "registry_supplied": true,
+    "registry_workflow_count": 0,
+    "registry_workflow_definition_count": 0,
+    "registry_workflow_population_observed": false,
+    "synthesized_launch_contract_measurement_complete": false
+  },
   "report_schema_version": "workflow_purity_report.v1",
   "schema_version": "workflow_purity_baseline.v1"
 }

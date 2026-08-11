@@ -102,9 +102,27 @@ startup under the `workflow_purity` logger key. The counters currently include:
 6. `builtin_capability_override_count`
 7. `non_vontology_discoverable_workflow_count`
 
-Parity enforcement now defaults to `fail`, not `warn`. Production startup should
-raise on authority drift unless a developer explicitly relaxes
-`VON_WORKFLOW_PARITY_ENFORCEMENT` for bounded local diagnostics.
+Parity enforcement defaults to `fail`, not `warn`, for executable-registry and
+authority defects: registry-only or Vontology-only workflow IDs, incomplete
+represented process graphs, missing authority concepts or types, and purity
+counters that identify a workflow source or policy violation. The deferred
+parity policy marks those defects failed and raises within its worker unless a
+developer explicitly relaxes `VON_WORKFLOW_PARITY_ENFORCEMENT` for bounded
+local diagnostics. The current deferred worker catches and records that
+failure; it does not retroactively make the already-running server unready.
+
+Two kinds of engineering debt are reported but are not runtime-readiness
+failures:
+
+- `synthesized_launch_contract_count`, including the exact sorted workflow IDs;
+- `monolith_line_count_*` source-size ratchets.
+
+An otherwise healthy registry with only those findings completes parity work as
+`completed_with_findings` and emits a `workflow_parity_advisory` warning. This
+keeps the debt visible without making a runnable workflow registry unavailable
+because of code-maintenance metrics. The standalone purity gate remains strict
+and returns non-zero for the authority and policy counters above; callers may
+still choose a warn-only integration policy.
 
 The runtime registry must also keep bootstrap-only workflow families separate
 from production registration authority. Python definitions that remain for
@@ -120,6 +138,14 @@ workflows must be skipped rather than receiving guessed fallback routing prose.
 The checked-in CI baseline lives at:
 
 - `tests/backend/fixtures/workflow_purity_baseline.json`
+
+The checked-in baseline is repository-observable and may be generated without
+a populated runtime registry. It therefore does not record an artificial zero
+for registry-dependent measurements such as synthesised launch contracts, nor
+does it use them as a historical ratchet. A complete live non-zero observation
+is reported separately as present advisory debt, with exact workflow IDs; an
+incomplete or empty observation is merely incomparable. Neither case is
+misreported as a static-baseline regression.
 
 To emit the current report locally:
 

@@ -972,6 +972,94 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
         )
 
 
+def _mapping_keys(value: Any) -> set[str]:
+    if not isinstance(value, Mapping):
+        return set()
+    return {key for key in value if isinstance(key, str) and key}
+
+
+def _string_items(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set()
+    return {item for item in value if isinstance(item, str) and item}
+
+
+def _classify_workflow_purity_regression(
+    comparison: Any,
+) -> Dict[str, Any]:
+    """Split purity findings into enforceable and advisory counter changes.
+
+    The purity report's current comparison contract provides the partitioned
+    fields consumed here. The legacy fallback deliberately treats an
+    undifferentiated regression as blocking because only an explicit
+    counter-level partition can prove that a finding is advisory.
+    """
+
+    if not isinstance(comparison, Mapping):
+        return {
+            "detected": False,
+            "blocking_detected": False,
+            "advisory_detected": False,
+            "blocking_counter_keys": [],
+            "advisory_counter_keys": [],
+            "unclassified_blocking_regression": False,
+        }
+
+    partition_fields = {
+        "blocking_increased_counters",
+        "advisory_increased_counters",
+        "advisory_observed_counters",
+        "blocking_missing_counter_keys",
+        "advisory_missing_counter_keys",
+        "advisory_findings_detected",
+    }
+    has_partitioned_findings = any(
+        field_name in comparison for field_name in partition_fields
+    )
+    if has_partitioned_findings:
+        blocking_counter_keys = _mapping_keys(
+            comparison.get("blocking_increased_counters")
+        ) | _string_items(comparison.get("blocking_missing_counter_keys"))
+        advisory_counter_keys = _mapping_keys(
+            comparison.get("advisory_increased_counters")
+        ) | _mapping_keys(
+            comparison.get("advisory_observed_counters")
+        ) | _string_items(comparison.get("advisory_missing_counter_keys"))
+        blocking_detected = bool(
+            comparison.get("regression_detected") or blocking_counter_keys
+        )
+        advisory_detected = bool(
+            comparison.get("advisory_findings_detected") or advisory_counter_keys
+        )
+        unclassified_blocking = bool(
+            blocking_detected and not blocking_counter_keys
+        )
+    elif comparison.get("regression_detected"):
+        # Legacy reports did not distinguish maintenance counters from
+        # authority/policy counters. Preserve strict behaviour instead of
+        # guessing that their combined regression was harmless.
+        blocking_counter_keys = set()
+        advisory_counter_keys = set()
+        unclassified_blocking = True
+        blocking_detected = True
+        advisory_detected = False
+    else:
+        blocking_counter_keys = set()
+        advisory_counter_keys = set()
+        blocking_detected = False
+        advisory_detected = False
+        unclassified_blocking = False
+
+    return {
+        "detected": bool(blocking_detected or advisory_detected),
+        "blocking_detected": blocking_detected,
+        "advisory_detected": advisory_detected,
+        "blocking_counter_keys": sorted(blocking_counter_keys),
+        "advisory_counter_keys": sorted(advisory_counter_keys),
+        "unclassified_blocking_regression": unclassified_blocking,
+    }
+
+
 def _build_workflow_parity_inventory(
     *,
     registry: WorkflowRegistry,
@@ -1136,21 +1224,30 @@ def _build_workflow_parity_inventory(
         )
     )
 
-    diagnostics_reason_codes: list[str] = []
+    enforced_reason_codes: list[str] = []
+    advisory_reason_codes: list[str] = []
     if registry_only_ids:
-        diagnostics_reason_codes.append("registry_only")
+        enforced_reason_codes.append("registry_only")
     if vontology_only_ids:
-        diagnostics_reason_codes.append("vontology_only")
+        enforced_reason_codes.append("vontology_only")
     if identity_only_ids:
-        diagnostics_reason_codes.append("identity_only")
+        enforced_reason_codes.append("identity_only")
     if authority_drift:
-        diagnostics_reason_codes.append("workflow_authority")
-    if isinstance(workflow_purity_comparison, dict) and workflow_purity_comparison.get(
-        "regression_detected"
-    ):
-        diagnostics_reason_codes.append("workflow_purity_regression")
+        enforced_reason_codes.append("workflow_authority")
 
-    drift_detected = bool(diagnostics_reason_codes)
+    workflow_purity_regression = _classify_workflow_purity_regression(
+        workflow_purity_comparison
+    )
+    if workflow_purity_regression["blocking_detected"]:
+        enforced_reason_codes.append("workflow_purity_regression")
+    if workflow_purity_regression["advisory_detected"]:
+        advisory_reason_codes.append("workflow_purity_advisory")
+
+    diagnostics_reason_codes = list(
+        dict.fromkeys(enforced_reason_codes + advisory_reason_codes)
+    )
+    drift_detected = bool(enforced_reason_codes)
+    advisory_detected = bool(advisory_reason_codes)
 
     return {
         "generated_at_utc": _utc_now_iso(),
@@ -1186,8 +1283,12 @@ def _build_workflow_parity_inventory(
         "summary_text": "\n".join(summary_lines),
         "diagnostics": {
             "drift_detected": drift_detected,
-            "severity": "warning" if drift_detected else "ok",
+            "advisory_detected": advisory_detected,
+            "severity": "warning" if drift_detected or advisory_detected else "ok",
             "reason_codes": diagnostics_reason_codes,
+            "enforced_reason_codes": enforced_reason_codes,
+            "advisory_reason_codes": advisory_reason_codes,
+            "workflow_purity_regression": workflow_purity_regression,
         },
     }
 
@@ -1196,31 +1297,93 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
     """Apply warn/fail parity drift policy and annotate inventory diagnostics.
 
     ``VON_WORKFLOW_PARITY_ENFORCEMENT`` controls behaviour:
-    - ``warn``: log warning on drift
-    - ``fail`` / ``strict`` / ``error``: raise RuntimeError on drift
-    - ``off`` / ``none``: do not warn or fail
+    - ``warn``: log warning on enforceable drift
+    - ``fail`` / ``strict`` / ``error``: raise RuntimeError on enforceable drift
+    - ``off`` / ``none``: do not warn or fail on enforceable drift
+
+    Advisory purity findings remain visible regardless of this mode, but they
+    never turn an otherwise runnable registry into a parity-policy exception.
     """
     mode = os.getenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail").strip().lower()
     diagnostics = inventory_snapshot.get("diagnostics")
-    drift_detected = bool(
-        isinstance(diagnostics, dict) and diagnostics.get("drift_detected")
-    )
     reason_codes: list[str] = []
+    enforced_reason_codes: list[str] = []
+    advisory_reason_codes: list[str] = []
     if isinstance(diagnostics, dict):
         maybe_reason_codes = diagnostics.get("reason_codes")
         if isinstance(maybe_reason_codes, list):
             reason_codes = [
                 item for item in maybe_reason_codes if isinstance(item, str)
             ]
-    reason_suffix = ",".join(reason_codes)
+
+        maybe_enforced_reason_codes = diagnostics.get("enforced_reason_codes")
+        if isinstance(maybe_enforced_reason_codes, list):
+            enforced_reason_codes = [
+                item
+                for item in maybe_enforced_reason_codes
+                if isinstance(item, str)
+            ]
+        else:
+            # Backwards-compatible handling for older inventory snapshots. An
+            # undifferentiated purity regression remains blocking unless its
+            # counter-level comparison proves it contains advisory findings only.
+            workflow_purity = inventory_snapshot.get("workflow_purity")
+            workflow_purity_baseline = (
+                workflow_purity.get("baseline", {})
+                if isinstance(workflow_purity, dict)
+                else {}
+            )
+            workflow_purity_comparison = (
+                workflow_purity_baseline.get("comparison", {})
+                if isinstance(workflow_purity_baseline, dict)
+                else {}
+            )
+            purity_classification = _classify_workflow_purity_regression(
+                workflow_purity_comparison
+            )
+            for reason_code in reason_codes:
+                if reason_code != "workflow_purity_regression":
+                    enforced_reason_codes.append(reason_code)
+                elif purity_classification["advisory_detected"] and not (
+                    purity_classification["blocking_detected"]
+                ):
+                    advisory_reason_codes.append(reason_code)
+                else:
+                    enforced_reason_codes.append(reason_code)
+            if diagnostics.get("drift_detected") and not reason_codes:
+                enforced_reason_codes.append("unknown")
+
+        maybe_advisory_reason_codes = diagnostics.get("advisory_reason_codes")
+        if isinstance(maybe_advisory_reason_codes, list):
+            advisory_reason_codes = [
+                item
+                for item in maybe_advisory_reason_codes
+                if isinstance(item, str)
+            ]
+
+    enforced_reason_codes = list(dict.fromkeys(enforced_reason_codes))
+    advisory_reason_codes = list(dict.fromkeys(advisory_reason_codes))
+    drift_detected = bool(enforced_reason_codes)
+    advisory_detected = bool(advisory_reason_codes)
+    reason_suffix = ",".join(enforced_reason_codes)
+    advisory_reason_suffix = ",".join(advisory_reason_codes)
     summary_text = inventory_snapshot.get(
         "summary_text", "workflow parity snapshot generated"
     )
     message = f"{summary_text}; drift_reasons={reason_suffix or 'none'}"
+    policy_outcome = (
+        "completed_with_findings"
+        if drift_detected or advisory_detected
+        else "completed"
+    )
 
     inventory_snapshot["parity_policy"] = {
         "mode": mode,
+        "outcome": policy_outcome,
         "drift_detected": drift_detected,
+        "advisory_detected": advisory_detected,
+        "enforced_reason_codes": enforced_reason_codes,
+        "advisory_reason_codes": advisory_reason_codes,
     }
 
     workflow_purity = inventory_snapshot.get("workflow_purity")
@@ -1234,6 +1397,14 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
             json.dumps(workflow_purity, sort_keys=True),
         )
 
+    if advisory_detected:
+        logger.warning(
+            "[workflow_parity_advisory] outcome=%s advisory_reasons=%s; %s",
+            policy_outcome,
+            advisory_reason_suffix or "unknown",
+            summary_text,
+        )
+
     if not drift_detected:
         logger.info("[workflow_parity] %s", summary_text)
         return
@@ -1244,6 +1415,7 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
 
     logger.warning("[workflow_parity] %s", message)
     if mode in {"fail", "strict", "error"}:
+        inventory_snapshot["parity_policy"]["outcome"] = "failed"
         raise RuntimeError(
             f"workflow_parity_drift_detected:{reason_suffix or 'unknown'}"
         )
@@ -1367,14 +1539,29 @@ def _build_pending_workflow_inventory_snapshot(
         "summary_text": "\n".join(summary_lines),
         "diagnostics": {
             "drift_detected": False,
+            "advisory_detected": False,
             "severity": "pending",
             "reason_codes": ["inventory_pending_background_build"],
+            "enforced_reason_codes": [],
+            "advisory_reason_codes": [],
+            "workflow_purity_regression": {
+                "detected": False,
+                "blocking_detected": False,
+                "advisory_detected": False,
+                "blocking_counter_keys": [],
+                "advisory_counter_keys": [],
+                "unclassified_blocking_regression": False,
+            },
         },
         "parity_policy": {
             "mode": os.getenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail")
             .strip()
             .lower(),
+            "outcome": "pending_background_build",
             "drift_detected": False,
+            "advisory_detected": False,
+            "enforced_reason_codes": [],
+            "advisory_reason_codes": [],
         },
     }
 
@@ -1676,9 +1863,16 @@ def _launch_deferred_registry_work(
 
             _apply_workflow_parity_policy(inventory_snapshot)
 
+            parity_policy = inventory_snapshot.get("parity_policy")
+            completion_outcome = (
+                str(parity_policy.get("outcome") or "completed")
+                if isinstance(parity_policy, dict)
+                else "completed"
+            )
             logger.info(
-                "Deferred workflow registry work completed: "
+                "Deferred workflow registry work outcome=%s: "
                 "%d eager workflows after background loading.",
+                completion_outcome,
                 len(list(registry.eager_workflow_ids())),
             )
         except Exception as exc:

@@ -4,19 +4,28 @@ from pathlib import Path
 from src.backend.services.workflow_capability_service import (
     BUILTIN_WORKFLOW_CAPABILITIES,
 )
+from src.backend.workflows.workflow_purity_report import (
+    build_workflow_purity_baseline_snapshot,
+    build_workflow_purity_report,
+    compare_workflow_purity_to_baseline,
+)
 from src.backend.workflows.workflow_registry import (
     LazyWorkflowRegistration,
     WorkflowRegistry,
 )
-from src.backend.workflows.workflow_purity_report import (
-    build_workflow_purity_report,
-    compare_workflow_purity_to_baseline,
-)
 
 
 class _DummyRegistry:
-    def __init__(self, source_by_workflow_id: dict[str, str]) -> None:
+    def __init__(
+        self,
+        source_by_workflow_id: dict[str, str],
+        *,
+        synthesized_launch_contract_workflow_ids: set[str] | None = None,
+    ) -> None:
         self._source_by_workflow_id = dict(source_by_workflow_id)
+        self._synthesized_launch_contract_workflow_ids = set(
+            synthesized_launch_contract_workflow_ids or set()
+        )
 
     def all_workflow_ids(self):
         return list(self._source_by_workflow_id)
@@ -25,7 +34,21 @@ class _DummyRegistry:
         source = self._source_by_workflow_id.get(workflow_id)
         if source is None:
             return None
-        return type("Registration", (), {"source": source})()
+        launch_contract_source = (
+            "synthesized_from_initial_state"
+            if workflow_id in self._synthesized_launch_contract_workflow_ids
+            else "represented"
+        )
+        definition = type(
+            "Definition",
+            (),
+            {"metadata": {"launch_contract_source": launch_contract_source}},
+        )()
+        return type(
+            "Registration",
+            (),
+            {"source": source, "definition": definition},
+        )()
 
 
 def _write(relative_path: str, text: str, *, root: Path) -> None:
@@ -253,6 +276,203 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     assert report["baseline"]["comparison"]["regression_detected"] is False
 
 
+def test_registry_measurement_is_visible_but_incomparable_to_legacy_baseline(
+    tmp_path: Path,
+) -> None:
+    baseline_path = _write_zero_baseline(tmp_path)
+    registry = _DummyRegistry(
+        {
+            "#V#zeta_workflow": "vontology",
+            "#V#alpha_workflow": "vontology",
+        },
+        synthesized_launch_contract_workflow_ids={
+            "#V#zeta_workflow",
+            "#V#alpha_workflow",
+        },
+    )
+
+    report = build_workflow_purity_report(
+        registry=registry,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["synthesized_launch_contract_count"] == 2
+    assert report["details"]["synthesized_launch_contract_workflow_ids"] == [
+        "#V#alpha_workflow",
+        "#V#zeta_workflow",
+    ]
+    assert report["measurement_provenance"] == {
+        "registry_supplied": True,
+        "registry_enumeration_succeeded": True,
+        "registry_workflow_count": 2,
+        "registry_workflow_definition_count": 2,
+        "registry_workflow_population_observed": True,
+        "registry_snapshot_scope": "vontology_inclusive",
+        "synthesized_launch_contract_measurement_complete": True,
+    }
+    comparison = report["baseline"]["comparison"]
+    assert comparison["regression_detected"] is False
+    assert comparison["advisory_findings_detected"] is True
+    assert comparison["incomparable_measurements_detected"] is True
+    assert (
+        comparison["incomparable_counters"]["synthesized_launch_contract_count"][
+            "baseline_registry_workflow_population_observed"
+        ]
+        is None
+    )
+    assert "synthesized_launch_contract_count" not in comparison["increased_counters"]
+    assert comparison["advisory_observed_counters"] == {
+        "synthesized_launch_contract_count": {
+            "current": 2,
+            "reason": "nonzero_complete_registry_observation",
+        }
+    }
+
+
+def test_baseline_snapshot_never_ratchets_registry_dependent_counter() -> None:
+    db_free_report = {
+        "schema_version": "workflow_purity_report.v1",
+        "measurement_provenance": {
+            "registry_supplied": True,
+            "registry_enumeration_succeeded": True,
+            "registry_workflow_count": 0,
+            "registry_workflow_definition_count": 0,
+            "registry_workflow_population_observed": False,
+            "registry_snapshot_scope": "empty",
+            "synthesized_launch_contract_measurement_complete": False,
+        },
+        "counters": {
+            "synthesized_launch_contract_count": 0,
+            "monolith_line_count_catalogue": 12,
+            "workflow_id_special_case_count": 1,
+        },
+    }
+
+    db_free_snapshot = build_workflow_purity_baseline_snapshot(db_free_report)
+
+    assert "synthesized_launch_contract_count" not in db_free_snapshot["counters"]
+    assert db_free_snapshot["counters"] == {
+        "monolith_line_count_catalogue": 12,
+        "workflow_id_special_case_count": 1,
+    }
+    assert (
+        db_free_snapshot["measurement_provenance"][
+            "registry_workflow_population_observed"
+        ]
+        is False
+    )
+
+    populated_report = {
+        **db_free_report,
+        "measurement_provenance": {
+            "registry_supplied": True,
+            "registry_enumeration_succeeded": True,
+            "registry_workflow_count": 20,
+            "registry_workflow_definition_count": 20,
+            "registry_workflow_population_observed": True,
+            "registry_snapshot_scope": "vontology_inclusive",
+            "synthesized_launch_contract_measurement_complete": True,
+        },
+        "counters": {
+            **db_free_report["counters"],
+            "synthesized_launch_contract_count": 3,
+        },
+    }
+    populated_snapshot = build_workflow_purity_baseline_snapshot(populated_report)
+
+    assert "synthesized_launch_contract_count" not in populated_snapshot["counters"]
+
+
+def test_advisory_counter_growth_does_not_set_blocking_regression() -> None:
+    provenance = {
+        "registry_supplied": True,
+        "registry_enumeration_succeeded": True,
+        "registry_workflow_count": 20,
+        "registry_workflow_definition_count": 20,
+        "registry_workflow_population_observed": True,
+        "registry_snapshot_scope": "vontology_inclusive",
+        "synthesized_launch_contract_measurement_complete": True,
+    }
+    comparison = compare_workflow_purity_to_baseline(
+        counters={
+            "synthesized_launch_contract_count": 3,
+            "monolith_line_count_catalogue": 12,
+            "workflow_id_special_case_count": 0,
+        },
+        baseline={
+            "schema_version": "workflow_purity_baseline.v1",
+            "measurement_provenance": provenance,
+            "counters": {
+                "synthesized_launch_contract_count": 2,
+                "monolith_line_count_catalogue": 10,
+                "workflow_id_special_case_count": 0,
+            },
+        },
+        current_measurement_provenance=provenance,
+    )
+
+    assert comparison["regression_detected"] is False
+    assert comparison["blocking_findings_detected"] is False
+    assert comparison["advisory_findings_detected"] is True
+    assert comparison["blocking_increased_counters"] == {}
+    assert set(comparison["advisory_increased_counters"]) == {
+        "monolith_line_count_catalogue",
+    }
+    assert set(comparison["increased_counters"]) == {
+        "monolith_line_count_catalogue",
+    }
+    assert comparison["advisory_observed_counters"] == {
+        "synthesized_launch_contract_count": {
+            "current": 3,
+            "reason": "nonzero_complete_registry_observation",
+        }
+    }
+
+
+def test_observed_registry_debt_is_advisory_without_a_baseline() -> None:
+    comparison = compare_workflow_purity_to_baseline(
+        counters={"synthesized_launch_contract_count": 2},
+        baseline=None,
+        current_measurement_provenance={
+            "registry_supplied": True,
+            "registry_enumeration_succeeded": True,
+            "registry_workflow_count": 20,
+            "registry_workflow_definition_count": 20,
+            "registry_workflow_population_observed": True,
+            "registry_snapshot_scope": "vontology_inclusive",
+            "synthesized_launch_contract_measurement_complete": True,
+        },
+    )
+
+    assert comparison["baseline_available"] is False
+    assert comparison["regression_detected"] is False
+    assert comparison["advisory_findings_detected"] is True
+    assert comparison["advisory_observed_counters"] == {
+        "synthesized_launch_contract_count": {
+            "current": 2,
+            "reason": "nonzero_complete_registry_observation",
+        }
+    }
+
+    incomplete = compare_workflow_purity_to_baseline(
+        counters={"synthesized_launch_contract_count": 2},
+        baseline=None,
+        current_measurement_provenance={
+            "registry_supplied": True,
+            "registry_enumeration_succeeded": True,
+            "registry_workflow_count": 20,
+            "registry_workflow_definition_count": 19,
+            "registry_workflow_population_observed": True,
+            "registry_snapshot_scope": "vontology_inclusive",
+            "synthesized_launch_contract_measurement_complete": False,
+        },
+    )
+
+    assert incomplete["advisory_findings_detected"] is False
+    assert incomplete["advisory_observed_counters"] == {}
+
+
 def test_build_workflow_purity_report_flags_agent_test_lexical_replay_drift(
     tmp_path: Path,
 ) -> None:
@@ -360,7 +580,15 @@ def test_build_workflow_purity_report_flags_baseline_regressions(
 
     comparison = report["baseline"]["comparison"]
     assert comparison["regression_detected"] is True
+    assert comparison["blocking_findings_detected"] is True
     assert comparison["increased_counters"]["built_in_registration_count"] == {
+        "baseline": 0,
+        "current": 1,
+        "delta": 1,
+    }
+    assert comparison["blocking_increased_counters"][
+        "built_in_registration_count"
+    ] == {
         "baseline": 0,
         "current": 1,
         "delta": 1,
@@ -1638,8 +1866,11 @@ def test_build_workflow_purity_report_ratchets_monolith_line_counts(
         counters=grown_counters,
         baseline=baseline,
     )
-    assert comparison["regression_detected"] is True
-    assert "monolith_line_count_orchestrator" in comparison["increased_counters"]
+    assert comparison["regression_detected"] is False
+    assert comparison["advisory_findings_detected"] is True
+    assert (
+        "monolith_line_count_orchestrator" in comparison["advisory_increased_counters"]
+    )
 
     shrunk_counters = dict(counters)
     shrunk_counters["monolith_line_count_orchestrator"] = 2
@@ -1648,3 +1879,4 @@ def test_build_workflow_purity_report_ratchets_monolith_line_counts(
         baseline=baseline,
     )
     assert comparison["regression_detected"] is False
+    assert comparison["advisory_findings_detected"] is False
