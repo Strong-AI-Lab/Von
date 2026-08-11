@@ -8286,6 +8286,30 @@ def _turn_projection_match_tokens(value: Any) -> tuple[str, list[str]]:
     return normalised, _dedupe_string_sequence(tokens)
 
 
+def _turn_projection_partial_label_match_is_material(
+    *,
+    label_tokens: Sequence[str],
+    matched_tokens: Sequence[str],
+) -> bool:
+    """Return whether a non-exact label match is strong enough to retain.
+
+    One matchable token is enough when it is the label's whole usable identity
+    (for example ``RE: SciClaimEval``).  Longer labels require both multiple
+    matching tokens and at least half-token coverage.  This keeps useful
+    paraphrase tolerance without allowing an incidental word such as
+    ``booking`` to select an unrelated ``Time booking link`` message.
+    """
+
+    label_token_count = len(label_tokens)
+    matched_token_count = len(matched_tokens)
+    if label_token_count == 1:
+        return matched_token_count == 1
+    return bool(
+        matched_token_count >= 2
+        and matched_token_count * 2 >= label_token_count
+    )
+
+
 def _select_answer_material_referents(
     *,
     response_text: Any,
@@ -8326,22 +8350,40 @@ def _select_answer_material_referents(
         stable_id_normalised = stable_id.casefold()
         score = 0
         offsets: list[int] = []
-        if label_normalised and label_normalised in answer_normalised:
+        exact_label_match = bool(
+            label_normalised and label_normalised in answer_normalised
+        )
+        exact_id_match = bool(
+            stable_id_normalised and stable_id_normalised in answer_normalised
+        )
+        if exact_label_match:
             score += 10_000 + len(label_normalised)
             offsets.append(answer_normalised.index(label_normalised))
-        if stable_id_normalised and stable_id_normalised in answer_normalised:
+        if exact_id_match:
             score += 20_000 + len(stable_id_normalised)
             offsets.append(answer_normalised.index(stable_id_normalised))
+        matched_label_tokens: list[str] = []
         for token in label_tokens:
             if token not in answer_token_offsets:
                 continue
             if candidate_count > 1 and token_document_frequency.get(token, 0) != 1:
                 continue
+            matched_label_tokens.append(token)
             score += len(token)
             offsets.append(answer_token_offsets[token])
-        if score <= 0:
+        partial_label_match = _turn_projection_partial_label_match_is_material(
+            label_tokens=label_tokens,
+            matched_tokens=matched_label_tokens,
+        )
+        if not (exact_label_match or exact_id_match or partial_label_match):
             continue
-        matched.append((min(offsets) if offsets else len(answer_normalised), index, candidate))
+        matched.append(
+            (
+                min(offsets) if offsets else len(answer_normalised),
+                index,
+                candidate,
+            )
+        )
 
     matched.sort(key=lambda item: (item[0], item[1]))
     return [
