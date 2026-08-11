@@ -319,6 +319,133 @@ def test_simple_chat_without_tool_records_does_not_create_runtime_situation() ->
     )
 
 
+def _referent_read_invocation(
+    *,
+    stable_id: str,
+    display_label: str,
+    call_id: str,
+) -> dict[str, object]:
+    return {
+        "tool": "mail_get_item",
+        "capability_kind": "mcp_tool",
+        "call_id": call_id,
+        "status": "ok",
+        "evidence": {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": f"evidence-{call_id}",
+            "status": "ok",
+            "projected_payload": {
+                "_tool_evidence_projection": {
+                    "tool_concept_id": "#V#mail_get_item_tool",
+                    "referent_candidates": [
+                        {
+                            "schema_version": "tool_referent_candidate.v1",
+                            "stable_id": stable_id,
+                            "display_label": display_label,
+                            "source_kind": "#V#mail_message_result_entity_type",
+                            "identity_field_concept_id": (
+                                "#V#mail_message_id_field"
+                            ),
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+
+def test_selected_referent_capsule_rejects_live_booking_token_false_match() -> None:
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-flight-booking",
+        terminal_status="completed",
+        response_text=(
+            "## Flight booking to keep handy\n\n"
+            "The email subject is **Your trip confirmation (JFK – SFO)**."
+        ),
+        tool_invocations=[
+            _referent_read_invocation(
+                stable_id="19fb8acf0e68c2ee",
+                display_label="Time booking link",
+                call_id="call-time-booking",
+            ),
+            _referent_read_invocation(
+                stable_id="19febb3feda7b024",
+                display_label="Your trip confirmation (JFK - SFO)",
+                call_id="call-trip-confirmation",
+            ),
+        ],
+    )
+
+    assert projection is not None
+    assert [
+        referent["stable_id"] for referent in projection["selected_referents"]
+    ] == ["19febb3feda7b024"]
+
+
+def test_selected_referent_capsule_rejects_one_incidental_label_token() -> None:
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-generic-booking-word",
+        terminal_status="completed",
+        response_text="Was there a recent flight booking email?",
+        tool_invocations=[
+            _referent_read_invocation(
+                stable_id="message-time-booking",
+                display_label="Time booking link",
+                call_id="call-generic-booking",
+            )
+        ],
+    )
+
+    assert projection is None
+
+
+def test_selected_referent_capsule_keeps_exact_id_and_exact_label_matches() -> None:
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-exact-referents",
+        terminal_status="completed",
+        response_text=(
+            "Use opaque-message-123, then review the Quarterly planning memo."
+        ),
+        tool_invocations=[
+            _referent_read_invocation(
+                stable_id="opaque-message-123",
+                display_label="Unmentioned internal status note",
+                call_id="call-exact-id",
+            ),
+            _referent_read_invocation(
+                stable_id="opaque-message-456",
+                display_label="Quarterly planning memo",
+                call_id="call-exact-label",
+            ),
+        ],
+    )
+
+    assert projection is not None
+    assert [
+        referent["stable_id"] for referent in projection["selected_referents"]
+    ] == ["opaque-message-123", "opaque-message-456"]
+
+
+def test_selected_referent_capsule_keeps_whole_distinctive_single_token() -> None:
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-distinctive-single-token",
+        terminal_status="completed",
+        response_text="I recommend replying about SciClaimEval next",
+        tool_invocations=[
+            _referent_read_invocation(
+                stable_id="message-sciclaimeval",
+                display_label="RE: SciClaimEval",
+                call_id="call-sciclaimeval",
+            )
+        ],
+    )
+
+    assert projection is not None
+    assert projection["selected_referents"][0]["stable_id"] == (
+        "message-sciclaimeval"
+    )
+
+
 def test_selected_referent_capsule_does_not_require_opaque_id_in_visible_answer() -> None:
     projection = build_conversation_situation_turn_projection(
         request_id="turn-email-priority",
@@ -460,6 +587,51 @@ def test_selected_referent_capsule_does_not_require_opaque_id_in_visible_answer(
         retained,
         source_family="mail",
     ) == projection["selected_referents"][0]["resource_scope"]
+
+
+def test_detail_referent_preserves_discovery_view_scope_for_same_resource() -> None:
+    discovery = _referent_read_invocation(
+        stable_id="message-trip-confirmation",
+        display_label="Your trip confirmation (JFK - SFO)",
+        call_id="call-list-trip",
+    )
+    discovery["resource_scope"] = {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+        "runtime_alias": "vonwitbrock-gmail",
+        "display_label": "zhanvonwitbrock@gmail.com",
+        "selection_source": "represented_default",
+        "view_scope": "whole_mailbox",
+    }
+    detail = _referent_read_invocation(
+        stable_id="message-trip-confirmation",
+        display_label="Your trip confirmation (JFK - SFO)",
+        call_id="call-get-trip",
+    )
+    detail["resource_scope"] = {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+        "runtime_alias": "vonwitbrock-gmail",
+        "display_label": "zhanvonwitbrock@gmail.com",
+        "selection_source": "represented_default",
+    }
+
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-trip-view-scope",
+        terminal_status="completed",
+        response_text="Keep Your trip confirmation (JFK - SFO) handy.",
+        tool_invocations=[discovery, detail],
+    )
+
+    assert projection is not None
+    assert projection["selected_referents"][0]["resource_scope"] == {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+        "runtime_alias": "vonwitbrock-gmail",
+        "display_label": "zhanvonwitbrock@gmail.com",
+        "selection_source": "represented_default",
+        "view_scope": "whole_mailbox",
+    }
 
 
 def test_selected_referent_capsule_preserves_long_opaque_identity_exactly() -> None:

@@ -154,6 +154,48 @@ def test_tool_timing_separates_queue_handler_transport_and_persistence() -> None
     )
 
 
+def test_tool_timing_reports_transport_and_result_projection_separately() -> None:
+    trace = build_turn_timing_trace(
+        request_id="req-tool-projection",
+        tool_invocations=[
+            {
+                "tool": "gmail_get_message",
+                "status": "completed",
+                "transport": {
+                    "execution_id": "mcp-gmail-read",
+                    "duration_ms": 2700,
+                    "handler_duration_ms": 2600,
+                    "transport_overhead_ms": 100,
+                    "advisory_budget_exceeded": False,
+                },
+                "result_projection_duration_ms": 24000,
+            }
+        ],
+    )
+
+    tool_span = next(
+        span for span in trace["spans"] if span["operation_kind"] == "tool_call"
+    )
+    projection_span = next(
+        span
+        for span in trace["spans"]
+        if span["operation_name"] == "gmail_get_message:result_projection"
+    )
+    assert tool_span["duration_ms"] == 2700
+    assert tool_span["attributes"]["execution_id"] == "mcp-gmail-read"
+    assert tool_span["attributes"]["handler_duration_ms"] == 2600
+    assert tool_span["attributes"]["transport_overhead_ms"] == 100
+    assert tool_span["attributes"]["result_projection_duration_ms"] == 24000
+    assert projection_span["operation_kind"] == "support"
+    assert projection_span["duration_ms"] == 24000
+    assert projection_span["attributes"]["support_kind"] == (
+        "tool_result_projection"
+    )
+    assert trace["summary"]["tool_elapsed_ms"] == 2700
+    assert trace["summary"]["tool_result_projection_elapsed_ms"] == 24000
+    assert trace["stage_totals"][0]["support_elapsed_ms"] == 24000
+
+
 def test_merge_timing_spans_deduplicates_and_bounds() -> None:
     merged = merge_timing_spans(
         [{"span_id": "a", "stage_id": "x", "operation_kind": "support", "duration_ms": 1}],

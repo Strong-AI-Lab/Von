@@ -1755,10 +1755,13 @@ def _scope_message(
                 "one focused question only when the remaining private-corpus "
                 "difference is material. Do not ask merely because alternatives "
                 "exist when one of those grounds is sufficient.\n"
-                "- Briefly name the selected human-readable resource on first use "
-                "or when it changes if the user could reasonably confuse accounts. "
-                "The remembered situation is not authority; every dispatch is "
-                "rechecked against this turn's choices.\n"
+                "- When the request leaves the connector resource unqualified, "
+                "briefly name the selected human-readable resource in the first "
+                "answer unless that answer already makes it clear. Repeat it only "
+                "when the resource changes or the distinction becomes material; "
+                "never expose an internal resource ID or runtime alias. The "
+                "remembered situation is not authority; every dispatch is rechecked "
+                "against this turn's choices.\n"
                 "- Connector account and view scope are separate. For an "
                 "unqualified request for recent or 'my' mail, use whole_mailbox on "
                 "the selected account. Use profile_default_view for a named stream "
@@ -3845,6 +3848,10 @@ def execute_adaptive_turn(
         namespace=user_namespace,
     )
     evidence_store = TurnEvidenceStore(scope, turn_id or "ordinary-turn")
+    # One actor-scoped turn uses one represented projection snapshot per tool.
+    # This removes repeated contract-resolution reads without carrying authority
+    # or stale state across turns, actors, processes, or live revisions.
+    tool_projection_contracts: dict[str, Any] = {}
     trusted_values = dict(trusted_argument_values or {})
     trusted_values.update(
         {
@@ -6343,18 +6350,46 @@ def execute_adaptive_turn(
                     envelope_payload["workflow_progress_evidence"] = dict(
                         workflow_progress_evidence
                     )
+                projection_started = time.perf_counter()
+                projection_duration_ms = 0.0
                 if isinstance(raw_payload, Mapping):
                     try:
-                        from src.backend.services.tool_evidence_projection_service import (
+                        from .tool_evidence_projection_service import (
                             project_tool_payload_for_llm,
+                            resolve_tool_projection_contract,
                         )
 
-                        projected_payload = project_tool_payload_for_llm(
-                            canonical_name,
-                            raw_payload,
-                        )
+                        with override_current_actor(
+                            scope.user_concept_id,
+                            scope.organisation_concept_id,
+                        ):
+                            projection_contract_key = canonical_name.casefold()
+                            if (
+                                projection_contract_key
+                                not in tool_projection_contracts
+                            ):
+                                tool_projection_contracts[
+                                    projection_contract_key
+                                ] = resolve_tool_projection_contract(canonical_name)
+                            projection_contract = tool_projection_contracts[
+                                projection_contract_key
+                            ]
+                            projected_payload = (
+                                project_tool_payload_for_llm(
+                                    canonical_name,
+                                    raw_payload,
+                                    contract=projection_contract,
+                                )
+                                if projection_contract is not None
+                                else None
+                            )
                     except Exception:  # noqa: BLE001 - projection is advisory
                         projected_payload = None
+                    finally:
+                        projection_duration_ms = max(
+                            0.0,
+                            (time.perf_counter() - projection_started) * 1000.0,
+                        )
                     if projected_payload is not None:
                         envelope_payload["projected_payload"] = projected_payload
                 result_target_ids = _effect_result_target_ids(raw_payload)
@@ -6529,6 +6564,9 @@ def execute_adaptive_turn(
                                 invocation[receipt_key] = receipt_value
                 if transport_metadata:
                     invocation["transport"] = transport_metadata
+                invocation["result_projection_duration_ms"] = (
+                    projection_duration_ms
+                )
                 catalogued_capability = catalogued_capabilities_by_name.get(
                     canonical_name.lower()
                 )
@@ -6551,6 +6589,9 @@ def execute_adaptive_turn(
                     )
                     if transport_metadata.get(key) is not None
                 }
+                actual_cost["result_projection_duration_ms"] = (
+                    projection_duration_ms
+                )
                 aux_calls.append(
                     {
                         "type": "adaptive_turn_capability_selection",
@@ -6629,6 +6670,7 @@ def execute_adaptive_turn(
                     "success": status == "ok",
                     "result_summary": semantic_operation["summary"],
                     "semantic_operation": semantic_operation,
+                    "result_projection_duration_ms": projection_duration_ms,
                 }
                 if selected_workflow_execution_event is not None:
                     completed_progress["selected_workflow_execution_event"] = dict(

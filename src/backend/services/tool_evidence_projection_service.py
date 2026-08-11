@@ -993,6 +993,7 @@ def project_tool_payload_for_llm(
     payload: Mapping[str, Any],
     *,
     max_collection_items: int = 40,
+    contract: ToolProjectionContract | None = None,
 ) -> dict[str, Any] | None:
     """Return a compact Vontology-backed LLM payload, or None if no contract exists."""
 
@@ -1001,7 +1002,7 @@ def project_tool_payload_for_llm(
     if not isinstance(payload, Mapping):
         return None
 
-    contract = resolve_tool_projection_contract(tool_name)
+    contract = contract or resolve_tool_projection_contract(tool_name)
     if contract is None or not contract.fields:
         return None
 
