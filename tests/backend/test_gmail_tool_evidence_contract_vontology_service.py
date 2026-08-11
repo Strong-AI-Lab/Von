@@ -5,7 +5,9 @@ from typing import Any
 import pytest
 
 from src.backend.services import concept_service
-from src.backend.services import gmail_tool_evidence_contract_vontology_service as service
+from src.backend.services import (
+    gmail_tool_evidence_contract_vontology_service as service,
+)
 
 
 @pytest.fixture
@@ -118,6 +120,28 @@ def test_bootstrap_materialises_gmail_tool_contract_graph_kr(
     assert validation["missing_relationships"] == []
 
 
+def test_conversation_turn_support_bootstrap_materialises_gmail_contract(
+    _reset_mock_db: Any,
+) -> None:
+    from src.backend.services.conversation_turn_workflow_vontology_service import (
+        _ensure_conversation_turn_prompt_support,
+    )
+
+    report = _ensure_conversation_turn_prompt_support(
+        ensure_tool_evidence_contracts=True
+    )
+
+    gmail_bootstrap = report["support_bootstraps"]["gmail_tool_evidence_contract"]
+    assert gmail_bootstrap["success"] is True
+    assert gmail_bootstrap["validation"]["success"] is True
+    assert (
+        concept_service.get_concept_by_concept_id(
+            service.GMAIL_TOOL_EVIDENCE_CONTRACT_ID
+        )
+        is not None
+    )
+
+
 def test_gmail_final_answer_view_requires_detail_completed_message_fields(
     _reset_mock_db: Any,
 ) -> None:
@@ -220,17 +244,19 @@ def test_gmail_list_detail_affordance_maps_list_identifier_to_detail_argument(
         service.GMAIL_LIST_MESSAGES_TOOL_ID,
         "#V#tool_result_preserves_field",
     )
-    assert {service.GMAIL_PROFILE_ARGUMENT_FIELD_ID, service.GMAIL_MESSAGE_ID_FIELD_ID}.issubset(
-        list_preserved_fields
-    )
+    assert {
+        service.GMAIL_PROFILE_ARGUMENT_FIELD_ID,
+        service.GMAIL_MESSAGE_ID_FIELD_ID,
+    }.issubset(list_preserved_fields)
 
     follow_up_required_fields = _targets(
         service.GMAIL_FOLLOW_UP_VIEW_ID,
         "#V#evidence_view_requires_field",
     )
-    assert {service.GMAIL_PROFILE_ARGUMENT_FIELD_ID, service.GMAIL_MESSAGE_ID_FIELD_ID}.issubset(
-        follow_up_required_fields
-    )
+    assert {
+        service.GMAIL_PROFILE_ARGUMENT_FIELD_ID,
+        service.GMAIL_MESSAGE_ID_FIELD_ID,
+    }.issubset(follow_up_required_fields)
 
 
 def test_gmail_fields_record_wire_aliases_and_payload_paths_as_concepts(
