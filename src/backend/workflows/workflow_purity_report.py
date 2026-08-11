@@ -29,6 +29,13 @@ WORKFLOW_PURITY_SUPPORT_FILE = "src/backend/workflows/workflow_purity_report.py"
 WORKFLOW_PURITY_BASELINE_REFRESH_COMMAND = (
     "pdm run python scripts/workflow_purity_report.py --refresh-baseline"
 )
+REGISTRY_DEPENDENT_COUNTER_KEYS = frozenset(
+    {
+        "synthesized_launch_contract_count",
+    }
+)
+ADVISORY_COUNTER_KEYS = REGISTRY_DEPENDENT_COUNTER_KEYS
+ADVISORY_COUNTER_PREFIXES = ("monolith_line_count_",)
 
 DIRECT_INSTANCE_CREATE_PATTERN = re.compile(r"\.create_instance(?:_for_event)?\(")
 ALLOWED_DIRECT_INSTANCE_CREATE_CALLSITES = frozenset(
@@ -1701,16 +1708,23 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
     if registry is None:
         return {
             "registry_available": False,
+            "registry_enumeration_succeeded": False,
+            "registry_workflow_definition_count": 0,
             "counts": {},
             "source_by_workflow_id": {},
+            "synthesized_launch_contract_workflow_ids": [],
         }
 
     source_counts: dict[str, int] = {}
     source_by_workflow_id: dict[str, str] = {}
+    synthesized_launch_contract_workflow_ids: list[str] = []
+    registry_workflow_definition_count = 0
     try:
         workflow_ids = sorted(set(registry.all_workflow_ids()))
+        registry_enumeration_succeeded = True
     except Exception:
         workflow_ids = []
+        registry_enumeration_succeeded = False
 
     for workflow_id in workflow_ids:
         source = "unknown"
@@ -1743,11 +1757,13 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
                 registration = registry.get_registration(workflow_id)
             definition = getattr(registration, "definition", None)
             if registration and definition is not None:
+                registry_workflow_definition_count += 1
                 metadata = getattr(definition, "metadata", None)
                 if isinstance(metadata, Mapping) and (
                     metadata.get("launch_contract_source")
                     == "synthesized_from_initial_state"
                 ):
+                    synthesized_launch_contract_workflow_ids.append(workflow_id)
                     source_counts["synthesized_launch_contract_count"] = (
                         source_counts.get("synthesized_launch_contract_count", 0) + 1
                     )
@@ -1756,17 +1772,23 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
 
     return {
         "registry_available": True,
+        "registry_enumeration_succeeded": registry_enumeration_succeeded,
+        "registry_workflow_definition_count": registry_workflow_definition_count,
         "counts": source_counts,
         "source_by_workflow_id": source_by_workflow_id,
+        "synthesized_launch_contract_workflow_ids": sorted(
+            set(synthesized_launch_contract_workflow_ids)
+        ),
     }
 
 
 def _scan_monolith_line_ratchet(project_root: Path) -> dict[str, Any]:
     """Measure the line counts of the named monolith files.
 
-    These counters ratchet through the baseline comparison: any growth beyond
-    the checked-in baseline is a regression, and deliberate reductions should
-    be locked in by refreshing the baseline. See JVNAUTOSCI-2497.
+    These counters ratchet through the advisory baseline comparison: growth is
+    reported without turning a code-maintenance metric into a runtime blocker.
+    Deliberate reductions should be locked in by refreshing the baseline. See
+    JVNAUTOSCI-2497.
     """
 
     files: list[dict[str, Any]] = []
@@ -1798,20 +1820,135 @@ def load_workflow_purity_baseline(
     return payload if isinstance(payload, dict) else None
 
 
+def _normalise_measurement_provenance(
+    provenance: Mapping[str, Any] | None,
+) -> dict[str, bool | int | str | None]:
+    raw = provenance if isinstance(provenance, Mapping) else {}
+    registry_supplied = raw.get("registry_supplied")
+    registry_enumeration_succeeded = raw.get("registry_enumeration_succeeded")
+    registry_workflow_count = raw.get("registry_workflow_count")
+    registry_workflow_definition_count = raw.get("registry_workflow_definition_count")
+    registry_workflow_population_observed = raw.get(
+        "registry_workflow_population_observed"
+    )
+    registry_snapshot_scope = raw.get("registry_snapshot_scope")
+    synthesized_launch_contract_measurement_complete = raw.get(
+        "synthesized_launch_contract_measurement_complete"
+    )
+    return {
+        "registry_supplied": (
+            registry_supplied if isinstance(registry_supplied, bool) else None
+        ),
+        "registry_enumeration_succeeded": (
+            registry_enumeration_succeeded
+            if isinstance(registry_enumeration_succeeded, bool)
+            else None
+        ),
+        "registry_workflow_count": (
+            registry_workflow_count
+            if isinstance(registry_workflow_count, int)
+            and not isinstance(registry_workflow_count, bool)
+            else None
+        ),
+        "registry_workflow_definition_count": (
+            registry_workflow_definition_count
+            if isinstance(registry_workflow_definition_count, int)
+            and not isinstance(registry_workflow_definition_count, bool)
+            else None
+        ),
+        "registry_workflow_population_observed": (
+            registry_workflow_population_observed
+            if isinstance(registry_workflow_population_observed, bool)
+            else None
+        ),
+        "registry_snapshot_scope": (
+            registry_snapshot_scope
+            if isinstance(registry_snapshot_scope, str)
+            and registry_snapshot_scope
+            in {"unavailable", "empty", "non_vontology_only", "vontology_inclusive"}
+            else None
+        ),
+        "synthesized_launch_contract_measurement_complete": (
+            synthesized_launch_contract_measurement_complete
+            if isinstance(synthesized_launch_contract_measurement_complete, bool)
+            else None
+        ),
+    }
+
+
+def _counter_is_advisory(counter_key: str) -> bool:
+    return counter_key in ADVISORY_COUNTER_KEYS or counter_key.startswith(
+        ADVISORY_COUNTER_PREFIXES
+    )
+
+
+def _advisory_observed_counters(
+    *,
+    counters: Mapping[str, Any],
+    measurement_provenance: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    if not (
+        measurement_provenance.get(
+            "synthesized_launch_contract_measurement_complete"
+        )
+        is True
+        and measurement_provenance.get("registry_workflow_population_observed")
+        is True
+    ):
+        return {}
+    return {
+        key: {
+            "current": value,
+            "reason": "nonzero_complete_registry_observation",
+        }
+        for key, value in counters.items()
+        if key in REGISTRY_DEPENDENT_COUNTER_KEYS
+        and _counter_is_advisory(key)
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    }
+
+
 def compare_workflow_purity_to_baseline(
     *,
     counters: Mapping[str, Any],
     baseline: Mapping[str, Any] | None,
+    current_measurement_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    current_provenance = _normalise_measurement_provenance(
+        current_measurement_provenance
+    )
+    advisory_observed = _advisory_observed_counters(
+        counters=counters,
+        measurement_provenance=current_provenance,
+    )
     if not isinstance(baseline, Mapping):
         return {
             "baseline_available": False,
             "baseline_schema_version": None,
+            "current_measurement_provenance": current_provenance,
+            "baseline_measurement_provenance": None,
+            "comparable_counter_keys": [],
+            "incomparable_counters": {},
+            "incomparable_measurements_detected": False,
+            "advisory_observed_counters": advisory_observed,
             "missing_counter_keys": [],
+            "blocking_missing_counter_keys": [],
+            "advisory_missing_counter_keys": [],
             "increased_counters": {},
+            "blocking_increased_counters": {},
+            "advisory_increased_counters": {},
+            "blocking_findings_detected": False,
+            "advisory_findings_detected": bool(advisory_observed),
             "regression_detected": False,
         }
 
+    baseline_provenance = _normalise_measurement_provenance(
+        baseline.get("measurement_provenance")
+        if isinstance(baseline.get("measurement_provenance"), Mapping)
+        else None
+    )
     baseline_counters = (
         baseline.get("counters", {}) if isinstance(baseline, Mapping) else {}
     )
@@ -1819,20 +1956,71 @@ def compare_workflow_purity_to_baseline(
         baseline_counters = {}
 
     increased: dict[str, dict[str, int]] = {}
+    blocking_increased: dict[str, dict[str, int]] = {}
+    advisory_increased: dict[str, dict[str, int]] = {}
+    comparable_counter_keys: list[str] = []
+    incomparable_counters: dict[str, dict[str, Any]] = {}
     missing_counter_keys: list[str] = []
+    blocking_missing_counter_keys: list[str] = []
+    advisory_missing_counter_keys: list[str] = []
     for key, value in counters.items():
         if not isinstance(value, int):
             continue
         baseline_value = baseline_counters.get(key)
+        if key in REGISTRY_DEPENDENT_COUNTER_KEYS:
+            incomparable_counters[key] = {
+                "baseline": baseline_value if isinstance(baseline_value, int) else None,
+                "current": value,
+                "reason": "registry_dependent_counter_not_owned_by_static_baseline",
+                "current_registry_workflow_population_observed": current_provenance.get(
+                    "registry_workflow_population_observed"
+                ),
+                "baseline_registry_workflow_population_observed": baseline_provenance.get(
+                    "registry_workflow_population_observed"
+                ),
+                "current_measurement_complete": current_provenance.get(
+                    "synthesized_launch_contract_measurement_complete"
+                ),
+                "baseline_measurement_complete": baseline_provenance.get(
+                    "synthesized_launch_contract_measurement_complete"
+                ),
+                "current_registry_snapshot_scope": current_provenance.get(
+                    "registry_snapshot_scope"
+                ),
+                "baseline_registry_snapshot_scope": baseline_provenance.get(
+                    "registry_snapshot_scope"
+                ),
+                "classification": (
+                    "advisory" if _counter_is_advisory(key) else "blocking"
+                ),
+            }
+            continue
         if not isinstance(baseline_value, int):
             missing_counter_keys.append(key)
+            if _counter_is_advisory(key):
+                advisory_missing_counter_keys.append(key)
+            else:
+                blocking_missing_counter_keys.append(key)
             continue
+        comparable_counter_keys.append(key)
         if value > baseline_value:
-            increased[key] = {
+            increase = {
                 "baseline": baseline_value,
                 "current": value,
                 "delta": value - baseline_value,
             }
+            increased[key] = increase
+            if _counter_is_advisory(key):
+                advisory_increased[key] = increase
+            else:
+                blocking_increased[key] = increase
+
+    blocking_findings_detected = bool(
+        blocking_increased or blocking_missing_counter_keys
+    )
+    advisory_findings_detected = bool(
+        advisory_increased or advisory_missing_counter_keys or advisory_observed
+    )
 
     return {
         "baseline_available": bool(isinstance(baseline, Mapping)),
@@ -1841,9 +2029,21 @@ def compare_workflow_purity_to_baseline(
             if isinstance(baseline, Mapping) and baseline.get("schema_version")
             else None
         ),
+        "current_measurement_provenance": current_provenance,
+        "baseline_measurement_provenance": baseline_provenance,
+        "comparable_counter_keys": sorted(comparable_counter_keys),
+        "incomparable_counters": incomparable_counters,
+        "incomparable_measurements_detected": bool(incomparable_counters),
+        "advisory_observed_counters": advisory_observed,
         "missing_counter_keys": sorted(missing_counter_keys),
+        "blocking_missing_counter_keys": sorted(blocking_missing_counter_keys),
+        "advisory_missing_counter_keys": sorted(advisory_missing_counter_keys),
         "increased_counters": increased,
-        "regression_detected": bool(increased or missing_counter_keys),
+        "blocking_increased_counters": blocking_increased,
+        "advisory_increased_counters": advisory_increased,
+        "blocking_findings_detected": blocking_findings_detected,
+        "advisory_findings_detected": advisory_findings_detected,
+        "regression_detected": blocking_findings_detected,
     }
 
 
@@ -1853,15 +2053,28 @@ def build_workflow_purity_baseline_snapshot(
     counters = report.get("counters", {})
     if not isinstance(counters, Mapping):
         counters = {}
+    measurement_provenance = _normalise_measurement_provenance(
+        report.get("measurement_provenance")
+        if isinstance(report.get("measurement_provenance"), Mapping)
+        else None
+    )
+    baseline_counters: dict[str, int] = {}
+    for key, value in counters.items():
+        if not isinstance(key, str) or not isinstance(value, int):
+            continue
+        if key in REGISTRY_DEPENDENT_COUNTER_KEYS:
+            # The checked-in baseline is repository-observable. A registry-
+            # dependent measurement belongs in the live report, with its own
+            # observation provenance, rather than in this static ratchet.
+            continue
+        baseline_counters[key] = int(value)
+
     return {
         "schema_version": WORKFLOW_PURITY_BASELINE_SCHEMA_VERSION,
         "generated_at_utc": _utc_now_iso(),
         "report_schema_version": report.get("schema_version"),
-        "counters": {
-            key: int(value)
-            for key, value in counters.items()
-            if isinstance(key, str) and isinstance(value, int)
-        },
+        "measurement_provenance": measurement_provenance,
+        "counters": baseline_counters,
     }
 
 
@@ -1895,6 +2108,42 @@ def build_workflow_purity_report(
         source_counts = {}
     if not isinstance(source_by_workflow_id, Mapping):
         source_by_workflow_id = {}
+    registry_enumeration_succeeded = bool(
+        runtime_sources.get("registry_enumeration_succeeded")
+    )
+    registry_workflow_count = len(source_by_workflow_id)
+    registry_workflow_definition_count = int(
+        runtime_sources.get("registry_workflow_definition_count", 0) or 0
+    )
+    registry_sources = {
+        source
+        for source in source_by_workflow_id.values()
+        if isinstance(source, str) and source
+    }
+    if registry is None or not registry_enumeration_succeeded:
+        registry_snapshot_scope = "unavailable"
+    elif registry_workflow_count == 0:
+        registry_snapshot_scope = "empty"
+    elif "vontology" in registry_sources:
+        registry_snapshot_scope = "vontology_inclusive"
+    else:
+        registry_snapshot_scope = "non_vontology_only"
+    registry_workflow_population_observed = bool(
+        registry_enumeration_succeeded and registry_workflow_count > 0
+    )
+    measurement_provenance = {
+        "registry_supplied": registry is not None,
+        "registry_enumeration_succeeded": registry_enumeration_succeeded,
+        "registry_workflow_count": registry_workflow_count,
+        "registry_workflow_definition_count": registry_workflow_definition_count,
+        # An empty DB-free snapshot cannot establish a runtime-backed zero.
+        "registry_workflow_population_observed": registry_workflow_population_observed,
+        "registry_snapshot_scope": registry_snapshot_scope,
+        "synthesized_launch_contract_measurement_complete": bool(
+            registry_workflow_population_observed
+            and registry_workflow_definition_count == registry_workflow_count
+        ),
+    }
 
     built_in_workflow_ids = sorted(
         workflow_id
@@ -1975,6 +2224,7 @@ def build_workflow_purity_report(
     comparison = compare_workflow_purity_to_baseline(
         counters=counters,
         baseline=baseline,
+        current_measurement_provenance=measurement_provenance,
     )
     summary_parts = [f"{key}={value}" for key, value in counters.items()]
     summary_text = "Workflow purity: " + " ".join(summary_parts)
@@ -1984,11 +2234,15 @@ def build_workflow_purity_report(
         "generated_at_utc": _utc_now_iso(),
         "summary_text": summary_text,
         "counters": counters,
+        "measurement_provenance": measurement_provenance,
         "details": {
             "registry_available": bool(runtime_sources.get("registry_available")),
             "registry_source_counts": dict(source_counts),
             "built_in_workflow_ids": built_in_workflow_ids,
             "non_vontology_discoverable_workflow_ids": non_vontology_discoverable_workflow_ids,
+            "synthesized_launch_contract_workflow_ids": list(
+                runtime_sources.get("synthesized_launch_contract_workflow_ids", [])
+            ),
             "remaining_python_workflow_family_files": copy.deepcopy(
                 python_workflow_families.get("family_files", [])
             ),
@@ -2023,6 +2277,8 @@ def build_workflow_purity_report(
 
 
 __all__ = [
+    "ADVISORY_COUNTER_KEYS",
+    "ADVISORY_COUNTER_PREFIXES",
     "ALLOWED_DIRECT_INSTANCE_CREATE_CALLSITES",
     "CORE_SUPPORT_POLICY_CONTRACTS",
     "CORE_SUPPORT_PROMPT_SOURCE_FILES",
@@ -2031,6 +2287,7 @@ __all__ = [
     "LEGACY_SELECTOR_CONSTRUCT_PATTERNS",
     "LEGACY_SELECTOR_FILE",
     "MONOLITH_RATCHET_FILES",
+    "REGISTRY_DEPENDENT_COUNTER_KEYS",
     "REPO_SEED_AUTHORITY_ALLOWED_PATHS",
     "REPO_SEED_AUTHORITY_PATTERNS",
     "SEED_FALLBACK_ORDER_CONTRACTS",

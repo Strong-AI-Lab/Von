@@ -229,6 +229,8 @@ def test_workflow_parity_policy_fail_mode_raises_on_drift(monkeypatch):
     with pytest.raises(RuntimeError, match="workflow_parity_drift_detected"):
         registry_factory._apply_workflow_parity_policy(inventory)
 
+    assert inventory["parity_policy"]["outcome"] == "failed"
+
 
 def test_workflow_parity_policy_no_drift_does_not_raise(monkeypatch):
     inventory = {
@@ -244,6 +246,7 @@ def test_workflow_parity_policy_no_drift_does_not_raise(monkeypatch):
     registry_factory._apply_workflow_parity_policy(inventory)
     policy = inventory.get("parity_policy", {})
     assert policy.get("mode") == "fail"
+    assert policy.get("outcome") == "completed"
     assert policy.get("drift_detected") is False
 
 
@@ -298,7 +301,7 @@ def test_workflow_parity_inventory_includes_authority_drift_reason(monkeypatch):
     assert counts.get("authority_missing_required_type") == 1
 
 
-def test_workflow_parity_inventory_includes_workflow_purity_regression_reason(
+def test_workflow_parity_inventory_keeps_unclassified_purity_regression_strict(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -341,8 +344,231 @@ def test_workflow_parity_inventory_includes_workflow_purity_regression_reason(
     )
 
     assert inventory["workflow_purity"]["baseline"]["comparison"]["regression_detected"] is True
-    reasons = inventory.get("diagnostics", {}).get("reason_codes", [])
+    diagnostics = inventory.get("diagnostics", {})
+    reasons = diagnostics.get("reason_codes", [])
     assert "workflow_purity_regression" in reasons
+    assert diagnostics["drift_detected"] is True
+    assert diagnostics["enforced_reason_codes"] == ["workflow_purity_regression"]
+    assert diagnostics["advisory_reason_codes"] == []
+    assert diagnostics["workflow_purity_regression"] == {
+        "detected": True,
+        "blocking_detected": True,
+        "advisory_detected": False,
+        "blocking_counter_keys": [],
+        "advisory_counter_keys": [],
+        "unclassified_blocking_regression": True,
+    }
+
+
+def test_workflow_parity_inventory_keeps_maintenance_purity_regressions_advisory(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (
+            {"initial_step": "#V#step_1", "steps": [{"step_id": "#V#step_1"}]},
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_purity_report",
+        lambda registry: {
+            "summary_text": "Workflow purity maintenance warning",
+            "counters": {
+                "synthesized_launch_contract_count": 18,
+            },
+            "baseline": {
+                "comparison": {
+                    "regression_detected": False,
+                    "advisory_findings_detected": True,
+                    "blocking_increased_counters": {},
+                    "advisory_increased_counters": {},
+                    "advisory_observed_counters": {
+                        "synthesized_launch_contract_count": {
+                            "current": 18,
+                            "reason": "nonzero_complete_registry_observation",
+                        },
+                    },
+                    "blocking_missing_counter_keys": [],
+                    "advisory_missing_counter_keys": [],
+                }
+            },
+        },
+    )
+    dummy_registry = _DummyRegistry(
+        workflow_ids=["#V#wf_ok"],
+        sources={"#V#wf_ok": "vontology"},
+    )
+
+    inventory = registry_factory._build_workflow_parity_inventory(
+        registry=dummy_registry,  # type: ignore[arg-type]
+        discovered_workflow_ids=["#V#wf_ok"],
+    )
+
+    diagnostics = inventory["diagnostics"]
+    assert diagnostics["drift_detected"] is False
+    assert diagnostics["advisory_detected"] is True
+    assert diagnostics["enforced_reason_codes"] == []
+    assert diagnostics["advisory_reason_codes"] == ["workflow_purity_advisory"]
+    assert diagnostics["workflow_purity_regression"] == {
+        "detected": True,
+        "blocking_detected": False,
+        "advisory_detected": True,
+        "blocking_counter_keys": [],
+        "advisory_counter_keys": ["synthesized_launch_contract_count"],
+        "unclassified_blocking_regression": False,
+    }
+
+    monkeypatch.setenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail")
+    with caplog.at_level("WARNING"):
+        registry_factory._apply_workflow_parity_policy(inventory)
+
+    assert "[workflow_parity_advisory]" in caplog.text
+    assert inventory["parity_policy"] == {
+        "mode": "fail",
+        "outcome": "completed_with_findings",
+        "drift_detected": False,
+        "advisory_detected": True,
+        "enforced_reason_codes": [],
+        "advisory_reason_codes": ["workflow_purity_advisory"],
+    }
+
+
+def test_workflow_parity_inventory_keeps_authority_purity_regression_strict(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (
+            {"initial_step": "#V#step_1", "steps": [{"step_id": "#V#step_1"}]},
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_purity_report",
+        lambda registry: {
+            "summary_text": "Workflow purity mixed regression",
+            "counters": {
+                "repo_seed_authority_drift_path_count": 1,
+                "monolith_line_count_catalogue": 35_200,
+            },
+            "baseline": {
+                "comparison": {
+                    "regression_detected": True,
+                    "advisory_findings_detected": True,
+                    "blocking_increased_counters": {
+                        "repo_seed_authority_drift_path_count": {
+                            "baseline": 0,
+                            "current": 1,
+                            "delta": 1,
+                        }
+                    },
+                    "advisory_increased_counters": {
+                        "monolith_line_count_catalogue": {
+                            "baseline": 35_161,
+                            "current": 35_200,
+                            "delta": 39,
+                        }
+                    },
+                    "blocking_missing_counter_keys": [],
+                    "advisory_missing_counter_keys": [],
+                }
+            },
+        },
+    )
+    dummy_registry = _DummyRegistry(
+        workflow_ids=["#V#wf_ok"],
+        sources={"#V#wf_ok": "vontology"},
+    )
+    inventory = registry_factory._build_workflow_parity_inventory(
+        registry=dummy_registry,  # type: ignore[arg-type]
+        discovered_workflow_ids=["#V#wf_ok"],
+    )
+
+    diagnostics = inventory["diagnostics"]
+    assert diagnostics["drift_detected"] is True
+    assert diagnostics["advisory_detected"] is True
+    assert diagnostics["enforced_reason_codes"] == ["workflow_purity_regression"]
+    assert diagnostics["advisory_reason_codes"] == ["workflow_purity_advisory"]
+    assert diagnostics["workflow_purity_regression"]["blocking_counter_keys"] == [
+        "repo_seed_authority_drift_path_count"
+    ]
+    assert diagnostics["workflow_purity_regression"]["advisory_counter_keys"] == [
+        "monolith_line_count_catalogue"
+    ]
+
+    monkeypatch.setenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail")
+    with pytest.raises(
+        RuntimeError,
+        match="workflow_parity_drift_detected:workflow_purity_regression",
+    ):
+        registry_factory._apply_workflow_parity_policy(inventory)
+
+
+def test_deferred_advisory_registry_work_reports_completed_with_findings(
+    monkeypatch,
+    caplog,
+):
+    registry = WorkflowRegistry()
+    registry.register(
+        _build_registration(
+            "#V#wf_ok",
+            source="vontology",
+            purpose="Runnable workflow",
+        )
+    )
+    inventory = {
+        "summary_text": "Workflow parity clean with purity maintenance findings",
+        "diagnostics": {
+            "drift_detected": False,
+            "advisory_detected": True,
+            "reason_codes": ["workflow_purity_advisory"],
+            "enforced_reason_codes": [],
+            "advisory_reason_codes": ["workflow_purity_advisory"],
+        },
+        "workflow_purity": {
+            "summary_text": "Workflow purity maintenance warning",
+        },
+    }
+    monkeypatch.setattr(registry_factory, "_last_inventory_snapshot", None)
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_concept_authority_report",
+        lambda *, registry: {"drift_detected": False, "counts": {}},
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_build_expected_authoritative_workflow_report",
+        lambda *, workflow_ids: {"workflow_ids": list(workflow_ids)},
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_build_workflow_parity_inventory",
+        lambda **_kwargs: inventory,
+    )
+    monkeypatch.setenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail")
+
+    with caplog.at_level("INFO"):
+        registry_factory._launch_deferred_registry_work(
+            registry=registry,
+            discovered_workflow_ids=["#V#wf_ok"],
+            expected_authoritative_file_copy_workflow_ids=(),
+            expected_authoritative_reasoning_recovery_workflow_ids=(),
+            expected_authoritative_support_maintenance_workflow_ids=(),
+            requested_bootstrap=False,
+        )
+
+    assert inventory["parity_policy"]["outcome"] == "completed_with_findings"
+    assert (
+        "Deferred workflow registry work outcome=completed_with_findings"
+        in caplog.text
+    )
+    assert "Deferred workflow registry work failed" not in caplog.text
 
 
 def test_register_workflow_from_vontology_replaces_existing_registration(monkeypatch):

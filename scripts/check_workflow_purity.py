@@ -11,8 +11,8 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 repo_root_str = str(REPO_ROOT)
@@ -45,9 +45,25 @@ def _print_regression_summary(
         comparison = {}
 
     regression_detected = bool(comparison.get("regression_detected"))
+    advisory_findings_detected = bool(
+        comparison.get("advisory_findings_detected")
+    )
+    partitioned_findings = any(
+        key in comparison
+        for key in (
+            "blocking_increased_counters",
+            "advisory_increased_counters",
+            "advisory_observed_counters",
+            "blocking_missing_counter_keys",
+            "advisory_missing_counter_keys",
+        )
+    )
 
     if quiet_on_pass and not regression_detected:
-        print("Workflow purity gate passed.")
+        if advisory_findings_detected:
+            print("Workflow purity gate passed with advisory findings.")
+        else:
+            print("Workflow purity gate passed.")
         return
 
     if not quiet:
@@ -59,7 +75,9 @@ def _print_regression_summary(
     if quiet:
         return
 
-    increased = comparison.get("increased_counters")
+    increased = comparison.get(
+        "blocking_increased_counters" if partitioned_findings else "increased_counters"
+    )
     if isinstance(increased, dict) and increased:
         print("Regressed counters:")
         for key in sorted(increased):
@@ -71,11 +89,42 @@ def _print_regression_summary(
                 f"current={delta.get('current')} delta={delta.get('delta')}"
             )
 
-    missing = comparison.get("missing_counter_keys")
+    missing = comparison.get(
+        "blocking_missing_counter_keys"
+        if partitioned_findings
+        else "missing_counter_keys"
+    )
     if isinstance(missing, list) and missing:
         print("Missing baseline counters:")
         for key in missing:
             print(f" - {key}")
+
+    advisory_increased = comparison.get("advisory_increased_counters")
+    advisory_observed = comparison.get("advisory_observed_counters")
+    advisory_missing = comparison.get("advisory_missing_counter_keys")
+    if advisory_findings_detected:
+        print("Advisory counter findings:")
+        if isinstance(advisory_increased, dict):
+            for key in sorted(advisory_increased):
+                delta = advisory_increased.get(key)
+                if not isinstance(delta, dict):
+                    continue
+                print(
+                    f" - {key}: baseline={delta.get('baseline')} "
+                    f"current={delta.get('current')} delta={delta.get('delta')}"
+                )
+        if isinstance(advisory_observed, dict):
+            for key in sorted(advisory_observed):
+                observation = advisory_observed.get(key)
+                if not isinstance(observation, dict):
+                    continue
+                print(
+                    f" - {key}: current={observation.get('current')} "
+                    f"reason={observation.get('reason')}"
+                )
+        if isinstance(advisory_missing, list):
+            for key in advisory_missing:
+                print(f" - {key}: baseline counter missing")
 
     if regression_detected:
         print(
@@ -88,6 +137,8 @@ def _print_regression_summary(
         if verbose:
             print("Full report:")
             print(json.dumps(report, indent=2, sort_keys=True))
+    elif advisory_findings_detected:
+        print("Workflow purity gate passed with advisory findings.")
     else:
         print("Workflow purity gate passed.")
 
@@ -129,19 +180,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     project_root = Path(args.project_root).resolve()
-    
-    # Try to include Vontology-backed workflows if DB is available
-    # so we can track synthesized launch contracts.
-    import os
-    if os.getenv("VON_DB_NAME"):
-        from src.backend.workflows.durable.registry_factory import build_vontology_workflow_registry_snapshot
-        try:
-            registry = build_vontology_workflow_registry_snapshot()
-        except Exception:
-            registry = build_workflow_purity_registry_snapshot()
-    else:
-        registry = build_workflow_purity_registry_snapshot()
 
+    # This gate owns repository-observable counters only. Runtime registry debt
+    # is reported by the live parity inventory with its own provenance.
+    registry = build_workflow_purity_registry_snapshot()
     report = build_workflow_purity_report(registry=registry, project_root=project_root)
 
     if args.refresh_baseline:
