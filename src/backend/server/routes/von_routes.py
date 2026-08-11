@@ -7558,9 +7558,32 @@ def _extract_tagged_block(text: str, tag: str) -> str | None:
     searchable, replacements = _mask_fenced_code_blocks(text)
     pattern = rf"<{re.escape(tag)}>\s*(.*?)\s*</{re.escape(tag)}>"
     match = re.search(pattern, searchable, flags=re.DOTALL | re.IGNORECASE)
-    if not match:
-        return None
-    value = match.group(1)
+    if match:
+        value = match.group(1)
+    else:
+        # A provider can occasionally omit only the closing tag on the final
+        # presenter block. Recover that terminal block when its boundary is
+        # unambiguous; otherwise leave the response to the normal backfill
+        # path. In particular, do not absorb another presenter block or a tag
+        # example from fenced content.
+        opening_pattern = rf"<{re.escape(tag)}>"
+        closing_pattern = rf"</{re.escape(tag)}>"
+        opening_matches = list(
+            re.finditer(opening_pattern, searchable, flags=re.IGNORECASE)
+        )
+        closing_matches = list(
+            re.finditer(closing_pattern, searchable, flags=re.IGNORECASE)
+        )
+        if len(opening_matches) != 1 or closing_matches:
+            return None
+        terminal_value = searchable[opening_matches[0].end() :]
+        if re.search(
+            r"</?(?:spoken|screen)>",
+            terminal_value,
+            flags=re.IGNORECASE,
+        ):
+            return None
+        value = terminal_value
     if not isinstance(value, str):
         return None
     value = _restore_masked_fenced_code_blocks(value, replacements).strip()

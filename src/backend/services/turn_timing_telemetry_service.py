@@ -534,7 +534,14 @@ def _tool_spans(
     for index, entry in enumerate(tool_entries):
         if not isinstance(entry, Mapping):
             continue
-        duration_ms = _safe_int_ms(entry.get("duration_ms"))
+        raw_transport = entry.get("transport")
+        transport = raw_transport if isinstance(raw_transport, Mapping) else {}
+
+        def timing_value(key: str) -> Any:
+            direct_value = entry.get(key)
+            return direct_value if direct_value is not None else transport.get(key)
+
+        duration_ms = _safe_int_ms(timing_value("duration_ms"))
         if duration_ms is None:
             continue
         tool_name = _tool_name(entry)
@@ -565,7 +572,8 @@ def _tool_spans(
                     "tool": tool_name,
                     "method": _safe_str(entry.get("method")) or tool_name,
                     "call_id": _safe_str(entry.get("call_id")),
-                    "execution_id": _safe_str(entry.get("execution_id")),
+                    "execution_id": _safe_str(entry.get("execution_id"))
+                    or _safe_str(transport.get("execution_id")),
                     "workflow_id": _safe_str(entry.get("workflow_id")),
                     "workflow_state_id": _safe_str(entry.get("workflow_state_id")),
                     "workflow_action_id": _safe_str(entry.get("workflow_action_id")),
@@ -573,28 +581,51 @@ def _tool_spans(
                     "blocked": entry.get("blocked"),
                     "direct_user_call": entry.get("direct_user_call"),
                     "queue_duration_ms": _safe_int_ms(
-                        entry.get("queue_duration_ms")
+                        timing_value("queue_duration_ms")
                     ),
                     "handler_duration_ms": _safe_int_ms(
-                        entry.get("handler_duration_ms")
+                        timing_value("handler_duration_ms")
                     ),
                     "handler_elapsed_ms": _safe_int_ms(
-                        entry.get("handler_elapsed_ms")
+                        timing_value("handler_elapsed_ms")
                     ),
                     "transport_overhead_ms": _safe_int_ms(
-                        entry.get("transport_overhead_ms")
+                        timing_value("transport_overhead_ms")
                     ),
-                    "timeout_sec": _safe_number(entry.get("timeout_sec")),
+                    "result_projection_duration_ms": _safe_int_ms(
+                        entry.get("result_projection_duration_ms")
+                    ),
+                    "timeout_sec": _safe_number(timing_value("timeout_sec")),
                     "advisory_timeout_sec": _safe_number(
-                        entry.get("advisory_timeout_sec")
+                        timing_value("advisory_timeout_sec")
                     ),
-                    "advisory_budget_exceeded": entry.get(
+                    "advisory_budget_exceeded": timing_value(
                         "advisory_budget_exceeded"
                     ),
-                    "timeout_phase": _safe_str(entry.get("timeout_phase")),
+                    "timeout_phase": _safe_str(timing_value("timeout_phase")),
                 },
             }
         )
+        projection_duration_ms = _safe_int_ms(
+            entry.get("result_projection_duration_ms")
+        )
+        if projection_duration_ms is not None and projection_duration_ms > 0:
+            spans.append(
+                {
+                    "span_id": f"{spans[-1]['span_id']}:result_projection",
+                    "source": source,
+                    "stage_id": spans[-1]["stage_id"],
+                    "operation_kind": "support",
+                    "operation_name": f"{tool_name}:result_projection",
+                    "duration_ms": projection_duration_ms,
+                    "status": spans[-1]["status"],
+                    "attributes": {
+                        "tool": tool_name,
+                        "call_id": _safe_str(entry.get("call_id")),
+                        "support_kind": "tool_result_projection",
+                    },
+                }
+            )
     return spans
 
 
@@ -1067,6 +1098,15 @@ def build_turn_timing_trace(
                 for span in stored_spans
                 if _safe_str(span.get("operation_kind")) == "tool_call"
                 and isinstance(span.get("attributes"), Mapping)
+            ),
+            "tool_result_projection_elapsed_ms": sum(
+                int(span["duration_ms"])
+                for span in stored_spans
+                if isinstance(span.get("attributes"), Mapping)
+                and _safe_str(
+                    (span.get("attributes") or {}).get("support_kind")
+                )
+                == "tool_result_projection"
             ),
         },
         "stage_totals": _aggregate_stage_totals(stored_spans),

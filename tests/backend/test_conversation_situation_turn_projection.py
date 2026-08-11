@@ -589,6 +589,51 @@ def test_selected_referent_capsule_does_not_require_opaque_id_in_visible_answer(
     ) == projection["selected_referents"][0]["resource_scope"]
 
 
+def test_detail_referent_preserves_discovery_view_scope_for_same_resource() -> None:
+    discovery = _referent_read_invocation(
+        stable_id="message-trip-confirmation",
+        display_label="Your trip confirmation (JFK - SFO)",
+        call_id="call-list-trip",
+    )
+    discovery["resource_scope"] = {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+        "runtime_alias": "vonwitbrock-gmail",
+        "display_label": "zhanvonwitbrock@gmail.com",
+        "selection_source": "represented_default",
+        "view_scope": "whole_mailbox",
+    }
+    detail = _referent_read_invocation(
+        stable_id="message-trip-confirmation",
+        display_label="Your trip confirmation (JFK - SFO)",
+        call_id="call-get-trip",
+    )
+    detail["resource_scope"] = {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+        "runtime_alias": "vonwitbrock-gmail",
+        "display_label": "zhanvonwitbrock@gmail.com",
+        "selection_source": "represented_default",
+    }
+
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-trip-view-scope",
+        terminal_status="completed",
+        response_text="Keep Your trip confirmation (JFK - SFO) handy.",
+        tool_invocations=[discovery, detail],
+    )
+
+    assert projection is not None
+    assert projection["selected_referents"][0]["resource_scope"] == {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+        "runtime_alias": "vonwitbrock-gmail",
+        "display_label": "zhanvonwitbrock@gmail.com",
+        "selection_source": "represented_default",
+        "view_scope": "whole_mailbox",
+    }
+
+
 def test_selected_referent_capsule_preserves_long_opaque_identity_exactly() -> None:
     stable_id = "opaque-attachment-" + ("x" * 700)
     projection = build_conversation_situation_turn_projection(

@@ -441,6 +441,35 @@ def test_presenter_mode_projects_tagged_adaptive_answer(app: Flask) -> None:
     }
 
 
+def test_presenter_mode_recovers_unclosed_terminal_screen_block(app: Flask) -> None:
+    app.config["_ADAPTIVE_TURN_STATE"]["response_text"] = (
+        "<spoken>It was in the email itself, not an attachment.</spoken>\n"
+        "<screen>The message reported **0 attachments**. Its itinerary and "
+        "receipt were embedded in the email body."
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Was that an attachment?", "presenter_mode": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["response"] == (
+        "The message reported **0 attachments**. Its itinerary and receipt "
+        "were embedded in the email body."
+    )
+    assert payload["response_channels"] == {
+        "spoken": "It was in the email itself, not an attachment.",
+        "screen": (
+            "The message reported **0 attachments**. Its itinerary and receipt "
+            "were embedded in the email body."
+        ),
+        "format": "tagged_blocks_v1",
+    }
+    assert payload["llm_debug"]["screen_backfill_second_pass_attempted"] is False
+
+
 def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
     app: Flask,
     monkeypatch: pytest.MonkeyPatch,

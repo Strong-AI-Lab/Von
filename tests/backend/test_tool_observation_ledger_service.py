@@ -116,6 +116,23 @@ def test_ledger_records_cancelled_pending_tool_from_runtime_diagnostics() -> Non
     assert ledger["observations"][0]["status"] == "cancelled"
 
 
+def test_pending_observation_is_not_misreported_as_timeout_or_cancellation() -> None:
+    ledger = build_tool_observation_ledger(
+        tool_observations=[
+            {
+                "source": "background_task_progress",
+                "tool": "gmail_get_message",
+                "status": "pending",
+                "call_id": "call-mail-pending",
+            }
+        ]
+    )
+
+    assert ledger["status_counts"] == {"pending": 1}
+    assert ledger["has_pending_observation"] is True
+    assert ledger["has_timeout_or_cancellation"] is False
+
+
 def test_turn_execution_record_projects_tool_observation_ledger() -> None:
     record = build_turn_execution_record(
         request_id="req-tool-ledger",

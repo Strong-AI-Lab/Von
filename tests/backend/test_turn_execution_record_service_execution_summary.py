@@ -702,6 +702,7 @@ def test_timeout_transport_metadata_survives_durable_turn_record_readback(
                 "handler_duration_ms": None,
                 "handler_elapsed_ms": 38.5,
                 "transport_overhead_ms": 0.5,
+                "result_projection_duration_ms": 24_000.0,
                 "timeout_sec": 0.04,
                 "advisory_timeout_sec": 0.01,
                 "advisory_budget_exceeded": True,
@@ -737,6 +738,7 @@ def test_timeout_transport_metadata_survives_durable_turn_record_readback(
     assert invocation["queue_duration_ms"] == 1.5
     assert invocation["handler_elapsed_ms"] == 38.5
     assert invocation["transport_overhead_ms"] == 0.5
+    assert invocation["result_projection_duration_ms"] == 24_000.0
     assert invocation["transport"] == transport_metadata
 
 

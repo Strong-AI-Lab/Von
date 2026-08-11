@@ -22,6 +22,7 @@ from src.backend.services.tool_evidence_projection_service import (
     project_surfaceable_concept_evidence,
     project_tool_payload_for_llm,
     render_surfaceable_concept_lines,
+    resolve_tool_projection_contract,
     surfaceable_concept_ids_from_evidence,
 )
 
@@ -191,6 +192,33 @@ def test_projection_runtime_uses_represented_mock_contract_without_tool_branch(
         }
     ]
     assert telemetry["missing_required_fields"] == []
+
+
+def test_projection_runtime_uses_supplied_turn_snapshot_without_reresolving(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _materialise_mock_projection_contract()
+    contract = resolve_tool_projection_contract("example_projection_tool")
+    assert contract is not None
+
+    def fail_if_resolved(_tool_name: str) -> None:
+        raise AssertionError("supplied turn snapshot must bypass live resolution")
+
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "resolve_tool_projection_contract",
+        fail_if_resolved,
+    )
+
+    projected = project_tool_payload_for_llm(
+        "example_projection_tool",
+        {"headline": "Snapshot projection works"},
+        contract=contract,
+    )
+
+    assert projected is not None
+    assert projected["title"] == "Snapshot projection works"
 
 
 def test_projection_runtime_reports_missing_required_fields(

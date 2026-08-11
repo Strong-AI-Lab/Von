@@ -553,10 +553,10 @@ def build_tool_observation_ledger(
         ),
         "has_empty_observation": bool(status_counts.get("empty_result")),
         "has_non_empty_observation": bool(status_counts.get("non_empty_result")),
+        "has_pending_observation": bool(status_counts.get("pending")),
         "has_timeout_or_cancellation": bool(
             status_counts.get("timeout")
             or status_counts.get("cancelled")
-            or status_counts.get("pending")
         ),
         "observations": observations,
     }

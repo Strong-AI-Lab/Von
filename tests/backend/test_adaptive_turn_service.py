@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from threading import Event
 from types import SimpleNamespace
 from typing import Any
@@ -1511,6 +1512,10 @@ def test_authorised_resource_choice_maps_selector_and_records_scope() -> None:
     assert "zhan@example.test" in system_message
     assert "whole_mailbox" in system_message
     assert "profile_default_view" in system_message
+    assert "request leaves the connector resource unqualified" in system_message
+    assert "selected human-readable resource in the first answer" in system_message
+    assert "Repeat it only when the resource changes" in system_message
+    assert "never expose an internal resource ID or runtime alias" in system_message
     assert "zhan-runtime" not in system_message
     assert seen_arguments == {
         "profile": "zhan-runtime",
@@ -5546,7 +5551,7 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier(
     monkeypatch.setattr(
         "src.backend.services.tool_evidence_projection_service."
         "project_tool_payload_for_llm",
-        lambda tool_name, payload: (
+        lambda tool_name, payload, **_kwargs: (
             {
                 "_llm_view": "test_projection.v1",
                 "relationships": {
@@ -5556,6 +5561,11 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier(
             if tool_name == "general_read" and payload.get("answer") == "found"
             else None
         ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "resolve_tool_projection_contract",
+        lambda _tool_name: object(),
     )
 
     def handler(**kwargs: Any) -> dict[str, Any]:
@@ -5633,6 +5643,101 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier(
     assert raw_tail not in json.dumps(result.tool_invocations)
     assert all(
         invocation.get("tool") != "general_write"
+        for invocation in result.tool_invocations
+    )
+
+
+def test_repeated_tool_results_resolve_projection_contract_once_per_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection_contract = object()
+    resolve_calls: list[str] = []
+    resolve_actor_scopes: list[tuple[str | None, str | None]] = []
+    projection_calls: list[tuple[str, object | None]] = []
+
+    def resolve_contract(tool_name: str) -> object:
+        resolve_calls.append(tool_name)
+        resolve_actor_scopes.append(
+            (
+                get_effective_user_concept_id(),
+                get_effective_organisation_concept_id(),
+            )
+        )
+        return projection_contract
+
+    def project_payload(
+        tool_name: str,
+        payload: Mapping[str, Any],
+        *,
+        contract: object | None = None,
+    ) -> dict[str, Any]:
+        projection_calls.append((tool_name, contract))
+        return {"_llm_view": "test_projection.v1", "answer": payload["answer"]}
+
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "resolve_tool_projection_contract",
+        resolve_contract,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "project_tool_payload_for_llm",
+        project_payload,
+    )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="call-projection-1",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "first"},
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="call-projection-2",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "second"},
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response="Both reads completed."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **kwargs: {
+                "success": True,
+                "answer": str(kwargs.get("query") or ""),
+            }
+        ),
+        prompt="Read both candidates.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-projection-cache",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "Both reads completed."
+    assert resolve_calls == ["general_read"]
+    assert resolve_actor_scopes == [("#V#person", "#V#org")]
+    assert projection_calls == [
+        ("general_read", projection_contract),
+        ("general_read", projection_contract),
+    ]
+    assert all(
+        invocation["result_projection_duration_ms"] >= 0
         for invocation in result.tool_invocations
     )
 

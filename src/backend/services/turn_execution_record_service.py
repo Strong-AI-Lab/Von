@@ -5313,6 +5313,7 @@ def _summarise_tool_invocations(
             "handler_duration_ms",
             "handler_elapsed_ms",
             "transport_overhead_ms",
+            "result_projection_duration_ms",
             "timeout_sec",
             "advisory_timeout_sec",
         ):
@@ -8348,7 +8349,6 @@ def _select_answer_material_referents(
         label_normalised, label_tokens = parsed_label
         stable_id = normalise_exact_referent_id(candidate.get("stable_id")) or ""
         stable_id_normalised = stable_id.casefold()
-        score = 0
         offsets: list[int] = []
         exact_label_match = bool(
             label_normalised and label_normalised in answer_normalised
@@ -8357,10 +8357,8 @@ def _select_answer_material_referents(
             stable_id_normalised and stable_id_normalised in answer_normalised
         )
         if exact_label_match:
-            score += 10_000 + len(label_normalised)
             offsets.append(answer_normalised.index(label_normalised))
         if exact_id_match:
-            score += 20_000 + len(stable_id_normalised)
             offsets.append(answer_normalised.index(stable_id_normalised))
         matched_label_tokens: list[str] = []
         for token in label_tokens:
@@ -8369,7 +8367,6 @@ def _select_answer_material_referents(
             if candidate_count > 1 and token_document_frequency.get(token, 0) != 1:
                 continue
             matched_label_tokens.append(token)
-            score += len(token)
             offsets.append(answer_token_offsets[token])
         partial_label_match = _turn_projection_partial_label_match_is_material(
             label_tokens=label_tokens,
@@ -8588,6 +8585,23 @@ def build_conversation_situation_turn_projection(
                         candidate["resource_scope"] = resource_scope
                     if actor_scope_ref:
                         candidate["actor_scope_ref"] = actor_scope_ref
+                    previous_candidate = referent_candidates_by_key.get(
+                        candidate_key
+                    )
+                    previous_resource_scope = (
+                        previous_candidate.get("resource_scope")
+                        if isinstance(previous_candidate, Mapping)
+                        else None
+                    )
+                    if isinstance(previous_resource_scope, Mapping):
+                        candidate["resource_scope"] = {
+                            **previous_resource_scope,
+                            **(
+                                resource_scope
+                                if isinstance(resource_scope, Mapping)
+                                else {}
+                            ),
+                        }
                     referent_candidates_by_key[candidate_key] = candidate
 
             if not is_write:
