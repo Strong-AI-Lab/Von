@@ -599,11 +599,30 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "gmail",
         "display_template": "Attachment: {filename}",
+        "dispatch_surface_family": "gmail",
+        "evidence_surface_family": "gmail",
+        "external_surface": True,
+        "operation_category": "read",
         "planner_hint": (
             "Call after gmail_get_message when an attachment is relevant to the "
-            "user's request. The call itself registers or reuses an actor-scoped "
-            "computer_file_copy and returns canonical read-back plus extracted text; "
-            "do not expect or attempt to decode raw base64."
+            "user's request. It returns bounded text extracted in memory and creates "
+            "no durable state; do not expect or attempt to decode raw base64. Use "
+            "gmail_import_attachment only when the user asks to retain the file."
+        ),
+    },
+    "gmail_import_attachment": {
+        "salience": "medium",
+        "category": "gmail",
+        "display_template": "Imported attachment: {filename}",
+        "dispatch_surface_family": "gmail",
+        "evidence_surface_family": "gmail",
+        "external_surface": True,
+        "operation_category": "write",
+        "planner_hint": (
+            "Use only when the user or represented workflow asks to save, import, "
+            "or represent a Gmail attachment. Requires profile, message_id, "
+            "attachment_id, and allow_import=true; returns an actor-scoped durable "
+            "computer_file_copy handle with canonical read-back."
         ),
     },
     "gmail_list_labels": {
@@ -1294,6 +1313,7 @@ _DEFAULT_WRITE_TOOL_NAMES = {
     "materialise_scholarly_representation_for_file_copy",
     "import_url_file_copy",
     "gmail_create_label",
+    "gmail_import_attachment",
     "gmail_modify_labels",
     "gmail_send_message",
     "issue_write",

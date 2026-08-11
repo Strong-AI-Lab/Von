@@ -149,6 +149,9 @@ def _ensure_conversation_turn_prompt_support(
 
     support_bootstraps: dict[str, Any] = {}
     if ensure_tool_evidence_contracts:
+        from .gmail_tool_evidence_contract_vontology_service import (
+            bootstrap_gmail_tool_evidence_contract,
+        )
         from .grounded_read_tool_evidence_contract_vontology_service import (
             bootstrap_grounded_read_tool_evidence_contract,
         )
@@ -157,6 +160,7 @@ def _ensure_conversation_turn_prompt_support(
         )
 
         for name, bootstrap in (
+            ("gmail_tool_evidence_contract", bootstrap_gmail_tool_evidence_contract),
             ("jira_tool_evidence_contract", bootstrap_jira_tool_evidence_contract),
             (
                 "grounded_read_tool_evidence_contract",

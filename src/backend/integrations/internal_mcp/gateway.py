@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 _LOG_TAG = "[mcp_gateway]"
 _SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER = 1.25
 _SUCCESSFUL_DURATION_HARD_MULTIPLIER = 2.0
+INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE = "tool_payload_fallback"
+INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE = "trusted_operator_payload_fallback"
 _ACTOR_CONTEXT_SOURCE: ContextVar[str | None] = ContextVar(
     "internal_mcp_actor_context_source",
     default=None,
@@ -62,6 +64,24 @@ def get_internal_mcp_preexisting_actor_context() -> (
     """Return actor authority present before tool-payload fallback was applied."""
 
     return _PREEXISTING_ACTOR_CONTEXT.get()
+
+
+def internal_mcp_actor_context_is_untrusted_payload_fallback() -> bool:
+    """Return whether actor values came only from untrusted tool arguments."""
+
+    return (
+        get_internal_mcp_actor_context_source()
+        == INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE
+    )
+
+
+def internal_mcp_actor_context_is_trusted_local_operator() -> bool:
+    """Return whether the explicit local-operator route bound this invocation."""
+
+    return (
+        get_internal_mcp_actor_context_source()
+        == INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
+    )
 
 
 @contextmanager
@@ -118,6 +138,10 @@ class MethodDefinition:
     ordinary_turn_excluded_reason: str | None = None
     # Map capability arguments to values resolved by the trusted entry point.
     ordinary_turn_trusted_argument_bindings: Mapping[str, str] | None = None
+    # Map capability arguments to actor-authorised constrained choices resolved
+    # by the trusted entry point. The model may choose only from that bounded
+    # set; dispatch maps the stable selector to the current runtime value.
+    ordinary_turn_trusted_argument_choice_bindings: Mapping[str, str] | None = None
     # Evidence-backed option-level boundary. The model cannot see or override
     # these values on an ordinary turn; keep the rest of the capability usable.
     ordinary_turn_fixed_arguments: Mapping[str, Any] | None = None
@@ -318,6 +342,14 @@ class MethodCatalogue:
                     dict(definition.ordinary_turn_trusted_argument_bindings)
                     if isinstance(
                         definition.ordinary_turn_trusted_argument_bindings,
+                        Mapping,
+                    )
+                    else None
+                ),
+                "ordinary_turn_trusted_argument_choice_bindings": (
+                    dict(definition.ordinary_turn_trusted_argument_choice_bindings)
+                    if isinstance(
+                        definition.ordinary_turn_trusted_argument_choice_bindings,
                         Mapping,
                     )
                     else None
@@ -673,9 +705,9 @@ class InternalMCPGateway:
                 "preexisting_authenticated_or_workflow_context"
                 if preexisting_actor_context is not None
                 else (
-                    "trusted_operator_payload_fallback"
+                    INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
                     if self._trusted_actor_payload_fallback
-                    else "tool_payload_fallback"
+                    else INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE
                 )
             )
             actor_source_token = _ACTOR_CONTEXT_SOURCE.set(actor_source)

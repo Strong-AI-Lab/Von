@@ -25,7 +25,7 @@ from .workflow_vontology_materialisation_helpers import (
     suspend_event_workflow_integration,
 )
 
-MAIL_PROFILE_RESOURCE_SCHEMA_VERSION = "mail_profile_resource.v1"
+MAIL_PROFILE_RESOURCE_SCHEMA_VERSION = "mail_profile_resource.v2"
 MAIL_PROFILE_RESOURCE_SOURCE_TAG = "JVNAUTOSCI-2295"
 MAIL_PROFILE_RESOURCE_MANAGED_BY = "mail_profile_resource_vontology_service"
 
@@ -36,6 +36,9 @@ HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID = "#V#has_authorised_mail_profile"
 HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID = "#V#has_default_mail_profile"
 HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID = "#V#has_runtime_profile_alias"
 HAS_OAUTH_SCOPE_PREDICATE_ID = "#V#has_oauth_scope"
+MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID = (
+    "#V#mail_profile_represents_identity"
+)
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,19 @@ _VOCABULARY_CONCEPT_SPECS: tuple[ConceptSpec, ...] = (
         create_as_instance=True,
         category="predicate",
     ),
+    _concept(
+        concept_id=MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID,
+        name="mail profile represents identity",
+        description=(
+            "Predicate linking a mail profile resource to the person, agent, "
+            "organisation, team, or other represented identity whose mailbox "
+            "the profile denotes. This differs from who may use the profile "
+            "and from which profile is that actor's default."
+        ),
+        parent_concept_ids=(PREDICATE_TYPE_ID, BINARY_PREDICATE_TYPE_ID),
+        create_as_instance=True,
+        category="predicate",
+    ),
 )
 
 
@@ -188,6 +204,69 @@ def gmail_profile_alias_concept_id(profile_id: str) -> str:
     return f"#V#gmail_runtime_profile_alias_{normalise_profile_id_for_concept_id(profile_id)}"
 
 
+def list_authorised_gmail_profiles_for_user(
+    *,
+    user_concept_id: str,
+) -> dict[str, Any]:
+    """List represented Gmail profile choices within one actor's authority.
+
+    The result deliberately contains only non-secret represented resource and
+    runtime-alias identities. Runtime configuration and OAuth mailbox labels
+    are intersected at the request boundary, where they can be kept scoped to
+    the authenticated actor rather than materialised as global profile facts.
+    """
+
+    cleaned_user_id = str(user_concept_id or "").strip()
+    user_doc = load_concept(cleaned_user_id)
+    if not isinstance(user_doc, Mapping):
+        return {
+            "success": False,
+            "reason_code": "mail_profile_actor_not_represented",
+            "profiles": [],
+        }
+
+    relationships = user_doc.get("relationships")
+    relation_map = relationships if isinstance(relationships, Mapping) else {}
+    authorised_resource_ids = normalise_relationship_targets(
+        relation_map.get(HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID)
+    )
+    default_resource_ids = set(
+        normalise_relationship_targets(
+            relation_map.get(HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID)
+        )
+    )
+
+    profiles: list[dict[str, Any]] = []
+    for resource_id in authorised_resource_ids:
+        resource_doc = load_concept(resource_id)
+        if not isinstance(resource_doc, Mapping):
+            continue
+        attributes = resource_doc.get("attributes")
+        if not isinstance(attributes, Mapping):
+            continue
+        alias = attributes.get("runtime_profile_alias")
+        if not isinstance(alias, str) or not alias.strip():
+            continue
+        profiles.append(
+            {
+                "profile_id": alias.strip(),
+                "profile_resource_concept_id": resource_id,
+                "is_default": resource_id in default_resource_ids,
+                "represented_identity_concept_ids": normalise_relationship_targets(
+                    (resource_doc.get("relationships") or {}).get(
+                        MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID
+                    )
+                ),
+            }
+        )
+
+    return {
+        "success": True,
+        "reason_code": "authorised_mail_profiles_resolved",
+        "profiles": profiles,
+    }
+
+
 def resolve_authorised_gmail_profile_for_user(
     *,
     user_concept_id: str,
@@ -199,42 +278,33 @@ def resolve_authorised_gmail_profile_for_user(
     configured profiles nor infers ownership from a runtime alias alone.
     """
 
-    cleaned_user_id = str(user_concept_id or "").strip()
     requested = str(requested_profile_id or "").strip() or None
-    user_doc = load_concept(cleaned_user_id)
-    if not isinstance(user_doc, Mapping):
+    authority = list_authorised_gmail_profiles_for_user(
+        user_concept_id=user_concept_id,
+    )
+    if not authority.get("success"):
         return {
             "success": False,
-            "reason_code": "mail_profile_actor_not_represented",
+            "reason_code": authority.get("reason_code")
+            or "mail_profile_actor_not_represented",
             "profile_id": None,
         }
 
-    relationships = user_doc.get("relationships")
-    relation_map = relationships if isinstance(relationships, Mapping) else {}
-    authorised_resource_ids = normalise_relationship_targets(
-        relation_map.get(HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID)
-    )
-    default_resource_ids = normalise_relationship_targets(
-        relation_map.get(HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID)
-    )
-
-    aliases_by_resource: dict[str, str] = {}
-    for resource_id in authorised_resource_ids:
-        resource_doc = load_concept(resource_id)
-        if not isinstance(resource_doc, Mapping):
-            continue
-        attributes = resource_doc.get("attributes")
-        if not isinstance(attributes, Mapping):
-            continue
-        alias = attributes.get("runtime_profile_alias")
-        if isinstance(alias, str) and alias.strip():
-            aliases_by_resource[resource_id] = alias.strip()
+    profiles = [
+        dict(item)
+        for item in authority.get("profiles") or []
+        if isinstance(item, Mapping)
+    ]
 
     selected_resource_id: str | None = None
+    selected_profile_id: str | None = None
     if requested is not None:
-        for resource_id, alias in aliases_by_resource.items():
+        for profile in profiles:
+            resource_id = str(profile.get("profile_resource_concept_id") or "")
+            alias = str(profile.get("profile_id") or "")
             if requested in {resource_id, alias}:
                 selected_resource_id = resource_id
+                selected_profile_id = alias
                 break
         if selected_resource_id is None:
             return {
@@ -243,14 +313,25 @@ def resolve_authorised_gmail_profile_for_user(
                 "profile_id": None,
             }
     else:
-        selected_resource_id = next(
-            (
-                resource_id
-                for resource_id in default_resource_ids
-                if resource_id in aliases_by_resource
-            ),
-            None,
-        )
+        default_profiles = [
+            profile for profile in profiles if profile.get("is_default") is True
+        ]
+        if len(default_profiles) > 1:
+            return {
+                "success": False,
+                "reason_code": "multiple_default_mail_profiles_represented",
+                "profile_id": None,
+            }
+        selected_profile = default_profiles[0] if default_profiles else None
+        selection_source = "represented_default"
+        if selected_profile is None and len(profiles) == 1:
+            selected_profile = profiles[0]
+            selection_source = "sole_authorised_profile"
+        if selected_profile is not None:
+            selected_resource_id = str(
+                selected_profile.get("profile_resource_concept_id") or ""
+            )
+            selected_profile_id = str(selected_profile.get("profile_id") or "")
         if selected_resource_id is None:
             return {
                 "success": False,
@@ -261,9 +342,9 @@ def resolve_authorised_gmail_profile_for_user(
     return {
         "success": True,
         "reason_code": "authorised_mail_profile_resolved",
-        "profile_id": aliases_by_resource[selected_resource_id],
+        "profile_id": selected_profile_id,
         "profile_resource_concept_id": selected_resource_id,
-        "selection_source": "request" if requested is not None else "represented_default",
+        "selection_source": "request" if requested is not None else selection_source,
     }
 
 
@@ -384,6 +465,7 @@ def _profile_relationship_specs(
     user_concept_id: str,
     profile_ids: Sequence[str],
     default_profile_id: str | None,
+    profile_identity_concept_ids: Mapping[str, str] | None = None,
 ) -> tuple[RelationshipSpec, ...]:
     specs: list[RelationshipSpec] = []
     seen: set[str] = set()
@@ -415,6 +497,17 @@ def _profile_relationship_specs(
                     source_id=user_concept_id,
                     predicate=HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID,
                     target_id=resource_concept_id,
+                )
+            )
+        identity_concept_id = str(
+            (profile_identity_concept_ids or {}).get(profile_id) or ""
+        ).strip()
+        if identity_concept_id:
+            specs.append(
+                RelationshipSpec(
+                    source_id=resource_concept_id,
+                    predicate=MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID,
+                    target_id=identity_concept_id,
                 )
             )
     return tuple(specs)
@@ -457,6 +550,7 @@ def materialise_gmail_profile_resources_for_user(
     profile_ids: Sequence[str],
     default_profile_id: str | None = None,
     profile_scopes: Mapping[str, Sequence[str]] | None = None,
+    profile_identity_concept_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Materialise safe Gmail profile resource facts for a user.
 
@@ -502,6 +596,7 @@ def materialise_gmail_profile_resources_for_user(
         user_concept_id=cleaned_user_concept_id,
         profile_ids=cleaned_profile_ids,
         default_profile_id=default_profile_id,
+        profile_identity_concept_ids=profile_identity_concept_ids,
     )
 
     with suspend_event_workflow_integration():
@@ -603,9 +698,11 @@ __all__ = [
     "HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID",
     "MAIL_PROFILE_RESOURCE_TYPE_ID",
     "MAIL_PROFILE_RUNTIME_ALIAS_TYPE_ID",
+    "MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID",
     "bootstrap_mail_profile_resource_vocabulary",
     "gmail_profile_alias_concept_id",
     "gmail_profile_resource_concept_id",
+    "list_authorised_gmail_profiles_for_user",
     "materialise_gmail_profile_resources_for_user",
     "normalise_profile_id_for_concept_id",
     "resolve_authorised_gmail_profile_for_user",

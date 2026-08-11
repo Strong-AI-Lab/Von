@@ -8802,6 +8802,76 @@ describe('chat abort behaviour', () => {
     });
 });
 
+describe('chat request resource-scope isolation', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="scrollableField"></div>
+            <div id="loadingIndicator" aria-hidden="true"></div>
+            <button id="sendButton"></button>
+            <button id="abortButton" style="display:none" aria-hidden="true"></button>
+            <textarea id="promptInput"></textarea>
+            <input type="checkbox" id="annotationToggle" />
+        `;
+        __testOnly_setSessionTabsCache([
+            {
+                session_id: 'chat-profile-isolation-session',
+                session_name: 'Profile isolation',
+                message_count: 0,
+                is_completed: false
+            }
+        ]);
+        __testOnly_setActiveChatSession(
+            'chat-profile-isolation-session',
+            'Profile isolation'
+        );
+        __testOnly_setDisplayedHistorySession('chat-profile-isolation-session');
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('omits a stale browser Settings Gmail profile from an ordinary generate request', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: 'stale-oauth-settings-profile'
+        });
+        document.getElementById('promptInput').value = 'Could you check recent email?';
+
+        let generateBody = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateBody = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ response: 'Done.' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        expect(generateBody).toEqual(expect.objectContaining({
+            prompt: 'Could you check recent email?',
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ'
+        }));
+        expect(generateBody).not.toHaveProperty('gmail_profile');
+    });
+});
+
 describe('chat session composer state', () => {
     function renderSessionComposerDom() {
         document.body.innerHTML = `

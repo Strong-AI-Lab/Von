@@ -1019,6 +1019,19 @@ async def list_tools() -> list[Tool]:
     return list(_TOOL_LIST_CACHE)
 
 
+_TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS = frozenset(
+    {
+        "gmail_list_messages",
+        "gmail_get_message",
+        "gmail_send_message",
+        "gmail_get_attachment",
+        "gmail_list_labels",
+        "gmail_create_label",
+        "gmail_modify_labels",
+    }
+)
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ignore[misc]
     """Handle tool calls by delegating to specific handlers."""
@@ -1084,6 +1097,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
             ]
 
     try:
+        if name in _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS:
+            # This stdio server is the deliberately local coding/operator
+            # surface.  Bind that provenance only around its direct Gmail
+            # handlers; chat/workflow proxy calls must retain their own actor
+            # provenance and cannot inherit operator authority from stdio.
+            with bind_internal_mcp_actor_context_source(
+                internal_mcp_gateway_module.INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
+            ):
+                return await handler(parsed_arguments)
         return await handler(parsed_arguments)
     except Exception as exc:  # Defensive: avoid crashing the stdio server
         return [
@@ -3022,11 +3044,11 @@ async def _handle_gmail_get_message(arguments: dict[str, Any]) -> list[TextConte
             )
         ]
     try:
-        result = gmail_service.get_message(
-            profile_id=profile,
-            message_id=message_id,
-            format=arguments.get("format", "metadata"),
-            audit_context=_gmail_audit_context("gmail_get_message"),
+        # Catalogue projection strips raw MIME/base64 and applies the shared
+        # profile invocation-authority boundary.  ``call_tool`` binds this
+        # direct stdio surface as the narrow trusted-local operator route.
+        result = internal_mcp_catalogue_module._gmail_get_message(
+            **arguments,
         )
         return [_json_text(result)]
     except Exception as exc:
@@ -3132,11 +3154,76 @@ async def _handle_gmail_get_attachment(arguments: dict[str, Any]) -> list[TextCo
             )
         ]
     try:
-        result = gmail_service.get_attachment(
-            profile_id=profile,
-            message_id=message_id,
-            attachment_id=attachment_id,
-            audit_context=_gmail_audit_context("gmail_get_attachment"),
+        from src.backend.services.file_bytes_text_projection_service import (
+            DEFAULT_MAX_TEXT_CHARS,
+            MAX_TEXT_CHARS,
+            extract_file_bytes_text_projection,
+        )
+
+        max_bytes, limit_error = (
+            internal_mcp_catalogue_module._gmail_attachment_positive_int(
+                arguments.get("max_bytes"),
+                field_name="max_bytes",
+                default=(
+                    internal_mcp_catalogue_module._DEFAULT_GMAIL_ATTACHMENT_MAX_BYTES
+                ),
+                maximum=(
+                    internal_mcp_catalogue_module._MAX_GMAIL_ATTACHMENT_MAX_BYTES
+                ),
+            )
+        )
+        if limit_error is not None:
+            return [_json_text(limit_error)]
+        max_text_chars, limit_error = (
+            internal_mcp_catalogue_module._gmail_attachment_positive_int(
+                arguments.get("max_text_chars"),
+                field_name="max_text_chars",
+                default=DEFAULT_MAX_TEXT_CHARS,
+                maximum=MAX_TEXT_CHARS,
+            )
+        )
+        if limit_error is not None:
+            return [_json_text(limit_error)]
+        assert max_bytes is not None
+        assert max_text_chars is not None
+
+        source = internal_mcp_catalogue_module._gmail_attachment_source_payload(
+            profile=str(profile),
+            message_id=str(message_id),
+            attachment_id=str(attachment_id),
+            namespace=str(arguments.get("namespace") or "trusted_local_operator"),
+            tool_name="gmail_get_attachment",
+            max_bytes=max_bytes,
+            audit_source="mcp_stdio",
+        )
+        if source.get("success") is not True:
+            return [_json_text(source)]
+        attachment_bytes = source.get("_bytes")
+        if not isinstance(attachment_bytes, bytes):
+            return [
+                _json_error(
+                    "Gmail did not return decodable attachment bytes",
+                    error_code="gmail_attachment_decode_failed",
+                )
+            ]
+        result = internal_mcp_catalogue_module._gmail_attachment_public_source(
+            source
+        )
+        result.update(
+            extract_file_bytes_text_projection(
+                data=attachment_bytes,
+                content_type=(
+                    source.get("content_type")
+                    if isinstance(source.get("content_type"), str)
+                    else None
+                ),
+                original_filename=(
+                    source.get("filename")
+                    if isinstance(source.get("filename"), str)
+                    else None
+                ),
+                max_text_chars=max_text_chars,
+            )
         )
         return [_json_text(result)]
     except Exception as exc:

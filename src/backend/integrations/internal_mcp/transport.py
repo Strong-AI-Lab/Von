@@ -77,6 +77,7 @@ _LATE_COMPLETION_RECEIPT_FIELDS = (
     "status",
     "effect_status",
     "changed",
+    "concept_id",
     "error",
     "error_code",
     "mutation_outcome",
@@ -90,6 +91,7 @@ _INTERMEDIATE_EFFECT_RECEIPT_FIELDS = (
     "changed",
     "workflow_id",
     "instance_id",
+    "concept_id",
     "created_new",
     "durable_submission_status",
     "final_status",
@@ -817,7 +819,12 @@ class InternalMCPTransport:
             if isinstance(effect_receipt, Mapping)
             else ""
         )
-        if outcome_unknown and durable_instance_id:
+        durable_concept_id = (
+            str((effect_receipt or {}).get("concept_id") or "").strip()
+            if isinstance(effect_receipt, Mapping)
+            else ""
+        )
+        if outcome_unknown and (durable_instance_id or durable_concept_id):
             bounded_receipt = dict(effect_receipt or {})
             payload.update(
                 {
@@ -831,7 +838,8 @@ class InternalMCPTransport:
                         else None
                     ),
                     "workflow_id": bounded_receipt.get("workflow_id"),
-                    "instance_id": durable_instance_id,
+                    "instance_id": durable_instance_id or None,
+                    "concept_id": durable_concept_id or None,
                     "created_new": bounded_receipt.get("created_new"),
                     "durable_submission_status": bounded_receipt.get(
                         "durable_submission_status"
@@ -839,13 +847,22 @@ class InternalMCPTransport:
                     "durable_effect_receipt": bounded_receipt,
                 }
             )
-            payload["recovery_affordances"] = [
-                {
-                    "action_type": "inspect_workflow_instance",
-                    "capability": "workflow_get_instance",
-                    "arguments": {"instance_id": durable_instance_id},
-                }
-            ]
+            if durable_instance_id:
+                payload["recovery_affordances"] = [
+                    {
+                        "action_type": "inspect_workflow_instance",
+                        "capability": "workflow_get_instance",
+                        "arguments": {"instance_id": durable_instance_id},
+                    }
+                ]
+            else:
+                payload["recovery_affordances"] = [
+                    {
+                        "action_type": "inspect_durable_resource",
+                        "capability": "read_file_copy",
+                        "arguments": {"concept_id": durable_concept_id},
+                    }
+                ]
         elif outcome_unknown:
             payload["mutation_outcome"] = "unknown"
             payload["recovery_affordances"] = [

@@ -33326,7 +33326,6 @@ async function handleSendPrompt(options = {}) {
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
-                gmail_profile: userContext.gmail_profile,
                 ...(localRequestedLlm?.requestModel ? { model: localRequestedLlm.requestModel } : {}),
                 ...(localRequestedLlm?.model_parameters ? { model_parameters: localRequestedLlm.model_parameters } : {}),
                 ...(request.pendingFileCopyConceptId ? {

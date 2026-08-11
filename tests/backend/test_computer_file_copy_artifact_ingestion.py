@@ -257,3 +257,78 @@ def test_import_bytes_file_copy_reuses_existing_concept_without_reupload(monkeyp
     assert result["reused_existing"] is True
     assert result["storage"]["backend"] == "s3"
     assert result["storage"]["key"] == "imports/user/hash/notes.txt"
+
+
+def test_import_bytes_file_copy_reports_blob_write_as_indeterminate(monkeypatch):
+    from src.backend.services import computer_file_copy_service as svc
+    from src.backend.services.blob_uploads import BlobUploadError
+
+    monkeypatch.setattr(
+        svc,
+        "find_existing_computer_file_copy_instance",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_uploads.put_bytes_durable",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BlobUploadError("backend disconnected after put")
+        ),
+    )
+
+    result = svc.import_bytes_file_copy(
+        data=b"possibly stored",
+        user_concept_id="#V#user",
+        original_filename="notes.txt",
+        content_type="text/plain",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "blob_store_upload_failed"
+    assert result["effect_status"] == "indeterminate"
+    assert result["mutation_outcome"] == "unknown"
+    assert result["outcome_finality"] == "blob_write_indeterminate"
+
+
+def test_import_bytes_file_copy_reports_stored_blob_before_registration_failure(
+    monkeypatch,
+):
+    from src.backend.services import computer_file_copy_service as svc
+    from src.backend.services.blob_store import BlobRef
+    from src.backend.services.blob_uploads import StoredBytes
+
+    monkeypatch.setattr(
+        svc,
+        "find_existing_computer_file_copy_instance",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_uploads.put_bytes_durable",
+        lambda **kwargs: StoredBytes(
+            ref=BlobRef(
+                backend="s3",
+                key=str(kwargs["key"]),
+                uri=f"s3://private/{kwargs['key']}",
+            ),
+            sha256="stored-sha",
+            size_bytes=len(kwargs["data"]),
+        ),
+    )
+    monkeypatch.setattr(
+        svc,
+        "create_computer_file_copy_instance",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("mongo unavailable")),
+    )
+
+    result = svc.import_bytes_file_copy(
+        data=b"stored before registration",
+        user_concept_id="#V#user",
+        original_filename="notes.txt",
+        content_type="text/plain",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "file_copy_register_failed"
+    assert result["effect_status"] == "partial"
+    assert result["changed"] is True
+    assert result["mutation_outcome"] == "partial"
+    assert result["outcome_finality"] == "blob_persisted_registration_failed"

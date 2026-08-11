@@ -1228,6 +1228,13 @@ def import_bytes_file_copy(
             "message": str(exc),
             "blob_key": resolved_blob_key,
             "registration_lookup": registration_lookup,
+            # A blob backend may persist bytes before reporting an error or
+            # returning an unusable reference.  The caller must reconcile this
+            # exact deterministic key rather than claiming no effect.
+            "effect_phase": "blob_write",
+            "effect_status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "outcome_finality": "blob_write_indeterminate",
         }
 
     try:
@@ -1253,6 +1260,14 @@ def import_bytes_file_copy(
             "message": str(exc),
             "blob_key": resolved_blob_key,
             "registration_lookup": registration_lookup,
+            # put_bytes_durable returned a canonical storage reference, so the
+            # requested import made durable physical progress even though no
+            # represented computer-file-copy handle could be registered.
+            "effect_phase": "concept_registration",
+            "effect_status": "partial",
+            "changed": True,
+            "mutation_outcome": "partial",
+            "outcome_finality": "blob_persisted_registration_failed",
         }
 
     typing_result: dict[str, Any] | None = None

@@ -5,22 +5,32 @@
 Von has a profile-scoped Gmail integration exposed through the service layer,
 the internal MCP gateway, and the stdio MCP manifest.
 
-- `gmail_list_profiles(profile?)` lists configured/authorised Gmail profiles
-  without returning secrets.
+- `gmail_list_profiles()` is a deployment-administration diagnostic. It
+  lists configured Gmail profiles without returning secrets and is deliberately
+  excluded from ordinary actor-scoped turns.
 - `gmail_list_messages(profile, query?, label_ids?, max_results?,
-  bypass_profile_query_prefix?)` lists messages.
-- `gmail_get_message(profile, message_id, format?)` fetches message details.
-- `gmail_get_attachment(profile, message_id, attachment_id)` fetches
-  attachments.
+  scope?)` lists messages. `scope` is `whole_mailbox` or
+  `profile_default_view`; omitting it preserves the legacy
+  `bypass_profile_query_prefix` behaviour.
+- `gmail_get_message(profile, message_id, format?, include_body?,
+  max_body_chars?)` returns compact message details, attachment handles, and an
+  optional bounded body projection. It never returns raw MIME or base64 part
+  data.
+- `gmail_get_attachment(profile, message_id, attachment_id)` fetches an
+  attachment and returns a bounded, in-memory text projection without creating
+  durable Von state.
+- `gmail_import_attachment(profile, message_id, attachment_id, allow_import)`
+  is the separate internal-gateway effect for deliberately retaining an
+  attachment as an actor-scoped `computer_file_copy`.
 - `gmail_list_labels(profile)` lists labels.
 - `gmail_modify_labels(profile, message_id, allow_mutation, add_labels?,
   remove_labels?)` performs guarded label mutation.
 - `gmail_send_message(profile, to, subject, body_text, allow_send, cc?, bcc?,
   reply_to?, body_html?)` sends outbound email and returns Gmail send metadata.
 
-The default posture remains read-only. Mutations and sends are available only
-through explicit guard fields, send/mutation-capable OAuth scopes, and the
-workflow/write-policy guards that authorise external side effects.
+The default posture remains read-only. Durable import, mutations, and sends are
+available only through explicit guard fields and the applicable actor,
+workflow, write-policy, and OAuth authority.
 
 ## Gmail REST support matrix
 
@@ -46,10 +56,39 @@ side effect; that authority remains in Vontology/workflow/prompt/tool metadata.
 - **Profile-based config**: Multiple Gmail profiles, each with its own token,
   scopes, and optional label/query filters. Config comes from
   `VON_GMAIL_PROFILES` JSON or the legacy single-profile environment fallback.
+- **Actor-authorised constrained choice**: The trusted conversation entry point
+  intersects represented actor authority with runtime availability and exposes
+  only those stable profile selectors to the model. The deployment-global
+  `gmail_list_profiles` diagnostic is not an ordinary-turn discovery mechanism.
+  A remembered profile is conversational continuity, not a new authority grant;
+  it must still be present in the current trusted choice set.
+- **Separate profile meanings**: A represented profile resource has a stable
+  identity distinct from its current runtime alias. Actor-to-profile authority,
+  the profile's represented mailbox/person identity, the actor's represented
+  default, and the profile's configured mailbox view are separate facts. This
+  lets one actor use many accounts without treating an email address, a browser
+  setting, or a remembered choice as authority.
+- **Semantic mailbox scope**: Unqualified requests for recent, all, or "my"
+  email use `whole_mailbox`, which bypasses that profile's configured
+  `query_prefix` and `label_filter`. A request naming the profile's configured
+  stream or view uses `profile_default_view`. Responses report the actual scope
+  in `effective_query`. The old `bypass_profile_query_prefix` field remains only
+  for callers that omit `scope`; explicit conflicting values are rejected.
 - **Explicit writes**: Label mutation requires `allow_mutation=true`; outbound
-  sending requires `allow_send=true`. The tool descriptions and prompt
-  authority instruct planners not to treat reads or label changes as evidence
-  of sending.
+  sending requires `allow_send=true`; durable attachment retention requires
+  `allow_import=true` on the distinct write-category tool. Attachment
+  inspection never imports, indexes, enriches, or represents the source. The
+  tool descriptions and prompt authority instruct planners not to treat reads
+  or label changes as evidence of sending.
+- **Compact untrusted evidence**: Message detail keeps stable message/thread and
+  attachment identifiers, normalised headers, labels, and bounded text only.
+  MIME traversal, decoded body bytes, archive expansion, document structures,
+  PDF pages, and projected text have named resource ceilings. Images are not
+  implicitly OCRed. PDF text extraction runs only in the Linux subprocess
+  confinement for which hard memory, CPU, wall-time, input, output, and page
+  limits are verified; macOS and other unverified hosts report the projection
+  as unsupported. Crossing a projection ceiling returns explicit partial or
+  unsupported metadata rather than abandoning the whole conversational turn.
 - **Workflow-authorised external side effects**: Gmail send is classified as an
   external non-Vontology write. The generic `workflow_mcp.invoke_tool` path can
   execute it only when represented workflow metadata supplies external mutation
@@ -129,7 +168,11 @@ Optional default:
 ## Risks and mitigations
 
 - Missing tokens or scopes -> explicit errors; no interactive fallback.
-- Profile mix-ups -> explicit profile ID/address resolution per call.
+- Profile mix-ups -> actor-authorised constrained choices, a stable selector to
+  runtime-alias mapping rechecked at the Gmail capability boundary, and explicit
+  effective scope in list-message read-back. Caller-supplied namespace/profile
+  pairs do not create actor authority; deployment-global profile enumeration is
+  a trusted-operator diagnostic.
 - Accidental sends -> `allow_send=true`, send-capable scopes, and external write
   policy are all required.
 - False success claims -> prompt authority requires `gmail_send_message`

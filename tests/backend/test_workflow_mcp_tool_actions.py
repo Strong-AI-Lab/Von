@@ -14,6 +14,8 @@ from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.services.workflow_event_integration_service import (
     current_event_workflow_launch_suppression_reason,
 )
+from src.backend.workflows import workflow_mcp_tool_actions as workflow_mcp_mod
+from src.backend.workflows import workflow_studio_service as studio_mod
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -23,13 +25,6 @@ from src.backend.workflows.action_registry import (
 from src.backend.workflows.durable.subworkflow_actions import (
     register_subworkflow_actions,
 )
-from src.backend.workflows.workflow_mcp_tool_actions import (
-    EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT,
-    SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT,
-    WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
-    register_workflow_mcp_tool_actions,
-)
-from src.backend.workflows import workflow_mcp_tool_actions as workflow_mcp_mod
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -37,7 +32,12 @@ from src.backend.workflows.engine import (
     WorkflowStateSpec,
     WorkflowTransitionSpec,
 )
-from src.backend.workflows import workflow_studio_service as studio_mod
+from src.backend.workflows.workflow_mcp_tool_actions import (
+    EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT,
+    SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT,
+    WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+    register_workflow_mcp_tool_actions,
+)
 
 
 class _FakeGateway:
@@ -568,6 +568,77 @@ def test_workflow_mcp_action_injects_default_gmail_profile_for_strict_schema():
 
     assert result.status == "success"
     assert gateway.invocations == [("gmail_list_labels", {"profile": "zhan-gmail"})]
+
+
+def test_workflow_mcp_action_preserves_actor_authority_for_gmail(monkeypatch):
+    from src.backend.integrations.google import gmail_service
+    from src.backend.services import mail_profile_resource_vontology_service
+
+    monkeypatch.setattr(
+        mail_profile_resource_vontology_service,
+        "resolve_authorised_gmail_profile_for_user",
+        lambda **kwargs: {
+            "success": kwargs == {
+                "user_concept_id": "#V#trusted_user",
+                "requested_profile_id": "actor-mail",
+            },
+            "reason_code": "authorised_mail_profile_resolved",
+            "profile_id": "actor-mail",
+            "profile_resource_concept_id": "#V#gmail_profile_actor_mail",
+        },
+    )
+    monkeypatch.setattr(
+        gmail_service,
+        "load_profiles_from_env",
+        lambda: {
+            "actor-mail": gmail_service.GmailProfile(
+                profile_id="actor-mail",
+                token_path="/nonexistent/actor-mail.json",
+            )
+        },
+    )
+    observed: dict[str, object] = {}
+
+    def _list_labels(**kwargs):
+        observed.update(kwargs)
+        return {"labels": []}
+
+    monkeypatch.setattr(gmail_service, "list_labels", _list_labels)
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "gmail_list_labels",
+            "tool_arguments": {
+                "profile": "actor-mail",
+                "namespace": "#V#forged_user@forged_org",
+            },
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#trusted_user@trusted_org",
+            user_concept_id="#V#trusted_user",
+            org_concept_id="#V#trusted_org",
+        ),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["workflow_actor_scope_enforced"] is True
+    assert observed["profile_id"] == "actor-mail"
+    assert observed["audit_context"] == {
+        "namespace": "#V#trusted_user@trusted_org",
+        "source": "internal_mcp_gateway",
+        "tool": "gmail_list_labels",
+    }
 
 
 def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():

@@ -250,6 +250,8 @@ export async function deleteJson(url) {
 /**
  * Get current user context from sessionStorage/localStorage for request-scoped identity.
  * Returns object with user_id, org_id, language fields (all optional).
+ * Connector administration preferences are deliberately excluded: a
+ * browser-wide OAuth/profile selector is not conversational resource scope.
  *
  * JVNAUTOSCI-1011: Now reads org context from sessionStorage first (window-scoped),
  * falling back to localStorage for backward compatibility.
@@ -279,12 +281,6 @@ export function getUserContext() {
     ctx.language = localStorage.getItem('von_preferred_language') || 'en-NZ';
   } catch (_e) {
     ctx.language = 'en-NZ';
-  }
-
-  try {
-    ctx.gmail_profile = localStorage.getItem('von_gmail_profile') || null;
-  } catch (_e) {
-    ctx.gmail_profile = null;
   }
 
   return ctx;

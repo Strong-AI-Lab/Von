@@ -32,6 +32,7 @@ GMAIL_TOOL_EVIDENCE_CONTRACT_MANAGED_BY = (
 
 GMAIL_TOOL_EVIDENCE_CONTRACT_ID = "#V#gmail_tool_evidence_contract_v1"
 GMAIL_MESSAGE_ENTITY_TYPE_ID = "#V#gmail_message_result_entity_type"
+GMAIL_ATTACHMENT_ENTITY_TYPE_ID = "#V#gmail_attachment_result_entity_type"
 GMAIL_LIST_MESSAGES_TOOL_ID = "#V#gmail_list_messages_tool"
 GMAIL_GET_MESSAGE_TOOL_ID = "#V#gmail_get_message_tool"
 GMAIL_FINAL_ANSWER_VIEW_ID = "#V#gmail_message_final_answer_evidence_view"
@@ -40,6 +41,7 @@ GMAIL_USER_DISPLAY_VIEW_ID = "#V#gmail_message_user_display_evidence_view"
 GMAIL_LIST_DETAIL_AFFORDANCE_ID = "#V#gmail_message_list_detail_affordance"
 
 GMAIL_MESSAGES_COLLECTION_FIELD_ID = "#V#gmail_messages_collection_field"
+GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID = "#V#gmail_attachments_collection_field"
 GMAIL_PROFILE_ARGUMENT_FIELD_ID = "#V#gmail_profile_argument_field"
 GMAIL_QUERY_ARGUMENT_FIELD_ID = "#V#gmail_query_argument_field"
 GMAIL_LABEL_IDS_ARGUMENT_FIELD_ID = "#V#gmail_label_ids_argument_field"
@@ -60,6 +62,12 @@ GMAIL_LABEL_IDS_FIELD_ID = "#V#gmail_label_ids_field"
 GMAIL_PAYLOAD_FIELD_ID = "#V#gmail_payload_field"
 GMAIL_BODY_FIELD_ID = "#V#gmail_body_field"
 GMAIL_BODY_TRUNCATED_FIELD_ID = "#V#gmail_body_truncated_field"
+GMAIL_ATTACHMENT_ID_FIELD_ID = "#V#gmail_attachment_id_field"
+GMAIL_ATTACHMENT_FILENAME_FIELD_ID = "#V#gmail_attachment_filename_field"
+GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID = "#V#gmail_attachment_content_type_field"
+GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID = "#V#gmail_attachment_size_bytes_field"
+GMAIL_ATTACHMENT_COUNT_FIELD_ID = "#V#gmail_attachment_count_field"
+GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID = "#V#gmail_attachments_truncated_field"
 GMAIL_EFFECTIVE_QUERY_FIELD_ID = "#V#gmail_effective_query_field"
 GMAIL_NOTES_FIELD_ID = "#V#gmail_notes_field"
 
@@ -170,7 +178,8 @@ _CORE_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         name="Gmail tool evidence contract v1",
         description=(
             "Gmail-specific contract binding Gmail MCP tools, message fields, "
-            "evidence views, and list/detail follow-up affordances."
+            "compact attachment summaries, evidence views, and list/detail "
+            "follow-up affordances."
         ),
         parent_concept_ids=("#V#tool_interface_contract",),
         category="contract",
@@ -211,6 +220,16 @@ _CORE_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         concept_id=GMAIL_MESSAGE_ENTITY_TYPE_ID,
         name="Gmail message result entity type",
         description="Entity type for a Gmail message item returned by Gmail MCP read tools.",
+        parent_concept_ids=("#V#tool_result_entity_type",),
+        category="entity_type",
+    ),
+    _concept(
+        concept_id=GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
+        name="Gmail attachment result entity type",
+        description=(
+            "Entity type for a compact Gmail attachment summary returned with "
+            "one message detail result."
+        ),
         parent_concept_ids=("#V#tool_result_entity_type",),
         category="entity_type",
     ),
@@ -259,6 +278,15 @@ _FIELD_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         "Gmail messages collection field",
         "Collection field containing Gmail message rows in gmail_list_messages output.",
         field_key="messages",
+    ),
+    _field(
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+        "Gmail attachments collection field",
+        (
+            "Bounded collection of compact attachment summaries in "
+            "gmail_get_message output."
+        ),
+        field_key="attachments",
     ),
     _field(
         GMAIL_PROFILE_ARGUMENT_FIELD_ID,
@@ -352,8 +380,12 @@ _FIELD_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
     ),
     _field(
         GMAIL_PAYLOAD_FIELD_ID,
-        "Gmail payload field",
-        "Full Gmail payload object returned by detail calls.",
+        "Legacy Gmail payload field",
+        (
+            "Legacy field retained only so activation can remove obsolete raw-payload "
+            "relationships from earlier contract revisions; it is not a current tool "
+            "output field or evidence-view member."
+        ),
         field_key="payload",
     ),
     _field(
@@ -367,6 +399,42 @@ _FIELD_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         "Gmail body truncated field",
         "Whether the returned bounded message body omitted trailing characters.",
         field_key="body_truncated",
+    ),
+    _field(
+        GMAIL_ATTACHMENT_ID_FIELD_ID,
+        "Gmail attachment identifier field",
+        "Exact opaque Gmail attachment handle needed by attachment follow-up tools.",
+        field_key="attachment_id",
+    ),
+    _field(
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        "Gmail attachment filename field",
+        "Display filename from one compact Gmail attachment summary.",
+        field_key="filename",
+    ),
+    _field(
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        "Gmail attachment content type field",
+        "MIME content type from one compact Gmail attachment summary.",
+        field_key="content_type",
+    ),
+    _field(
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+        "Gmail attachment size field",
+        "Reported byte size from one compact Gmail attachment summary.",
+        field_key="size_bytes",
+    ),
+    _field(
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+        "Gmail attachment count field",
+        "Number of attachment parts observed during bounded MIME traversal.",
+        field_key="attachment_count",
+    ),
+    _field(
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
+        "Gmail attachments truncated field",
+        "Whether the compact attachment inventory is incomplete.",
+        field_key="attachments_truncated",
     ),
     _field(
         GMAIL_EFFECTIVE_QUERY_FIELD_ID,
@@ -392,6 +460,7 @@ _WIRE_KEYS = (
     "format",
     "include_body",
     "messages",
+    "attachments",
     "message_id",
     "id",
     "threadId",
@@ -404,6 +473,12 @@ _WIRE_KEYS = (
     "payload",
     "body",
     "body_truncated",
+    "attachment_id",
+    "filename",
+    "content_type",
+    "size_bytes",
+    "attachment_count",
+    "attachments_truncated",
     "effective_query",
     "notes",
 )
@@ -417,6 +492,23 @@ _PAYLOAD_PATH_SPECS: tuple[GmailConceptSpec, ...] = (
     _payload_path("#V#gmail_payload_path_messages_message_id", "messages[].message_id"),
     _payload_path("#V#gmail_payload_path_messages_id", "messages[].id"),
     _payload_path("#V#gmail_payload_path_messages_thread_id", "messages[].threadId"),
+    _payload_path("#V#gmail_payload_path_attachments", "attachments"),
+    _payload_path(
+        "#V#gmail_payload_path_attachments_attachment_id",
+        "attachments[].attachment_id",
+    ),
+    _payload_path(
+        "#V#gmail_payload_path_attachments_filename",
+        "attachments[].filename",
+    ),
+    _payload_path(
+        "#V#gmail_payload_path_attachments_content_type",
+        "attachments[].content_type",
+    ),
+    _payload_path(
+        "#V#gmail_payload_path_attachments_size_bytes",
+        "attachments[].size_bytes",
+    ),
     _payload_path("#V#gmail_payload_path_profile", "profile"),
     _payload_path("#V#gmail_payload_path_effective_query", "effective_query"),
     _payload_path("#V#gmail_payload_path_notes", "notes"),
@@ -432,6 +524,11 @@ _PAYLOAD_PATH_SPECS: tuple[GmailConceptSpec, ...] = (
     _payload_path("#V#gmail_payload_path_payload", "payload"),
     _payload_path("#V#gmail_payload_path_body", "body"),
     _payload_path("#V#gmail_payload_path_body_truncated", "body_truncated"),
+    _payload_path("#V#gmail_payload_path_attachment_count", "attachment_count"),
+    _payload_path(
+        "#V#gmail_payload_path_attachments_truncated",
+        "attachments_truncated",
+    ),
     _payload_path("#V#gmail_payload_path_header_from", "payload.headers[name=From]"),
     _payload_path(
         "#V#gmail_payload_path_header_subject", "payload.headers[name=Subject]"
@@ -465,6 +562,7 @@ def _wire_key_id(key: str) -> str:
 def _field_alias_relationships() -> tuple[GmailRelationshipSpec, ...]:
     alias_map = {
         GMAIL_MESSAGES_COLLECTION_FIELD_ID: ("messages",),
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID: ("attachments",),
         GMAIL_PROFILE_ARGUMENT_FIELD_ID: ("profile",),
         GMAIL_QUERY_ARGUMENT_FIELD_ID: ("query",),
         GMAIL_LABEL_IDS_ARGUMENT_FIELD_ID: ("label_ids",),
@@ -483,6 +581,12 @@ def _field_alias_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_PAYLOAD_FIELD_ID: ("payload",),
         GMAIL_BODY_FIELD_ID: ("body",),
         GMAIL_BODY_TRUNCATED_FIELD_ID: ("body_truncated",),
+        GMAIL_ATTACHMENT_ID_FIELD_ID: ("attachment_id",),
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID: ("filename",),
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID: ("content_type",),
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID: ("size_bytes",),
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID: ("attachment_count",),
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID: ("attachments_truncated",),
         GMAIL_EFFECTIVE_QUERY_FIELD_ID: ("effective_query",),
         GMAIL_NOTES_FIELD_ID: ("notes",),
     }
@@ -496,6 +600,9 @@ def _field_alias_relationships() -> tuple[GmailRelationshipSpec, ...]:
 def _field_payload_path_relationships() -> tuple[GmailRelationshipSpec, ...]:
     path_map = {
         GMAIL_MESSAGES_COLLECTION_FIELD_ID: ("#V#gmail_payload_path_messages",),
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID: (
+            "#V#gmail_payload_path_attachments",
+        ),
         GMAIL_PROFILE_ARGUMENT_FIELD_ID: ("#V#gmail_payload_path_profile",),
         GMAIL_MESSAGE_ID_FIELD_ID: (
             "#V#gmail_payload_path_messages_message_id",
@@ -527,6 +634,24 @@ def _field_payload_path_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_BODY_TRUNCATED_FIELD_ID: (
             "#V#gmail_payload_path_body_truncated",
         ),
+        GMAIL_ATTACHMENT_ID_FIELD_ID: (
+            "#V#gmail_payload_path_attachments_attachment_id",
+        ),
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID: (
+            "#V#gmail_payload_path_attachments_filename",
+        ),
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID: (
+            "#V#gmail_payload_path_attachments_content_type",
+        ),
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID: (
+            "#V#gmail_payload_path_attachments_size_bytes",
+        ),
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID: (
+            "#V#gmail_payload_path_attachment_count",
+        ),
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID: (
+            "#V#gmail_payload_path_attachments_truncated",
+        ),
         GMAIL_EFFECTIVE_QUERY_FIELD_ID: ("#V#gmail_payload_path_effective_query",),
         GMAIL_NOTES_FIELD_ID: ("#V#gmail_payload_path_notes",),
     }
@@ -541,6 +666,10 @@ def _field_role_relationships() -> tuple[GmailRelationshipSpec, ...]:
     role_map = {
         GMAIL_MESSAGES_COLLECTION_FIELD_ID: (
             "#V#tool_field_role_collection_membership",
+        ),
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID: (
+            "#V#tool_field_role_collection_membership",
+            "#V#tool_field_role_answer_evidence",
         ),
         GMAIL_PROFILE_ARGUMENT_FIELD_ID: ("#V#tool_field_role_follow_up_argument",),
         GMAIL_QUERY_ARGUMENT_FIELD_ID: ("#V#tool_field_role_follow_up_argument",),
@@ -576,6 +705,26 @@ def _field_role_relationships() -> tuple[GmailRelationshipSpec, ...]:
             "#V#tool_field_role_sensitive_content",
         ),
         GMAIL_BODY_TRUNCATED_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
+        GMAIL_ATTACHMENT_ID_FIELD_ID: (
+            "#V#tool_field_role_entity_identifier",
+            "#V#tool_field_role_follow_up_argument",
+        ),
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID: (
+            "#V#tool_field_role_answer_evidence",
+            "#V#tool_field_role_display_label",
+        ),
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID: (
+            "#V#tool_field_role_answer_evidence",
+        ),
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID: (
+            "#V#tool_field_role_answer_evidence",
+        ),
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID: (
+            "#V#tool_field_role_answer_evidence",
+        ),
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID: (
+            "#V#tool_field_role_answer_evidence",
+        ),
         GMAIL_EFFECTIVE_QUERY_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
         GMAIL_NOTES_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
     }
@@ -607,6 +756,7 @@ def _field_policy_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_MESSAGE_ID_FIELD_ID,
         GMAIL_MESSAGE_ID_ARGUMENT_FIELD_ID,
         GMAIL_PROFILE_ARGUMENT_FIELD_ID,
+        GMAIL_ATTACHMENT_ID_FIELD_ID,
     ):
         relationships.append(
             _relationship(
@@ -666,12 +816,18 @@ def _tool_field_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_THREAD_ID_FIELD_ID,
         GMAIL_LABEL_IDS_FIELD_ID,
         GMAIL_SNIPPET_FIELD_ID,
-        GMAIL_PAYLOAD_FIELD_ID,
         GMAIL_SENDER_FIELD_ID,
         GMAIL_SUBJECT_FIELD_ID,
         GMAIL_DATE_FIELD_ID,
         GMAIL_BODY_FIELD_ID,
         GMAIL_BODY_TRUNCATED_FIELD_ID,
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+        GMAIL_ATTACHMENT_ID_FIELD_ID,
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
     )
 
     relationships: list[GmailRelationshipSpec] = []
@@ -701,10 +857,24 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_LABEL_IDS_FIELD_ID,
         GMAIL_BODY_FIELD_ID,
         GMAIL_BODY_TRUNCATED_FIELD_ID,
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+        GMAIL_ATTACHMENT_ID_FIELD_ID,
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
         *GMAIL_REQUIRED_FINAL_ANSWER_FIELD_IDS,
     )
     user_display_fields = (
         GMAIL_MESSAGE_ID_FIELD_ID,
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+        GMAIL_ATTACHMENT_ID_FIELD_ID,
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
         *GMAIL_REQUIRED_FINAL_ANSWER_FIELD_IDS,
     )
     follow_up_fields = (
@@ -726,6 +896,11 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_FINAL_ANSWER_VIEW_ID,
             "#V#evidence_view_applies_to_entity_type",
             GMAIL_MESSAGE_ENTITY_TYPE_ID,
+        ),
+        _relationship(
+            GMAIL_FINAL_ANSWER_VIEW_ID,
+            "#V#evidence_view_applies_to_entity_type",
+            GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
         ),
         _relationship(
             GMAIL_FINAL_ANSWER_VIEW_ID,
@@ -756,6 +931,11 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_USER_DISPLAY_VIEW_ID,
             "#V#evidence_view_applies_to_entity_type",
             GMAIL_MESSAGE_ENTITY_TYPE_ID,
+        ),
+        _relationship(
+            GMAIL_USER_DISPLAY_VIEW_ID,
+            "#V#evidence_view_applies_to_entity_type",
+            GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
         ),
         _relationship(
             GMAIL_USER_DISPLAY_VIEW_ID,
@@ -793,18 +973,11 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
         )
         for field_id in user_display_fields
     )
-    relationships.append(
-        _relationship(
-            GMAIL_USER_DISPLAY_VIEW_ID,
-            "#V#evidence_view_redacts_field",
-            GMAIL_PAYLOAD_FIELD_ID,
-        )
-    )
     return tuple(relationships)
 
 
 def _entity_relationships() -> tuple[GmailRelationshipSpec, ...]:
-    fields = (
+    message_fields = (
         GMAIL_MESSAGE_ID_FIELD_ID,
         GMAIL_THREAD_ID_FIELD_ID,
         GMAIL_SENDER_FIELD_ID,
@@ -812,15 +985,35 @@ def _entity_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_DATE_FIELD_ID,
         GMAIL_SNIPPET_FIELD_ID,
         GMAIL_LABEL_IDS_FIELD_ID,
-        GMAIL_PAYLOAD_FIELD_ID,
         GMAIL_BODY_FIELD_ID,
         GMAIL_BODY_TRUNCATED_FIELD_ID,
+        GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+        GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+        GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
     )
-    return tuple(
-        _relationship(
-            GMAIL_MESSAGE_ENTITY_TYPE_ID, "#V#entity_type_has_tool_field", field_id
-        )
-        for field_id in fields
+    attachment_fields = (
+        GMAIL_ATTACHMENT_ID_FIELD_ID,
+        GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+    )
+    return (
+        *(
+            _relationship(
+                GMAIL_MESSAGE_ENTITY_TYPE_ID,
+                "#V#entity_type_has_tool_field",
+                field_id,
+            )
+            for field_id in message_fields
+        ),
+        *(
+            _relationship(
+                GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
+                "#V#entity_type_has_tool_field",
+                field_id,
+            )
+            for field_id in attachment_fields
+        ),
     )
 
 
@@ -882,6 +1075,11 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_MESSAGE_ENTITY_TYPE_ID,
         ),
         _relationship(
+            GMAIL_GET_MESSAGE_TOOL_ID,
+            "#V#tool_emits_collection_entity_type",
+            GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
+        ),
+        _relationship(
             GMAIL_LIST_MESSAGES_TOOL_ID,
             "#V#list_tool_has_detail_tool",
             GMAIL_GET_MESSAGE_TOOL_ID,
@@ -922,9 +1120,15 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_DATE_FIELD_ID,
             GMAIL_SNIPPET_FIELD_ID,
             GMAIL_LABEL_IDS_FIELD_ID,
-            GMAIL_PAYLOAD_FIELD_ID,
             GMAIL_BODY_FIELD_ID,
             GMAIL_BODY_TRUNCATED_FIELD_ID,
+            GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+            GMAIL_ATTACHMENT_ID_FIELD_ID,
+            GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+            GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+            GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+            GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+            GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
         )
     )
     relationships.extend(
@@ -951,6 +1155,13 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_SNIPPET_FIELD_ID,
             GMAIL_BODY_FIELD_ID,
             GMAIL_BODY_TRUNCATED_FIELD_ID,
+            GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+            GMAIL_ATTACHMENT_ID_FIELD_ID,
+            GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+            GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+            GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+            GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+            GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
         )
     )
     return tuple(relationships)
@@ -1086,12 +1297,47 @@ def _relationship_identity(spec: GmailRelationshipSpec) -> str:
     return f"{spec.source_id}:{spec.predicate}:{spec.target_id}"
 
 
+_OBSOLETE_PAYLOAD_RELATIONSHIP_SOURCES: tuple[tuple[str, str], ...] = (
+    (GMAIL_GET_MESSAGE_TOOL_ID, "#V#tool_has_output_field"),
+    (GMAIL_GET_MESSAGE_TOOL_ID, "#V#detail_tool_completes_field"),
+    (GMAIL_MESSAGE_ENTITY_TYPE_ID, "#V#entity_type_has_tool_field"),
+    (GMAIL_USER_DISPLAY_VIEW_ID, "#V#evidence_view_redacts_field"),
+)
+
+
+def _remove_obsolete_payload_relationships() -> int:
+    """Migrate the managed contract away from the former raw payload field."""
+
+    removed = 0
+    for source_id, predicate in _OBSOLETE_PAYLOAD_RELATIONSHIP_SOURCES:
+        concept_doc = load_concept(source_id)
+        if not isinstance(concept_doc, Mapping):
+            continue
+        relationships = dict(concept_doc.get("relationships") or {})
+        targets = _normalise_targets(relationships.get(predicate))
+        if GMAIL_PAYLOAD_FIELD_ID not in targets:
+            continue
+        concept_service.update_concept(
+            source_id,
+            {
+                f"relationships.{predicate}": [
+                    target_id
+                    for target_id in targets
+                    if target_id != GMAIL_PAYLOAD_FIELD_ID
+                ]
+            },
+        )
+        removed += 1
+    return removed
+
+
 def bootstrap_gmail_tool_evidence_contract() -> dict[str, Any]:
     """Materialise Gmail-specific tool evidence contracts into Vontology."""
 
     vocabulary_report = bootstrap_tool_evidence_contract_vocabulary()
     concept_status_by_id: dict[str, str] = {}
     relationship_ids: list[str] = []
+    removed_obsolete_payload_relationship_count = 0
     errors: list[dict[str, Any]] = []
 
     if not vocabulary_report.get("success"):
@@ -1142,6 +1388,18 @@ def bootstrap_gmail_tool_evidence_contract() -> dict[str, Any]:
                     }
                 )
 
+        try:
+            removed_obsolete_payload_relationship_count = (
+                _remove_obsolete_payload_relationships()
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "section": "obsolete_payload_relationships",
+                    "reason_code": str(exc),
+                }
+            )
+
     validation = validate_gmail_tool_evidence_contract()
     validation_errors = validation.get("errors") or []
     if isinstance(validation_errors, list):
@@ -1176,6 +1434,9 @@ def bootstrap_gmail_tool_evidence_contract() -> dict[str, Any]:
         "repaired_concept_ids": repaired_concept_ids,
         "existing_concept_ids": existing_concept_ids,
         "relationship_ids": relationship_ids,
+        "removed_obsolete_payload_relationship_count": (
+            removed_obsolete_payload_relationship_count
+        ),
         "validation": validation,
         "errors": errors,
         "counts": {
@@ -1196,6 +1457,7 @@ def validate_gmail_tool_evidence_contract() -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
     missing_concept_ids: list[str] = []
     missing_relationships: list[str] = []
+    obsolete_payload_relationships: list[str] = []
 
     vocabulary_validation = validate_tool_evidence_contract_vocabulary()
     if not vocabulary_validation.get("success"):
@@ -1239,14 +1501,37 @@ def validate_gmail_tool_evidence_contract() -> dict[str, Any]:
                 }
             )
 
+    for source_id, predicate in _OBSOLETE_PAYLOAD_RELATIONSHIP_SOURCES:
+        source_doc = load_concept(source_id)
+        if not isinstance(source_doc, Mapping):
+            continue
+        targets = set(
+            _normalise_targets(
+                (source_doc.get("relationships") or {}).get(predicate)
+            )
+        )
+        if GMAIL_PAYLOAD_FIELD_ID not in targets:
+            continue
+        identity = f"{source_id}:{predicate}:{GMAIL_PAYLOAD_FIELD_ID}"
+        obsolete_payload_relationships.append(identity)
+        errors.append(
+            {
+                "section": "obsolete_payload_relationships",
+                "relationship": identity,
+                "reason_code": "obsolete_payload_relationship_present",
+            }
+        )
+
     return {
         "success": not errors,
         "schema_version": GMAIL_TOOL_EVIDENCE_CONTRACT_SCHEMA_VERSION,
         "contract_concept_id": GMAIL_TOOL_EVIDENCE_CONTRACT_ID,
         "message_entity_type_concept_id": GMAIL_MESSAGE_ENTITY_TYPE_ID,
+        "attachment_entity_type_concept_id": GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
         "required_final_answer_field_ids": GMAIL_REQUIRED_FINAL_ANSWER_FIELD_IDS,
         "missing_concept_ids": missing_concept_ids,
         "missing_relationships": missing_relationships,
+        "obsolete_payload_relationships": obsolete_payload_relationships,
         "generic_vocabulary_validation": vocabulary_validation,
         "errors": errors,
         "counts": {
@@ -1254,12 +1539,21 @@ def validate_gmail_tool_evidence_contract() -> dict[str, Any]:
             "expected_relationships": len(_gmail_relationship_specs()),
             "missing_concepts": len(missing_concept_ids),
             "missing_relationships": len(missing_relationships),
+            "obsolete_payload_relationships": len(obsolete_payload_relationships),
             "errors": len(errors),
         },
     }
 
 
 __all__ = [
+    "GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID",
+    "GMAIL_ATTACHMENT_COUNT_FIELD_ID",
+    "GMAIL_ATTACHMENT_ENTITY_TYPE_ID",
+    "GMAIL_ATTACHMENT_FILENAME_FIELD_ID",
+    "GMAIL_ATTACHMENT_ID_FIELD_ID",
+    "GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID",
+    "GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID",
+    "GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID",
     "GMAIL_BODY_FIELD_ID",
     "GMAIL_BODY_TRUNCATED_FIELD_ID",
     "GMAIL_DATE_FIELD_ID",

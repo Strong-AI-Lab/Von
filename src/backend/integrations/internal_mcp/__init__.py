@@ -8,10 +8,14 @@ lightweight so the surface can evolve without forcing early runtime coupling.
 from typing import TYPE_CHECKING
 
 from .gateway import (
-    InternalMCPGateway,
-    MethodDefinition,
-    MethodCatalogue,
+    INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+    INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE,
     GatewayDisabledError,
+    InternalMCPGateway,
+    MethodCatalogue,
+    MethodDefinition,
+    internal_mcp_actor_context_is_trusted_local_operator,
+    internal_mcp_actor_context_is_untrusted_payload_fallback,
 )
 from .catalogue import build_default_catalogue
 from .transport import (
@@ -61,22 +65,26 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "InternalMCPGateway",
-    "MethodDefinition",
-    "MethodCatalogue",
-    "GatewayDisabledError",
-    "Schema",
-    "SchemaValidationError",
-    "validate_payload",
-    "build_default_catalogue",
-    "InternalMCPTransport",
-    "InternalMCPHandlerCancelled",
-    "get_internal_mcp_execution_scope",
-    "internal_mcp_cancellation_requested",
-    "raise_if_internal_mcp_cancelled",
+    "INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE",
+    "INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE",
     "CancellationRequested",
+    "GatewayDisabledError",
     "InternalMCPChatOrchestrator",
+    "InternalMCPGateway",
+    "InternalMCPHandlerCancelled",
+    "InternalMCPTransport",
+    "MethodCatalogue",
+    "MethodDefinition",
     "OrchestratorResult",
     "ProgressTracker",
+    "Schema",
+    "SchemaValidationError",
     "ToolCallParsingError",
+    "build_default_catalogue",
+    "get_internal_mcp_execution_scope",
+    "internal_mcp_actor_context_is_trusted_local_operator",
+    "internal_mcp_actor_context_is_untrusted_payload_fallback",
+    "internal_mcp_cancellation_requested",
+    "raise_if_internal_mcp_cancelled",
+    "validate_payload",
 ]

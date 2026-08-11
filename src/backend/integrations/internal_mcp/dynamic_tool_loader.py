@@ -460,6 +460,9 @@ def load_dynamic_method_definitions(
         trusted_bindings = (
             target_definition.ordinary_turn_trusted_argument_bindings
         )
+        trusted_choice_bindings = (
+            target_definition.ordinary_turn_trusted_argument_choice_bindings
+        )
         trusted_argument_names = (
             {
                 str(argument_name)
@@ -469,6 +472,12 @@ def load_dynamic_method_definitions(
             if isinstance(trusted_bindings, Mapping)
             else set()
         )
+        if isinstance(trusted_choice_bindings, Mapping):
+            trusted_argument_names.update(
+                str(argument_name)
+                for argument_name in trusted_choice_bindings
+                if isinstance(argument_name, str) and argument_name
+            )
         fixed_trusted_argument_names = sorted(
             trusted_argument_names.intersection(
                 str(key) for key in fixed_payload
@@ -581,6 +590,16 @@ def load_dynamic_method_definitions(
                 dict(target_definition.ordinary_turn_trusted_argument_bindings)
                 if isinstance(
                     target_definition.ordinary_turn_trusted_argument_bindings,
+                    Mapping,
+                )
+                else None
+            ),
+            ordinary_turn_trusted_argument_choice_bindings=(
+                dict(
+                    target_definition.ordinary_turn_trusted_argument_choice_bindings
+                )
+                if isinstance(
+                    target_definition.ordinary_turn_trusted_argument_choice_bindings,
                     Mapping,
                 )
                 else None

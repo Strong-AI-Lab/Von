@@ -40,6 +40,7 @@ from .required_tool_obligation_service import (
     required_tool_obligation_effect,
 )
 from .required_tool_identity_service import canonical_required_tool_key
+from .selected_referent_contract import normalise_exact_referent_id
 from .tool_metadata_service import (
     is_tool_prompt_required_evidence,
     is_tool_prompt_required_mutation,
@@ -8044,9 +8045,25 @@ def _extract_tool_invocation_relation_tuples(
 CONVERSATION_SITUATION_TURN_PROJECTION_SCHEMA_VERSION = (
     "conversation_situation_turn_projection.v1"
 )
+SELECTED_REFERENT_CAPSULE_SCHEMA_VERSION = "selected_referent_capsule.v1"
 _CONVERSATION_SITUATION_PROJECTION_MAX_IDS = 24
 _CONVERSATION_SITUATION_PROJECTION_MAX_RELATIONS = 12
 _CONVERSATION_SITUATION_PROJECTION_MAX_EFFECTS = 12
+_CONVERSATION_SITUATION_PROJECTION_MAX_REFERENTS = 12
+_SELECTED_REFERENT_TEXT_MAX_CHARS = 512
+_SELECTED_REFERENT_SCOPE_FIELDS = (
+    "source_family",
+    "resource_id",
+    "runtime_alias",
+    "display_label",
+    "selection_source",
+    "view_scope",
+)
+_SELECTED_REFERENT_ACTOR_SCOPE_FIELDS = (
+    "namespace",
+    "user_concept_id",
+    "organisation_concept_id",
+)
 
 
 def _turn_projection_result_payload(
@@ -8190,6 +8207,151 @@ def _turn_projection_value_mentions(value: Any, token: str, *, depth: int = 0) -
     return False
 
 
+def _turn_projection_bounded_text(value: Any) -> str | None:
+    cleaned = _safe_str(value)
+    if not cleaned:
+        return None
+    return " ".join(cleaned.split())[:_SELECTED_REFERENT_TEXT_MAX_CHARS]
+
+
+def _turn_projection_bounded_mapping(
+    value: Any,
+    *,
+    allowed_fields: Sequence[str],
+) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    bounded = {
+        field_name: cleaned
+        for field_name in allowed_fields
+        if (cleaned := _turn_projection_bounded_text(value.get(field_name)))
+    }
+    return bounded or None
+
+
+def _turn_projection_referent_candidates(
+    invocation: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    evidence = invocation.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return []
+    projected = evidence.get("projected_payload")
+    if not isinstance(projected, Mapping):
+        return []
+    telemetry = projected.get("_tool_evidence_projection")
+    if not isinstance(telemetry, Mapping):
+        return []
+    raw_candidates = telemetry.get("referent_candidates")
+    if not isinstance(raw_candidates, Sequence) or isinstance(
+        raw_candidates,
+        (str, bytes, bytearray),
+    ):
+        return []
+
+    candidates: list[dict[str, str]] = []
+    for raw_candidate in raw_candidates[:_CONVERSATION_SITUATION_PROJECTION_MAX_IDS]:
+        if not isinstance(raw_candidate, Mapping):
+            continue
+        stable_id = normalise_exact_referent_id(raw_candidate.get("stable_id"))
+        display_label = _turn_projection_bounded_text(
+            raw_candidate.get("display_label")
+        )
+        source_kind = _turn_projection_bounded_text(
+            raw_candidate.get("source_kind")
+        )
+        if not stable_id or not display_label or not source_kind:
+            continue
+        candidate = {
+            "stable_id": stable_id,
+            "display_label": display_label,
+            "source_kind": source_kind,
+        }
+        identity_field_concept_id = _turn_projection_bounded_text(
+            raw_candidate.get("identity_field_concept_id")
+        )
+        if identity_field_concept_id:
+            candidate["identity_field_concept_id"] = identity_field_concept_id
+        candidates.append(candidate)
+    return candidates
+
+
+def _turn_projection_match_tokens(value: Any) -> tuple[str, list[str]]:
+    text = _turn_projection_bounded_text(value) or ""
+    normalised = " ".join(text.casefold().split())
+    tokens = [
+        token
+        for token in re.findall(r"[\w@.+-]+", normalised, flags=re.UNICODE)
+        if len(token) >= 4 or any(char.isdigit() for char in token)
+    ]
+    return normalised, _dedupe_string_sequence(tokens)
+
+
+def _select_answer_material_referents(
+    *,
+    response_text: Any,
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(response_text, str) or not response_text.strip():
+        return []
+    answer_normalised = " ".join(response_text.casefold().split())
+    answer_token_offsets: dict[str, int] = {}
+    for token_match in re.finditer(
+        r"[\w@.+-]+",
+        answer_normalised,
+        flags=re.UNICODE,
+    ):
+        token = token_match.group(0)
+        answer_token_offsets.setdefault(token, token_match.start())
+    candidate_rows = [dict(item) for item in candidates if isinstance(item, Mapping)]
+    if not candidate_rows:
+        return []
+
+    token_document_frequency: dict[str, int] = {}
+    parsed_labels: list[tuple[str, list[str]]] = []
+    for candidate in candidate_rows:
+        label_normalised, label_tokens = _turn_projection_match_tokens(
+            candidate.get("display_label")
+        )
+        parsed_labels.append((label_normalised, label_tokens))
+        for token in set(label_tokens):
+            token_document_frequency[token] = token_document_frequency.get(token, 0) + 1
+
+    matched: list[tuple[int, int, dict[str, Any]]] = []
+    candidate_count = len(candidate_rows)
+    for index, (candidate, parsed_label) in enumerate(
+        zip(candidate_rows, parsed_labels, strict=False)
+    ):
+        label_normalised, label_tokens = parsed_label
+        stable_id = normalise_exact_referent_id(candidate.get("stable_id")) or ""
+        stable_id_normalised = stable_id.casefold()
+        score = 0
+        offsets: list[int] = []
+        if label_normalised and label_normalised in answer_normalised:
+            score += 10_000 + len(label_normalised)
+            offsets.append(answer_normalised.index(label_normalised))
+        if stable_id_normalised and stable_id_normalised in answer_normalised:
+            score += 20_000 + len(stable_id_normalised)
+            offsets.append(answer_normalised.index(stable_id_normalised))
+        for token in label_tokens:
+            if token not in answer_token_offsets:
+                continue
+            if candidate_count > 1 and token_document_frequency.get(token, 0) != 1:
+                continue
+            score += len(token)
+            offsets.append(answer_token_offsets[token])
+        if score <= 0:
+            continue
+        matched.append((min(offsets) if offsets else len(answer_normalised), index, candidate))
+
+    matched.sort(key=lambda item: (item[0], item[1]))
+    return [
+        candidate
+        for _offset, _index, candidate in matched[
+            :_CONVERSATION_SITUATION_PROJECTION_MAX_REFERENTS
+        ]
+    ]
+
+
 def build_conversation_situation_turn_projection(
     *,
     request_id: Any,
@@ -8225,6 +8387,7 @@ def build_conversation_situation_turn_projection(
     verified_relationships: list[dict[str, str]] = []
     effects: list[dict[str, Any]] = []
     workflow_instances: list[dict[str, Any]] = []
+    referent_candidates_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     effect_material_values: list[Any] = []
     for invocation in invocations:
         payload = _turn_projection_result_payload(invocation)
@@ -8306,6 +8469,84 @@ def build_conversation_situation_turn_projection(
                     and concept_id.lower() in answer_concept_ids
                 ):
                     append_unique(verified_concept_ids, concept_id)
+
+            if not is_write:
+                evidence = invocation.get("evidence")
+                evidence_payload = evidence if isinstance(evidence, Mapping) else {}
+                evidence_provenance = evidence_payload.get("provenance")
+                actor_scope_ref = _turn_projection_bounded_mapping(
+                    evidence_provenance,
+                    allowed_fields=_SELECTED_REFERENT_ACTOR_SCOPE_FIELDS,
+                )
+                resource_scope = _turn_projection_bounded_mapping(
+                    invocation.get("resource_scope"),
+                    allowed_fields=_SELECTED_REFERENT_SCOPE_FIELDS,
+                )
+                projected_payload = evidence_payload.get("projected_payload")
+                projection_telemetry = (
+                    projected_payload.get("_tool_evidence_projection")
+                    if isinstance(projected_payload, Mapping)
+                    else None
+                )
+                tool_concept_id = (
+                    _turn_projection_bounded_text(
+                        projection_telemetry.get("tool_concept_id")
+                    )
+                    if isinstance(projection_telemetry, Mapping)
+                    else None
+                )
+                capability_kind = (
+                    _turn_projection_bounded_text(invocation.get("capability_kind"))
+                    or "tool"
+                )
+                for raw_candidate in _turn_projection_referent_candidates(invocation):
+                    resource_identity = ""
+                    if resource_scope:
+                        resource_identity = (
+                            resource_scope.get("resource_id")
+                            or resource_scope.get("runtime_alias")
+                            or ""
+                        )
+                    candidate_key = (
+                        raw_candidate["source_kind"].casefold(),
+                        raw_candidate["stable_id"].casefold(),
+                        resource_identity.casefold(),
+                    )
+                    provenance: dict[str, str] = {
+                        "request_id": clean_request_id,
+                        "selection_basis": "represented_display_label_match",
+                    }
+                    for provenance_field, provenance_value in (
+                        ("call_id", invocation.get("call_id")),
+                        ("evidence_id", evidence_payload.get("evidence_id")),
+                        ("tool_concept_id", tool_concept_id),
+                    ):
+                        cleaned_value = _turn_projection_bounded_text(
+                            provenance_value
+                        )
+                        if cleaned_value:
+                            provenance[provenance_field] = cleaned_value
+                    candidate: dict[str, Any] = {
+                        "schema_version": SELECTED_REFERENT_CAPSULE_SCHEMA_VERSION,
+                        "stable_id": raw_candidate["stable_id"],
+                        "source_kind": raw_candidate["source_kind"],
+                        "capability_kind": capability_kind,
+                        "capability_name": tool_name,
+                        "display_label": raw_candidate["display_label"],
+                        "provenance": provenance,
+                    }
+                    identity_field_concept_id = raw_candidate.get(
+                        "identity_field_concept_id"
+                    )
+                    if identity_field_concept_id:
+                        candidate["identity_field_concept_id"] = (
+                            identity_field_concept_id
+                        )
+                    if resource_scope:
+                        candidate["resource_scope"] = resource_scope
+                    if actor_scope_ref:
+                        candidate["actor_scope_ref"] = actor_scope_ref
+                    referent_candidates_by_key[candidate_key] = candidate
 
             if not is_write:
                 for assertion_id in _turn_projection_collect_named_strings(
@@ -8449,6 +8690,12 @@ def build_conversation_situation_turn_projection(
         projection["workflow_instances"] = workflow_instances[
             :_CONVERSATION_SITUATION_PROJECTION_MAX_EFFECTS
         ]
+    selected_referents = _select_answer_material_referents(
+        response_text=response_text,
+        candidates=list(referent_candidates_by_key.values()),
+    )
+    if selected_referents:
+        projection["selected_referents"] = selected_referents
 
     if len(projection) == 4:
         return None
