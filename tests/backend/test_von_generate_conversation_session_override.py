@@ -127,6 +127,15 @@ def _make_app(monkeypatch, history_calls: list[dict[str, object]]) -> Flask:
         lambda *_args, **_kwargs: None,
         raising=False,
     )
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_turn_scope_service.build_gmail_profile_turn_scope",
+        lambda **_kwargs: {
+            "success": False,
+            "reason_code": "mail_profile_actor_not_represented",
+            "profile_id": None,
+            "choices": [],
+        },
+    )
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -161,6 +170,152 @@ def test_generate_honours_explicit_conversation_session_id(monkeypatch):
     )
 
 
+def test_generate_reauthorises_shared_conversation_mailbox_memory_for_actor(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+    from src.backend.services import mail_profile_turn_scope_service
+    from src.backend.services.conversation_turn_memory_context_service import (
+        merge_conversation_situation_turn_projection,
+    )
+
+    real_build_gmail_profile_turn_scope = (
+        mail_profile_turn_scope_service.build_gmail_profile_turn_scope
+    )
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    scope_calls: list[dict[str, Any]] = []
+
+    shared_situation = merge_conversation_situation_turn_projection(
+        current_situation=None,
+        model_situation=None,
+        projection={
+            "request_id": "owner-mail-turn",
+            "terminal_status": "completed",
+            "provenance": "canonical_turn_tool_records",
+            "selected_referents": [
+                {
+                    "schema_version": "selected_referent_capsule.v1",
+                    "stable_id": "owner-message-id",
+                    "source_kind": "#V#gmail_message_result_entity_type",
+                    "capability_kind": "mcp_tool",
+                    "capability_name": "gmail_get_message",
+                    "display_label": "Owner's recent message",
+                    "resource_scope": {
+                        "source_family": "gmail",
+                        "resource_id": "#V#gmail_profile_owner_personal",
+                        "runtime_alias": "owner-personal",
+                        "display_label": "owner@example.test",
+                        "selection_source": "request",
+                    },
+                }
+            ],
+        },
+    )
+    assert shared_situation is not None
+
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: (
+            "#V#owner",
+            {"organisation_concept_id": "#V#org"},
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": {
+                "text": shared_situation,
+                "revision": 2,
+                "source": "adaptive_turn",
+                "updated_by": "#V#owner",
+            },
+            "conversation_observations": [],
+        },
+    )
+
+    monkeypatch.setattr(
+        mail_profile_turn_scope_service,
+        "list_authorised_gmail_profiles_for_user",
+        lambda **_kwargs: {
+            "success": True,
+            "reason_code": "authorised_mail_profiles_resolved",
+            "profiles": [
+                {
+                    "profile_id": "actor-personal",
+                    "profile_resource_concept_id": (
+                        "#V#gmail_profile_actor_personal"
+                    ),
+                    "is_default": True,
+                    "represented_identity_concept_ids": ["#V#user"],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        mail_profile_turn_scope_service,
+        "load_profiles_from_env",
+        lambda: {"actor-personal": object(), "owner-personal": object()},
+    )
+    monkeypatch.setattr(
+        mail_profile_turn_scope_service,
+        "list_profile_summaries",
+        lambda _profiles: [
+            {
+                "profile_id": "actor-personal",
+                "authorised_email": "actor@example.test",
+            },
+            {
+                "profile_id": "owner-personal",
+                "authorised_email": "owner@example.test",
+            },
+        ],
+    )
+
+    def _build_scope(**kwargs: Any) -> dict[str, Any]:
+        scope_calls.append(dict(kwargs))
+        return real_build_gmail_profile_turn_scope(**kwargs)
+
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_turn_scope_service.build_gmail_profile_turn_scope",
+        _build_scope,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "What else should I do about that email?",
+            "conversation_session_id": "shared-mail-session",
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert scope_calls == [
+        {
+            "user_concept_id": "#V#user",
+            "requested_profile_id": None,
+            "remembered_resource_scope": {
+                "source_family": "gmail",
+                "resource_id": "#V#gmail_profile_owner_personal",
+                "runtime_alias": "owner-personal",
+                "display_label": "owner@example.test",
+                "selection_source": "request",
+            },
+        }
+    ]
+    adaptive_call = app.config["_ADAPTIVE_TURN_CALLS"][0]
+    trusted = adaptive_call["trusted_argument_values"]["gmail_profile"]
+    assert trusted["default_selector"] == "#V#gmail_profile_actor_personal"
+    assert trusted["default_selection_source"] == "represented_default"
+    assert [choice["value"] for choice in trusted["choices"]] == [
+        "actor-personal"
+    ]
+
+
 def test_generate_rejects_non_string_conversation_session_id(monkeypatch):
     history_calls: list[dict[str, object]] = []
     app = _make_app(monkeypatch, history_calls)
@@ -175,6 +330,128 @@ def test_generate_rejects_non_string_conversation_session_id(monkeypatch):
     body = resp.get_json()
     assert isinstance(body, dict)
     assert body["error"] == "invalid_conversation_session_id"
+
+
+def test_generate_preserves_explicit_gmail_profile_authority_denial(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    session_calls: list[dict[str, Any]] = []
+    profile_calls: list[dict[str, Any]] = []
+
+    def _deny_profile(**kwargs: Any) -> dict[str, Any]:
+        profile_calls.append(dict(kwargs))
+        return {
+            "success": False,
+            "reason_code": "mail_profile_not_authorised_for_actor",
+            "profile_id": None,
+            "choices": [],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_turn_scope_service.build_gmail_profile_turn_scope",
+        _deny_profile,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_ensure_generate_conversation_session",
+        lambda **kwargs: (
+            session_calls.append(dict(kwargs))
+            or ("must-not-be-created", None, True)
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("history must not load before explicit profile denial")
+        ),
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Check recent mail",
+            "conversation_session_id": "explicit-profile-denial",
+            "gmail_profile": "somebody-elses-mail",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": "gmail_profile_not_authorised",
+        "detail": (
+            "The requested Gmail profile is not represented as authorised "
+            "for the authenticated actor."
+        ),
+    }
+    assert profile_calls == [
+        {
+            "user_concept_id": "#V#user",
+            "requested_profile_id": "somebody-elses-mail",
+            "remembered_resource_scope": None,
+        }
+    ]
+    assert session_calls == []
+
+
+def test_generate_resolves_explicit_gmail_profile_once_before_situation_load(
+    monkeypatch,
+) -> None:
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    profile_calls: list[dict[str, Any]] = []
+
+    def _allow_profile(**kwargs: Any) -> dict[str, Any]:
+        profile_calls.append(dict(kwargs))
+        return {
+            "success": True,
+            "reason_code": "authorised_mail_profile_choices_resolved",
+            "profile_id": "personal",
+            "trusted_argument_choice": {
+                "schema_version": "trusted_argument_choice.v1",
+                "default_selector": "#V#gmail_profile_personal",
+                "default_selection_source": "request",
+                "choices": [
+                    {
+                        "selector": "#V#gmail_profile_personal",
+                        "value": "personal",
+                        "source_family": "gmail",
+                        "resource_id": "#V#gmail_profile_personal",
+                        "runtime_alias": "personal",
+                        "display_label": "me@example.test",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_turn_scope_service.build_gmail_profile_turn_scope",
+        _allow_profile,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Check recent mail",
+            "conversation_session_id": "explicit-profile-success",
+            "gmail_profile": "personal",
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert profile_calls == [
+        {
+            "user_concept_id": "#V#user",
+            "requested_profile_id": "personal",
+            "remembered_resource_scope": None,
+        }
+    ]
+    trusted = app.config["_ADAPTIVE_TURN_CALLS"][0]["trusted_argument_values"]
+    assert trusted["gmail_profile"]["default_selection_source"] == "request"
 
 
 def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active_session(
@@ -547,6 +824,146 @@ def test_generate_persists_runtime_situation_when_model_sidecar_is_omitted(
         body["conversation_situation"]["source_request_id"]
         == set_calls[0]["source_request_id"]
     )
+
+
+def test_generate_carries_selected_referent_capsule_to_natural_follow_up(
+    monkeypatch,
+):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    adaptive_calls: list[dict[str, Any]] = []
+    stored: dict[str, Any] = {"text": None, "revision": 0, "request_id": None}
+
+    def _session_state(**kwargs: Any) -> dict[str, Any]:
+        situation = (
+            {
+                "text": stored["text"],
+                "revision": stored["revision"],
+                "source": "adaptive_turn",
+                "updated_by": "#V#user",
+                "updated_at": "2026-08-11T09:00:00+00:00",
+                "source_request_id": stored["request_id"],
+            }
+            if stored["text"]
+            else None
+        )
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": situation,
+            "conversation_observations": [],
+        }
+
+    def _set_situation(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["expected_revision"] == stored["revision"]
+        stored["text"] = kwargs["text"]
+        stored["revision"] += 1
+        stored["request_id"] = kwargs["source_request_id"]
+        return {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": stored["revision"],
+            "session_id": kwargs["session_id"],
+        }
+
+    def _adaptive(**kwargs: Any) -> AdaptiveTurnResult:
+        adaptive_calls.append(dict(kwargs))
+        if len(adaptive_calls) > 1:
+            return AdaptiveTurnResult(
+                response_text="Open it in the official app and check in.",
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=(),
+            )
+        return AdaptiveTurnResult(
+            response_text=(
+                "Pay attention to the easyJet booking KD5BJTT first; the "
+                "flight is imminent."
+            ),
+            extra_messages=(),
+            tool_invocations=(
+                {
+                    "tool": "mail_get_item",
+                    "capability_kind": "mcp_tool",
+                    "call_id": "call-easyjet",
+                    "status": "ok",
+                    "resource_scope": {
+                        "source_family": "mail",
+                        "resource_id": "#V#mail_profile_michael_personal",
+                        "runtime_alias": "michael-personal",
+                        "display_label": "Michael's personal email",
+                        "selection_source": "conversation_default",
+                    },
+                    "evidence": {
+                        "evidence_id": "evidence-easyjet",
+                        "status": "ok",
+                        "projected_payload": {
+                            "body": "Private body must not be persisted.",
+                            "_tool_evidence_projection": {
+                                "tool_concept_id": "#V#mail_get_item_tool",
+                                "referent_candidates": [
+                                    {
+                                        "stable_id": "19fece69a5839e69",
+                                        "display_label": (
+                                            "easyJet booking KD5BJTT"
+                                        ),
+                                        "source_kind": (
+                                            "#V#mail_message_result_entity_type"
+                                        ),
+                                        "identity_field_concept_id": (
+                                            "#V#mail_message_id_field"
+                                        ),
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                },
+            ),
+            aux_llm_calls=(),
+            conversation_situation=None,
+        )
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        _session_state,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "set_chat_history_conversation_situation",
+        _set_situation,
+    )
+    monkeypatch.setattr(von_routes, "execute_adaptive_turn", _adaptive)
+
+    first = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Which recent email should I pay attention to first?",
+            "conversation_session_id": "session-selected-referent",
+        },
+    )
+    second = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "What should I do about that one?",
+            "conversation_session_id": "session-selected-referent",
+        },
+    )
+
+    assert first.status_code == 200, first.get_json()
+    assert second.status_code == 200, second.get_json()
+    assert len(adaptive_calls) == 2
+    follow_up_situation = adaptive_calls[1]["conversation_situation"]
+    assert "selected referent capsule:" in follow_up_situation
+    assert "19fece69a5839e69" in follow_up_situation
+    assert "easyJet booking KD5BJTT" in follow_up_situation
+    assert "michael-personal" in follow_up_situation
+    assert "Private body" not in follow_up_situation
 
 
 def test_generate_returns_answer_when_situation_revision_conflicts(monkeypatch):

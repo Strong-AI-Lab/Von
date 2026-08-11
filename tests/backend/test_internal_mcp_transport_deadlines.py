@@ -1260,6 +1260,53 @@ def test_write_timeout_preserves_intermediate_durable_effect_receipt() -> None:
     ]
 
 
+def test_write_timeout_preserves_intermediate_durable_concept_receipt() -> None:
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.03,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler():
+        assert record_internal_mcp_effect_receipt(
+            {
+                "schema_version": "gmail_attachment_import_receipt.v1",
+                "concept_id": "#V#computer_file_copy_gmail_1",
+                "created_new": True,
+                "effect_status": "partial",
+                "mutation_outcome": "partial",
+                "outcome_finality": "pending_canonical_readback",
+                "secret": "must-not-be-projected",
+            }
+        )
+        time.sleep(0.1)
+
+    gateway = _gateway_for(
+        method_name="synthetic_durable_concept_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+    )
+
+    result = gateway.invoke("synthetic_durable_concept_write", {})
+
+    assert result.outcome == "timed_out"
+    assert result.payload["error_code"] == "tool_timeout_after_durable_submission"
+    assert result.payload["effect_status"] == "partial"
+    assert result.payload["concept_id"] == "#V#computer_file_copy_gmail_1"
+    assert result.payload["instance_id"] is None
+    assert result.payload["durable_effect_receipt"]["concept_id"] == (
+        "#V#computer_file_copy_gmail_1"
+    )
+    assert "secret" not in result.payload["durable_effect_receipt"]
+    assert result.payload["recovery_affordances"] == [
+        {
+            "action_type": "inspect_durable_resource",
+            "capability": "read_file_copy",
+            "arguments": {"concept_id": "#V#computer_file_copy_gmail_1"},
+        }
+    ]
+
+
 def test_dispatched_write_reports_one_bounded_late_completion_observation() -> None:
     observations = []
     observation_seen = Event()

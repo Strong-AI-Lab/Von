@@ -262,6 +262,150 @@ def test_gmail_detail_projection_preserves_final_answer_fields_and_omits_raw_pay
     assert telemetry["missing_required_fields"] == []
 
 
+def test_gmail_detail_projection_preserves_exact_attachment_handle_without_raw_part_data(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_gmail_tool_evidence_contract()
+    opaque_attachment_id = "opaque-" + ("x" * 700)
+
+    projected = project_tool_payload_for_llm(
+        "gmail_get_message",
+        {
+            "message_id": "message-easyjet",
+            "threadId": "thread-easyjet",
+            "sender": "easyJet <noreply@easyjet.com>",
+            "subject": "easyJet booking KD5BJTT",
+            "date": "Mon, 10 Aug 2026 12:00:00 +0000",
+            "snippet": "Your booking is confirmed.",
+            "attachments": [
+                {
+                    "attachment_id": opaque_attachment_id,
+                    "filename": "itinerary.pdf",
+                    "content_type": "application/pdf",
+                    "size_bytes": 42_000,
+                    "body": {"data": "raw-attachment-base64-must-not-survive"},
+                }
+            ],
+            "attachment_count": 1,
+            "attachments_truncated": False,
+            "payload": {
+                "parts": [
+                    {"body": {"data": "raw-message-base64-must-not-survive"}}
+                ]
+            },
+        },
+    )
+
+    assert projected is not None
+    assert projected["attachments"] == [
+        {
+            "attachment_id": opaque_attachment_id,
+            "filename": "itinerary.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 42_000,
+        }
+    ]
+    assert projected["attachment_count"] == 1
+    assert projected["attachments_truncated"] is False
+    assert "payload" not in projected
+    assert "raw-attachment-base64-must-not-survive" not in repr(projected)
+    assert "raw-message-base64-must-not-survive" not in repr(projected)
+
+    referents = projected["_tool_evidence_projection"]["referent_candidates"]
+    assert referents == [
+        {
+            "schema_version": "tool_referent_candidate.v1",
+            "stable_id": "message-easyjet",
+            "display_label": "easyJet booking KD5BJTT",
+            "source_kind": "#V#gmail_message_result_entity_type",
+            "identity_field_concept_id": "#V#gmail_message_id_field",
+        },
+        {
+            "schema_version": "tool_referent_candidate.v1",
+            "stable_id": opaque_attachment_id,
+            "display_label": "itinerary.pdf",
+            "source_kind": "#V#gmail_attachment_result_entity_type",
+            "identity_field_concept_id": "#V#gmail_attachment_id_field",
+        },
+    ]
+
+
+def test_over_limit_referent_identity_is_omitted_instead_of_truncated(
+    _reset_mock_db: Any,
+) -> None:
+    from src.backend.services.selected_referent_contract import (
+        MAX_EXACT_REFERENT_ID_CHARS,
+    )
+
+    bootstrap_gmail_tool_evidence_contract()
+    oversized_attachment_id = "a" * (MAX_EXACT_REFERENT_ID_CHARS + 1)
+
+    projected = project_tool_payload_for_llm(
+        "gmail_get_message",
+        {
+            "message_id": "message-1",
+            "sender": "sender@example.test",
+            "subject": "One attachment",
+            "date": "Mon, 10 Aug 2026 12:00:00 +0000",
+            "snippet": "Attachment included.",
+            "attachments": [
+                {
+                    "attachment_id": oversized_attachment_id,
+                    "filename": "oversized-id.pdf",
+                    "content_type": "application/pdf",
+                    "size_bytes": 1,
+                }
+            ],
+        },
+    )
+
+    assert projected is not None
+    assert projected["attachments"][0]["attachment_id"] == oversized_attachment_id
+    referents = projected["_tool_evidence_projection"]["referent_candidates"]
+    assert [candidate["stable_id"] for candidate in referents] == ["message-1"]
+    assert not any(
+        candidate["stable_id"] == oversized_attachment_id[:MAX_EXACT_REFERENT_ID_CHARS]
+        for candidate in referents
+    )
+
+
+def test_represented_field_roles_project_a_bounded_gmail_referent_candidate(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_gmail_tool_evidence_contract()
+
+    projected = project_tool_payload_for_llm(
+        "gmail_get_message",
+        {
+            "message_id": "19fece69a5839e69",
+            "threadId": "19fece69a5839e69",
+            "sender": "easyJet <noreply@easyjet.com>",
+            "subject": "easyJet booking KD5BJTT",
+            "date": "Mon, 10 Aug 2026 12:00:00 +0000",
+            "snippet": "Private snippet that is not a referent label.",
+            "body": "Private message body that must not enter continuity.",
+        },
+    )
+
+    assert projected is not None
+    telemetry = projected["_tool_evidence_projection"]
+    assert telemetry["entity_type_concept_ids"] == [
+        "#V#gmail_message_result_entity_type",
+        "#V#gmail_attachment_result_entity_type",
+    ]
+    assert telemetry["referent_candidates"] == [
+        {
+            "schema_version": "tool_referent_candidate.v1",
+            "stable_id": "19fece69a5839e69",
+            "display_label": "easyJet booking KD5BJTT",
+            "source_kind": "#V#gmail_message_result_entity_type",
+            "identity_field_concept_id": "#V#gmail_message_id_field",
+        }
+    ]
+    assert "Private snippet" not in str(telemetry["referent_candidates"])
+    assert "Private message body" not in str(telemetry["referent_candidates"])
+
+
 def test_orchestrator_formats_gmail_detail_with_vontology_projection(
     _reset_mock_db: Any,
 ) -> None:

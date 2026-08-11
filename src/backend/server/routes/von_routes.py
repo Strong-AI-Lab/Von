@@ -10395,49 +10395,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     _check_background_cancellation("authentication context")
 
-    from ...integrations.google.gmail_service import list_profile_ids_from_env
-    from ...services.mail_profile_resource_vontology_service import (
-        resolve_authorised_gmail_profile_for_user,
-    )
-
     authorised_gmail_profile: str | None = None
-    if user_concept_id:
-        gmail_authority = resolve_authorised_gmail_profile_for_user(
-            user_concept_id=user_concept_id,
-            requested_profile_id=request_gmail_profile,
-        )
-        resolved_profile = gmail_authority.get("profile_id")
-        if gmail_authority.get("success") and isinstance(resolved_profile, str):
-            configured_profiles = set(list_profile_ids_from_env())
-            if resolved_profile in configured_profiles:
-                authorised_gmail_profile = resolved_profile
-            elif request_gmail_profile:
-                return (
-                    jsonify(
-                        {
-                            "error": "authorised_gmail_profile_unavailable",
-                            "detail": (
-                                "The requested Gmail profile is authorised for "
-                                "this actor but is not configured in this runtime."
-                            ),
-                        }
-                    ),
-                    503,
-                )
-        elif request_gmail_profile:
-            return (
-                jsonify(
-                    {
-                        "error": "gmail_profile_not_authorised",
-                        "detail": (
-                            "The requested Gmail profile is not represented as "
-                            "authorised for the authenticated actor."
-                        ),
-                    }
-                ),
-                403,
-            )
-    elif request_gmail_profile:
+    gmail_profile_trusted_binding: Mapping[str, Any] | str | None = None
+    if not user_concept_id and request_gmail_profile:
         return (
             jsonify(
                 {
@@ -10449,7 +10409,51 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
             401,
         )
-    request_gmail_profile = authorised_gmail_profile
+    if user_concept_id and request_gmail_profile:
+        from ...services.mail_profile_turn_scope_service import (
+            build_gmail_profile_turn_scope,
+        )
+
+        explicit_gmail_authority = build_gmail_profile_turn_scope(
+            user_concept_id=user_concept_id,
+            requested_profile_id=request_gmail_profile,
+            remembered_resource_scope=None,
+        )
+        explicit_resolved_profile = explicit_gmail_authority.get("profile_id")
+        if not explicit_gmail_authority.get("success"):
+            reason_code = str(
+                explicit_gmail_authority.get("reason_code") or ""
+            )
+            unavailable = reason_code in {
+                "authorised_mail_profile_unavailable",
+                "gmail_profile_runtime_configuration_unavailable",
+            }
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "authorised_gmail_profile_unavailable"
+                            if unavailable
+                            else "gmail_profile_not_authorised"
+                        ),
+                        "detail": (
+                            "The requested Gmail profile is authorised for this "
+                            "actor but is not configured in this runtime."
+                            if unavailable
+                            else "The requested Gmail profile is not represented "
+                            "as authorised for the authenticated actor."
+                        ),
+                    }
+                ),
+                503 if unavailable else 403,
+            )
+        if isinstance(explicit_resolved_profile, str):
+            authorised_gmail_profile = explicit_resolved_profile
+        explicit_trusted_choice = explicit_gmail_authority.get(
+            "trusted_argument_choice"
+        )
+        if isinstance(explicit_trusted_choice, Mapping):
+            gmail_profile_trusted_binding = dict(explicit_trusted_choice)
 
     try:
         request_workflow_launch_inputs = (
@@ -10731,6 +10735,40 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     session_id,
                     request_id,
                 )
+
+    # A profile retained in the conversation situation is useful continuity,
+    # not an authority grant.  Resolve it only after the owner-scoped situation
+    # has been loaded, then intersect it afresh with this authenticated actor's
+    # represented authority and the profiles available in this runtime.  This
+    # is especially important for shared conversations, whose latest resource
+    # may belong to another participant.
+    if user_concept_id and request_gmail_profile is None:
+        from ...services.conversation_turn_memory_context_service import (
+            latest_resource_scope_from_conversation_situation,
+        )
+        from ...services.mail_profile_turn_scope_service import (
+            build_gmail_profile_turn_scope,
+        )
+
+        remembered_gmail_scope = (
+            latest_resource_scope_from_conversation_situation(
+                conversation_situation_text,
+                source_family="gmail",
+            )
+        )
+        gmail_authority = build_gmail_profile_turn_scope(
+            user_concept_id=user_concept_id,
+            requested_profile_id=None,
+            remembered_resource_scope=remembered_gmail_scope,
+        )
+        resolved_profile = gmail_authority.get("profile_id")
+        if gmail_authority.get("success"):
+            if isinstance(resolved_profile, str):
+                authorised_gmail_profile = resolved_profile
+            trusted_choice = gmail_authority.get("trusted_argument_choice")
+            if isinstance(trusted_choice, Mapping):
+                gmail_profile_trusted_binding = dict(trusted_choice)
+    request_gmail_profile = authorised_gmail_profile
 
     # Persisted history is the canonical transcript, not an instruction to
     # replay every stored message into every provider round. Keep the recent
@@ -11486,8 +11524,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
             trusted_argument_values=(
-                {"gmail_profile": request_gmail_profile}
-                if request_gmail_profile
+                {"gmail_profile": gmail_profile_trusted_binding}
+                if gmail_profile_trusted_binding is not None
                 else None
             ),
             workflow_launch_inputs=request_workflow_launch_inputs,

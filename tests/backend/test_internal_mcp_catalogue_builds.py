@@ -1,6 +1,38 @@
 import pytest
 
 
+@pytest.fixture
+def trusted_gmail_operator(monkeypatch):
+    """Explicit local-operator provenance for handler-mechanics tests."""
+
+    from src.backend.integrations.google import gmail_service
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
+    )
+
+    profile_ids = (
+        "zhan-gmail",
+        "vonwitbrock-gmail",
+        "represented-profile",
+        "operator-profile",
+    )
+    monkeypatch.setattr(
+        gmail_service,
+        "load_profiles_from_env",
+        lambda: {
+            profile_id: gmail_service.GmailProfile(
+                profile_id=profile_id,
+                token_path=f"/nonexistent/{profile_id}.json",
+            )
+            for profile_id in profile_ids
+        },
+    )
+    with bind_internal_mcp_actor_context_source(
+        "trusted_operator_payload_fallback"
+    ):
+        yield
+
+
 class _GmailHttpError(Exception):
     def __init__(self, message: str, status: int):
         super().__init__(message)
@@ -198,6 +230,7 @@ def test_frequent_gmail_and_scoped_assertion_paths_use_advisory_only_timing():
         "gmail_list_messages": 20.0,
         "gmail_get_message": 20.0,
         "gmail_get_attachment": 20.0,
+        "gmail_import_attachment": 20.0,
         "gmail_list_labels": 15.0,
         "upsert_scoped_assertion": 20.0,
         "list_scoped_assertions": 20.0,
@@ -314,6 +347,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "upsert_text_relation",
         "upsert_uncertain_relationship_assertion",
         "add_relationship",
+        "gmail_import_attachment",
         "message_send_direct",
         "task_create",
         "task_update_status",
@@ -435,8 +469,9 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
             "namespace": "turn_namespace",
         }
 
-    # Server-bound resources are absent until the entry point supplies the
-    # actor's represented binding; the model never selects the profile.
+    # Profile-scoped reads are absent until the entry point supplies the
+    # actor-authorised constrained choice set. The model may select only from
+    # those stable selectors; the server maps the selection to a runtime alias.
     gmail_reads = {
         "gmail_get_auth_config",
         "gmail_get_attachment",
@@ -449,8 +484,21 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     assert catalogue.get(
         "gmail_get_attachment"
     ).ordinary_turn_trusted_argument_bindings == {
-        "profile": "gmail_profile",
         "namespace": "turn_namespace",
+    }
+    assert catalogue.get(
+        "gmail_get_attachment"
+    ).ordinary_turn_trusted_argument_choice_bindings == {
+        "profile": "gmail_profile",
+    }
+    gmail_import_definition = catalogue.get("gmail_import_attachment")
+    assert gmail_import_definition.category == "write"
+    assert gmail_import_definition.ordinary_turn_effect is True
+    assert gmail_import_definition.ordinary_turn_trusted_argument_bindings == {
+        "namespace": "turn_namespace",
+    }
+    assert gmail_import_definition.ordinary_turn_trusted_argument_choice_bindings == {
+        "profile": "gmail_profile",
     }
 
     # These are mechanism-level exclusions: they expose ambient deployment
@@ -586,7 +634,10 @@ def test_failure_case_learning_reads_require_operator_provenance():
 
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
     from src.backend.integrations.internal_mcp import build_default_catalogue
-    from src.backend.integrations.internal_mcp.schemas import validate_payload
+    from src.backend.integrations.internal_mcp.schemas import (
+        schema_to_json_schema,
+        validate_payload,
+    )
 
     catalogue = build_default_catalogue()
     method = catalogue.get("gmail_list_messages")
@@ -596,6 +647,23 @@ def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
         {"profile": "zhan-gmail", "query": "in:inbox", "max_results": 10},
     )
     assert ok, errors
+    assert method.input_schema.enum_values["scope"] == (
+        "whole_mailbox",
+        "profile_default_view",
+    )
+    assert schema_to_json_schema(method.input_schema)["properties"]["scope"][
+        "enum"
+    ] == ["whole_mailbox", "profile_default_view"]
+
+    invalid_ok, invalid_errors = validate_payload(
+        method.input_schema,
+        {"profile": "zhan-gmail", "scope": "received"},
+    )
+    assert invalid_ok is False
+    assert any(
+        "Optional field 'scope' expected one of" in error
+        for error in invalid_errors
+    )
 
     ok, errors = validate_payload(
         method.input_schema,
@@ -621,9 +689,12 @@ def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
 
 def test_internal_mcp_gmail_list_profiles_registered_and_handler_returns_summaries(
     monkeypatch,
+    trusted_gmail_operator,
 ):
     from src.backend.integrations.internal_mcp import (
         build_default_catalogue,
+    )
+    from src.backend.integrations.internal_mcp import (
         catalogue as catalogue_module,
     )
 
@@ -656,7 +727,10 @@ def test_internal_mcp_gmail_list_profiles_registered_and_handler_returns_summari
         assert set(entry.keys()) == {"profile_id", "authorised_email"}
 
 
-def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatch):
+def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
     monkeypatch.setattr(
@@ -682,13 +756,34 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
         assert kwargs["message_id"] == "msg-1"
         return {
             "id": "msg-1",
+            "threadId": "thread-1",
+            "labelIds": ["INBOX", "UNREAD"],
             "snippet": "Short preview",
+            "raw": "top-level-raw-must-not-escape",
             "payload": {
+                "mimeType": "multipart/mixed",
                 "headers": [
                     {"name": "From", "value": "Sender <sender@example.test>"},
                     {"name": "Subject", "value": "Subject line"},
                     {"name": "Date", "value": "Sat, 25 Apr 2026 09:00:00 +0000"},
-                ]
+                ],
+                "parts": [
+                    {
+                        "partId": "0",
+                        "mimeType": "text/plain",
+                        "body": {"data": "body-base64-must-not-escape"},
+                    },
+                    {
+                        "partId": "1",
+                        "filename": "ticket.pdf",
+                        "mimeType": "application/pdf",
+                        "body": {
+                            "attachmentId": "attachment-1",
+                            "data": "attachment-base64-must-not-escape",
+                            "size": 456,
+                        },
+                    },
+                ],
             },
         }
 
@@ -730,6 +825,8 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     )
 
     assert detail_payload["message_id"] == "msg-1"
+    assert detail_payload["thread_id"] == "thread-1"
+    assert detail_payload["label_ids"] == ["INBOX", "UNREAD"]
     assert detail_payload["profile"] == "zhan-gmail"
     assert detail_payload["authorised_email"] == "zhanvonwitbrock@gmail.com"
     assert detail_payload["sender"] == "Sender <sender@example.test>"
@@ -737,11 +834,26 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     assert detail_payload["subject"] == "Subject line"
     assert detail_payload["date"] == "Sat, 25 Apr 2026 09:00:00 +0000"
     assert detail_payload["snippet"] == "Short preview"
+    assert detail_payload["attachments"] == [
+        {
+            "attachment_id": "attachment-1",
+            "filename": "ticket.pdf",
+            "content_type": "application/pdf",
+            "part_id": "1",
+            "size_bytes": 456,
+        }
+    ]
+    assert detail_payload["attachment_count"] == 1
+    assert detail_payload["attachments_truncated"] is False
     assert "body" not in detail_payload
+    assert "payload" not in detail_payload
+    assert "raw" not in detail_payload
+    assert "must-not-escape" not in repr(detail_payload)
 
 
 def test_internal_mcp_gmail_get_message_includes_body_only_when_requested(
     monkeypatch,
+    trusted_gmail_operator,
 ):
     import base64
 
@@ -777,15 +889,50 @@ def test_internal_mcp_gmail_get_message_includes_body_only_when_requested(
         profile="zhan-gmail",
         message_id="msg-body",
         include_body=True,
+        max_body_chars=12,
     )
 
-    assert requested_formats == ["metadata", "full"]
+    assert requested_formats == ["full", "full"]
     assert "body" not in metadata_payload
-    assert body_payload["body"] == "Explicitly requested message body"
-    assert body_payload["body_truncated"] is False
+    assert body_payload["body"] == "Explicitly r"
+    assert body_payload["body_truncated"] is True
+    assert "payload" not in body_payload
 
 
-def test_gmail_list_messages_surfaces_invalid_grant_as_reauthorisation(monkeypatch):
+def test_internal_mcp_gmail_get_message_reports_truncated_body_without_text(
+    monkeypatch,
+    trusted_gmail_operator,
+):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_message",
+        lambda **_kwargs: {
+            "id": "msg-many-parts",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "parts": [
+                    {"mimeType": "application/octet-stream", "body": {}}
+                    for _index in range(300)
+                ],
+            },
+        },
+    )
+
+    payload = catalogue_module._gmail_get_message(
+        profile="zhan-gmail",
+        message_id="msg-many-parts",
+        include_body=True,
+    )
+
+    assert "body" not in payload
+    assert payload["body_truncated"] is True
+
+
+def test_gmail_list_messages_surfaces_invalid_grant_as_reauthorisation(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
     def fake_list_messages(**_kwargs):
@@ -807,7 +954,10 @@ def test_gmail_list_messages_surfaces_invalid_grant_as_reauthorisation(monkeypat
     }
 
 
-def test_gmail_get_message_keeps_transport_timeout_distinct_from_auth(monkeypatch):
+def test_gmail_get_message_keeps_transport_timeout_distinct_from_auth(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
     def fake_get_message(**_kwargs):
@@ -829,7 +979,10 @@ def test_gmail_get_message_keeps_transport_timeout_distinct_from_auth(monkeypatc
     assert payload["error_details"]["reauthorisation_required"] is False
 
 
-def test_gmail_get_message_surfaces_insufficient_oauth_scope(monkeypatch):
+def test_gmail_get_message_surfaces_insufficient_oauth_scope(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
     def fake_get_message(**_kwargs):
@@ -852,7 +1005,10 @@ def test_gmail_get_message_surfaces_insufficient_oauth_scope(monkeypatch):
     assert payload["error_details"]["reauthorisation_required"] is True
 
 
-def test_gmail_list_messages_zero_results_exposes_empty_messages(monkeypatch):
+def test_gmail_list_messages_zero_results_exposes_empty_messages(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from types import SimpleNamespace
 
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
@@ -867,7 +1023,11 @@ def test_gmail_list_messages_zero_results_exposes_empty_messages(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.integrations.google.gmail_service.get_profile",
-        lambda _profile: SimpleNamespace(query_prefix=None, label_filter=[]),
+        lambda _profile, *_args: SimpleNamespace(
+            profile_id="zhan-gmail",
+            query_prefix=None,
+            label_filter=[],
+        ),
     )
 
     payload = catalogue_module._gmail_list_messages(
@@ -883,6 +1043,7 @@ def test_gmail_list_messages_zero_results_exposes_empty_messages(monkeypatch):
 
 def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
     monkeypatch,
+    trusted_gmail_operator,
 ):
     """JVNAUTOSCI-2127: list response must surface profile-level filtering.
 
@@ -923,6 +1084,8 @@ def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
     assert eq["effective_query_string"] == fake_profile.query_prefix
     assert eq["effective_label_ids"] == ["INBOX"]
     assert eq["bypass_profile_query_prefix"] is False
+    assert eq["scope"] == "profile_default_view"
+    assert eq["scope_source"] == "legacy_default"
 
     assert "notes" in payload
     assert any("query_prefix" in n for n in payload["notes"])
@@ -931,7 +1094,10 @@ def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
     assert captured_kwargs.get("bypass_profile_query_prefix") is False
 
 
-def test_gmail_list_messages_reports_grouped_profile_and_caller_query(monkeypatch):
+def test_gmail_list_messages_reports_grouped_profile_and_caller_query(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.google import gmail_service as gs
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
@@ -964,6 +1130,7 @@ def test_gmail_list_messages_reports_grouped_profile_and_caller_query(monkeypatc
 
 def test_gmail_list_messages_bypass_profile_query_prefix_passes_through(
     monkeypatch,
+    trusted_gmail_operator,
 ):
     """JVNAUTOSCI-2127: bypass flag forwards to gmail_service and clears prefix."""
 
@@ -998,6 +1165,8 @@ def test_gmail_list_messages_bypass_profile_query_prefix_passes_through(
     assert eq["applied_query_prefix"] is None
     assert eq["applied_label_filter"] is None
     assert eq["effective_query_string"] is None
+    assert eq["scope"] == "whole_mailbox"
+    assert eq["scope_source"] == "legacy_bypass_profile_query_prefix"
     # No filtering note when nothing was applied.
     assert payload.get("notes") in (None, [])
 
@@ -1027,7 +1196,9 @@ def test_gmail_list_messages_input_schema_accepts_bypass_flag():
     input_description = method.input_schema.description or ""
     assert "adjacent clauses mean AND" in input_description
     assert "uppercase OR or braces express a union" in input_description
-    assert "accepted compatibility hints but are ignored" in input_description
+    assert "scope='whole_mailbox'" in input_description
+    assert "scope='profile_default_view'" in input_description
+    assert "order/order_by/sort remain compatibility hints" in input_description
 
 
 def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
@@ -1044,7 +1215,7 @@ def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
         "limit": 10,
         "order_by": "newest",
         "order": "desc",
-        "scope": "received",
+        "scope": "whole_mailbox",
         "include_metadata": ["id", "from", "subject", "date"],
     }
 
@@ -1084,6 +1255,7 @@ def test_predicate_incidence_input_schema_accepts_target_type_alias():
 
 def test_gmail_list_messages_handler_accepts_limit_alias_and_planning_hints(
     monkeypatch,
+    trusted_gmail_operator,
 ):
     from src.backend.integrations.google import gmail_service as gs
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
@@ -1106,7 +1278,7 @@ def test_gmail_list_messages_handler_accepts_limit_alias_and_planning_hints(
         profile="zhan-gmail",
         limit=10,
         order="desc",
-        scope="received",
+        scope="whole_mailbox",
         include_metadata=["sender", "subject", "date", "snippet"],
     )
 
@@ -1119,9 +1291,117 @@ def test_gmail_list_messages_handler_accepts_limit_alias_and_planning_hints(
         "date",
         "snippet",
     ]
+    assert captured_kwargs["bypass_profile_query_prefix"] is True
+    assert payload["effective_query"]["scope"] == "whole_mailbox"
+    assert payload["effective_query"]["scope_source"] == "explicit_scope"
 
 
-def test_gmail_list_messages_projection_narrows_follow_up_fields(monkeypatch):
+def test_gmail_list_messages_profile_default_view_applies_profile_filters(
+    monkeypatch,
+    trusted_gmail_operator,
+):
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    captured_kwargs: dict = {}
+
+    def fake_list_messages(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"messages": [], "resultSizeEstimate": 0}
+
+    fake_profile = gs.GmailProfile(
+        profile_id="zhan-gmail",
+        token_path="/tmp/fake-token.json",
+        label_filter=["INBOX"],
+        query_prefix="to:zhan@example.test OR from:zhan@example.test",
+    )
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        scope="profile_default_view",
+    )
+
+    assert captured_kwargs["bypass_profile_query_prefix"] is False
+    effective_query = payload["effective_query"]
+    assert effective_query["scope"] == "profile_default_view"
+    assert effective_query["scope_source"] == "explicit_scope"
+    assert effective_query["applied_query_prefix"] == fake_profile.query_prefix
+    assert effective_query["applied_label_filter"] == ["INBOX"]
+
+
+def test_gmail_list_messages_rejects_invalid_or_conflicting_explicit_scope(
+    monkeypatch,
+):
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    gmail_called = False
+
+    def fake_list_messages(**_kwargs):
+        nonlocal gmail_called
+        gmail_called = True
+        raise AssertionError("invalid mailbox scope must fail before Gmail access")
+
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+
+    invalid = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        scope="received",
+    )
+    whole_mailbox_conflict = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        scope="whole_mailbox",
+        bypass_profile_query_prefix=False,
+    )
+    default_view_conflict = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        scope="profile_default_view",
+        bypass_profile_query_prefix=True,
+    )
+
+    assert invalid["error_code"] == "invalid_mailbox_scope"
+    assert invalid["error_details"]["allowed_scopes"] == [
+        "whole_mailbox",
+        "profile_default_view",
+    ]
+    assert whole_mailbox_conflict["error_code"] == "conflicting_mailbox_scope"
+    assert default_view_conflict["error_code"] == "conflicting_mailbox_scope"
+    assert gmail_called is False
+
+
+def test_ordinary_gmail_methods_use_actor_authorised_profile_choices():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    catalogue = build_default_catalogue()
+    profile_argument_by_method = {
+        "gmail_get_auth_config": "profile_id",
+        "gmail_list_messages": "profile",
+        "gmail_get_message": "profile",
+        "gmail_get_attachment": "profile",
+        "gmail_import_attachment": "profile",
+        "gmail_list_labels": "profile",
+    }
+
+    for method_name, profile_argument in profile_argument_by_method.items():
+        definition = catalogue.get(method_name)
+        assert definition.ordinary_turn_trusted_argument_choice_bindings == {
+            profile_argument: "gmail_profile",
+        }
+        assert profile_argument not in (
+            definition.ordinary_turn_trusted_argument_bindings or {}
+        )
+
+    profile_listing = catalogue.get("gmail_list_profiles")
+    assert profile_listing.ordinary_turn_excluded_reason == "deployment_global_account"
+    assert "excluded from ordinary" in (profile_listing.description or "")
+
+
+def test_gmail_list_messages_projection_narrows_follow_up_fields(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from types import SimpleNamespace
 
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
@@ -1155,7 +1435,11 @@ def test_gmail_list_messages_projection_narrows_follow_up_fields(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.integrations.google.gmail_service.get_profile",
-        lambda _profile: SimpleNamespace(query_prefix=None, label_filter=[]),
+        lambda _profile, *_args: SimpleNamespace(
+            profile_id="zhan-gmail",
+            query_prefix=None,
+            label_filter=[],
+        ),
     )
 
     payload = catalogue_module._gmail_list_messages(
@@ -1179,7 +1463,10 @@ def test_gmail_list_messages_projection_narrows_follow_up_fields(monkeypatch):
     assert "snippet" not in follow_up["required_when_any_item_missing_fields"]
 
 
-def test_gmail_list_messages_resolves_represented_profile_resource_alias(monkeypatch):
+def test_gmail_list_messages_resolves_represented_profile_resource_alias(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.google import gmail_service as gs
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
     from src.backend.services import concept_service
@@ -1216,7 +1503,10 @@ def test_gmail_list_messages_resolves_represented_profile_resource_alias(monkeyp
     assert payload["profile"] == "zhan-gmail"
 
 
-def test_gmail_modify_labels_resolves_represented_profile_resource_alias(monkeypatch):
+def test_gmail_modify_labels_resolves_represented_profile_resource_alias(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
     from src.backend.services import concept_service
 
@@ -1258,7 +1548,10 @@ def test_gmail_modify_labels_resolves_represented_profile_resource_alias(monkeyp
     assert captured_kwargs["verify_after"] is True
 
 
-def test_gmail_list_labels_supports_required_exact_name_resolution(monkeypatch):
+def test_gmail_list_labels_supports_required_exact_name_resolution(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
     captured_kwargs: dict = {}
@@ -1360,7 +1653,10 @@ def test_spreadsheet_record_plan_tools_are_bounded_internal_surfaces():
     assert snapshot["build_spreadsheet_batch_completion_evidence"]["category"] == "read"
 
 
-def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
+def test_gmail_send_message_registered_and_gateway_invokes(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,
         InternalMCPTransport,
@@ -1395,6 +1691,7 @@ def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
         catalogue=catalogue,
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
     result = gateway.invoke(
         "gmail_send_message",
@@ -1455,7 +1752,10 @@ def test_gmail_send_message_gateway_fails_closed_without_allow_send(monkeypatch)
     assert called is False
 
 
-def test_gmail_create_label_registered_and_gateway_invokes(monkeypatch):
+def test_gmail_create_label_registered_and_gateway_invokes(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,
         InternalMCPTransport,
@@ -1489,6 +1789,7 @@ def test_gmail_create_label_registered_and_gateway_invokes(monkeypatch):
         catalogue=catalogue,
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
     result = gateway.invoke(
         "gmail_create_label",
@@ -1551,7 +1852,10 @@ def test_gmail_create_label_gateway_fails_closed_without_allow_mutation(
     assert called is False
 
 
-def test_gmail_create_label_gateway_surfaces_conflict(monkeypatch):
+def test_gmail_create_label_gateway_surfaces_conflict(
+    monkeypatch,
+    trusted_gmail_operator,
+):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,
         InternalMCPTransport,
@@ -1576,6 +1880,7 @@ def test_gmail_create_label_gateway_surfaces_conflict(monkeypatch):
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
     result = gateway.invoke(
         "gmail_create_label",

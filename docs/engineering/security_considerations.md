@@ -233,15 +233,18 @@ Current implementation details:
 
 ### 4. MCP Tool Access Control and Agentic-AI Threats
 
-**Current as of 27 July 2026**: When internal MCP is enabled, authenticated
+**Current as of 11 August 2026**: When internal MCP is enabled, authenticated
 ordinary turns receive a bounded additive representation aperture. Trusted
 actor and namespace values are server-bound; creation scope is fixed; effects
 on existing subjects require actor- or organisation-scoped authority; and
 ordinary turns cannot change visibility scope. Gmail reads are projected only
 when a represented actor-to-profile relation authorises a configured profile,
-which the entry point injects without letting the model choose it. Revalidate
-the catalogue and adaptive-turn service before relying on this dated
-implementation claim.
+and the model may choose only among the actor-authorised stable resource
+selectors supplied by the trusted entry point. Runtime aliases are resolved
+server-side and every Gmail handler rechecks the selected profile against
+trusted invocation provenance and current represented authority. Revalidate the
+catalogue and adaptive-turn service before relying on this dated implementation
+claim.
 
 **Protection**:
 - The ordinary-turn projection excludes undelegated effects; an operation's

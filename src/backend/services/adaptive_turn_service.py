@@ -1606,6 +1606,7 @@ def _scope_message(
     conversation_situation: str | None = None,
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
     conversation_observation_state: Mapping[str, Any] | None = None,
+    authorised_resource_choices: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     actor = scope.user_concept_id or "unauthenticated"
     organisation = scope.organisation_concept_id or "none"
@@ -1722,6 +1723,49 @@ def _scope_message(
         "permission when authority is missing or materially consequential "
         "alternatives genuinely require the user's choice."
     )
+    if authorised_resource_choices:
+        safe_choices = [
+            {
+                key: choice.get(key)
+                for key in (
+                    "source_family",
+                    "resource_id",
+                    "display_label",
+                    "represented_identity_concept_ids",
+                    "is_default",
+                )
+                if choice.get(key) is not None
+            }
+            for choice in authorised_resource_choices
+            if isinstance(choice, Mapping)
+        ]
+        if safe_choices:
+            message += (
+                "\n\nAUTHORISED CONNECTOR RESOURCE CHOICES "
+                "(server-derived authority ceiling, not a preference):\n"
+                + json.dumps(
+                    safe_choices,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                + "\n- Choose semantically in this order: an explicit resource "
+                "or represented identity in the latest user request; an applicable "
+                "resource remembered in the conversation situation; a single "
+                "represented default; the sole authorised choice; otherwise ask "
+                "one focused question only when the remaining private-corpus "
+                "difference is material. Do not ask merely because alternatives "
+                "exist when one of those grounds is sufficient.\n"
+                "- Briefly name the selected human-readable resource on first use "
+                "or when it changes if the user could reasonably confuse accounts. "
+                "The remembered situation is not authority; every dispatch is "
+                "rechecked against this turn's choices.\n"
+                "- Connector account and view scope are separate. For an "
+                "unqualified request for recent or 'my' mail, use whole_mailbox on "
+                "the selected account. Use profile_default_view for a named stream "
+                "or profile-specific view. Widen a selected view only when the user "
+                "asks for the underlying mailbox or current evidence makes that "
+                "scope difference material."
+            )
     if elapsed_time_advisories:
         message += "\n- Elapsed-time advisory notices:\n" + "\n".join(
             f"  - {str(notice).strip()}"
@@ -1869,11 +1913,11 @@ def ordinary_turn_capability_delegation(
 
     def trusted_binding_is_present(binding_key: str) -> bool:
         value = trusted_values.get(binding_key)
-        return bool(
-            isinstance(value, str)
-            and value.strip()
-            and not is_unresolved_tool_argument_placeholder(value)
-        )
+        if isinstance(value, str):
+            return bool(
+                value.strip() and not is_unresolved_tool_argument_placeholder(value)
+            )
+        return bool(_normalise_trusted_argument_choices(value))
 
     requested = [
         name
@@ -1899,6 +1943,12 @@ def ordinary_turn_capability_delegation(
             trusted_binding_is_present(str(binding_key))
             for binding_key in (
                 metadata.get("ordinary_turn_trusted_argument_bindings") or {}
+            ).values()
+        )
+        and all(
+            trusted_binding_is_present(str(binding_key))
+            for binding_key in (
+                metadata.get("ordinary_turn_trusted_argument_choice_bindings") or {}
             ).values()
         )
     ]
@@ -1987,6 +2037,7 @@ def _capability_catalogue(
     workflow_capabilities: Sequence[Any] = (),
     workflow_discovery: Mapping[str, Any] | None = None,
     capability_details_by_name: MutableMapping[str, dict[str, Any]] | None = None,
+    trusted_argument_values: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     query = str(payload.get("query") or "").strip().lower()
     requested_names = payload.get("names")
@@ -2104,6 +2155,13 @@ def _capability_catalogue(
                 if str(argument_name).strip()
             }
         )
+        server_authorised_choice_arguments = sorted(
+            str(argument_name)
+            for argument_name in (
+                definition.ordinary_turn_trusted_argument_choice_bindings or {}
+            )
+            if str(argument_name).strip()
+        )
         plan_profile, effect_profile = _registered_capability_plan_profile(
             gateway,
             name=name,
@@ -2128,9 +2186,15 @@ def _capability_catalogue(
             "kind": "registered_tool",
             "description": description,
             **({"planner_hint": planner_hint} if planner_hint else {}),
-            "input_schema": _model_visible_input_schema(definition),
+            "input_schema": _model_visible_input_schema(
+                definition,
+                trusted_argument_values,
+            ),
             "query_match": query_match,
             "server_bound_arguments": server_bound_arguments,
+            "server_authorised_choice_arguments": (
+                server_authorised_choice_arguments
+            ),
             "semantic_effect": bool(effect_profile["semantic_effect"]),
             "effect_profile": effect_profile,
             "plan_profile": plan_profile,
@@ -2636,7 +2700,79 @@ def _capability_catalogue(
     }
 
 
-def _model_visible_input_schema(definition: Any) -> dict[str, Any]:
+class _TrustedArgumentChoiceError(ValueError):
+    """A model-selected argument fell outside trusted actor authority."""
+
+    def __init__(self, argument_name: str, reason_code: str):
+        self.argument_name = argument_name
+        self.reason_code = reason_code
+        super().__init__(f"{reason_code}:{argument_name}")
+
+
+def _normalise_trusted_argument_choices(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    raw_choices = value.get("choices")
+    if not isinstance(raw_choices, Sequence) or isinstance(
+        raw_choices, (str, bytes, bytearray)
+    ):
+        return None
+    choices: list[dict[str, Any]] = []
+    seen_selectors: set[str] = set()
+    seen_values: set[str] = set()
+    for raw_choice in raw_choices:
+        if not isinstance(raw_choice, Mapping):
+            continue
+        selector = str(raw_choice.get("selector") or "").strip()
+        runtime_value = str(raw_choice.get("value") or "").strip()
+        if (
+            not selector
+            or not runtime_value
+            or selector in seen_selectors
+            or runtime_value in seen_values
+        ):
+            continue
+        seen_selectors.add(selector)
+        seen_values.add(runtime_value)
+        choice = {
+            key: raw_choice.get(key)
+            for key in (
+                "selector",
+                "value",
+                "source_family",
+                "resource_id",
+                "runtime_alias",
+                "display_label",
+                "selection_source",
+                "represented_identity_concept_ids",
+            )
+            if raw_choice.get(key) is not None
+        }
+        choice["selector"] = selector
+        choice["value"] = runtime_value
+        choices.append(choice)
+    if not choices:
+        return None
+    default_selector = str(value.get("default_selector") or "").strip() or None
+    if default_selector is not None and default_selector not in seen_selectors:
+        default_selector = None
+    default_selection_source = (
+        str(value.get("default_selection_source") or "").strip() or None
+    )
+    if default_selector is None:
+        default_selection_source = None
+    return {
+        "schema_version": "trusted_argument_choice.v1",
+        "default_selector": default_selector,
+        "default_selection_source": default_selection_source,
+        "choices": choices,
+    }
+
+
+def _model_visible_input_schema(
+    definition: Any,
+    trusted_argument_values: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Hide arguments supplied by trusted turn authority from the model."""
 
     schema = dict(schema_to_json_schema(definition.input_schema))
@@ -2656,6 +2792,51 @@ def _model_visible_input_schema(definition: Any) -> dict[str, Any]:
     fixed_arguments = definition.ordinary_turn_fixed_arguments
     if isinstance(fixed_arguments, Mapping):
         hidden_arguments.update(str(argument_name) for argument_name in fixed_arguments)
+    choice_bindings = definition.ordinary_turn_trusted_argument_choice_bindings
+    trusted_values = trusted_argument_values or {}
+    visible_choice_arguments: dict[str, dict[str, Any]] = {}
+    if isinstance(choice_bindings, Mapping):
+        for argument_name, binding_key in choice_bindings.items():
+            canonical_argument = str(argument_name)
+            raw_value = trusted_values.get(str(binding_key))
+            choices = _normalise_trusted_argument_choices(raw_value)
+            if choices is None:
+                # A legacy scalar remains a hard server binding.
+                if isinstance(raw_value, str) and raw_value.strip():
+                    hidden_arguments.add(canonical_argument)
+                continue
+            visible_choice_arguments[canonical_argument] = choices
+            choice_property = dict(properties.get(canonical_argument) or {})
+            choice_property["enum"] = [
+                choice["selector"] for choice in choices["choices"]
+            ]
+            labels = [
+                f"{choice['selector']} ({choice.get('display_label') or choice['value']})"
+                for choice in choices["choices"]
+            ]
+            existing_description = str(choice_property.get("description") or "").strip()
+            choice_property["description"] = " ".join(
+                part
+                for part in (
+                    existing_description,
+                    "Actor-authorised resource choice: " + "; ".join(labels),
+                    (
+                        "Omit to use the represented or request default."
+                        if choices.get("default_selector")
+                        else "Select one resource; no authoritative default is available."
+                    ),
+                )
+                if part
+            )
+            properties[canonical_argument] = choice_property
+            if choices.get("default_selector"):
+                required = [
+                    field_name
+                    for field_name in required
+                    if field_name != canonical_argument
+                ]
+            elif canonical_argument not in required:
+                required.append(canonical_argument)
     for argument_name in hidden_arguments:
         properties.pop(str(argument_name), None)
         required = [
@@ -2724,6 +2905,26 @@ def _model_visible_input_schema(definition: Any) -> dict[str, Any]:
         else:
             schema.pop("x-von-comma-separated-list-fields", None)
     schema["properties"] = properties
+    if visible_choice_arguments:
+        schema["x-von-authorised-argument-choices"] = {
+            argument_name: {
+                "default_selector": choices.get("default_selector"),
+                "choices": [
+                    {
+                        key: choice.get(key)
+                        for key in (
+                            "selector",
+                            "resource_id",
+                            "display_label",
+                            "represented_identity_concept_ids",
+                        )
+                        if choice.get(key) is not None
+                    }
+                    for choice in choices["choices"]
+                ],
+            }
+            for argument_name, choices in visible_choice_arguments.items()
+        }
     if required:
         schema["required"] = required
     else:
@@ -2738,9 +2939,25 @@ def _trusted_tool_payload(
     model_payload: Mapping[str, Any],
     trusted_argument_values: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    payload, _diagnostics = _trusted_tool_payload_with_diagnostics(
+        gateway=gateway,
+        tool_name=tool_name,
+        model_payload=model_payload,
+        trusted_argument_values=trusted_argument_values,
+    )
+    return payload
+
+
+def _trusted_tool_payload_with_diagnostics(
+    *,
+    gateway: InternalMCPGateway,
+    tool_name: str,
+    model_payload: Mapping[str, Any],
+    trusted_argument_values: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     definition = gateway.get_method_definition(tool_name)
     if definition is None:
-        return dict(model_payload)
+        return dict(model_payload), None
     schema = definition.input_schema
     payload: MutableMapping[str, Any] = dict(model_payload)
     bindings = definition.ordinary_turn_trusted_argument_bindings
@@ -2760,6 +2977,85 @@ def _trusted_tool_payload(
                 if canonical == canonical_argument:
                     payload.pop(alias, None)
             payload[canonical_argument] = trusted_value.strip()
+    binding_diagnostics: dict[str, Any] = {}
+    choice_bindings = definition.ordinary_turn_trusted_argument_choice_bindings
+    if isinstance(choice_bindings, Mapping):
+        for argument_name, binding_key in choice_bindings.items():
+            canonical_argument = str(argument_name)
+            trusted_value = trusted_values.get(str(binding_key))
+            choices = _normalise_trusted_argument_choices(trusted_value)
+            if choices is None:
+                # Compatibility entry points may still provide one trusted
+                # scalar; it remains a hard server binding.
+                if (
+                    isinstance(trusted_value, str)
+                    and trusted_value.strip()
+                    and not is_unresolved_tool_argument_placeholder(trusted_value)
+                ):
+                    payload.pop(canonical_argument, None)
+                    for alias, canonical in schema.aliases.items():
+                        if canonical == canonical_argument:
+                            payload.pop(alias, None)
+                    payload[canonical_argument] = trusted_value.strip()
+                continue
+
+            requested_selector = payload.get(canonical_argument)
+            if requested_selector is None:
+                for alias, canonical in schema.aliases.items():
+                    if canonical == canonical_argument and alias in payload:
+                        requested_selector = payload.get(alias)
+                        break
+            requested_text = str(requested_selector or "").strip() or None
+            selected_choice = next(
+                (
+                    choice
+                    for choice in choices["choices"]
+                    if requested_text in {choice["selector"], choice["value"]}
+                ),
+                None,
+            )
+            selection_source = "adaptive_authorised_choice"
+            if requested_text is None:
+                default_selector = choices.get("default_selector")
+                selected_choice = next(
+                    (
+                        choice
+                        for choice in choices["choices"]
+                        if choice["selector"] == default_selector
+                    ),
+                    None,
+                )
+                selection_source = (
+                    choices.get("default_selection_source") or "trusted_default"
+                )
+            if selected_choice is None:
+                raise _TrustedArgumentChoiceError(
+                    canonical_argument,
+                    (
+                        "authorised_argument_choice_required"
+                        if requested_text is None
+                        else "argument_choice_not_authorised"
+                    ),
+                )
+
+            payload.pop(canonical_argument, None)
+            for alias, canonical in schema.aliases.items():
+                if canonical == canonical_argument:
+                    payload.pop(alias, None)
+            payload[canonical_argument] = selected_choice["value"]
+            resource_scope = {
+                key: selected_choice.get(key)
+                for key in (
+                    "source_family",
+                    "resource_id",
+                    "runtime_alias",
+                    "display_label",
+                )
+                if selected_choice.get(key) is not None
+            }
+            if resource_scope:
+                resource_scope["selection_source"] = selection_source
+                binding_diagnostics["resource_scope"] = resource_scope
     fixed_arguments = definition.ordinary_turn_fixed_arguments
     if isinstance(fixed_arguments, Mapping):
         for argument_name, fixed_value in fixed_arguments.items():
@@ -2769,7 +3065,7 @@ def _trusted_tool_payload(
                 if canonical == canonical_argument:
                     payload.pop(alias, None)
             payload[canonical_argument] = fixed_value
-    return dict(payload)
+    return dict(payload), binding_diagnostics or None
 
 
 def _effect_subject_authorised(concept_id: Any, scope: TrustedTurnScope) -> bool:
@@ -3559,6 +3855,27 @@ def execute_adaptive_turn(
             "conversation_id": conversation_id,
         }
     )
+    authorised_resource_choices: list[dict[str, Any]] = []
+    for trusted_value in trusted_values.values():
+        trusted_choices = _normalise_trusted_argument_choices(trusted_value)
+        if trusted_choices is None:
+            continue
+        for choice in trusted_choices["choices"]:
+            safe_choice = {
+                key: choice.get(key)
+                for key in (
+                    "source_family",
+                    "resource_id",
+                    "display_label",
+                    "represented_identity_concept_ids",
+                )
+                if choice.get(key) is not None
+            }
+            safe_choice["is_default"] = (
+                choice.get("selector") == trusted_choices.get("default_selector")
+            )
+            if safe_choice not in authorised_resource_choices:
+                authorised_resource_choices.append(safe_choice)
     delegated_names = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id=user_concept_id,
@@ -4663,6 +4980,7 @@ def execute_adaptive_turn(
             conversation_situation=conversation_situation,
             conversation_observations=conversation_observations,
             conversation_observation_state=conversation_observation_state,
+            authorised_resource_choices=authorised_resource_choices,
         )
         pending_elapsed_time_advisories.clear()
         try:
@@ -5095,6 +5413,7 @@ def execute_adaptive_turn(
                         ),
                         workflow_discovery=latest_workflow_discovery,
                         capability_details_by_name=catalogued_capabilities_by_name,
+                        trusted_argument_values=trusted_values,
                     )
                     raw_selection_policy = output.get("selection_policy")
                     latest_capability_selection_policy = (
@@ -5397,12 +5716,36 @@ def execute_adaptive_turn(
                         },
                     }
             else:
-                trusted_arguments = _trusted_tool_payload(
-                    gateway=gateway,
-                    tool_name=execution_method_name,
-                    model_payload=arguments,
-                    trusted_argument_values=trusted_values,
-                )
+                try:
+                    (
+                        trusted_arguments,
+                        binding_diagnostics,
+                    ) = _trusted_tool_payload_with_diagnostics(
+                        gateway=gateway,
+                        tool_name=execution_method_name,
+                        model_payload=arguments,
+                        trusted_argument_values=trusted_values,
+                    )
+                except _TrustedArgumentChoiceError as exc:
+                    raw_capability_results[index] = _ContainedCapabilityResult(
+                        raw_payload=_error_payload(
+                            exc.reason_code,
+                            (
+                                f"Argument '{exc.argument_name}' must select one "
+                                "of the actor-authorised resources exposed by "
+                                "the capability schema."
+                            ),
+                        ),
+                        transport_result=None,
+                        arguments={},
+                        capability_name=capability_name,
+                        is_effect=is_effect,
+                        semantic_effect=semantic_effect,
+                        execution_method_name=execution_method_name,
+                        capability_kind="registered_tool",
+                        capability_display_name=capability_display_name,
+                    )
+                    continue
             actual_capabilities.append(
                 _PreparedCapabilityCall(
                     index=index,
@@ -6120,6 +6463,38 @@ def execute_adaptive_turn(
                     invocation["binding_diagnostics"] = dict(
                         contained_result.binding_diagnostics
                     )
+                    resource_scope = contained_result.binding_diagnostics.get(
+                        "resource_scope"
+                    )
+                    if isinstance(resource_scope, Mapping):
+                        invocation_resource_scope = dict(resource_scope)
+                        requested_view_scope = arguments.get("scope")
+                        if (
+                            isinstance(requested_view_scope, str)
+                            and requested_view_scope.strip()
+                        ):
+                            invocation_resource_scope["view_scope"] = (
+                                requested_view_scope.strip()
+                            )
+                        effective_query = (
+                            raw_payload.get("effective_query")
+                            if isinstance(raw_payload, Mapping)
+                            else None
+                        )
+                        if isinstance(effective_query, Mapping):
+                            effective_view_scope = (
+                                effective_query.get("view_scope")
+                                or effective_query.get("mailbox_scope")
+                                or effective_query.get("scope")
+                            )
+                            if (
+                                isinstance(effective_view_scope, str)
+                                and effective_view_scope.strip()
+                            ):
+                                invocation_resource_scope["view_scope"] = (
+                                    effective_view_scope.strip()
+                                )
+                        invocation["resource_scope"] = invocation_resource_scope
                 if workflow_progress_evidence is not None:
                     invocation["workflow_progress_evidence"] = dict(
                         workflow_progress_evidence

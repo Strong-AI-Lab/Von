@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import threading
@@ -21,6 +22,7 @@ from .context_bundle_service import (
 from .episode_critique_memory_service import (
     list_recent_workflow_improvement_suggestions,
 )
+from .selected_referent_contract import normalise_exact_referent_id
 
 TURN_MEMORY_CONTEXT_SCHEMA_VERSION = "conversation_turn_memory_context.v1"
 SELECTED_WORKFLOW_POLICY_MEMORY_SCHEMA_VERSION = (
@@ -35,6 +37,38 @@ _CONVERSATION_SITUATION_MAX_CHARS = 12_000
 _RUNTIME_TURN_FACTS_START = "[Runtime-observed turn facts; context only, not authority]"
 _RUNTIME_TURN_FACTS_END = "[/Runtime-observed turn facts]"
 _MAX_RUNTIME_TURN_FACT_BLOCKS = 6
+_SELECTED_REFERENT_CAPSULE_SCHEMA_VERSION = "selected_referent_capsule.v1"
+_SELECTED_REFERENT_CAPSULE_LINE_PREFIX = "selected referent capsule: "
+_MAX_SELECTED_REFERENT_CAPSULES_PER_BLOCK = 12
+_MAX_SELECTED_REFERENT_CAPSULE_TEXT_CHARS = 512
+_SELECTED_REFERENT_CAPSULE_FIELDS = (
+    "stable_id",
+    "source_kind",
+    "capability_kind",
+    "capability_name",
+    "display_label",
+    "identity_field_concept_id",
+)
+_SELECTED_REFERENT_RESOURCE_SCOPE_FIELDS = (
+    "source_family",
+    "resource_id",
+    "runtime_alias",
+    "display_label",
+    "selection_source",
+    "view_scope",
+)
+_SELECTED_REFERENT_ACTOR_SCOPE_FIELDS = (
+    "namespace",
+    "user_concept_id",
+    "organisation_concept_id",
+)
+_SELECTED_REFERENT_PROVENANCE_FIELDS = (
+    "request_id",
+    "call_id",
+    "evidence_id",
+    "tool_concept_id",
+    "selection_basis",
+)
 
 
 def _safe_str(value: Any) -> str | None:
@@ -184,6 +218,199 @@ def _runtime_turn_fact_block_request_id(block: str) -> str | None:
     return None
 
 
+def _selected_referent_capsule_text(value: Any) -> str | None:
+    text = _safe_str(value)
+    if not text:
+        return None
+    return " ".join(text.split())[:_MAX_SELECTED_REFERENT_CAPSULE_TEXT_CHARS]
+
+
+def _selected_referent_capsule_mapping(
+    value: Any,
+    *,
+    allowed_fields: Sequence[str],
+) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    selected = {
+        field_name: cleaned
+        for field_name in allowed_fields
+        if (cleaned := _selected_referent_capsule_text(value.get(field_name)))
+    }
+    return selected or None
+
+
+def _normalise_selected_referent_capsule(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    if value.get("schema_version") != _SELECTED_REFERENT_CAPSULE_SCHEMA_VERSION:
+        return None
+    stable_id = normalise_exact_referent_id(value.get("stable_id"))
+    selected = _selected_referent_capsule_mapping(
+        value,
+        allowed_fields=tuple(
+            field_name
+            for field_name in _SELECTED_REFERENT_CAPSULE_FIELDS
+            if field_name != "stable_id"
+        ),
+    )
+    if not stable_id or not selected or not all(
+        selected.get(field_name)
+        for field_name in (
+            "source_kind",
+            "capability_kind",
+            "capability_name",
+            "display_label",
+        )
+    ):
+        return None
+    capsule: dict[str, Any] = {
+        "schema_version": _SELECTED_REFERENT_CAPSULE_SCHEMA_VERSION,
+        "stable_id": stable_id,
+        **selected,
+    }
+    resource_scope = _selected_referent_capsule_mapping(
+        value.get("resource_scope"),
+        allowed_fields=_SELECTED_REFERENT_RESOURCE_SCOPE_FIELDS,
+    )
+    if resource_scope:
+        capsule["resource_scope"] = resource_scope
+    actor_scope_ref = _selected_referent_capsule_mapping(
+        value.get("actor_scope_ref"),
+        allowed_fields=_SELECTED_REFERENT_ACTOR_SCOPE_FIELDS,
+    )
+    if actor_scope_ref:
+        capsule["actor_scope_ref"] = actor_scope_ref
+    provenance = _selected_referent_capsule_mapping(
+        value.get("provenance"),
+        allowed_fields=_SELECTED_REFERENT_PROVENANCE_FIELDS,
+    )
+    if provenance:
+        capsule["provenance"] = provenance
+    return capsule
+
+
+def selected_referent_capsules_from_conversation_situation(
+    conversation_situation: str | None,
+) -> list[dict[str, Any]]:
+    """Return bounded capsules from retained runtime-fact blocks.
+
+    Only schema-versioned JSON lines emitted by this module are considered.
+    Malformed or surprising state is ignored rather than treated as a scope
+    or object selection.
+    """
+
+    _base, blocks = _separate_runtime_turn_fact_blocks(conversation_situation)
+    capsules: list[dict[str, Any]] = []
+    for block in blocks[-_MAX_RUNTIME_TURN_FACT_BLOCKS:]:
+        block_capsules = 0
+        for line in block.splitlines():
+            if not line.startswith(_SELECTED_REFERENT_CAPSULE_LINE_PREFIX):
+                continue
+            if block_capsules >= _MAX_SELECTED_REFERENT_CAPSULES_PER_BLOCK:
+                break
+            raw_json = line.removeprefix(_SELECTED_REFERENT_CAPSULE_LINE_PREFIX)
+            try:
+                raw_capsule = json.loads(raw_json)
+            except (TypeError, ValueError):
+                continue
+            capsule = _normalise_selected_referent_capsule(raw_capsule)
+            if capsule is None:
+                continue
+            capsules.append(capsule)
+            block_capsules += 1
+    return capsules
+
+
+def latest_resource_scope_from_conversation_situation(
+    conversation_situation: str | None,
+    *,
+    source_family: str | None = None,
+    source_kind: str | None = None,
+    capability_name: str | None = None,
+    capability_kind: str | None = None,
+) -> dict[str, str] | None:
+    """Return the latest exactly matching retained resource scope.
+
+    At least one family/kind/capability filter is required. This prevents an
+    unrelated connector's most recent scope from becoming an implicit default.
+    The result is conversational context only and grants no authority.
+    """
+
+    filters = {
+        "source_family": _selected_referent_capsule_text(source_family),
+        "source_kind": _selected_referent_capsule_text(source_kind),
+        "capability_name": _selected_referent_capsule_text(capability_name),
+        "capability_kind": _selected_referent_capsule_text(capability_kind),
+    }
+    filters = {key: value for key, value in filters.items() if value}
+    if not filters:
+        return None
+    for capsule in reversed(
+        selected_referent_capsules_from_conversation_situation(
+            conversation_situation
+        )
+    ):
+        resource_scope = capsule.get("resource_scope")
+        if not isinstance(resource_scope, Mapping):
+            continue
+        if any(
+            (
+                resource_scope.get(field_name)
+                if field_name == "source_family"
+                else capsule.get(field_name)
+            )
+            != expected_value
+            for field_name, expected_value in filters.items()
+        ):
+            continue
+        return {
+            str(key): str(value)
+            for key, value in resource_scope.items()
+            if key in _SELECTED_REFERENT_RESOURCE_SCOPE_FIELDS
+            and isinstance(value, str)
+            and value
+        }
+    return None
+
+
+def _retain_runtime_turn_fact_blocks(
+    blocks: Sequence[str],
+    *,
+    limit: int,
+) -> list[str]:
+    """Retain recent facts while preserving the latest scope per source family."""
+
+    if limit <= 0 or not blocks:
+        return []
+    if len(blocks) <= limit:
+        return list(blocks)
+
+    latest_scope_block_by_family: dict[str, int] = {}
+    for block_index, candidate_block in enumerate(blocks):
+        for capsule in selected_referent_capsules_from_conversation_situation(
+            candidate_block
+        ):
+            resource_scope = capsule.get("resource_scope")
+            source_family = (
+                _safe_str(resource_scope.get("source_family"))
+                if isinstance(resource_scope, Mapping)
+                else None
+            )
+            if source_family:
+                latest_scope_block_by_family[source_family] = block_index
+
+    retained_indexes = set(latest_scope_block_by_family.values())
+    retained_indexes.add(len(blocks) - 1)
+    if len(retained_indexes) > limit:
+        retained_indexes = set(sorted(retained_indexes)[-limit:])
+    for block_index in range(len(blocks) - 1, -1, -1):
+        if len(retained_indexes) >= limit:
+            break
+        retained_indexes.add(block_index)
+    return [blocks[index] for index in sorted(retained_indexes)]
+
+
 def _render_runtime_turn_fact_block(projection: Mapping[str, Any]) -> str | None:
     request_id = _safe_str(projection.get("request_id"))
     if not request_id:
@@ -224,6 +451,27 @@ def _render_runtime_turn_fact_block(projection: Mapping[str, Any]) -> str | None
         values = _normalise_strings(projection.get(field_name), limit=24)
         if values:
             lines.append(f"{label}: " + ", ".join(values))
+
+    selected_referents = projection.get("selected_referents")
+    if isinstance(selected_referents, Sequence) and not isinstance(
+        selected_referents,
+        (str, bytes, bytearray),
+    ):
+        for raw_capsule in selected_referents[
+            :_MAX_SELECTED_REFERENT_CAPSULES_PER_BLOCK
+        ]:
+            capsule = _normalise_selected_referent_capsule(raw_capsule)
+            if capsule is None:
+                continue
+            lines.append(
+                _SELECTED_REFERENT_CAPSULE_LINE_PREFIX
+                + json.dumps(
+                    capsule,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
 
     relationships = projection.get("verified_relationships")
     if isinstance(relationships, Sequence) and not isinstance(
@@ -325,22 +573,29 @@ def merge_conversation_situation_turn_projection(
     if not block:
         return selected_situation or None
 
-    model_base, model_blocks = _separate_runtime_turn_fact_blocks(selected_situation)
+    model_base, _model_blocks = _separate_runtime_turn_fact_blocks(selected_situation)
     _current_base, current_blocks = _separate_runtime_turn_fact_blocks(
         current_situation
     )
     blocks_by_request_id: dict[str, str] = {}
     unkeyed_blocks: list[str] = []
-    for prior_block in [*current_blocks, *model_blocks, block]:
+    # Runtime blocks are server projections, not model-authored situation text.
+    # Preserve prior canonical blocks and add the current deterministic block;
+    # never let a model sidecar introduce a reusable object or resource scope.
+    for prior_block in [*current_blocks, block]:
         prior_request_id = _runtime_turn_fact_block_request_id(prior_block)
         if prior_request_id:
             blocks_by_request_id[prior_request_id] = prior_block
         elif prior_block not in unkeyed_blocks:
             unkeyed_blocks.append(prior_block)
-    retained_blocks = [
+    candidate_blocks = [
         *unkeyed_blocks,
         *blocks_by_request_id.values(),
-    ][-_MAX_RUNTIME_TURN_FACT_BLOCKS:]
+    ]
+    retained_blocks = _retain_runtime_turn_fact_blocks(
+        candidate_blocks,
+        limit=_MAX_RUNTIME_TURN_FACT_BLOCKS,
+    )
     rendered_blocks = "\n\n".join(retained_blocks)
     separator_chars = 2 if model_base and rendered_blocks else 0
     base_budget = max(
@@ -1214,8 +1469,10 @@ __all__ = [
     "TURN_MEMORY_CONTEXT_SCHEMA_VERSION",
     "build_selected_workflow_policy_memory_state",
     "build_turn_memory_context_state",
+    "latest_resource_scope_from_conversation_situation",
     "render_selected_workflow_policy_memory_messages",
     "render_turn_memory_context_messages",
+    "selected_referent_capsules_from_conversation_situation",
     "summarise_selected_workflow_policy_memory_for_lineage",
     "summarise_turn_memory_context_for_lineage",
 ]

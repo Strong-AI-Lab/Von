@@ -85,6 +85,10 @@ def test_bootstrap_materialises_gmail_tool_contract_graph_kr(
         "#V#tool_emits_entity_type",
         [],
     )
+    assert service.GMAIL_ATTACHMENT_ENTITY_TYPE_ID in detail_tool_relationships.get(
+        "#V#tool_emits_collection_entity_type",
+        [],
+    )
     assert service.GMAIL_MESSAGE_ID_FIELD_ID in detail_tool_relationships.get(
         "#V#detail_tool_accepts_identifier_field",
         [],
@@ -137,6 +141,15 @@ def test_gmail_final_answer_view_requires_detail_completed_message_fields(
     )
     assert service.GMAIL_BODY_FIELD_ID in included_fields
     assert service.GMAIL_BODY_TRUNCATED_FIELD_ID in included_fields
+    assert {
+        service.GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID,
+        service.GMAIL_ATTACHMENT_ID_FIELD_ID,
+        service.GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        service.GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        service.GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+        service.GMAIL_ATTACHMENT_COUNT_FIELD_ID,
+        service.GMAIL_ATTACHMENTS_TRUNCATED_FIELD_ID,
+    }.issubset(included_fields)
 
     completed_fields = _targets(
         service.GMAIL_GET_MESSAGE_TOOL_ID,
@@ -151,6 +164,29 @@ def test_gmail_final_answer_view_requires_detail_completed_message_fields(
     assert required_fields.issubset(preserved_detail_fields)
     assert service.GMAIL_BODY_FIELD_ID in preserved_detail_fields
     assert service.GMAIL_BODY_TRUNCATED_FIELD_ID in preserved_detail_fields
+
+    detail_output_fields = _targets(
+        service.GMAIL_GET_MESSAGE_TOOL_ID,
+        "#V#tool_has_output_field",
+    )
+    assert service.GMAIL_PAYLOAD_FIELD_ID not in detail_output_fields
+    assert service.GMAIL_ATTACHMENTS_COLLECTION_FIELD_ID in detail_output_fields
+
+    message_entity_fields = _targets(
+        service.GMAIL_MESSAGE_ENTITY_TYPE_ID,
+        "#V#entity_type_has_tool_field",
+    )
+    assert service.GMAIL_PAYLOAD_FIELD_ID not in message_entity_fields
+    attachment_entity_fields = _targets(
+        service.GMAIL_ATTACHMENT_ENTITY_TYPE_ID,
+        "#V#entity_type_has_tool_field",
+    )
+    assert attachment_entity_fields == {
+        service.GMAIL_ATTACHMENT_ID_FIELD_ID,
+        service.GMAIL_ATTACHMENT_FILENAME_FIELD_ID,
+        service.GMAIL_ATTACHMENT_CONTENT_TYPE_FIELD_ID,
+        service.GMAIL_ATTACHMENT_SIZE_BYTES_FIELD_ID,
+    }
 
 
 def test_gmail_list_detail_affordance_maps_list_identifier_to_detail_argument(
@@ -236,3 +272,36 @@ def test_gmail_contract_does_not_use_json_text_relation_contracts() -> None:
     assert all("json" not in concept_id.lower() for concept_id in concept_ids)
     assert all("json" not in spec.predicate.lower() for spec in relationship_specs)
     assert all(spec.predicate != "hasText" for spec in relationship_specs)
+
+
+def test_bootstrap_removes_obsolete_raw_payload_relationships(
+    _reset_mock_db: Any,
+) -> None:
+    from src.backend.services.relationship_write_service import add_relationship
+
+    first_report = service.bootstrap_gmail_tool_evidence_contract()
+    assert first_report["success"] is True
+
+    obsolete_sources = (
+        (service.GMAIL_GET_MESSAGE_TOOL_ID, "#V#tool_has_output_field"),
+        (service.GMAIL_GET_MESSAGE_TOOL_ID, "#V#detail_tool_completes_field"),
+        (service.GMAIL_MESSAGE_ENTITY_TYPE_ID, "#V#entity_type_has_tool_field"),
+        (service.GMAIL_USER_DISPLAY_VIEW_ID, "#V#evidence_view_redacts_field"),
+    )
+    for source_id, predicate in obsolete_sources:
+        result = add_relationship(
+            source_id=source_id,
+            predicate=predicate,
+            target=service.GMAIL_PAYLOAD_FIELD_ID,
+        )
+        assert result.get("success") is True
+
+    second_report = service.bootstrap_gmail_tool_evidence_contract()
+
+    assert second_report["success"] is True
+    assert second_report["removed_obsolete_payload_relationship_count"] == len(
+        obsolete_sources
+    )
+    assert second_report["validation"]["obsolete_payload_relationships"] == []
+    for source_id, predicate in obsolete_sources:
+        assert service.GMAIL_PAYLOAD_FIELD_ID not in _targets(source_id, predicate)

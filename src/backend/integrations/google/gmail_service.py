@@ -65,6 +65,11 @@ MESSAGE_LIST_VISIBILITY_VALUES: set[str] = {
 }
 
 PROFILES_ENV_VAR = "VON_GMAIL_PROFILES"
+MAX_GMAIL_ATTACHMENT_MIME_PARTS = 256
+
+
+class GmailAttachmentSizeLimitError(ValueError):
+    """Attachment response exceeds the caller's named byte boundary."""
 
 
 def _create_connection_prefer_ipv4(
@@ -883,16 +888,43 @@ def get_attachment(
     return request.execute() or {}
 
 
-def decode_attachment_bytes(attachment: Mapping[str, Any]) -> bytes:
+def decode_attachment_bytes(
+    attachment: Mapping[str, Any],
+    *,
+    max_bytes: int | None = None,
+) -> bytes:
     """Decode Gmail's base64url attachment payload into source bytes."""
 
+    if max_bytes is not None and max_bytes <= 0:
+        raise ValueError("max_bytes must be positive when provided")
+    reported_size = attachment.get("size")
+    if (
+        max_bytes is not None
+        and isinstance(reported_size, int)
+        and not isinstance(reported_size, bool)
+        and reported_size > max_bytes
+    ):
+        raise GmailAttachmentSizeLimitError(
+            f"Gmail attachment reported {reported_size} bytes, exceeding "
+            f"the {max_bytes}-byte limit"
+        )
     raw_data = attachment.get("data")
     if not isinstance(raw_data, str) or not raw_data.strip():
         raise ValueError("Gmail attachment response did not contain data")
-    compact = "".join(raw_data.split())
+    compact = raw_data.strip()
+    if any(character.isspace() for character in compact):
+        raise ValueError(
+            "Gmail attachment response contained whitespace in base64url data"
+        )
+    if max_bytes is not None:
+        maximum_encoded_chars = ((max_bytes + 2) // 3) * 4
+        if len(compact) > maximum_encoded_chars:
+            raise GmailAttachmentSizeLimitError(
+                "Gmail attachment encoded payload exceeds the bounded decode limit"
+            )
     padding = "=" * (-len(compact) % 4)
     try:
-        return base64.b64decode(
+        decoded = base64.b64decode(
             (compact + padding).encode("ascii"),
             altchars=b"-_",
             validate=True,
@@ -901,12 +933,19 @@ def decode_attachment_bytes(attachment: Mapping[str, Any]) -> bytes:
         raise ValueError(
             "Gmail attachment response contained invalid base64url data"
         ) from exc
+    if max_bytes is not None and len(decoded) > max_bytes:
+        raise GmailAttachmentSizeLimitError(
+            f"Gmail attachment decoded to {len(decoded)} bytes, exceeding "
+            f"the {max_bytes}-byte limit"
+        )
+    return decoded
 
 
 def find_attachment_part_metadata(
     message: Mapping[str, Any],
     *,
     attachment_id: str,
+    max_parts: int = MAX_GMAIL_ATTACHMENT_MIME_PARTS,
 ) -> Dict[str, Any]:
     """Return trusted MIME metadata for one attachment in a full Gmail message."""
 
@@ -914,11 +953,16 @@ def find_attachment_part_metadata(
     if not isinstance(payload, Mapping):
         return {}
 
+    effective_max_parts = max(1, int(max_parts))
     pending: list[Mapping[str, Any]] = [payload]
-    while pending:
+    visited_parts = 0
+    while pending and visited_parts < effective_max_parts:
         part = pending.pop()
+        visited_parts += 1
         children = part.get("parts")
         if isinstance(children, list):
+            remaining_capacity = effective_max_parts - visited_parts - len(pending)
+            children = children[: max(0, remaining_capacity)]
             pending.extend(
                 child for child in reversed(children) if isinstance(child, Mapping)
             )

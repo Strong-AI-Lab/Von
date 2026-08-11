@@ -482,6 +482,39 @@ def test_decode_attachment_bytes_accepts_gmail_base64url_without_padding():
     assert gs.decode_attachment_bytes({"data": encoded}) == source
 
 
+def test_decode_attachment_bytes_rejects_encoded_payload_before_decode(monkeypatch):
+    encoded = base64.urlsafe_b64encode(b"too large").decode("ascii")
+    decode_called = False
+
+    def _decode(*_args, **_kwargs):
+        nonlocal decode_called
+        decode_called = True
+        raise AssertionError("oversized payload must not be decoded")
+
+    monkeypatch.setattr(base64, "b64decode", _decode)
+
+    with pytest.raises(gs.GmailAttachmentSizeLimitError):
+        gs.decode_attachment_bytes({"data": encoded}, max_bytes=3)
+
+    assert decode_called is False
+
+
+def test_decode_attachment_bytes_rejects_reported_size_before_decode(monkeypatch):
+    decode_called = False
+
+    def _decode(*_args, **_kwargs):
+        nonlocal decode_called
+        decode_called = True
+        raise AssertionError("oversized payload must not be decoded")
+
+    monkeypatch.setattr(base64, "b64decode", _decode)
+
+    with pytest.raises(gs.GmailAttachmentSizeLimitError):
+        gs.decode_attachment_bytes({"size": 100, "data": "YQ=="}, max_bytes=3)
+
+    assert decode_called is False
+
+
 def test_find_attachment_part_metadata_traverses_nested_mime_parts():
     message = {
         "payload": {
@@ -510,6 +543,28 @@ def test_find_attachment_part_metadata_traverses_nested_mime_parts():
         "content_type": "application/pdf",
         "reported_size_bytes": 321,
     }
+
+
+def test_find_attachment_part_metadata_bounds_mime_traversal():
+    message = {
+        "payload": {
+            "parts": [
+                {
+                    "filename": f"attachment-{index}.txt",
+                    "body": {"attachmentId": f"attachment-{index}"},
+                }
+                for index in range(300)
+            ]
+        }
+    }
+
+    assert (
+        gs.find_attachment_part_metadata(
+            message,
+            attachment_id="attachment-299",
+        )
+        == {}
+    )
 
 
 def test_modify_labels_guard(monkeypatch):

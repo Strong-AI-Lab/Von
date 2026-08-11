@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ..db.repositories.concepts_repository import ConceptsRepository
+from .selected_referent_contract import (
+    MAX_EXACT_REFERENT_ID_CHARS,
+    normalise_exact_referent_id,
+)
 from .workflow_vontology_materialisation_helpers import (
     load_concept,
     normalise_relationship_targets,
@@ -117,6 +121,7 @@ class ToolFieldContract:
     required: bool
     included: bool
     redacted: bool
+    role_concept_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -126,6 +131,16 @@ class ToolProjectionContract:
     fields: tuple[ToolFieldContract, ...]
     output_field_ids: tuple[str, ...]
     collection_field_ids: tuple[str, ...]
+    entity_type_concept_ids: tuple[str, ...] = ()
+
+
+REFERENT_CANDIDATE_SCHEMA_VERSION = "tool_referent_candidate.v1"
+_ENTITY_IDENTIFIER_ROLE_ID = "#V#tool_field_role_entity_identifier"
+_FOLLOW_UP_ARGUMENT_ROLE_ID = "#V#tool_field_role_follow_up_argument"
+_DISPLAY_LABEL_ROLE_ID = "#V#tool_field_role_display_label"
+_SENSITIVE_CONTENT_ROLE_ID = "#V#tool_field_role_sensitive_content"
+_REFERENT_CANDIDATE_MAX_ITEMS = 24
+_REFERENT_DISPLAY_LABEL_MAX_CHARS = 320
 
 
 def project_surfaceable_concept_evidence(
@@ -804,6 +819,175 @@ def render_surfaceable_concept_lines(
     return lines
 
 
+def _bounded_referent_text(value: Any, *, maximum: int) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split()).strip()
+    if not cleaned:
+        return None
+    return cleaned[:maximum]
+
+
+def _referent_field_values(
+    item: Mapping[str, Any],
+    field: ToolFieldContract,
+    *,
+    maximum: int,
+    exact_identifier: bool = False,
+) -> list[str]:
+    value = _mapping_value(item, field.output_key)
+    raw_values = (
+        value[:4]
+        if isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
+        else [value]
+    )
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        cleaned = (
+            normalise_exact_referent_id(raw_value)
+            if exact_identifier
+            else _bounded_referent_text(raw_value, maximum=maximum)
+        )
+        if not cleaned or cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        values.append(cleaned)
+    return values
+
+
+def _referent_entity_type_for_identifier_field(
+    contract: ToolProjectionContract,
+    identity_field: ToolFieldContract,
+) -> str:
+    """Resolve a candidate's represented entity type from its identity field."""
+
+    for entity_type_id in contract.entity_type_concept_ids:
+        entity_doc = load_concept(entity_type_id)
+        if identity_field.concept_id in _relationship_targets(
+            entity_doc,
+            "#V#entity_type_has_tool_field",
+        ):
+            return entity_type_id
+    return (
+        contract.entity_type_concept_ids[0]
+        if contract.entity_type_concept_ids
+        else contract.tool_concept_id
+    )
+
+
+def _project_referent_candidates(
+    contract: ToolProjectionContract,
+    projected: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Project reusable object handles from represented field semantics.
+
+    This is deliberately ignorant of connector names and wire vocabularies.
+    A source becomes eligible by representing an entity identifier and a
+    non-sensitive display label in its ordinary tool evidence contract.
+    """
+
+    identifier_fields = sorted(
+        (
+            field
+            for field in contract.fields
+            if not field.redacted
+            and _ENTITY_IDENTIFIER_ROLE_ID in field.role_concept_ids
+        ),
+        key=lambda field: (
+            _FOLLOW_UP_ARGUMENT_ROLE_ID not in field.role_concept_ids,
+            field.concept_id,
+        ),
+    )
+    display_fields = [
+        field
+        for field in contract.fields
+        if not field.redacted
+        and _DISPLAY_LABEL_ROLE_ID in field.role_concept_ids
+        and _SENSITIVE_CONTENT_ROLE_ID not in field.role_concept_ids
+    ]
+    if not identifier_fields or not display_fields:
+        return []
+
+    collection_keys = {
+        field.output_key
+        for field in contract.fields
+        if field.concept_id in contract.collection_field_ids
+    }
+    # Some tools return one primary entity plus a bounded child collection.
+    # Keep both eligible; list tools simply produce no top-level candidate when
+    # their identity/display fields exist only on collection rows.
+    item_mappings: list[Mapping[str, Any]] = [projected]
+    for collection_key in sorted(collection_keys):
+        rows = _mapping_value(projected, collection_key)
+        if not isinstance(rows, Sequence) or isinstance(
+            rows, (str, bytes, bytearray)
+        ):
+            continue
+        item_mappings.extend(
+            item for item in rows[:_REFERENT_CANDIDATE_MAX_ITEMS] if isinstance(item, Mapping)
+        )
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in item_mappings[:_REFERENT_CANDIDATE_MAX_ITEMS]:
+        stable_id: str | None = None
+        identity_field: ToolFieldContract | None = None
+        for field in identifier_fields:
+            values = _referent_field_values(
+                item,
+                field,
+                maximum=MAX_EXACT_REFERENT_ID_CHARS,
+                exact_identifier=True,
+            )
+            if values:
+                stable_id = values[0]
+                identity_field = field
+                break
+        if not stable_id or identity_field is None:
+            continue
+
+        entity_type_id = _referent_entity_type_for_identifier_field(
+            contract,
+            identity_field,
+        )
+
+        labels: list[str] = []
+        label_seen: set[str] = set()
+        for field in display_fields:
+            for label in _referent_field_values(
+                item,
+                field,
+                maximum=_REFERENT_DISPLAY_LABEL_MAX_CHARS,
+            ):
+                lowered = label.lower()
+                if lowered in label_seen:
+                    continue
+                label_seen.add(lowered)
+                labels.append(label)
+        if not labels:
+            continue
+        display_label = " · ".join(labels)[:_REFERENT_DISPLAY_LABEL_MAX_CHARS]
+        identity_key = (entity_type_id.lower(), stable_id.lower())
+        if identity_key in seen:
+            continue
+        seen.add(identity_key)
+        candidates.append(
+            {
+                "schema_version": REFERENT_CANDIDATE_SCHEMA_VERSION,
+                "stable_id": stable_id,
+                "display_label": display_label,
+                "source_kind": entity_type_id,
+                "identity_field_concept_id": identity_field.concept_id,
+            }
+        )
+    return candidates
+
+
 def project_tool_payload_for_llm(
     tool_name: str,
     payload: Mapping[str, Any],
@@ -832,6 +1016,7 @@ def project_tool_payload_for_llm(
         "missing_required_fields": [],
         "omitted_fields": [],
         "redacted_fields": [],
+        "entity_type_concept_ids": list(contract.entity_type_concept_ids),
     }
 
     collection_projection = _project_collection_fields(
@@ -940,6 +1125,10 @@ def project_tool_payload_for_llm(
             }
         )
 
+    referent_candidates = _project_referent_candidates(contract, projected)
+    if referent_candidates:
+        telemetry["referent_candidates"] = referent_candidates
+
     projected["_tool_evidence_projection"] = telemetry
     if len(projected) <= 2 and not (
         telemetry["missing_required_fields"] or telemetry["redacted_fields"]
@@ -959,6 +1148,18 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
         return None
 
     relationships = _relationships(tool_doc)
+    entity_type_concept_ids = tuple(
+        _ordered_unique(
+            [
+                *_normalise_unique(
+                    relationships.get("#V#tool_emits_entity_type")
+                ),
+                *_normalise_unique(
+                    relationships.get("#V#tool_emits_collection_entity_type")
+                ),
+            ]
+        )
+    )
     output_field_ids = tuple(
         _normalise_unique(relationships.get("#V#tool_has_output_field"))
     )
@@ -1036,6 +1237,7 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
         fields=fields,
         output_field_ids=output_field_ids,
         collection_field_ids=collection_field_ids,
+        entity_type_concept_ids=entity_type_concept_ids,
     )
 
 
@@ -1105,6 +1307,9 @@ def _load_field_contract(
     )
     if output_key not in aliases:
         aliases = (output_key, *aliases)
+    role_concept_ids = tuple(
+        _normalise_unique(_relationships(doc).get("#V#field_has_role"))
+    )
     return ToolFieldContract(
         concept_id=field_id,
         output_key=output_key,
@@ -1113,6 +1318,7 @@ def _load_field_contract(
         required=required,
         included=included,
         redacted=redacted,
+        role_concept_ids=role_concept_ids,
     )
 
 
@@ -1229,6 +1435,7 @@ def _field_for_collection_item(
         required=field.required,
         included=field.included,
         redacted=field.redacted,
+        role_concept_ids=field.role_concept_ids,
     )
 
 
@@ -1406,6 +1613,7 @@ def _clean_str(value: Any) -> str | None:
 __all__ = [
     "NESTED_WORKFLOW_PROGRESS_EVIDENCE_SCHEMA_VERSION",
     "PROJECTION_SCHEMA_VERSION",
+    "REFERENT_CANDIDATE_SCHEMA_VERSION",
     "WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION",
     "ToolFieldContract",
     "ToolProjectionContract",

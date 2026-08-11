@@ -295,6 +295,63 @@ def _gmail_gateway(handler: Any) -> InternalMCPGateway:
     )
 
 
+def _gmail_choice_gateway(handler: Any) -> InternalMCPGateway:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="gmail_list_messages",
+            handler=handler,
+            input_schema=Schema(
+                required={"profile": str},
+                optional={"query": str, "scope": str},
+                aliases={
+                    "profile_id": "profile",
+                    "identity": "profile",
+                },
+                allow_unknown=False,
+                description="List Gmail messages for an authorised profile.",
+            ),
+            category="read",
+            ordinary_turn_trusted_argument_choice_bindings={
+                "profile": "gmail_profile",
+            },
+            description="List Gmail messages for an authorised profile.",
+        )
+    )
+    return InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+
+def _gmail_profile_choices(*, default: str | None) -> dict[str, Any]:
+    return {
+        "schema_version": "trusted_argument_choice.v1",
+        "default_selector": default,
+        "choices": [
+            {
+                "selector": "#V#gmail_profile_personal",
+                "value": "personal-runtime",
+                "source_family": "gmail",
+                "resource_id": "#V#gmail_profile_personal",
+                "runtime_alias": "personal-runtime",
+                "display_label": "michael@example.test",
+                "represented_identity_concept_ids": ["#V#michael"],
+            },
+            {
+                "selector": "#V#gmail_profile_zhan",
+                "value": "zhan-runtime",
+                "source_family": "gmail",
+                "resource_id": "#V#gmail_profile_zhan",
+                "runtime_alias": "zhan-runtime",
+                "display_label": "zhan@example.test",
+                "represented_identity_concept_ids": ["#V#zhan"],
+            },
+        ],
+    }
+
+
 def _actor_alias_gateway(handler: Any) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -1355,6 +1412,243 @@ def test_server_bound_capability_argument_is_not_model_visible() -> None:
     assert set(input_schema["properties"]) == {"query"}
     assert "profile" not in input_schema.get("required", [])
     assert "x-von-argument-aliases" not in input_schema
+
+
+def test_authorised_resource_choices_expose_only_stable_selectors() -> None:
+    gateway = _gmail_choice_gateway(lambda **_kwargs: {"success": True})
+    trusted = {"gmail_profile": _gmail_profile_choices(default=None)}
+    delegated = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values=trusted,
+    )
+
+    capability = _capability_catalogue(
+        gateway,
+        delegated,
+        {"names": ["gmail_list_messages"]},
+        trusted_argument_values=trusted,
+    )["capabilities"][0]
+
+    assert capability["server_authorised_choice_arguments"] == ["profile"]
+    input_schema = capability["input_schema"]
+    assert input_schema["properties"]["profile"]["enum"] == [
+        "#V#gmail_profile_personal",
+        "#V#gmail_profile_zhan",
+    ]
+    assert "profile" in input_schema["required"]
+    projected_choices = input_schema["x-von-authorised-argument-choices"][
+        "profile"
+    ]["choices"]
+    assert projected_choices == [
+        {
+            "selector": "#V#gmail_profile_personal",
+            "resource_id": "#V#gmail_profile_personal",
+            "display_label": "michael@example.test",
+            "represented_identity_concept_ids": ["#V#michael"],
+        },
+        {
+            "selector": "#V#gmail_profile_zhan",
+            "resource_id": "#V#gmail_profile_zhan",
+            "display_label": "zhan@example.test",
+            "represented_identity_concept_ids": ["#V#zhan"],
+        },
+    ]
+    assert "personal-runtime" not in json.dumps(input_schema)
+    assert "zhan-runtime" not in json.dumps(input_schema)
+
+
+def test_authorised_resource_choice_maps_selector_and_records_scope() -> None:
+    seen_arguments: dict[str, Any] = {}
+
+    def handler(**kwargs: Any) -> dict[str, Any]:
+        seen_arguments.update(kwargs)
+        return {
+            "success": True,
+            "messages": [],
+            "effective_query": {"scope": "whole_mailbox"},
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="call-zhan-mail",
+                    payload={
+                        "name": "gmail_list_messages",
+                        "arguments": {
+                            "profile": "#V#gmail_profile_zhan",
+                            "scope": "whole_mailbox",
+                            "query": "newer_than:1d",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="I checked zhan@example.test."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gmail_choice_gateway(handler),
+        prompt="Check Zhan's recent email.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_concept_id="#V#person",
+        trusted_argument_values={
+            "gmail_profile": _gmail_profile_choices(default=None),
+        },
+        turn_id="turn-zhan-mail-choice",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "I checked zhan@example.test."
+    system_message = client.calls[0]["system_message"]
+    assert "AUTHORISED CONNECTOR RESOURCE CHOICES" in system_message
+    assert "zhan@example.test" in system_message
+    assert "whole_mailbox" in system_message
+    assert "profile_default_view" in system_message
+    assert "zhan-runtime" not in system_message
+    assert seen_arguments == {
+        "profile": "zhan-runtime",
+        "scope": "whole_mailbox",
+        "query": "newer_than:1d",
+    }
+    invocation = result.tool_invocations[0]
+    assert invocation["effective_arguments"] == seen_arguments
+    assert invocation["resource_scope"] == {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_zhan",
+        "runtime_alias": "zhan-runtime",
+        "display_label": "zhan@example.test",
+        "selection_source": "adaptive_authorised_choice",
+        "view_scope": "whole_mailbox",
+    }
+
+
+def test_authorised_resource_choice_uses_default_or_rejects_foreign_value() -> None:
+    seen_arguments: list[dict[str, Any]] = []
+
+    def handler(**kwargs: Any) -> dict[str, Any]:
+        seen_arguments.append(dict(kwargs))
+        return {"success": True, "messages": []}
+
+    default_client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="call-default-mail",
+                    payload={
+                        "name": "gmail_list_messages",
+                        "arguments": {"query": "newer_than:1d"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="No recent messages."),
+    )
+    execute_adaptive_turn(
+        gateway=_gmail_choice_gateway(handler),
+        prompt="Check recent email.",
+        context=[],
+        llm_client=default_client,
+        model="test-model",
+        user_concept_id="#V#person",
+        trusted_argument_values={
+            "gmail_profile": _gmail_profile_choices(
+                default="#V#gmail_profile_personal"
+            ),
+        },
+        turn_id="turn-default-mail-choice",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+    assert seen_arguments == [
+        {"profile": "personal-runtime", "query": "newer_than:1d"}
+    ]
+
+    foreign_client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="call-foreign-mail",
+                    payload={
+                        "name": "gmail_list_messages",
+                        "arguments": {"profile": "other-person-runtime"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="That mailbox is not authorised."),
+    )
+    foreign_result = execute_adaptive_turn(
+        gateway=_gmail_choice_gateway(handler),
+        prompt="Check somebody else's mailbox.",
+        context=[],
+        llm_client=foreign_client,
+        model="test-model",
+        user_concept_id="#V#person",
+        trusted_argument_values={
+            "gmail_profile": _gmail_profile_choices(default=None),
+        },
+        turn_id="turn-foreign-mail-choice",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert seen_arguments == [
+        {"profile": "personal-runtime", "query": "newer_than:1d"}
+    ]
+    invocation = foreign_result.tool_invocations[0]
+    assert invocation["status"] == "error"
+    assert json.loads(invocation["evidence"]["preview"])["error_code"] == (
+        "argument_choice_not_authorised"
+    )
+
+    missing_client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="call-ambiguous-mail",
+                    payload={
+                        "name": "gmail_list_messages",
+                        "arguments": {"query": "newer_than:1d"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Which mailbox should I check?"),
+    )
+    missing_result = execute_adaptive_turn(
+        gateway=_gmail_choice_gateway(handler),
+        prompt="Check recent email.",
+        context=[],
+        llm_client=missing_client,
+        model="test-model",
+        user_concept_id="#V#person",
+        trusted_argument_values={
+            "gmail_profile": _gmail_profile_choices(default=None),
+        },
+        turn_id="turn-ambiguous-mail-choice",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+    assert seen_arguments == [
+        {"profile": "personal-runtime", "query": "newer_than:1d"}
+    ]
+    missing_error = json.loads(
+        missing_result.tool_invocations[0]["evidence"]["preview"]
+    )
+    assert missing_error["error_code"] == "authorised_argument_choice_required"
 
 
 def test_capability_catalogue_rejects_placeholder_description_override(

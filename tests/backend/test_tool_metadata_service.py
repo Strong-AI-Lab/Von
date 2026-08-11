@@ -40,6 +40,28 @@ def test_gmail_send_metadata_marks_external_surface_and_planner_hint(monkeypatch
         service.invalidate_cache()
 
 
+def test_gmail_attachment_metadata_separates_inspection_from_import(monkeypatch):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        inspection = service.get_tool_metadata("gmail_get_attachment")
+        durable_import = service.get_tool_metadata("gmail_import_attachment")
+
+        assert inspection.category == "gmail"
+        assert inspection.operation_category == "read"
+        assert inspection.planner_hint is not None
+        assert "creates no durable state" in inspection.planner_hint
+
+        assert durable_import.category == "gmail"
+        assert durable_import.operation_category == "write"
+        assert durable_import.planner_hint is not None
+        assert "allow_import=true" in durable_import.planner_hint
+    finally:
+        service.invalidate_cache()
+
+
 def test_gmail_create_label_metadata_marks_external_write_surface(monkeypatch):
     from src.backend.services import tool_metadata_service as service
 

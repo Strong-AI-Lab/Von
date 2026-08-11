@@ -54,7 +54,7 @@ def test_bootstrap_materialises_mail_profile_resource_vocabulary(
     report = service.bootstrap_mail_profile_resource_vocabulary()
 
     assert report["success"] is True
-    assert report["schema_version"] == "mail_profile_resource.v1"
+    assert report["schema_version"] == "mail_profile_resource.v2"
     assert report["errors"] == []
 
     validation = service.validate_mail_profile_resource_vocabulary()
@@ -80,11 +80,15 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
 ) -> None:
     user_concept_id = "#V#michael_witbrock"
     _create_user(user_concept_id)
+    _create_user("#V#zhan_vonwitbrock")
 
     report = service.materialise_gmail_profile_resources_for_user(
         user_concept_id=user_concept_id,
         profile_ids=["vonwitbrock-gmail", "zhan-gmail"],
         default_profile_id="vonwitbrock-gmail",
+        profile_identity_concept_ids={
+            "zhan-gmail": "#V#zhan_vonwitbrock",
+        },
     )
 
     assert report["success"] is True
@@ -107,6 +111,12 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
     )
     assert default_targets == {von_profile}
 
+    identity_targets = _targets(
+        zhan_profile,
+        service.MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID,
+    )
+    assert identity_targets == {"#V#zhan_vonwitbrock"}
+
     alias_targets = _targets(
         von_profile,
         service.HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID,
@@ -124,6 +134,28 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
     assert profile_attributes["runtime_profile_alias"] == "vonwitbrock-gmail"
     assert "token_path" not in profile_attributes
     assert "credentials_path" not in profile_attributes
+
+    authority = service.list_authorised_gmail_profiles_for_user(
+        user_concept_id=user_concept_id,
+    )
+    assert authority == {
+        "success": True,
+        "reason_code": "authorised_mail_profiles_resolved",
+        "profiles": [
+            {
+                "profile_id": "vonwitbrock-gmail",
+                "profile_resource_concept_id": von_profile,
+                "is_default": True,
+                "represented_identity_concept_ids": [],
+            },
+            {
+                "profile_id": "zhan-gmail",
+                "profile_resource_concept_id": zhan_profile,
+                "is_default": False,
+                "represented_identity_concept_ids": ["#V#zhan_vonwitbrock"],
+            },
+        ],
+    }
 
     default_resolution = service.resolve_authorised_gmail_profile_for_user(
         user_concept_id=user_concept_id,

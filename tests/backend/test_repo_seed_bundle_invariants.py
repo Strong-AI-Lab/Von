@@ -223,6 +223,53 @@ def test_legacy_general_mail_review_is_not_an_ordinary_routing_candidate() -> No
     assert routing_profile["retained_for_explicit_durable_review_only"] is True
 
 
+def test_repo_seeded_gmail_list_steps_use_semantic_mailbox_scope() -> None:
+    canonical = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
+    mail_review = next(
+        item
+        for item in canonical.get("workflows", [])
+        if item.get("workflow_id") == "#V#general_mail_review_workflow"
+    )
+    mail_review_steps = {
+        step["state_id"]: step
+        for step in mail_review["publication_spec"]["steps"]
+        if isinstance(step, dict) and isinstance(step.get("state_id"), str)
+    }
+    list_bindings = dict(
+        mail_review_steps["list_recent_mail_messages"]["static_input_bindings"]
+    )
+    assert list_bindings["scope"] == "whole_mailbox"
+    assert "bypass_profile_query_prefix" not in list_bindings
+
+    prompt_bindings = dict(
+        mail_review_steps["prepare_mail_review_tool_prompt"][
+            "static_input_bindings"
+        ]
+    )
+    prompt_template = prompt_bindings["assignments"][0]["template"]
+    assert "scope whole_mailbox" in prompt_template
+    assert "bypass_profile_query_prefix true" not in prompt_template
+
+    convergence_path = (
+        SEED_BUNDLE_DIR
+        / "email_source_representation_convergence_workflow_seed_bundle.json"
+    )
+    convergence = json.loads(convergence_path.read_text(encoding="utf-8"))
+    zhan_workflow = next(
+        item
+        for item in convergence.get("workflows", [])
+        if item.get("workflow_id") == "#V#zhan_gmail_arxiv_ingestion_workflow"
+    )
+    list_step = next(
+        step
+        for step in zhan_workflow["publication_spec"]["steps"]
+        if step.get("state_id") == "list_messages"
+    )
+    tool_arguments = dict(list_step["static_input_bindings"])["tool_arguments"]
+    assert tool_arguments["scope"] == "whole_mailbox"
+    assert "bypass_profile_query_prefix" not in tool_arguments
+
+
 def test_explicit_workflow_experience_prelude_callers_keep_their_seed_definition() -> (
     None
 ):
