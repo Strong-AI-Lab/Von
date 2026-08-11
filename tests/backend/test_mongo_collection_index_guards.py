@@ -232,8 +232,31 @@ def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
         "relationships_has_initial_step_1",
         "relationships_v_evidence_view_applies_to_tool_1",
         "episode_critique_remediation_external_instance_lookup",
+        "legacy_name_exact_1",
         "updated_at_-1",
     }.issubset(concept_index_names)
+    concept_indexes_by_name = {
+        str(call["kwargs"].get("name") or ""): call
+        for call in db_one[mc.CONCEPTS_COLLECTION_NAME].create_index_calls
+    }
+    assert concept_indexes_by_name["legacy_name_exact_1"]["keys"] == [
+        ("name", mc.ASCENDING)
+    ]
+    assert concept_indexes_by_name["legacy_name_exact_1"]["kwargs"] == {
+        "name": "legacy_name_exact_1",
+        "sparse": True,
+    }
+
+
+def test_concepts_indexes_accept_existing_scalar_legacy_name_index() -> None:
+    coll = _FakeCollection(index_names=["name_1"])
+
+    mc._ensure_concepts_collection_indexes(cast(Any, coll))
+
+    created_names = {
+        str(call["kwargs"].get("name") or "") for call in coll.create_index_calls
+    }
+    assert "legacy_name_exact_1" not in created_names
 
 
 def test_invalidate_connection_clears_collection_index_cache(monkeypatch):

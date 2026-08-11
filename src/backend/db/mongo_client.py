@@ -1476,6 +1476,15 @@ def _ensure_concepts_collection_indexes(concepts_coll: Collection) -> None:
             )
         except Exception as _e:
             logger.warning("Unable to create text index on name: %s", _e)
+    if (
+        "legacy_name_exact_1" not in existing_indexes
+        and "name_1" not in existing_indexes
+    ):
+        concepts_coll.create_index(
+            [("name", ASCENDING)],
+            name="legacy_name_exact_1",
+            sparse=True,
+        )
     if "names.name_1" not in existing_indexes:
         concepts_coll.create_index([("names.name", ASCENDING)], name="names.name_1")
     if "names.text_1" not in existing_indexes:

@@ -118,6 +118,46 @@ def test_modern_text_relation_hits_skip_legacy_regex_scan(monkeypatch) -> None:
     assert len(concept_find_calls) == 1
 
 
+def test_exact_instance_lookup_preserves_legacy_top_level_name(monkeypatch) -> None:
+    legacy_doc = {
+        "concept_id": "#V#legacy_person",
+        "name": "Legacy Person",
+        "relationships": {"is_an_instance_of": ["#V#person"]},
+    }
+    concept_find_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(svc.TextValuesRepository, "find", lambda *args, **kwargs: [])
+    monkeypatch.setattr(svc.TextRelationsRepository, "find", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        svc,
+        "get_vontology_node_and_descendant_ids",
+        lambda _concept_id: ["#V#person"],
+    )
+
+    def fake_concepts_find(query, *args, **kwargs):
+        concept_find_calls.append(query)
+        return [legacy_doc]
+
+    monkeypatch.setattr(svc.ConceptsRepository, "find", fake_concepts_find)
+    monkeypatch.setattr(svc, "_determine_concept_kind", lambda _doc: "individual")
+
+    result = svc.search_concepts(
+        "Legacy Person",
+        instance_of="#V#person",
+        match_type="exact",
+        limit=10,
+    )
+
+    assert [item["concept_id"] for item in result["results"]] == [
+        "#V#legacy_person"
+    ]
+    assert len(concept_find_calls) == 1
+    assert concept_find_calls[0]["relationships.is_an_instance_of"] == {
+        "$in": ["#V#person"]
+    }
+    assert {"name": "Legacy Person"} in concept_find_calls[0]["$or"]
+
+
 def test_legacy_regex_fallback_filters_duplicates_without_mongo_nin(monkeypatch) -> None:
     concept_find_calls: list[dict[str, Any]] = []
     duplicate_doc = _concept("#V#duplicate", "duplicate")
