@@ -266,6 +266,7 @@ def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
         WORKFLOW_SCHEDULES_COLLECTION,
         WORKFLOW_WORKERS_COLLECTION,
     )
+    from .models import WorkflowInstanceStatus
 
     db = get_db()
     status: dict[str, Any] = {
@@ -283,8 +284,16 @@ def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
             schedules_coll = db[WORKFLOW_SCHEDULES_COLLECTION]
             workers_coll = db[WORKFLOW_WORKERS_COLLECTION]
 
-            # Count instances by status
-            pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+            # Restrict the aggregation to recognised statuses so MongoDB can use
+            # the existing status-leading worker index as a covered scan instead
+            # of reading every workflow instance document.
+            instance_status_values = [
+                instance_status.value for instance_status in WorkflowInstanceStatus
+            ]
+            pipeline = [
+                {"$match": {"status": {"$in": instance_status_values}}},
+                {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+            ]
             status_counts = {
                 doc["_id"]: doc["count"] for doc in instances_coll.aggregate(pipeline)
             }
