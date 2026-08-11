@@ -4,7 +4,11 @@ import pytest
 
 from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
 from src.backend.workflows.definitions import TOOL_CALLING_WORKFLOW_ID
-from src.backend.workflows.workflow_registry import WorkflowRegistration, WorkflowRegistry
+from src.backend.workflows.workflow_registry import (
+    LazyWorkflowRegistration,
+    WorkflowRegistration,
+    WorkflowRegistry,
+)
 from src.backend.workflows.durable import registry_factory
 
 
@@ -21,6 +25,9 @@ class _DummyRegistry:
         if source is None:
             return None
         return SimpleNamespace(source=source)
+
+    def peek_registration(self, workflow_id: str):
+        return self.get_registration(workflow_id)
 
 
 def _build_definition(workflow_id: str, purpose: str) -> WorkflowDefinition:
@@ -213,6 +220,70 @@ def test_workflow_parity_inventory_includes_drift_reason_codes(monkeypatch):
     assert "registry_only" in reasons
     assert "vontology_only" in reasons
     assert "identity_only" in reasons
+
+
+def test_workflow_parity_inventory_does_not_resolve_lazy_definitions(monkeypatch):
+    workflow_id = "#V#wf_lazy"
+    loader_calls: list[str] = []
+
+    def _unexpected_loader(requested_workflow_id: str):
+        loader_calls.append(requested_workflow_id)
+        raise AssertionError("parity inventory must not resolve lazy definitions")
+
+    registry = WorkflowRegistry(definition_loader=_unexpected_loader)
+    registry.register_lazy(
+        LazyWorkflowRegistration(
+            workflow_id=workflow_id,
+            source="vontology",
+        )
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (
+            {
+                "initial_step": "#V#step_1",
+                "steps": [{"step_id": "#V#step_1"}],
+            },
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_description",
+        lambda *_args, **_kwargs: ("", "text_relation.none"),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "best_effort_workflow_narrative_text",
+        lambda _workflow_id: "Lazy workflow narrative",
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_purity_report",
+        lambda registry: {
+            "counters": {},
+            "baseline": {"comparison": {"regression_detected": False}},
+        },
+    )
+
+    inventory = registry_factory._build_workflow_parity_inventory(
+        registry=registry,
+        discovered_workflow_ids=[workflow_id],
+    )
+
+    assert inventory["registry_sources"]["source_by_workflow_id"] == {
+        workflow_id: "vontology"
+    }
+    assert inventory["counts"]["graph_complete"] == 1
+    description_quality = inventory["workflow_description_quality"]
+    assert description_quality["counts"]["total"] == 1
+    assert description_quality["counts"]["missing"] == 0
+    assert description_quality["counts_by_source"] == {
+        "definition.purpose": 1
+    }
+    assert loader_calls == []
+    assert registry.lazy_registration_count() == 1
 
 
 def test_workflow_parity_policy_fail_mode_raises_on_drift(monkeypatch):

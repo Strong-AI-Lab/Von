@@ -36,6 +36,8 @@ from ..mcp_tool_bridge import (
 )
 from ..workflow_side_effect_guardrails import enforce_workflow_mcp_write_guardrails
 from ..vontology_loader import (
+    WORKFLOW_DESCRIPTION_SOURCE_DEFINITION,
+    best_effort_workflow_narrative_text,
     build_workflow_process_graph,
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
@@ -1111,7 +1113,11 @@ def _build_workflow_parity_inventory(
         source = "unknown"
         registration = None
         try:
-            registration = registry.get_registration(workflow_id)
+            # Parity has already inspected the authoritative process graph above.
+            # Do not resolve a lazy registration merely to read its source and
+            # optional purpose: resolution rebuilds that graph and eagerly loads
+            # every workflow in what should remain a diagnostic inventory pass.
+            registration = registry.peek_registration(workflow_id)
             if (
                 registration
                 and isinstance(registration.source, str)
@@ -1131,6 +1137,13 @@ def _build_workflow_parity_inventory(
             registration_purpose=registration_purpose,
             definition_purpose=definition_purpose,
         )
+        if not description and isinstance(registration, LazyWorkflowRegistration):
+            # Preserve the former lazy-definition purpose fallback without
+            # rebuilding the complete workflow graph and executable definition.
+            narrative_description = best_effort_workflow_narrative_text(workflow_id)
+            if narrative_description:
+                description = narrative_description
+                description_source = WORKFLOW_DESCRIPTION_SOURCE_DEFINITION
         description_records.append(
             {
                 "workflow_id": workflow_id,
