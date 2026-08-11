@@ -157,6 +157,94 @@ def _materialise_mock_projection_contract() -> None:
     )
 
 
+def _materialise_bulk_projection_contract(*, extra_field_count: int = 8) -> None:
+    bootstrap_tool_evidence_contract_vocabulary()
+    tool_id = "#V#bulk_projection_tool"
+    entity_type_id = "#V#bulk_projection_entity_type"
+    view_id = "#V#bulk_projection_final_answer_view"
+    _create_concept(
+        tool_id,
+        "bulk_projection_tool",
+        ["#V#mcp_tool"],
+        attributes={"mcp_tool_name": "bulk_projection_tool"},
+    )
+    _create_concept(
+        entity_type_id,
+        "Bulk projection entity type",
+        ["#V#tool_result_entity_type"],
+    )
+    _create_concept(
+        view_id,
+        "Bulk projection final-answer evidence view",
+        ["#V#tool_evidence_view"],
+    )
+    _rel(tool_id, "#V#tool_emits_entity_type", entity_type_id)
+    _rel(view_id, "#V#evidence_view_applies_to_tool", tool_id)
+    _rel(
+        view_id,
+        "#V#evidence_view_has_purpose",
+        "#V#tool_evidence_view_purpose_final_answer",
+    )
+
+    field_specs = [
+        (
+            "id",
+            (
+                "#V#tool_field_role_entity_identifier",
+                "#V#tool_field_role_follow_up_argument",
+            ),
+            "required",
+        ),
+        ("label", ("#V#tool_field_role_display_label",), "included"),
+        (
+            "items",
+            ("#V#tool_field_role_collection_membership",),
+            "included",
+        ),
+        ("secret", ("#V#tool_field_role_sensitive_content",), "redacted"),
+        *[(f"extra_{index}", (), "included") for index in range(extra_field_count)],
+    ]
+    for field_key, role_ids, selection in field_specs:
+        field_id = f"#V#bulk_projection_{field_key}_field"
+        alias_id = f"#V#bulk_projection_{field_key}_wire_key"
+        path_id = f"#V#bulk_projection_{field_key}_payload_path"
+        _create_concept(
+            field_id,
+            f"Bulk projection {field_key} field",
+            ["#V#tool_result_field"],
+            attributes={"field_key": field_key},
+        )
+        _create_concept(
+            alias_id,
+            f"Bulk projection {field_key} wire key",
+            ["#V#tool_wire_key"],
+            attributes={"wire_key": f"wire_{field_key}"},
+        )
+        _create_concept(
+            path_id,
+            f"Bulk projection {field_key} payload path",
+            ["#V#tool_payload_path"],
+            attributes={"payload_path": f"envelope.{field_key}"},
+        )
+        _rel(tool_id, "#V#tool_has_output_field", field_id)
+        _rel(field_id, "#V#field_has_wire_alias", alias_id)
+        _rel(field_id, "#V#field_extracts_from_payload_path", path_id)
+        for role_id in role_ids:
+            _rel(field_id, "#V#field_has_role", role_id)
+        if selection == "required":
+            _rel(view_id, "#V#evidence_view_requires_field", field_id)
+        elif selection == "redacted":
+            _rel(view_id, "#V#evidence_view_redacts_field", field_id)
+        else:
+            _rel(view_id, "#V#evidence_view_includes_field", field_id)
+
+    _rel(
+        entity_type_id,
+        "#V#entity_type_has_tool_field",
+        "#V#bulk_projection_id_field",
+    )
+
+
 def test_projection_runtime_uses_represented_mock_contract_without_tool_branch(
     _reset_mock_db: Any,
 ) -> None:
@@ -219,6 +307,173 @@ def test_projection_runtime_uses_supplied_turn_snapshot_without_reresolving(
 
     assert projected is not None
     assert projected["title"] == "Snapshot projection works"
+
+
+def test_bulk_contract_resolution_preserves_projection_and_referent_semantics(
+    _reset_mock_db: Any,
+) -> None:
+    _materialise_bulk_projection_contract(extra_field_count=4)
+
+    contract = resolve_tool_projection_contract("bulk_projection_tool")
+
+    assert contract is not None
+    fields_by_key = {field.output_key: field for field in contract.fields}
+    assert fields_by_key["id"].wire_aliases == ("id", "wire_id")
+    assert fields_by_key["id"].payload_paths == ("envelope.id",)
+    assert fields_by_key["label"].wire_aliases == ("label", "wire_label")
+    assert contract.collection_field_ids == ("#V#bulk_projection_items_field",)
+    assert contract.entity_type_concept_ids == ("#V#bulk_projection_entity_type",)
+    assert contract.identity_field_entity_type_pairs == (
+        (
+            "#V#bulk_projection_id_field",
+            "#V#bulk_projection_entity_type",
+        ),
+    )
+
+    projected = project_tool_payload_for_llm(
+        "bulk_projection_tool",
+        {
+            "envelope": {
+                "id": "message-123",
+                "extra_0": "Path-projected value",
+            },
+            "wire_label": "A represented message",
+            "wire_secret": "must not surface",
+        },
+        contract=contract,
+    )
+
+    assert projected is not None
+    assert projected["id"] == "message-123"
+    assert projected["label"] == "A represented message"
+    assert projected["extra_0"] == "Path-projected value"
+    assert "secret" not in projected
+    telemetry = projected["_tool_evidence_projection"]
+    assert telemetry["redacted_fields"] == [
+        {
+            "field_concept_id": "#V#bulk_projection_secret_field",
+            "output_key": "secret",
+        }
+    ]
+    assert telemetry["referent_candidates"] == [
+        {
+            "schema_version": "tool_referent_candidate.v1",
+            "stable_id": "message-123",
+            "display_label": "A represented message",
+            "source_kind": "#V#bulk_projection_entity_type",
+            "identity_field_concept_id": "#V#bulk_projection_id_field",
+        }
+    ]
+
+
+def test_bulk_contract_resolution_has_bounded_repository_query_count(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+
+    _materialise_bulk_projection_contract(extra_field_count=12)
+    ConceptsRepository.delete_one(
+        {"concept_id": "#V#bulk_projection_extra_11_wire_key"}
+    )
+    original_find_one = ConceptsRepository.find_one
+    original_find = ConceptsRepository.find
+    find_one_filters: list[dict[str, Any]] = []
+    find_filters: list[dict[str, Any]] = []
+
+    def _counting_find_one(query, *args, **kwargs):
+        find_one_filters.append(dict(query))
+        return original_find_one(query, *args, **kwargs)
+
+    def _counting_find(query, *args, **kwargs):
+        find_filters.append(dict(query))
+        return original_find(query, *args, **kwargs)
+
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find_one",
+        staticmethod(_counting_find_one),
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find",
+        staticmethod(_counting_find),
+    )
+
+    contract = resolve_tool_projection_contract("bulk_projection_tool")
+
+    assert contract is not None
+    assert len(contract.fields) == 16
+    assert next(
+        field for field in contract.fields if field.output_key == "extra_11"
+    ).wire_aliases == ("extra_11",)
+    assert find_one_filters == [{"attributes.mcp_tool_name": "bulk_projection_tool"}]
+    assert len(find_filters) == 3
+    assert find_filters[0] == {
+        "relationships.#V#evidence_view_applies_to_tool": "#V#bulk_projection_tool"
+    }
+    assert len(find_filters[1]["concept_id"]["$in"]) == 17
+    assert len(find_filters[2]["concept_id"]["$in"]) == 32
+
+    projected = project_tool_payload_for_llm(
+        "bulk_projection_tool",
+        {
+            "wire_id": "message-456",
+            "wire_label": "No live entity reads",
+        },
+        contract=contract,
+    )
+    assert projected is not None
+    assert (
+        projected["_tool_evidence_projection"]["referent_candidates"][0]["source_kind"]
+        == "#V#bulk_projection_entity_type"
+    )
+    assert len(find_one_filters) == 1
+    assert len(find_filters) == 3
+
+    # Resolution is actor/request scoped; there is intentionally no process or
+    # cross-turn cache. A second resolution performs the same bounded four
+    # repository calls rather than reusing the prior actor's documents.
+    assert resolve_tool_projection_contract("bulk_projection_tool") is not None
+    assert len(find_one_filters) == 2
+    assert len(find_filters) == 6
+
+
+def test_bulk_contract_resolution_retains_actor_scoped_access_filtering(
+    _reset_mock_db: Any,
+) -> None:
+    from src.backend.security.access_control import override_current_actor
+
+    _materialise_mock_projection_contract()
+    with override_current_actor("#V#projection_owner", "#V#owner_org"):
+        concept_service.create_concept(
+            name="Owner-only title wire key",
+            concept_id="#V#owner_only_projection_title_wire_key",
+            parent_concept_ids=["#V#tool_wire_key"],
+            create_as_instance=True,
+            attributes={"wire_key": "owner_headline"},
+            visibility_scope_mode=None,
+        )
+        _rel(
+            "#V#example_projection_title_field",
+            "#V#field_has_wire_alias",
+            "#V#owner_only_projection_title_wire_key",
+        )
+        owner_contract = resolve_tool_projection_contract("example_projection_tool")
+
+    with override_current_actor("#V#projection_outsider", "#V#outsider_org"):
+        outsider_contract = resolve_tool_projection_contract("example_projection_tool")
+
+    assert owner_contract is not None
+    assert outsider_contract is not None
+    owner_title = next(
+        field for field in owner_contract.fields if field.output_key == "title"
+    )
+    outsider_title = next(
+        field for field in outsider_contract.fields if field.output_key == "title"
+    )
+    assert owner_title.wire_aliases == ("title", "headline", "owner_headline")
+    assert outsider_title.wire_aliases == ("title", "headline")
 
 
 def test_projection_runtime_reports_missing_required_fields(

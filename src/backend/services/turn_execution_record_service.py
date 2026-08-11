@@ -8427,6 +8427,7 @@ def build_conversation_situation_turn_projection(
     effects: list[dict[str, Any]] = []
     workflow_instances: list[dict[str, Any]] = []
     referent_candidates_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    resource_scopes_by_key: dict[tuple[str, str], dict[str, str]] = {}
     effect_material_values: list[Any] = []
     for invocation in invocations:
         payload = _turn_projection_result_payload(invocation)
@@ -8521,6 +8522,28 @@ def build_conversation_situation_turn_projection(
                     invocation.get("resource_scope"),
                     allowed_fields=_SELECTED_REFERENT_SCOPE_FIELDS,
                 )
+                resource_scope_key: tuple[str, str] | None = None
+                if resource_scope:
+                    source_family = _safe_str(resource_scope.get("source_family"))
+                    resource_identity = _safe_str(
+                        resource_scope.get("resource_id")
+                        or resource_scope.get("runtime_alias")
+                    )
+                    if source_family and resource_identity:
+                        resource_scope_key = (
+                            source_family.casefold(),
+                            resource_identity.casefold(),
+                        )
+                        previous_scope = resource_scopes_by_key.get(
+                            resource_scope_key
+                        )
+                        resource_scope = {
+                            **(previous_scope or {}),
+                            **resource_scope,
+                        }
+                        resource_scopes_by_key[resource_scope_key] = dict(
+                            resource_scope
+                        )
                 projected_payload = evidence_payload.get("projected_payload")
                 projection_telemetry = (
                     projected_payload.get("_tool_evidence_projection")

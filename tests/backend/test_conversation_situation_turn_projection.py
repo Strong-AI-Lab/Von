@@ -590,18 +590,29 @@ def test_selected_referent_capsule_does_not_require_opaque_id_in_visible_answer(
 
 
 def test_detail_referent_preserves_discovery_view_scope_for_same_resource() -> None:
-    discovery = _referent_read_invocation(
-        stable_id="message-trip-confirmation",
-        display_label="Your trip confirmation (JFK - SFO)",
-        call_id="call-list-trip",
-    )
-    discovery["resource_scope"] = {
-        "source_family": "gmail",
-        "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
-        "runtime_alias": "vonwitbrock-gmail",
-        "display_label": "zhanvonwitbrock@gmail.com",
-        "selection_source": "represented_default",
-        "view_scope": "whole_mailbox",
+    discovery = {
+        "tool": "gmail_list_messages",
+        "capability_kind": "mcp_tool",
+        "call_id": "call-list-trip",
+        "status": "ok",
+        "resource_scope": {
+            "source_family": "gmail",
+            "resource_id": "#V#gmail_profile_vonwitbrock_gmail",
+            "runtime_alias": "vonwitbrock-gmail",
+            "display_label": "zhanvonwitbrock@gmail.com",
+            "selection_source": "represented_default",
+            "view_scope": "whole_mailbox",
+        },
+        "evidence": {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": "evidence-call-list-trip",
+            "status": "ok",
+            "projected_payload": {
+                "_tool_evidence_projection": {
+                    "tool_concept_id": "#V#gmail_list_messages_tool",
+                }
+            },
+        },
     }
     detail = _referent_read_invocation(
         stable_id="message-trip-confirmation",
@@ -631,6 +642,61 @@ def test_detail_referent_preserves_discovery_view_scope_for_same_resource() -> N
         "display_label": "zhanvonwitbrock@gmail.com",
         "selection_source": "represented_default",
         "view_scope": "whole_mailbox",
+    }
+
+
+def test_detail_referent_does_not_inherit_view_scope_from_another_resource() -> None:
+    discovery = {
+        "tool": "gmail_list_messages",
+        "capability_kind": "mcp_tool",
+        "call_id": "call-list-personal",
+        "status": "ok",
+        "resource_scope": {
+            "source_family": "gmail",
+            "resource_id": "#V#gmail_profile_personal",
+            "runtime_alias": "personal-gmail",
+            "display_label": "personal@example.test",
+            "selection_source": "represented_default",
+            "view_scope": "whole_mailbox",
+        },
+        "evidence": {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": "evidence-call-list-personal",
+            "status": "ok",
+            "projected_payload": {
+                "_tool_evidence_projection": {
+                    "tool_concept_id": "#V#gmail_list_messages_tool",
+                }
+            },
+        },
+    }
+    detail = _referent_read_invocation(
+        stable_id="message-zhan",
+        display_label="Zhan mailbox message",
+        call_id="call-get-zhan",
+    )
+    detail["resource_scope"] = {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_zhan",
+        "runtime_alias": "zhan-gmail",
+        "display_label": "zhan@example.test",
+        "selection_source": "adaptive_authorised_choice",
+    }
+
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-no-cross-resource-view-scope",
+        terminal_status="completed",
+        response_text="Review the Zhan mailbox message.",
+        tool_invocations=[discovery, detail],
+    )
+
+    assert projection is not None
+    assert projection["selected_referents"][0]["resource_scope"] == {
+        "source_family": "gmail",
+        "resource_id": "#V#gmail_profile_zhan",
+        "runtime_alias": "zhan-gmail",
+        "display_label": "zhan@example.test",
+        "selection_source": "adaptive_authorised_choice",
     }
 
 
