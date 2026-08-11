@@ -17,6 +17,8 @@ from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
     WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
+    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
+    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
     WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
     WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
@@ -74,6 +76,181 @@ def test_optional_kr_materialisation_guard_is_registered_and_noop_when_absent() 
     assert result.status == "success"
     assert result.outputs["guard_applied"] is False
     assert result.outputs["guard_passed"] is True
+
+
+def _verified_kr_concept_results() -> list[dict[str, object]]:
+    return [
+        {
+            "completed": True,
+            "item": {"key": "trip"},
+            "result": {
+                "kr_concept_key": "trip",
+                "kr_concept_id": "#V#trip_1",
+                "kr_readback_concept_id": "#V#trip_1",
+            },
+        },
+        {
+            "completed": True,
+            "item": {"key": "flight"},
+            "result": {
+                "kr_concept_key": "flight",
+                "kr_concept_id": "#V#flight_1",
+                "kr_readback_concept_id": "#V#flight_1",
+            },
+        },
+    ]
+
+
+def test_kr_relationship_resolution_maps_verified_keys_and_preserves_exact_ids() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
+        inputs={},
+        context={
+            "kr_concept_iteration_results": _verified_kr_concept_results(),
+            "kr_relationship_specs": [
+                {
+                    "key": "trip_flight",
+                    "source_key": "trip",
+                    "predicate_id": "#V#has_trip_component",
+                    "target_key": "flight",
+                    "rationale": "The booked flight is part of the trip.",
+                },
+                {
+                    "key": "trip_owner",
+                    "source_key": "trip",
+                    "predicate": "#V#owned_by",
+                    "target_id": "#V#person_1",
+                },
+            ],
+        },
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs == {
+        "decision": "assert",
+        "blocking_reason": None,
+        "resolved_relationship_specs": [
+            {
+                "key": "trip_flight",
+                "source_id": "#V#trip_1",
+                "predicate": "#V#has_trip_component",
+                "target_id": "#V#flight_1",
+                "rationale": "The booked flight is part of the trip.",
+            },
+            {
+                "key": "trip_owner",
+                "source_id": "#V#trip_1",
+                "predicate": "#V#owned_by",
+                "target_id": "#V#person_1",
+                "rationale": "",
+            },
+        ],
+    }
+
+
+def test_kr_relationship_resolution_blocks_mixed_and_duplicate_references() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+    context = {
+        "kr_concept_iteration_results": _verified_kr_concept_results(),
+    }
+
+    mixed = registry.execute(
+        WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
+        inputs={
+            "relationship_specs": [
+                {
+                    "source_key": "trip",
+                    "source_id": "#V#trip_1",
+                    "predicate": "#V#has_trip_component",
+                    "target_key": "flight",
+                }
+            ]
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+    duplicate = registry.execute(
+        WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
+        inputs={
+            "relationship_specs": [
+                {
+                    "source_key": "trip",
+                    "predicate": "#V#has_trip_component",
+                    "target_key": "flight",
+                },
+                {
+                    "source_id": "#V#trip_1",
+                    "predicate_id": "#V#has_trip_component",
+                    "target_id": "#V#flight_1",
+                },
+            ]
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+    over_bound = registry.execute(
+        WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
+        inputs={
+            "relationship_specs": [
+                {
+                    "source_key": "trip",
+                    "predicate": f"#V#predicate_{index}",
+                    "target_key": "flight",
+                }
+                for index in range(41)
+            ]
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert mixed.outputs["decision"] == "block"
+    assert mixed.outputs["blocking_reason"] == (
+        "kr_relationship_resolution_source_reference_invalid"
+    )
+    assert duplicate.outputs["decision"] == "block"
+    assert duplicate.outputs["blocking_reason"] == (
+        "kr_relationship_resolution_duplicate_relationship"
+    )
+    assert over_bound.outputs["decision"] == "block"
+    assert over_bound.outputs["blocking_reason"] == (
+        "kr_relationship_resolution_specs_bound_exceeded"
+    )
+
+
+def test_kr_relationship_readback_action_uses_exact_canonical_evidence() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
+        inputs={},
+        context={
+            "kr_relationship_source_id": "#V#trip_1",
+            "kr_relationship_predicate": "#V#has_trip_component",
+            "kr_relationship_target_id": "#V#flight_1",
+            "kr_relationship_assert_success": True,
+            "kr_relationship_source_readback_id": "#V#trip_1",
+            "kr_relationship_source_readback_relationships": {
+                "#V#has_trip_component": ["#V#flight_1"]
+            },
+            "kr_relationship_target_readback_id": "#V#flight_1",
+        },
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["verified"] is True
+    assert result.outputs["verified_relationship"] == {
+        "source_id": "#V#trip_1",
+        "predicate_id": "#V#has_trip_component",
+        "target_id": "#V#flight_1",
+    }
 
 
 def test_fork_join_actions_execute_and_merge_branch_results() -> None:

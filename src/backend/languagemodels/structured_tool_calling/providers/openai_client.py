@@ -19,8 +19,9 @@ import openai
 from ..client import (
     LLMClient,
     LLMClientConfig,
+    observe_request_advisory,
     resolve_safe_temperature_for_model,
-    split_request_timeout_from_llm_params,
+    split_request_advisory_from_llm_params,
 )
 from ..transport import (
     API_SURFACE_CHAT_COMPLETIONS,
@@ -149,14 +150,10 @@ class OpenAIClient(LLMClient):
             request_client_base = self._client
         request_model = request_kwargs.pop("model", None) or self.config.model
         raw_llm_params = request_kwargs.pop("llm_params", None)
-        llm_params, request_timeout_seconds = split_request_timeout_from_llm_params(
+        llm_params, request_advisory_seconds = split_request_advisory_from_llm_params(
             raw_llm_params
         )
-        request_deadline_monotonic = (
-            monotonic() + request_timeout_seconds
-            if request_timeout_seconds is not None
-            else None
-        )
+        request_started_monotonic = monotonic()
         raw_continuation = request_kwargs.pop("continuation", None)
         continuation = LLMContinuation.from_value(raw_continuation)
         if raw_continuation is not None and continuation is None:
@@ -203,20 +200,8 @@ class OpenAIClient(LLMClient):
         ) -> LLMResponse:
             selected_request_kwargs = dict(request_kwargs)
             request_client = request_client_base
-            if request_deadline_monotonic is not None:
-                remaining_seconds = request_deadline_monotonic - monotonic()
-                if remaining_seconds <= 0.0:
-                    raise TimeoutError(
-                        "OpenAI structured-tool request deadline exhausted."
-                    )
-                # Disable SDK retries and give each represented surface attempt
-                # only the time left in the one caller-owned request budget.
-                request_client = request_client_base.with_options(
-                    timeout=remaining_seconds,
-                    max_retries=0,
-                )
             if selected_decision.effective_api_surface == API_SURFACE_RESPONSES:
-                return await self._generate_responses(
+                response = await self._generate_responses(
                     prompt=prompt,
                     available_tools=available_tools,
                     context=context,
@@ -229,19 +214,27 @@ class OpenAIClient(LLMClient):
                     decision=selected_decision,
                     request_client=request_client,
                 )
-            return await self._generate_chat_completions(
-                prompt=prompt,
-                available_tools=available_tools,
-                context=context,
-                system_message=system_message,
-                request_model=request_model,
-                llm_params=llm_params,
-                continuation=continuation,
-                tool_results=tool_results,
-                request_kwargs=selected_request_kwargs,
-                decision=selected_decision,
-                request_client=request_client,
+            else:
+                response = await self._generate_chat_completions(
+                    prompt=prompt,
+                    available_tools=available_tools,
+                    context=context,
+                    system_message=system_message,
+                    request_model=request_model,
+                    llm_params=llm_params,
+                    continuation=continuation,
+                    tool_results=tool_results,
+                    request_kwargs=selected_request_kwargs,
+                    decision=selected_decision,
+                    request_client=request_client,
+                )
+            observe_request_advisory(
+                provider="openai",
+                advisory_seconds=request_advisory_seconds,
+                started_monotonic=request_started_monotonic,
+                event_logger=self.logger,
             )
+            return response
 
         try:
             return await _invoke(decision)

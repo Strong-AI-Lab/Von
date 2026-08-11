@@ -1,5 +1,3 @@
-from contextlib import contextmanager
-
 import pytest
 from flask import Flask
 
@@ -12,24 +10,21 @@ def _reset_relationship_extent_readiness_cache():
     from src.backend.services import relationship_extent_index_service as service
 
     service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
+    service._SUCCESSFUL_OPERATION_MAX_SECONDS.clear()
     access_control.invalidate_current_access_evaluator()
     yield
     service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
+    service._SUCCESSFUL_OPERATION_MAX_SECONDS.clear()
     access_control.invalidate_current_access_evaluator()
 
 
-def test_relationship_extent_sync_has_client_deadline(monkeypatch):
+def test_relationship_extent_sync_reports_advisory_without_hard_deadline(monkeypatch):
     from src.backend.services import relationship_extent_index_service as service
 
     client = mongomock.MongoClient()
-    observed_timeouts: list[float] = []
-
-    @contextmanager
-    def fake_timeout(seconds: float):
-        observed_timeouts.append(seconds)
-        yield
-
-    monkeypatch.setattr(service, "timeout", fake_timeout)
+    monkeypatch.setattr(service, "RELATIONSHIP_EXTENT_SYNC_ADVISORY_SECONDS", 0.1)
+    monotonic_times = iter([0.0, 0.2])
+    monkeypatch.setattr(service.time, "perf_counter", lambda: next(monotonic_times))
     monkeypatch.setattr(
         service,
         "get_relationship_extent_index_collection",
@@ -44,32 +39,22 @@ def test_relationship_extent_sync_has_client_deadline(monkeypatch):
     )
 
     assert result["success"] is True
-    assert observed_timeouts == [service.RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS]
+    assert result["elapsed_time_enforcement"] == "advisory"
+    assert result["advisory_seconds"] == 0.1
+    assert result["advisory_exceeded"] is True
+    assert result["hard_timeout_seconds"] is None
 
 
-def test_relationship_extent_sync_deadline_covers_concept_read_and_writes(
+def test_relationship_extent_sync_completes_concept_read_and_writes(
     monkeypatch,
 ):
     from src.backend.services import relationship_extent_index_service as service
 
     client = mongomock.MongoClient()
     coll = client.db.relationship_extent_index
-    deadline_active = False
     observed_operations: list[str] = []
 
-    @contextmanager
-    def fake_timeout(seconds: float):
-        nonlocal deadline_active
-        assert seconds == service.RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS
-        assert deadline_active is False
-        deadline_active = True
-        try:
-            yield
-        finally:
-            deadline_active = False
-
     def fake_find_one(_query, _projection):
-        assert deadline_active is True
         observed_operations.append("find_one")
         return {
             "concept_id": "#V#source",
@@ -80,16 +65,13 @@ def test_relationship_extent_sync_deadline_covers_concept_read_and_writes(
     real_replace_one = coll.replace_one
 
     def tracked_delete_many(query):
-        assert deadline_active is True
         observed_operations.append("delete_many")
         return real_delete_many(query)
 
     def tracked_replace_one(query, document, *, upsert):
-        assert deadline_active is True
         observed_operations.append("replace_one")
         return real_replace_one(query, document, upsert=upsert)
 
-    monkeypatch.setattr(service, "timeout", fake_timeout)
     monkeypatch.setattr(service.ConceptsRepository, "find_one", fake_find_one)
     monkeypatch.setattr(
         service, "get_relationship_extent_index_collection", lambda: coll
@@ -102,33 +84,20 @@ def test_relationship_extent_sync_deadline_covers_concept_read_and_writes(
     )
 
     assert result["success"] is True
+    assert result["elapsed_time_enforcement"] == "advisory"
+    assert result["hard_timeout_seconds"] is None
     assert observed_operations == ["find_one", "replace_one", "delete_many"]
 
 
-def test_relationship_extent_readiness_has_total_deadline_and_fails_closed(
+def test_relationship_extent_readiness_failure_fails_closed_without_deadline(
     monkeypatch,
 ):
     from src.backend.services import relationship_extent_index_service as service
 
-    deadline_active = False
-    observed_timeouts: list[float] = []
-
-    @contextmanager
-    def fake_timeout(seconds):
-        nonlocal deadline_active
-        observed_timeouts.append(seconds)
-        deadline_active = True
-        try:
-            yield
-        finally:
-            deadline_active = False
-
     class FailingSettings:
         def find_one(self, *_args, **_kwargs):
-            assert deadline_active is True
-            raise RuntimeError("simulated readiness timeout")
+            raise RuntimeError("simulated readiness failure")
 
-    monkeypatch.setattr(service, "timeout", fake_timeout)
     monkeypatch.setattr(
         service,
         "get_application_settings_collection",
@@ -136,9 +105,6 @@ def test_relationship_extent_readiness_has_total_deadline_and_fails_closed(
     )
 
     assert service.relationship_extent_index_ready() is False
-    assert observed_timeouts == [
-        service.RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS
-    ]
 
 
 def test_relationship_extent_readiness_requires_explicit_complete_state(
@@ -264,29 +230,17 @@ def test_relationship_extent_rebuild_enforces_batch_size_for_dense_source(
     assert state["value"]["status"] == "ready"
 
 
-def test_relationship_extent_query_cursor_and_count_share_total_deadline(
+def test_relationship_extent_query_cursor_and_count_complete_without_deadline(
     monkeypatch,
 ):
     from src.backend.services import relationship_extent_index_service as service
 
-    deadline_active = False
-    observed_timeouts: list[float] = []
     observed_projection = None
     observed_batch_size = None
     expected_doc = {
         "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
         "relation_id": "row-1",
     }
-
-    @contextmanager
-    def fake_timeout(seconds):
-        nonlocal deadline_active
-        observed_timeouts.append(seconds)
-        deadline_active = True
-        try:
-            yield
-        finally:
-            deadline_active = False
 
     class DeadlineAwareCursor:
         def sort(self, _value):
@@ -304,21 +258,17 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
             return self
 
         def __iter__(self):
-            assert deadline_active is True
             return iter([expected_doc])
 
     class DeadlineAwareCollection:
         def find(self, _query, projection=None):
             nonlocal observed_projection
-            assert deadline_active is True
             observed_projection = projection
             return DeadlineAwareCursor()
 
         def count_documents(self, _query):
-            assert deadline_active is True
             return 1
 
-    monkeypatch.setattr(service, "timeout", fake_timeout)
     monkeypatch.setattr(service, "relationship_extent_index_ready", lambda: True)
     monkeypatch.setattr(
         service,
@@ -337,7 +287,6 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
 
     assert docs == [expected_doc]
     assert total == 1
-    assert observed_timeouts == [service.RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS]
     assert observed_projection == {"_id": 0, "source_concept_id": 1}
     assert observed_batch_size == 20_000
 
@@ -399,21 +348,7 @@ def test_bulk_extent_sync_uses_one_fetch_and_batched_upsert_then_delete(monkeypa
     )
     find_calls: list[tuple[dict, dict]] = []
     bulk_operation_batches: list[list[str]] = []
-    deadline_active = False
-
-    @contextmanager
-    def fake_timeout(seconds: float):
-        nonlocal deadline_active
-        assert seconds == service.RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS
-        assert deadline_active is False
-        deadline_active = True
-        try:
-            yield
-        finally:
-            deadline_active = False
-
     def fake_find(query, projection):
-        assert deadline_active is True
         find_calls.append((query, projection))
         return [
             {
@@ -434,7 +369,6 @@ def test_bulk_extent_sync_uses_one_fetch_and_batched_upsert_then_delete(monkeypa
             self.deleted_count = deleted_count
 
     def tracked_bulk_write(operations, *, ordered):
-        assert deadline_active is True
         operation_list = list(operations)
         operation_names = [type(operation).__name__ for operation in operation_list]
         bulk_operation_batches.append(operation_names)
@@ -450,7 +384,6 @@ def test_bulk_extent_sync_uses_one_fetch_and_batched_upsert_then_delete(monkeypa
                 deleted_count += real_delete_many(operation._filter).deleted_count
         return _BulkResult(deleted_count=deleted_count)
 
-    monkeypatch.setattr(service, "timeout", fake_timeout)
     monkeypatch.setattr(service.ConceptsRepository, "find", fake_find)
     monkeypatch.setattr(
         service, "get_relationship_extent_index_collection", lambda: coll
@@ -498,14 +431,6 @@ def test_failed_batch_refresh_preserves_prior_rows_and_marks_index_degraded(
         ]
     )
 
-    observed_timeouts: list[float] = []
-
-    @contextmanager
-    def fake_timeout(seconds):
-        observed_timeouts.append(seconds)
-        yield
-
-    monkeypatch.setattr(service, "timeout", fake_timeout)
     monkeypatch.setattr(
         service.ConceptsRepository,
         "find",
@@ -541,10 +466,6 @@ def test_failed_batch_refresh_preserves_prior_rows_and_marks_index_degraded(
     assert state["value"]["status"] == "degraded"
     assert state["value"]["source_count"] == 1
     assert service.relationship_extent_index_ready() is False
-    assert observed_timeouts == [
-        service.RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS,
-        service.RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS,
-    ]
 
 
 def test_deferred_extent_sync_failure_does_not_fail_canonical_mutation(
@@ -782,23 +703,10 @@ def test_incoming_extent_page_stops_after_has_more_evidence(monkeypatch):
     assert diagnostics["index_rows_scanned"] == 4
 
 
-def test_incoming_extent_page_timeout_returns_typed_canonical_fallback(
+def test_incoming_extent_page_failure_returns_typed_canonical_fallback(
     monkeypatch,
 ):
     from src.backend.services import relationship_extent_index_service as service
-
-    deadline_active = False
-    observed_timeouts: list[float] = []
-
-    @contextmanager
-    def fake_timeout(seconds):
-        nonlocal deadline_active
-        observed_timeouts.append(seconds)
-        deadline_active = True
-        try:
-            yield
-        finally:
-            deadline_active = False
 
     class FailingCursor:
         def sort(self, _value):
@@ -811,14 +719,12 @@ def test_incoming_extent_page_timeout_returns_typed_canonical_fallback(
             return self
 
         def __iter__(self):
-            assert deadline_active is True
-            raise RuntimeError("simulated extent page timeout")
+            raise RuntimeError("simulated extent page failure")
 
     class FailingCollection:
         def find(self, _query):
             return FailingCursor()
 
-    monkeypatch.setattr(service, "timeout", fake_timeout)
     monkeypatch.setattr(service, "relationship_extent_index_ready", lambda: True)
     monkeypatch.setattr(
         service,
@@ -842,7 +748,6 @@ def test_incoming_extent_page_timeout_returns_typed_canonical_fallback(
     assert rows == []
     assert used_index is False
     assert diagnostics["reason"] == "extent_index_query_failed"
-    assert observed_timeouts == [pytest.approx(0.5, abs=0.05)]
 
 
 def test_predicate_structured_extent_uses_relationship_extent_index(monkeypatch):

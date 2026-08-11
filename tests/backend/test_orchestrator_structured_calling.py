@@ -176,49 +176,77 @@ def _build_large_method_catalogue(
         "search_concepts": {
             "name": "search_concepts",
             "description": "Search concepts",
-            "input_schema": {"required": ["query"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["query"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "fetch_concept": {
             "name": "fetch_concept",
             "description": "Fetch one concept",
-            "input_schema": {"required": ["concept_id"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["concept_id"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "concept_exists": {
             "name": "concept_exists",
             "description": "Check concept existence",
-            "input_schema": {"required": ["concept_id"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["concept_id"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "search_web": {
             "name": "search_web",
             "description": "Search the web",
-            "input_schema": {"required": ["query"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["query"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "qna_search": {
             "name": "qna_search",
             "description": "Question answering search",
-            "input_schema": {"required": ["query"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["query"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "extract_url": {
             "name": "extract_url",
             "description": "Extract URL content",
-            "input_schema": {"required": ["url"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["url"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "resilient_extract_url": {
             "name": "resilient_extract_url",
             "description": "Extract URL content (resilient)",
-            "input_schema": {"required": ["url"], "optional": [], "allow_unknown": True},
+            "input_schema": {
+                "required": ["url"],
+                "optional": [],
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -352,11 +380,6 @@ def _build_workflow_testing_method_catalogue() -> dict[str, dict[str, Any]]:
     return catalogue
 
 
-
-
-
-
-
 def test_tool_calling_respond_surfaces_tool_evidence_in_outputs(
     orchestrator, mock_gateway
 ):
@@ -457,7 +480,6 @@ def test_tool_definition_conversion_accepts_list_schema():
     assert schema.get("additionalProperties") is True
 
 
-
 def test_mcp_schema_to_json_schema_conversion(orchestrator):
     """Test Schema to JSON Schema conversion."""
     mcp_schema = {
@@ -540,9 +562,6 @@ def test_tool_definitions_conversion_appends_planner_hints():
     assert "represented-knowledge lookup" in by_name["search_knowledge_base"]
 
 
-
-
-
 def test_structured_candidate_resolver_enforces_provider_cap():
     """Structured planner candidates stay bounded without prompt-keyword family gating."""
 
@@ -608,16 +627,14 @@ def test_structured_calling_passes_capped_tool_list_to_llm():
             prompt: str,
             context: Optional[Sequence[Mapping[str, Any]]] = None,
             model: Optional[str] = None,
-            ) -> str:
-                return "Direct response"
+        ) -> str:
+            return "Direct response"
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
     gateway = MagicMock(spec=InternalMCPGateway)
     gateway.enabled = True
-    catalogue = _build_large_method_catalogue(
-        read_count=140, write_count=12
-    )
+    catalogue = _build_large_method_catalogue(read_count=140, write_count=12)
     gateway.describe_methods.return_value = catalogue
 
     orch = InternalMCPChatOrchestrator(gateway=gateway)
@@ -733,18 +750,16 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
             host=None,
         )
     ]
-    cast(Any, orch)._create_client_for_candidate = (
-        lambda _candidate, **_kwargs: (
-            llm_client,
-            "gpt-4",
-            {
-                "provider": "openai",
-                "model": "gpt-4",
-                "source": "test",
-                "raw": "gpt-4",
-                "host": None,
-            },
-        )
+    cast(Any, orch)._create_client_for_candidate = lambda _candidate, **_kwargs: (
+        llm_client,
+        "gpt-4",
+        {
+            "provider": "openai",
+            "model": "gpt-4",
+            "source": "test",
+            "raw": "gpt-4",
+            "host": None,
+        },
     )
 
     llm_response, _, _ = orch._run_llm_with_tools_fallbacks(
@@ -777,8 +792,8 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
 
     assert llm_response.tool_calls[0].tool_name == "search_knowledge_base"
     assert captured["timeout_override_sec"] == 120.0
-    assert captured["attempt_meta"]["timeout_override_sec"] == 120.0
-    assert llm_client.llm_params == {"request_timeout_seconds": 120.0}
+    assert captured["attempt_meta"]["advisory_timeout_seconds"] == 120.0
+    assert llm_client.llm_params is None
 
 
 def test_structured_calling_forces_single_required_openai_tool():
@@ -831,18 +846,16 @@ def test_structured_calling_forces_single_required_openai_tool():
     gateway.describe_methods.return_value = catalogue
     orch = InternalMCPChatOrchestrator(gateway=gateway)
     llm_client = _CapturingLLM()
-    cast(Any, orch)._create_client_for_candidate = (
-        lambda _candidate, **_kwargs: (
-            llm_client,
-            "gpt-4",
-            {
-                "provider": "openai",
-                "model": "gpt-4",
-                "source": "test",
-                "raw": "gpt-4",
-                "host": None,
-            },
-        )
+    cast(Any, orch)._create_client_for_candidate = lambda _candidate, **_kwargs: (
+        llm_client,
+        "gpt-4",
+        {
+            "provider": "openai",
+            "model": "gpt-4",
+            "source": "test",
+            "raw": "gpt-4",
+            "host": None,
+        },
     )
     aux_log: list[Mapping[str, Any]] = []
 
@@ -886,9 +899,10 @@ def test_structured_calling_forces_single_required_openai_tool():
         and entry.get("type") == "structured_tool_candidates"
     )
     assert candidate_log["required_available_tools"] == ["gmail_list_messages"]
-    assert candidate_log["structured_call_options"]["tool_choice"]["function"][
-        "name"
-    ] == "gmail_list_messages"
+    assert (
+        candidate_log["structured_call_options"]["tool_choice"]["function"]["name"]
+        == "gmail_list_messages"
+    )
 
 
 def test_structured_candidate_resolver_readds_required_tool_deterministically():
@@ -935,7 +949,6 @@ def test_structured_candidate_resolver_readds_required_tool_deterministically():
         for name, reason in first.excluded_tools
     )
     assert second.candidate_tool_names == first.candidate_tool_names
-
 
 
 def test_structured_candidate_resolver_uses_required_tools_for_workflow_testing_planner():
@@ -995,14 +1008,22 @@ def test_structured_candidate_resolver_uses_required_tools_for_entity_relative_k
         "search_knowledge_base": {
             "name": "search_knowledge_base",
             "description": "Search the knowledge base",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "resolve_concept_by_name": {
             "name": "resolve_concept_by_name",
             "description": "Resolve a concept by name",
-            "input_schema": {"required": {"name": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"name": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -1151,7 +1172,11 @@ def test_structured_candidate_resolver_does_not_hint_families_from_prompt_keywor
         "jira_search": {
             "name": "jira_search",
             "description": "Search Jira issues",
-            "input_schema": {"required": {"jql": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"jql": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -1165,7 +1190,11 @@ def test_structured_candidate_resolver_does_not_hint_families_from_prompt_keywor
         "search_web": {
             "name": "search_web",
             "description": "Search the web",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -1337,31 +1366,29 @@ def test_turn_contract_requirement_augmentation_adds_predicate_relation_summary_
 def test_turn_contract_requirement_augmentation_respects_allowed_workflow_tools():
     evaluation = _PromptRequirementEvaluation()
 
-    augmented = (
-        InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
-            evaluation=evaluation,
-            turn_expected_outcome_contract={
-                "summary": "Identify the authenticated user and list grounded papers only.",
-                "required_tools": [
-                    "search_knowledge_base",
-                    "get_predicate_incidence",
-                    "find_relations_with_argument",
-                ],
-                "selector_guidance": (
-                    "Use predicate incidence first and then relation retrieval."
-                ),
-            },
-            method_catalogue={
-                "search_knowledge_base": {},
-                "get_predicate_incidence": {},
-                "find_relations_with_argument": {},
-            },
-            allowed_tools=(
+    augmented = InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+        evaluation=evaluation,
+        turn_expected_outcome_contract={
+            "summary": "Identify the authenticated user and list grounded papers only.",
+            "required_tools": [
+                "search_knowledge_base",
                 "get_predicate_incidence",
                 "find_relations_with_argument",
+            ],
+            "selector_guidance": (
+                "Use predicate incidence first and then relation retrieval."
             ),
-            tool_invocations=(),
-        )
+        },
+        method_catalogue={
+            "search_knowledge_base": {},
+            "get_predicate_incidence": {},
+            "find_relations_with_argument": {},
+        },
+        allowed_tools=(
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+        ),
+        tool_invocations=(),
     )
 
     assert augmented.required_tools == (
@@ -1397,7 +1424,6 @@ def test_turn_contract_required_relation_summary_tools_count_as_metadata_driven_
     assert families == ("knowledge_base",)
 
 
-
 def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_task_prompt():
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1407,35 +1433,55 @@ def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_t
         "search_knowledge_base": {
             "name": "search_knowledge_base",
             "description": "Search the knowledge base",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "search_concepts": {
             "name": "search_concepts",
             "description": "Search concepts",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "find_relations_with_argument": {
             "name": "find_relations_with_argument",
             "description": "Find relations for a concept argument",
-            "input_schema": {"required": {"concept_id": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"concept_id": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "search_arxiv": {
             "name": "search_arxiv",
             "description": "Search arXiv",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "jira_search": {
             "name": "jira_search",
             "description": "Search Jira issues",
-            "input_schema": {"required": {"jql": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"jql": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -1490,7 +1536,9 @@ def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_t
     assert "task_list" not in lowered
 
 
-def test_missing_tool_retry_does_not_force_guided_retrieval_from_research_briefing_context() -> None:
+def test_missing_tool_retry_does_not_force_guided_retrieval_from_research_briefing_context() -> (
+    None
+):
     gateway = MagicMock()
     gateway.describe_methods.return_value = {
         "search_knowledge_base": {},
@@ -1538,7 +1586,9 @@ def test_missing_tool_retry_does_not_force_guided_retrieval_from_research_briefi
     assert calls is None
 
 
-def test_missing_tool_retry_does_not_force_guided_retrieval_from_open_jira_context() -> None:
+def test_missing_tool_retry_does_not_force_guided_retrieval_from_open_jira_context() -> (
+    None
+):
     gateway = MagicMock()
     gateway.describe_methods.return_value = {
         "search_knowledge_base": {},
@@ -1583,7 +1633,9 @@ def test_missing_tool_retry_does_not_force_guided_retrieval_from_open_jira_conte
     assert calls is None
 
 
-def test_missing_tool_retry_does_not_force_guided_retrieval_from_non_english_prompt() -> None:
+def test_missing_tool_retry_does_not_force_guided_retrieval_from_non_english_prompt() -> (
+    None
+):
     gateway = MagicMock()
     gateway.describe_methods.return_value = {
         "search_knowledge_base": {},
@@ -1628,21 +1680,33 @@ def test_structured_candidate_resolver_caps_unhinted_planner_shortlists():
         "search_knowledge_base": {
             "name": "search_knowledge_base",
             "description": "Search represented knowledge",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "search_web": {
             "name": "search_web",
             "description": "Search the web",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
         "fetch_concept": {
             "name": "fetch_concept",
             "description": "Fetch one concept",
-            "input_schema": {"required": {"concept_id": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"concept_id": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -1651,21 +1715,33 @@ def test_structured_candidate_resolver_caps_unhinted_planner_shortlists():
         catalogue[f"search_misc_{index:03d}"] = {
             "name": f"search_misc_{index:03d}",
             "description": "Generic search helper",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         }
         catalogue[f"rag_misc_{index:03d}"] = {
             "name": f"rag_misc_{index:03d}",
             "description": "Generic KB helper",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         }
         catalogue[f"concept_misc_{index:03d}"] = {
             "name": f"concept_misc_{index:03d}",
             "description": "Generic Vontology helper",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         }
@@ -1717,8 +1793,7 @@ def test_structured_candidate_resolver_caps_unhinted_planner_shortlists():
     assert not any(name.startswith("concept_write_") for name in lowered)
     assert len(resolution.candidate_tool_names) <= 16
     assert any(
-        warning == "planner_shortlist_cap_applied:16"
-        for warning in resolution.warnings
+        warning == "planner_shortlist_cap_applied:16" for warning in resolution.warnings
     )
 
 
@@ -1847,11 +1922,15 @@ def test_follow_up_summaries_keep_all_paper_like_relation_evidence() -> None:
         ],
     }
 
-    relation_lines = InternalMCPChatOrchestrator._build_find_relations_with_argument_follow_up_lines(
-        relation_payload
+    relation_lines = (
+        InternalMCPChatOrchestrator._build_find_relations_with_argument_follow_up_lines(
+            relation_payload
+        )
     )
-    predicate_lines = InternalMCPChatOrchestrator._build_predicate_incidence_follow_up_lines(
-        predicate_payload
+    predicate_lines = (
+        InternalMCPChatOrchestrator._build_predicate_incidence_follow_up_lines(
+            predicate_payload
+        )
     )
     relation_text = "\n".join(relation_lines)
     predicate_text = "\n".join(predicate_lines)

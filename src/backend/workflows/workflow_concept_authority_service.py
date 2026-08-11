@@ -348,6 +348,7 @@ _STEP_RELATIONSHIP_ALIAS_KEYS: tuple[str, ...] = tuple(
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesWorkflow"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepUsesLlmPrompt"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInputMap"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepMapsContextKeyToToolParam"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES[

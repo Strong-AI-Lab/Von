@@ -17,7 +17,8 @@ Technical Notes:
     - Uses semantic search via concept_embedding_service for RAG-based discovery
     - Uses concept_search_service for Vontology-native search
     - Relevance threshold (default 0.70) filters noise from results
-    - Search should add < 500ms to turn latency
+    - Discovery latency is observed and reported; elapsed thresholds are not
+      terminal routing policy
 """
 
 from __future__ import annotations
@@ -64,7 +65,9 @@ DEFAULT_RELEVANCE_THRESHOLD = 0.70
 DEFAULT_MAX_RESULTS = 3
 
 
-# Search timeout in seconds
+# Search advisory in seconds. Legacy timeout names remain API-compatible, but
+# elapsed time no longer suppresses a search substrate or turns partial routing
+# evidence into a terminal result.
 def _coerce_discovery_timeout_seconds(value: Any, *, default: float) -> float:
     try:
         parsed = float(value)
@@ -79,12 +82,12 @@ SEARCH_TIMEOUT_SECONDS = _coerce_discovery_timeout_seconds(
     os.getenv("VON_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS"),
     default=10.0,
 )
-# Cold-start capability-index waits should be bounded and should not consume the
-# full discovery budget. Discovery still needs time for semantic and Vontology
-# search when the authoritative primary substrate is not yet sufficient.
+# A cold-start index gets a short observation window before discovery continues
+# through its other substrates. This switches strategy without abandoning the
+# request; it is not a hard deadline for discovery or index construction.
 DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS = 0.75
 DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION = 0.5
-DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS = 1.0
+DISCOVERY_SECONDARY_SEARCH_ADVISORY_MARGIN_SECONDS = 1.0
 
 # Executability reason codes (JVNAUTOSCI-1088).
 EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
@@ -111,9 +114,6 @@ ROUTING_READINESS_WORKFLOW_PRESENT_NOT_ROUTING_ELIGIBLE = (
 )
 ROUTING_READINESS_WORKFLOW_PRESENT_CAPABILITY_INDEX_PENDING = (
     "workflow_present_capability_index_pending"
-)
-DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES = (
-    "workflow_discovery_budget_exhausted_no_candidates"
 )
 CONTRACT_PROJECTION_SCHEMA_VERSION = "workflow_discovery_contract_projection.v1"
 
@@ -308,6 +308,7 @@ class WorkflowDiscoveryResult:
     budget_exhausted: bool = False
     budget_exhaustion_stage: Optional[str] = None
     budget_exhaustion_detail: Optional[str] = None
+    elapsed_time_enforcement: str = "advisory"
     stage_timings: List[Dict[str, Any]] = field(default_factory=list)
     contract_projection: Optional[Dict[str, Any]] = None
     routing_readiness_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
@@ -344,6 +345,26 @@ class WorkflowDiscoveryResult:
             "budget_exhausted": bool(self.budget_exhausted),
             "budget_exhaustion_stage": self.budget_exhaustion_stage,
             "budget_exhaustion_detail": self.budget_exhaustion_detail,
+            "elapsed_time_enforcement": self.elapsed_time_enforcement,
+            "advisory_budget_seconds": round(self.timeout_budget_seconds, 3),
+            "advisory_budget_exceeded": bool(
+                self.budget_exhausted
+                and self.elapsed_time_enforcement == "advisory"
+            ),
+            "hard_timeout_exceeded": bool(
+                self.budget_exhausted
+                and self.elapsed_time_enforcement != "advisory"
+            ),
+            "advisory_crossing_stage": (
+                self.budget_exhaustion_stage
+                if self.elapsed_time_enforcement == "advisory"
+                else None
+            ),
+            "advisory_crossing_detail": (
+                self.budget_exhaustion_detail
+                if self.elapsed_time_enforcement == "advisory"
+                else None
+            ),
             "stage_timings": list(self.stage_timings),
             "stage_timing_count": len(self.stage_timings),
             "contract_projection": (
@@ -560,7 +581,7 @@ def _derive_capability_index_unavailability_errors(
     ready = bool(runtime_state.get("ready", False))
     build_in_progress = bool(runtime_state.get("build_in_progress", False))
     if wait_seconds > 0.0 and build_in_progress and not ready:
-        errors.append("capability_index_wait_timed_out")
+        errors.append("capability_index_advisory_wait_elapsed")
     if build_in_progress:
         errors.append("capability_index_build_in_progress")
     elif not ready:
@@ -590,10 +611,10 @@ def _derive_discovery_result_match_absence_reason(
     if not candidates:
         error_set = {str(item).strip() for item in errors if str(item).strip()}
         if (
-            "capability_index_wait_timed_out" in error_set
+            "capability_index_advisory_wait_elapsed" in error_set
             and "capability_index_build_in_progress" in error_set
         ):
-            return "capability_index_wait_timed_out_build_in_progress"
+            return "capability_index_build_in_progress"
         if "capability_index_build_in_progress" in error_set:
             return "capability_index_build_in_progress"
         if "capability_index_not_ready" in error_set:
@@ -2037,7 +2058,7 @@ def discover_workflows(
         query: User input text to match against workflows
         relevance_threshold: Minimum relevance score (0.0-1.0) for inclusion
         max_results: Maximum number of workflows to return
-        timeout_seconds: Maximum time to spend searching (soft limit)
+        timeout_seconds: Legacy name for the elapsed-time advisory threshold.
 
     Returns:
         WorkflowDiscoveryResult with matched workflows and search metadata
@@ -2139,11 +2160,7 @@ def discover_workflows(
             for match in ranked_matches
             if match.routing_readiness_status
         ]
-        blocker_reason = (
-            DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES
-            if budget_exhausted and not ranked_matches
-            else match_absence_reason
-        )
+        blocker_reason = match_absence_reason
         try:
             from ..workflows.workflow_baseline_telemetry import (
                 record_workflow_discovery_observation,
@@ -2155,6 +2172,7 @@ def discover_workflows(
                 budget_exhausted=budget_exhausted,
                 budget_exhaustion_stage=budget_exhaustion_stage,
                 timeout_budget_seconds=effective_timeout_seconds,
+                elapsed_time_enforcement="advisory",
             )
         except Exception:
             pass
@@ -2251,12 +2269,6 @@ def discover_workflows(
                 started_at=start_time,
                 timeout_seconds=effective_timeout_seconds,
             )
-            if capability_timeout_remaining <= 0.0:
-                raise TimeoutError(
-                    "Discovery timeout budget was exhausted before "
-                    "capability_index_search could start "
-                    f"(budget={effective_timeout_seconds:.3f}s)."
-                )
             capability_matches = _search_workflow_capabilities(
                 search_query,
                 limit=max_results * 3,
@@ -2383,34 +2395,24 @@ def discover_workflows(
         _record_budget_exhaustion(
             "semantic_search",
             (
-                "Discovery timeout budget was exhausted before semantic_search "
-                f"could start (budget={effective_timeout_seconds:.3f}s)."
+                "Discovery crossed its elapsed-time advisory before "
+                "semantic_search started; search continued "
+                f"(advisory={effective_timeout_seconds:.3f}s)."
             ),
         )
-    elif (
-        not capability_matches_sufficient
-        and semantic_budget_remaining < DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS
+    elif not capability_matches_sufficient and (
+        semantic_budget_remaining < DISCOVERY_SECONDARY_SEARCH_ADVISORY_MARGIN_SECONDS
     ):
         _record_budget_exhaustion(
             "semantic_search",
             (
-                "Discovery skipped semantic_search because the remaining budget "
-                "was too small for the unbounded secondary search substrate "
+                "Discovery approached its elapsed-time advisory before "
+                "semantic_search; search continued "
                 f"(remaining={semantic_budget_remaining:.3f}s, "
-                f"minimum={DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS:.3f}s)."
+                f"advisory_margin={DISCOVERY_SECONDARY_SEARCH_ADVISORY_MARGIN_SECONDS:.3f}s)."
             ),
         )
-        _record_discovery_stage_timing(
-            stage_timings,
-            stage="semantic_search",
-            started_at=time.perf_counter(),
-            status="skipped_budget_insufficient",
-            budget_seconds=round(semantic_budget_remaining, 3),
-            minimum_budget_seconds=round(
-                DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS, 3
-            ),
-        )
-    elif not capability_matches_sufficient:
+    if not capability_matches_sufficient:
         try:
             search_sources.append("semantic")
             semantic_started_at = time.perf_counter()
@@ -2458,35 +2460,24 @@ def discover_workflows(
         _record_budget_exhaustion(
             "vontology_search",
             (
-                "Discovery timeout budget was exhausted before vontology_search "
-                f"could start (budget={effective_timeout_seconds:.3f}s)."
+                "Discovery crossed its elapsed-time advisory before "
+                "vontology_search started; search continued "
+                f"(advisory={effective_timeout_seconds:.3f}s)."
             ),
         )
-    elif (
-        not capability_matches_sufficient
-        and vontology_budget_remaining
-        < DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS
+    elif not capability_matches_sufficient and (
+        vontology_budget_remaining < DISCOVERY_SECONDARY_SEARCH_ADVISORY_MARGIN_SECONDS
     ):
         _record_budget_exhaustion(
             "vontology_search",
             (
-                "Discovery skipped vontology_search because the remaining budget "
-                "was too small for the unbounded secondary search substrate "
+                "Discovery approached its elapsed-time advisory before "
+                "vontology_search; search continued "
                 f"(remaining={vontology_budget_remaining:.3f}s, "
-                f"minimum={DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS:.3f}s)."
+                f"advisory_margin={DISCOVERY_SECONDARY_SEARCH_ADVISORY_MARGIN_SECONDS:.3f}s)."
             ),
         )
-        _record_discovery_stage_timing(
-            stage_timings,
-            stage="vontology_search",
-            started_at=time.perf_counter(),
-            status="skipped_budget_insufficient",
-            budget_seconds=round(vontology_budget_remaining, 3),
-            minimum_budget_seconds=round(
-                DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS, 3
-            ),
-        )
-    elif not capability_matches_sufficient:
+    if not capability_matches_sufficient:
         try:
             search_sources.append("vontology")
             vontology_started_at = time.perf_counter()
@@ -2532,9 +2523,7 @@ def discover_workflows(
     # "no represented workflows" result after the index is already ready.
     if bool(capability_index_state.get("build_in_progress")):
         reconciliation_started_at = time.perf_counter()
-        reconciled_index_state = (
-            _get_latency_sensitive_capability_index_runtime_state()
-        )
+        reconciled_index_state = _get_latency_sensitive_capability_index_runtime_state()
         if bool(reconciled_index_state.get("ready")):
             reconciled_capability_matches = _search_workflow_capabilities(
                 search_query,
@@ -2555,9 +2544,7 @@ def discover_workflows(
             status=reconciliation_status,
             match_count=len(reconciled_capability_matches),
             runtime_ready=bool(reconciled_index_state.get("ready")),
-            build_in_progress=bool(
-                reconciled_index_state.get("build_in_progress")
-            ),
+            build_in_progress=bool(reconciled_index_state.get("build_in_progress")),
             waited=False,
         )
 
@@ -2649,9 +2636,9 @@ _SELECTOR_FAST_PATH_SUPPORTED_RULES = frozenset(
 )
 
 
-def _resolve_selector_fast_path_policy() -> tuple[
-    Optional[Dict[str, Any]], Dict[str, Any]
-]:
+def _resolve_selector_fast_path_policy() -> (
+    tuple[Optional[Dict[str, Any]], Dict[str, Any]]
+):
     """Resolve the represented selector fast-path policy (JVNAUTOSCI-2406).
 
     The policy is authored on the Vontology concept
@@ -2925,6 +2912,9 @@ def discover_workflows_for_turn(
                     "workflow_discovery_for_turn" if budget_exhausted else None
                 ),
                 timeout_budget_seconds=effective_timeout_seconds,
+                elapsed_time_enforcement=(
+                    "hard_external_resource" if budget_exhausted else "advisory"
+                ),
             )
         except Exception:
             pass
@@ -2959,6 +2949,9 @@ def discover_workflows_for_turn(
                 "workflow_discovery_for_turn" if budget_exhausted else None
             ),
             budget_exhaustion_detail=str(e) if budget_exhausted else None,
+            elapsed_time_enforcement=(
+                "hard_external_resource" if budget_exhausted else "advisory"
+            ),
             stage_timings=[
                 {
                     "stage": "workflow_discovery_for_turn",

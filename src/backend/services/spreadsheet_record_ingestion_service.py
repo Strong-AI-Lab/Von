@@ -9,22 +9,22 @@ authority.
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Mapping, Sequence
-from datetime import date, datetime, time
-from decimal import Decimal
 import hashlib
 import io
 import json
 import math
 import re
-from typing import Any
 import zipfile
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, time
+from decimal import Decimal
+from typing import Any
 
+from .kr_relationship_readback_service import verify_kr_relationship_readback
 from .spreadsheet_materialisation_guard_service import (
     build_spreadsheet_kr_materialisation_guard,
 )
-
 
 SPREADSHEET_EVIDENCE_SCHEMA_VERSION = "spreadsheet_evidence.v1"
 SPREADSHEET_RECORD_PLAN_SCHEMA_VERSION = "spreadsheet_record_plan.v1"
@@ -2614,26 +2614,50 @@ def _verify_relationship_readback_row(
         or predicate_id != _clean_text(item.get("predicate"))
     ):
         return None, "relationship_identity_readback_incomplete"
-    source_fetch_payloads = _tool_payload_variants(row, tool_name="fetch_concept")
     source_fetch_payloads = [
         payload
-        for payload in source_fetch_payloads
+        for payload in _tool_payload_variants(row, tool_name="fetch_concept")
         if not _clean_text(payload.get("concept_id"))
         or _clean_text(payload.get("concept_id")) == source_id
     ]
-    if target_id not in _relationship_targets(
-        source_fetch_payloads,
-        predicate_id=predicate_id,
-    ):
-        return None, "relationship_edge_readback_incomplete"
-    return (
-        {
-            "source_id": source_id,
-            "predicate_id": predicate_id,
-            "target_id": target_id,
-        },
-        None,
-    )
+    for payload in source_fetch_payloads:
+        relationship_maps: list[Mapping[str, Any]] = []
+        for key in (
+            "relationships",
+            "kr_readback_relationships",
+            "kr_relationship_source_readback_relationships",
+        ):
+            value = payload.get(key)
+            if isinstance(value, Mapping):
+                relationship_maps.append(value)
+        payload_predicate = _clean_text(
+            payload.get("predicate_id")
+            or payload.get("predicate_concept_id")
+            or payload.get("predicate")
+        )
+        payload_targets = (
+            payload.get("target_values")
+            or payload.get("targets")
+            or payload.get("target")
+        )
+        if payload_predicate:
+            relationship_maps.append({payload_predicate: payload_targets})
+        for relationship_map in relationship_maps:
+            verification = verify_kr_relationship_readback(
+                expected_source_id=source_id,
+                expected_predicate_id=predicate_id,
+                expected_target_id=target_id,
+                assertion_succeeded=result.get("kr_relationship_assert_success"),
+                source_readback_id=result.get("kr_relationship_source_readback_id"),
+                source_readback_relationships=relationship_map,
+                target_readback_id=result.get("kr_relationship_target_readback_id"),
+            )
+            verified_relationship = verification.get("verified_relationship")
+            if verification.get("verified") is True and isinstance(
+                verified_relationship, Mapping
+            ):
+                return dict(verified_relationship), None
+    return None, "relationship_edge_readback_incomplete"
 
 
 def _minimum_contract_counts(

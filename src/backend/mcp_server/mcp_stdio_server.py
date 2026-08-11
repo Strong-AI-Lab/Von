@@ -12,6 +12,7 @@ import concurrent.futures
 import importlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
@@ -868,21 +869,12 @@ def _redact_debug_value(value: Any, *, max_string_chars: int) -> Any:
     return value
 
 
-class VonChatRunTimeout(TimeoutError):
-    def __init__(
-        self, *, timeout_seconds: float, pid: int, thread_id: int | None
-    ) -> None:
-        super().__init__(f"Timed out after {timeout_seconds:.0f}s.")
-        self.timeout_seconds = timeout_seconds
-        self.pid = pid
-        self.thread_id = thread_id
-
-
 async def _run_blocking_with_timeout(func, *, timeout_seconds: float):
-    """Run a blocking callable in a worker thread with an overall timeout.
+    """Run a blocking callable with an advisory elapsed threshold.
 
-    Returns the callable's result. On timeout, raises VonChatRunTimeout carrying
-    the current process PID and the worker thread ID (if captured).
+    Crossing the threshold is logged, but the callable's usable result is
+    retained. Explicit coroutine cancellation and callable failures still
+    propagate.
 
     Export for testing.
     """
@@ -898,22 +890,23 @@ async def _run_blocking_with_timeout(func, *, timeout_seconds: float):
         thread_id_holder["thread_id"] = threading.get_ident()
         return func()
 
-    # A shared bounded pool prevents repeated timed-out calls from creating an
-    # unbounded family of live threads. A running Python thread cannot be
-    # killed safely, so the ordinary chat worker is read-only and its result is
-    # isolated by the cancelled asyncio future.
+    # A shared bounded pool prevents slow calls from creating an unbounded
+    # family of live threads.
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(_VON_CHAT_RUN_EXECUTOR, _wrapped)
     try:
         if timeout_seconds <= 0:
             return await future
-        return await asyncio.wait_for(future, timeout=timeout_seconds)
-    except asyncio.TimeoutError as exc:
-        raise VonChatRunTimeout(
-            timeout_seconds=timeout_seconds,
-            pid=pid,
-            thread_id=thread_id_holder["thread_id"],
-        ) from exc
+        return await asyncio.wait_for(asyncio.shield(future), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        _LOG.warning(
+            "von_chat_run crossed its %.1fs advisory; continuing to wait "
+            "(pid=%s, thread_id=%s)",
+            timeout_seconds,
+            pid,
+            thread_id_holder["thread_id"],
+        )
+        return await future
 
 
 class _RestrictedGateway:
@@ -1466,7 +1459,9 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
     max_string_chars = max(256, min(20000, max_string_chars))
 
     try:
-        timeout_seconds = float(arguments.get("timeout_seconds", 90))
+        timeout_seconds = float(
+            arguments.get("advisory_seconds", arguments.get("timeout_seconds", 90))
+        )
     except Exception:
         timeout_seconds = 90.0
     timeout_seconds = max(1.0, min(600.0, timeout_seconds))
@@ -1552,10 +1547,13 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
                     ),
                 )
 
+        outer_advisory_seconds = timeout_seconds + 1.0
+        outer_started_at = time.perf_counter()
         adaptive_result = await _run_blocking_with_timeout(
             _run_adaptive_turn_sync,
-            timeout_seconds=timeout_seconds + 1.0,
+            timeout_seconds=outer_advisory_seconds,
         )
+        outer_elapsed_seconds = time.perf_counter() - outer_started_at
         completed = adaptive_result.terminal_status == "completed"
         payload = {
             "success": completed,
@@ -1565,6 +1563,11 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "delegation": "read_only",
             "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
+            "advisory_seconds_requested": timeout_seconds,
+            "elapsed_time_enforcement": "advisory",
+            "advisory_seconds": outer_advisory_seconds,
+            "advisory_exceeded": outer_elapsed_seconds > outer_advisory_seconds,
+            "hard_timeout_seconds": None,
             "terminal_status": adaptive_result.terminal_status,
             "response_text": _truncate_string(
                 adaptive_result.response_text, max_chars=max_string_chars
@@ -1586,23 +1589,6 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         if not completed:
             payload["error_code"] = adaptive_result.terminal_status
             payload["error"] = adaptive_result.response_text
-    except VonChatRunTimeout as exc:
-        payload = {
-            "success": False,
-            "model": model_name,
-            "dry_run": dry_run,
-            "allow_writes": effective_allow_writes,
-            "delegation": "read_only",
-            "access_profile": access_profile_summary,
-            "timeout_seconds": timeout_seconds,
-            "error_code": "von_chat_run_timeout",
-            "error": str(exc),
-            "timeout_debug": {
-                "pid": exc.pid,
-                "thread_id": exc.thread_id,
-                "late_result_policy": "discard_from_terminal_reply",
-            },
-        }
     except Exception as exc:
         payload = {
             "success": False,
@@ -1612,6 +1598,9 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "delegation": "read_only",
             "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
+            "elapsed_time_enforcement": "advisory",
+            "advisory_seconds_requested": timeout_seconds,
+            "hard_timeout_seconds": None,
             "error_code": type(exc).__name__,
             "error": str(exc),
         }
@@ -2965,15 +2954,9 @@ async def _handle_gmail_list_messages(arguments: dict[str, Any]) -> list[TextCon
             )
         ]
     try:
-        result = gmail_service.list_messages(
-            profile_id=profile,
-            query=arguments.get("query"),
-            label_ids=arguments.get("label_ids"),
-            max_results=arguments.get("max_results", 25),
-            audit_context=_gmail_audit_context("gmail_list_messages"),
-            bypass_profile_query_prefix=bool(
-                arguments.get("bypass_profile_query_prefix") or False
-            ),
+        result = internal_mcp_catalogue_module._gmail_list_messages(
+            **arguments,
+            _audit_source="mcp_stdio",
         )
         return [_json_text(result)]
     except Exception as exc:

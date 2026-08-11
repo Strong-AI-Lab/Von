@@ -171,7 +171,7 @@ def test_expand_relation_predicate_family_uses_exact_fallback_when_index_unavail
         }
     }
     assert queries[1]["limit"] == 32
-    assert queries[1]["max_time_ms"] == 8_000
+    assert queries[1]["max_time_ms"] is None
 
 
 def test_expand_relation_predicate_family_fails_soft(monkeypatch) -> None:

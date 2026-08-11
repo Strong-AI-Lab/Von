@@ -70,7 +70,6 @@ def _verify_spreadsheet_support_parent_concepts() -> dict[str, Any]:
             for row in ConceptsRepository.find(
                 {"concept_id": {"$in": list(SPREADSHEET_SUPPORT_PARENT_CONCEPT_IDS)}},
                 {"_id": 0, "concept_id": 1},
-                max_time_ms=5_000,
             )
             if isinstance(row, dict) and str(row.get("concept_id") or "").strip()
         }

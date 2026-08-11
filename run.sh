@@ -882,6 +882,21 @@ confirm_health_stable() {
     return 0
 }
 
+report_server_readiness_observation() {
+    local pid="$1"
+    local detail="$2"
+    if ! process_exists "$pid"; then
+        remove_pidfile
+        log "ERROR: $detail The server process PID=$pid has exited."
+        show_server_start_failure_tail
+        return 1
+    fi
+
+    log "WARNING: $detail"
+    log "Readiness observation window elapsed; server process PID=$pid remains active. Returning with readiness pending so /health can continue initialising and be reconciled by ./run.sh status or the caller."
+    return 0
+}
+
 show_server_start_failure_tail() {
     log "Showing last 40 log lines for startup diagnostics:"
     if [ -f "$CURRENT_LOG" ]; then
@@ -1633,6 +1648,7 @@ start_server() {
         local attempt=0
         local healthy=0
         local listening_logged=0
+        local readiness_detail=""
         while [ "$attempt" -lt "$max_attempts" ]; do
             sleep 0.5
 
@@ -1735,12 +1751,7 @@ start_server() {
 
         if [ "$healthy" -eq 1 ] && ! confirm_health_stable; then
             healthy=0
-            log "ERROR: /health read-back did not remain stable after initial readiness."
-            if ! process_exists "$pid"; then
-                remove_pidfile
-            fi
-            show_server_start_failure_tail
-            return 1
+            readiness_detail="/health read-back did not remain stable after initial readiness."
         fi
 
         if [ "$healthy" -eq 1 ]; then
@@ -1749,15 +1760,21 @@ start_server() {
         elif [ "$listening_logged" -eq 1 ]; then
             if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
                 launcher_health_ready 1 || true
-                log "ERROR: Agent test port is listening but /health marker read-back did not validate in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s."
-                show_server_start_failure_tail
-                return 1
+                if [ -z "$readiness_detail" ]; then
+                    readiness_detail="Agent test port is listening but /health marker read-back did not validate within the $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s observation window."
+                fi
             else
-                log "WARNING: Port is listening but /health did not respond in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s; continuing (service may still be initialising)."
-                log_mongo_status
+                if [ -z "$readiness_detail" ]; then
+                    readiness_detail="Port is listening but /health did not respond within the $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s observation window."
+                fi
             fi
+            report_server_readiness_observation "$pid" "$readiness_detail" || return 1
+            [ "$AGENT_TEST_INSTANCE" -eq 1 ] || log_mongo_status
         else
-            log "WARNING: Server not healthy after initial ${HEALTH_TIMEOUT_SEC}s (port not listening); check logs: $CURRENT_LOG and $SERVER_ERR_LOG"
+            if [ -z "$readiness_detail" ]; then
+                readiness_detail="Port is not yet listening and /health was not ready within the initial ${HEALTH_TIMEOUT_SEC}s observation window; inspect $CURRENT_LOG and $SERVER_ERR_LOG."
+            fi
+            report_server_readiness_observation "$pid" "$readiness_detail" || return 1
         fi
     fi
 

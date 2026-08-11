@@ -339,7 +339,15 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
                     "timeout_seconds": {
                         "type": "number",
                         "default": 90,
-                        "description": "Overall elapsed-time budget for the adaptive turn",
+                        "description": "Legacy alias for advisory_seconds",
+                    },
+                    "advisory_seconds": {
+                        "type": "number",
+                        "default": 90,
+                        "description": (
+                            "Elapsed-time advisory for the adaptive turn; crossing "
+                            "it does not discard the result"
+                        ),
                     },
                     "max_string_chars": {
                         "type": "integer",

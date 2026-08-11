@@ -56,6 +56,39 @@ class _FakeClient:
         return {"label": self.label, "db_name": db_name}
 
 
+def test_new_client_bounds_connection_but_not_operation_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[tuple[str, dict]] = []
+    sentinel = object()
+
+    def _fake_mongo_client(uri: str, **kwargs):
+        created.append((uri, dict(kwargs)))
+        return sentinel
+
+    monkeypatch.setattr(mc, "MongoClient", _fake_mongo_client)
+    monkeypatch.setenv("MONGO_CONNECT_TIMEOUT_MS", "4321")
+    monkeypatch.setenv("MONGO_SOCKET_TIMEOUT_MS", "7")
+
+    result = mc._new_mongo_client(
+        "mongodb://example.invalid/",
+        server_selection_timeout_ms=1234,
+    )
+
+    assert result is sentinel
+    assert created == [
+        (
+            "mongodb://example.invalid/",
+            {
+                "serverSelectionTimeoutMS": 1234,
+                "connectTimeoutMS": 4321,
+                "retryWrites": True,
+                "retryReads": True,
+            },
+        )
+    ]
+
+
 def test_get_db_rebuilds_client_after_periodic_ping_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

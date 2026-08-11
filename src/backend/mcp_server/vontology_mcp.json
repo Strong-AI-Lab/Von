@@ -303,7 +303,7 @@
         },
         {
             "name": "concept_exists",
-            "description": "Minimal existence/accessibility check for a concept_id. Use before expensive fetch operations or when you need to validate user input.",
+            "description": "Built-in internal MCP tool that verifies exact Vontology concept existence and actor-scoped accessibility.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1958,7 +1958,7 @@
         },
         {
             "name": "fetch_concept",
-            "description": "Fetch full details of one concept by exact ID. An authenticated actor receives actor_effective scoped enrichment; identity or namespace supplied only in an ordinary tool payload is ignored and the response is explicitly base_publication. Don't use for searching.",
+            "description": "Fetch grounded facts for one known concept by exact ID; do not use it for searching. An authenticated actor receives actor_effective scoped enrichment, while identity or namespace supplied only in an ordinary payload is ignored and the response is explicitly base_publication. For a bounded relationship question, prefer a small predicate-filtered relation read. If relation enrichment is needed here, start with a small page without inline previews and hydrate only selected related concepts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2117,7 +2117,7 @@
         },
         {
             "name": "find_relations_with_argument",
-            "description": "Find relation assertions where a concept appears in one or more argument positions. The anchor entity must be supplied in concept_id; use argument_index to choose the relation slot instead of inventing subject/object payload fields. Supports exact graph matching and full-text text-relation matching with optional predicate/kind filters and pagination. A positive hit proves existence, not enumeration completeness. When predicate, direction, or represented-form coverage is uncertain, inspect predicate incidence first and then read every fitting exact predicate. For list, count, broad-category, or negative claims, pass all semantically fitting predicate IDs together in one predicate_filter read unless the incidence evidence distinguishes their coverage; do not choose only the most obvious label. When a hit reaches a reified, event, claim, or role node, inspect its represented role predicates before treating another filler as the requested related entity; co-participation alone does not establish that semantic role. Verified actors receive actor_effective results; payload-only identity is ignored and yields base_publication. Truncated actor overlays expose bounded recovery rather than a misleading offset continuation.",
+            "description": "Find grounded relations for one anchor concept as a direct content-bearing read. For a simple entity-relative question, use this before a broader workflow when its bounded result can answer the requested work product. Use relation_kind='binary' for entity-to-entity relationships and request text relations or snippets only for text-content questions. Keep argument_index='any' when the direction or stored object slot is materially unknown; a numeric object index selects one exact stored slot, not every object-side assertion. A positive hit proves that relation exists, not that a requested enumeration or cardinality is complete. When the work product enumerates or quantifies a broad relationship category, or supports a negative claim, inspect one small predicate-incidence call with argument_index='any' first when the predicates, directions, or represented forms needed for that coverage are not already established; lexical schema search shows possible predicates, while incidence shows the predicates actually in use around the anchor. Keep argument type counts off for entity enumeration because they aggregate neighbour types rather than identify related entities. Then pass every semantically fitting returned exact predicate ID, including inverse forms, together in one predicate_filter read; do not choose only the most obvious label. Begin with minimally enriched, predicate-filtered evidence unless broad inventory is itself requested. For an initial single-relationship question, start around limit 20 with include_concept_preview=false and hydrate only selected concept IDs with fetch_concept; request inline previews when their immediate value justifies the added read and output cost. When a hit reaches a reified, event, claim, or role node, inspect its represented role predicates before treating another filler as the requested related entity; co-participation alone does not establish that semantic role. Stop when the evidence supports the requested work product or state its bound.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2539,6 +2539,9 @@
                             "null"
                         ]
                     },
+                    "require_represented_artifacts": {
+                        "type": "boolean"
+                    },
                     "source_profile": {
                         "type": [
                             "string",
@@ -2720,7 +2723,7 @@
         },
         {
             "name": "gmail_get_attachment",
-            "description": "Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
+            "description": "Inspect a Gmail attachment after the model decides it is relevant. The tool performs bounded derived maintenance by registering or reusing an actor-scoped computer_file_copy, then uses canonical file-copy read-back to return extracted document text. It never returns raw base64 to the model.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2732,6 +2735,12 @@
                     },
                     "attachment_id": {
                         "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -2740,12 +2749,12 @@
                     "attachment_id"
                 ],
                 "additionalProperties": false,
-                "description": "Fetch a Gmail attachment for a profile (base64 payload)."
+                "description": "Inspect a Gmail attachment for a profile. The call fetches the source bytes, registers or reuses an actor-scoped computer_file_copy, reads that file copy back, and returns bounded extracted text when supported. The namespace is server-bound and raw base64 is not returned."
             }
         },
         {
             "name": "gmail_get_message",
-            "description": "Fetch a Gmail message for a profile using message_id from gmail_list_messages. The 'profile' parameter accepts either the configured profile alias or the authorised Gmail address. Supports Gmail API formats metadata|full|raw|minimal and returns normalised sender, subject, date, and snippet fields when available. Set include_body=true whenever bounded body inspection is needed to fulfil an explicitly authorised, content-dependent request, including identifying cited resources. Read-only; profile token required.",
+            "description": "Gmail MCP tool for fetching a single message by id. Returns the full Gmail message payload plus normalised header fields (sender, subject, date) and the message body.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2852,7 +2861,7 @@
                     "profile"
                 ],
                 "additionalProperties": false,
-                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call. The 'limit' alias maps to max_results; order/order_by/sort, scope, and include_metadata are accepted as read-only planning hints.",
+                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call. query uses Gmail q grammar and is otherwise passed through unchanged: adjacent clauses mean AND, uppercase OR or braces express a union, and quotes delimit a phrase. Example: newer_than:2d from:airline@example.com subject:\"booking confirmation\". Set include_metadata to a list containing sender/from, subject, date, snippet, or label_ids to project those fields for the returned rows using Gmail metadata reads only; id/message_id and threadId/thread_id remain available and no message body is fetched. Projection can issue up to one metadata read per returned row, so set max_results to the candidate cardinality the request actually needs. A narrow query plus max_results and include_metadata can normally identify candidate messages in one tool call. The 'limit' alias maps to max_results; order/order_by/sort and scope are accepted compatibility hints but are ignored; express mailbox scope in query.",
                 "x-von-argument-aliases": {
                     "profile_id": "profile",
                     "identity": "profile",
@@ -2870,7 +2879,7 @@
         },
         {
             "name": "gmail_modify_labels",
-            "description": "Atomically add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope. Use verify_after=true for independent canonical state read-back and lost-response reconciliation.",
+            "description": "MCP tool for adding or removing labels on a Gmail message. It is an external-system write tool and must only be invoked from represented workflows with explicit mutation authority and caller-supplied message context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3414,6 +3423,13 @@
                             "null"
                         ]
                     },
+                    "advisory_seconds": {
+                        "type": [
+                            "integer",
+                            "number",
+                            "null"
+                        ]
+                    },
                     "timeout_seconds": {
                         "type": [
                             "integer",
@@ -3444,7 +3460,7 @@
                     "issue_key"
                 ],
                 "additionalProperties": true,
-                "description": "jira_move_issue input: issue_key (required) plus optional target_project_key, target_issue_type, and target_parent_issue_key. Supports Task->Subtask conversion and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, infer_field_defaults, infer_status_defaults, infer_subtask_type_default, target_mandatory_fields, target_status, await_completion, poll_interval_seconds, timeout_seconds. Guardrails: dry_run defaults to true; pass approved=true (or alias confirm=true) to execute. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
+                "description": "jira_move_issue input: issue_key (required) plus optional target_project_key, target_issue_type, and target_parent_issue_key. Supports Task->Subtask conversion and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, infer_field_defaults, infer_status_defaults, infer_subtask_type_default, target_mandatory_fields, target_status, await_completion, poll_interval_seconds, advisory_seconds (timeout_seconds is a legacy alias). Crossing the advisory returns the still-running bulk task for polling. Guardrails: dry_run defaults to true; pass approved=true (or alias confirm=true) to execute. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
             }
         },
         {
@@ -3637,7 +3653,7 @@
         },
         {
             "name": "materialise_scholarly_representation_for_file_copy",
-            "description": "Materialise the scholarly-paper representation explicitly from an already-registered #V#computer_file_copy. Use after download_paper, finalise_cached_paper, or other file-copy registration when the user wants the paper concept and source linkage created.",
+            "description": "MCP tool for materialising a scholarly-paper representation from an existing #V#computer_file_copy. This is an additive Vontology write surface used after acquisition tools have registered a durable file copy.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4039,6 +4055,9 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "require_represented_artifacts": {
+                        "type": "boolean"
                     },
                     "processing_status": {
                         "type": [
@@ -4535,7 +4554,7 @@
         },
         {
             "name": "search_concepts",
-            "description": "Search Vontology names and descriptions for possible entities, predicates, and types. Start with exact or substring search and enrich only when needed. This discovers possible schema, not the predicates actually used around an anchor or enumeration coverage.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use exact or substring search to resolve unknown represented schema. The same tool can enumerate the canonical extent of a known type: set query='' and instance_of to the exact type concept ID, choose direct_instances_only according to the requested scope, and use pagination for complete lists or counts. This type-extent mode is distinct from enumerating broad relationships around a known entity, where predicate incidence and relation-bearing reads are more informative.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4627,7 +4646,7 @@
         },
         {
             "name": "search_knowledge_base",
-            "description": "Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+            "description": "Built-in internal MCP tool that searches namespace-scoped represented knowledge through the RAG retrieval surface.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6367,7 +6386,12 @@
                     "timeout_seconds": {
                         "type": "number",
                         "default": 90,
-                        "description": "Overall elapsed-time budget for the adaptive turn"
+                        "description": "Legacy alias for advisory_seconds"
+                    },
+                    "advisory_seconds": {
+                        "type": "number",
+                        "default": 90,
+                        "description": "Elapsed-time advisory for the adaptive turn; crossing it does not discard the result"
                     },
                     "max_string_chars": {
                         "type": "integer",
@@ -6386,7 +6410,7 @@
         },
         {
             "name": "vontology_concept_search",
-            "description": "Search Vontology names and descriptions for possible entities, predicates, and types. Start with exact or substring search and enrich only when needed. This discovers possible schema, not the predicates actually used around an anchor or enumeration coverage.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use exact or substring search to resolve unknown represented schema. The same tool can enumerate the canonical extent of a known type: set query='' and instance_of to the exact type concept ID, choose direct_instances_only according to the requested scope, and use pagination for complete lists or counts. This type-extent mode is distinct from enumerating broad relationships around a known entity, where predicate incidence and relation-bearing reads are more informative.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6763,7 +6787,7 @@
         },
         {
             "name": "workflow_execute",
-            "description": "Create a durable workflow instance via the verified submission pathway and optionally wait for one bounded observation interval of at most 90 seconds. Expiry returns partial/current state so the model can choose another wait; it does not cancel, retry, or relaunch the instance.",
+            "description": "Create a durable workflow instance via the verified submission pathway and optionally wait for one advisory observation interval of at most 90 seconds. Crossing returns partial/current state so the model can choose another wait; it does not cancel, retry, or relaunch the instance.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6830,6 +6854,12 @@
                             "number"
                         ]
                     },
+                    "advisory_seconds": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
                     "timeout_seconds": {
                         "type": [
                             "integer",
@@ -6863,7 +6893,7 @@
                     "workflow_id"
                 ],
                 "additionalProperties": true,
-                "description": "Launch a durable workflow instance and optionally await one bounded observation interval. timeout_seconds is clamped to 90; expiry returns partial/current state and the model may choose another wait without cancelling or relaunching."
+                "description": "Launch a durable workflow instance and optionally await one advisory observation interval. advisory_seconds is clamped to 90 (timeout_seconds is a legacy alias); crossing returns partial/current state and the model may choose another wait without cancelling or relaunching."
             }
         },
         {
@@ -6892,7 +6922,7 @@
         },
         {
             "name": "workflow_get_instance",
-            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors. Set await_terminal=true to make a bounded observation wait on an existing instance; expiry returns its current state to the model and never cancels or retries the workflow.",
+            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors. Set await_terminal=true to make a advisory observation wait on an existing instance; crossing returns its current state to the model and never cancels or retries the workflow.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6903,6 +6933,12 @@
                         "type": [
                             "boolean",
                             "string",
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "advisory_seconds": {
+                        "type": [
                             "integer",
                             "number"
                         ]
@@ -6924,7 +6960,7 @@
                     "instance_id"
                 ],
                 "additionalProperties": true,
-                "description": "Get a workflow instance by ID, optionally waiting for one bounded observation interval. timeout_seconds is clamped to 90; expiry returns partial/current state and the model may choose another wait without cancelling or retrying it."
+                "description": "Get a workflow instance by ID, optionally waiting for one advisory observation interval. advisory_seconds is clamped to 90 (timeout_seconds is a legacy alias); crossing returns partial/current state and the model may choose another wait without cancelling or retrying it."
             }
         },
         {

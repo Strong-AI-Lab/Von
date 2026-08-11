@@ -127,12 +127,16 @@ def test_build_turn_memory_context_state_fails_closed_for_missing_explicit_dossi
     assert memory_service.render_turn_memory_context_messages(state) == []
 
 
-def test_build_turn_memory_context_state_times_out_slow_subject_resolution(
+def test_build_turn_memory_context_state_retains_slow_subject_resolution(
     monkeypatch,
 ) -> None:
     def slow_subject_resolution(**_kwargs):
         time.sleep(0.2)
-        return {"status": "available"}
+        return {
+            "subject_id": "#V#test_user",
+            "status": "available",
+            "fail_closed": False,
+        }
 
     monkeypatch.setattr(
         memory_service,
@@ -153,18 +157,16 @@ def test_build_turn_memory_context_state_times_out_slow_subject_resolution(
     )
     elapsed = time.monotonic() - started_at
 
-    assert elapsed < 0.15
-    assert state["status"] == "unavailable"
+    assert elapsed >= 0.15
+    assert state["status"] == "available"
     assert state["fail_closed"] is False
     assert state["failure_reason"] is None
     subject_context = state["subject_contexts"][0]
     assert subject_context["subject_id"] == "#V#test_user"
-    assert subject_context["status"] == "unavailable"
-    assert subject_context["fail_closed"] is False
-    assert subject_context["failure_reason"] == "turn_memory_context_subject_timeout"
-    assert subject_context["failed_substep"] == "resolve_subject_memory_context"
-    assert subject_context["timeout_seconds"] == 0.01
-    assert memory_service.render_turn_memory_context_messages(state) == []
+    assert subject_context["status"] == "available"
+    assert subject_context["elapsed_time_enforcement"] == "advisory"
+    assert subject_context["advisory_timeout_seconds"] == 0.01
+    assert subject_context["advisory_exceeded"] is True
 
 
 def test_build_selected_workflow_policy_memory_state_renders_recent_suggestions(

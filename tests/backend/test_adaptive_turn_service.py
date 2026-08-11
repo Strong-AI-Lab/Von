@@ -173,6 +173,95 @@ def test_scope_message_contains_boundaries_and_preserves_request_scope() -> None
     assert "requested outcome and effect cardinality" in message
     assert "smallest bounded candidate set" in message
     assert "must not create, update, or otherwise act on more" in message
+    assert "Before another search, read, or hydration" in message
+    assert "what unresolved material decision" in message
+    assert "Stop retrieving once current evidence supports" in message
+    assert "do not broaden retrieval merely to avoid asking" in message
+    assert "hydrate candidates sequentially" in message
+    assert "Parallel fan-out is appropriate only" in message
+    assert "Preserve result-set continuity" in message
+    assert "uninspected candidate handles" in message
+    assert "A non-match among earlier items" in message
+    assert "Replace the result only when you can identify" in message
+    assert "reuse existing representation as create-if-absent" in message
+    assert "inspect and reuse any exact existing candidate" in message
+    assert "stable source or component identifiers" in message
+    assert "partial neighbourhood cannot establish absence" in message
+    assert "Create only after that bounded reuse check" in message
+
+
+def test_progressive_evidence_guidance_survives_post_read_continuation() -> None:
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    call_id="call-read-once",
+                    tool_name="turn_invoke_capability",
+                    payload={"name": "general_read", "arguments": {}},
+                )
+            ],
+        ),
+        LLMResponse(text_response="The first bounded read was sufficient."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Find the relevant item.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-progressive-evidence",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "The first bounded read was sufficient."
+    assert len(client.calls) == 2
+    second_system_message = client.calls[1]["system_message"]
+    assert "what unresolved material decision" in second_system_message
+    assert "Stop retrieving once current evidence supports" in second_system_message
+    assert "hydrate candidates sequentially" in second_system_message
+    assert "Preserve result-set continuity" in second_system_message
+    assert "reuse existing representation as create-if-absent" in second_system_message
+    assert "inspect and reuse any exact existing candidate" in second_system_message
+
+
+def test_scope_message_carries_brief_approval_and_exact_recovery_state() -> None:
+    situation = (
+        "Proposal: represent the booked journey using source Gmail message "
+        "19febb3feda7b024. Durable workflow instance: workflow-trip-123. "
+        "Created concept: #V#trip_gmail_19febb3feda7b024. "
+        "Unmet outcome: add the three component relations."
+    )
+
+    message = _scope_message(
+        TrustedTurnScope(
+            user_concept_id="#V#person",
+            organisation_concept_id="#V#org",
+            namespace="#V#person@org",
+        ),
+        delegated_count=12,
+        final_synthesis=False,
+        conversation_id="conversation-trip",
+        conversation_situation=situation,
+    )
+
+    assert situation in message
+    assert "Interpret a brief follow-up" in message
+    assert "most recent sufficiently concrete proposal" in message
+    assert "Do not make the user repeat internal identifiers" in message
+    assert "carry it out rather than merely restating it" in message
+    assert "complete purpose index" in message
+    assert "typed recovery affordance" in message
+    assert "same requested semantic object and effect cardinality" in message
+    assert "normally use it in the same turn" in message
+    assert "complete only unmet postconditions" in message
+    assert "never repeat a confirmed effect" in message
+    assert "preserve its exact grounded candidate identifiers" in message
+    assert "unresolved create-versus-reuse status" in message
+    assert "Do not leave the only stable identity solely" in message
+    assert "including when you made a proposal intended for later approval" in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
@@ -281,6 +370,7 @@ def _effect_gateway(
     effect_output_schema: Schema | None = None,
     effect_admission_window_sec: float | None = None,
     include_scoped_assertion: bool = False,
+    hard_timeout_enabled: bool = False,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -295,11 +385,7 @@ def _effect_gateway(
         ("create_concepts", None),
         ("upsert_text_relation", "concept_id"),
         ("add_relationship", "source_id"),
-        *(
-            (("upsert_scoped_assertion", None),)
-            if include_scoped_assertion
-            else ()
-        ),
+        *((("upsert_scoped_assertion", None),) if include_scoped_assertion else ()),
     ):
         catalogue.register(
             MethodDefinition(
@@ -309,6 +395,7 @@ def _effect_gateway(
                 output_schema=effect_output_schema,
                 category="write",
                 ordinary_turn_effect=True,
+                hard_timeout_enabled=hard_timeout_enabled,
                 effect_admission_window_sec=effect_admission_window_sec,
                 ordinary_turn_mutation_subject_argument=subject_argument,
                 ordinary_turn_trusted_argument_bindings=(
@@ -322,9 +409,7 @@ def _effect_gateway(
                         if name == "upsert_text_relation"
                         else (
                             {
-                                "acting_user_concept_id": (
-                                    "actor_user_concept_id"
-                                ),
+                                "acting_user_concept_id": ("actor_user_concept_id"),
                                 "organisation_concept_id": (
                                     "actor_organisation_concept_id"
                                 ),
@@ -721,9 +806,7 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     assert "#V#person" in system_message
     assert "#V#org" in system_message
     assert "all other writes are unavailable" in system_message
-    assert {
-        tool.name for tool in client.calls[0]["available_tools"]
-    } == {
+    assert {tool.name for tool in client.calls[0]["available_tools"]} == {
         "turn_capabilities",
         "turn_invoke_capability",
         "turn_list_evidence",
@@ -997,11 +1080,9 @@ def test_machine_observations_are_bounded_separate_and_not_redispatched() -> Non
         )
     ]
     projection = _bounded_conversation_observation_projection(observations)
-    projection_with_prior_omissions = (
-        _bounded_conversation_observation_projection(
-            observations,
-            omitted_before=5,
-        )
+    projection_with_prior_omissions = _bounded_conversation_observation_projection(
+        observations,
+        omitted_before=5,
     )
 
     assert projection is not None
@@ -1015,7 +1096,9 @@ def test_machine_observations_are_bounded_separate_and_not_redispatched() -> Non
         <= _CONVERSATION_OBSERVATIONS_MAX_BYTES
     )
 
-    client = _SequenceClient(LLMResponse(text_response="The recorded effect succeeded."))
+    client = _SequenceClient(
+        LLMResponse(text_response="The recorded effect succeeded.")
+    )
     result = execute_adaptive_turn(
         gateway=_gateway(lambda **_kwargs: {"success": True}),
         prompt="What happened to the pending effect?",
@@ -1304,9 +1387,7 @@ def test_capability_catalogue_rejects_placeholder_description_override(
             "grounded_direct_read": tool_metadata_service.ToolMetadata(
                 tool_name="grounded_direct_read",
                 concept_id="#V#grounded_direct_read_tool",
-                description=(
-                    "Internal MCP metadata concept for grounded_direct_read."
-                ),
+                description=("Internal MCP metadata concept for grounded_direct_read."),
             )
         },
     )
@@ -1333,11 +1414,14 @@ def test_effect_delegation_is_authenticated_and_exactly_metadata_marked() -> Non
         "actor_user_concept_id": "#V#person",
     }
 
-    assert ordinary_turn_capability_delegation(
-        gateway,
-        user_concept_id=None,
-        trusted_argument_values=trusted,
-    ) == ()
+    assert (
+        ordinary_turn_capability_delegation(
+            gateway,
+            user_concept_id=None,
+            trusted_argument_values=trusted,
+        )
+        == ()
+    )
     delegated = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#person",
@@ -1353,7 +1437,7 @@ def test_effect_delegation_is_authenticated_and_exactly_metadata_marked() -> Non
     assert "other_write" not in delegated
 
 
-def test_effect_catalogue_and_scope_project_method_liveness_boundaries() -> None:
+def test_advisory_effect_does_not_project_inactive_admission_boundary() -> None:
     gateway = _effect_gateway(
         lambda _name, _arguments: {"success": True},
         write_timeout_sec=0.5,
@@ -1375,12 +1459,10 @@ def test_effect_catalogue_and_scope_project_method_liveness_boundaries() -> None
         {"names": ["create_concepts"]},
     )["capabilities"][0]
 
-    assert gateway.get_method_effect_admission_window_sec(
-        "create_concepts"
-    ) == pytest.approx(0.125)
+    assert gateway.get_method_effect_admission_window_sec("create_concepts") is None
     assert gateway.get_method_effect_admission_window_sec("general_read") is None
     assert catalogue_entry["semantic_effect"] is True
-    assert catalogue_entry["minimum_effect_window_seconds"] == pytest.approx(0.125)
+    assert "minimum_effect_window_seconds" not in catalogue_entry
 
     clock = _ManualClock(100.0)
     client = _SequenceClient(LLMResponse(text_response="A useful answer."))
@@ -1401,7 +1483,7 @@ def test_effect_catalogue_and_scope_project_method_liveness_boundaries() -> None
     )
 
     assert "Elapsed-time budgets are advisory" in client.calls[0]["system_message"]
-    assert "Individual model and capability calls retain hard liveness" in (
+    assert "Model and capability elapsed thresholds are advisory too" in (
         client.calls[0]["system_message"]
     )
 
@@ -1436,7 +1518,8 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
     assert allocation["final_answer_reserve_source"] == "environment_or_default"
     assert allocation["explicit_zero_override"] is False
     assert allocation["enforcement"] == "advisory"
-    assert allocation["model_call_liveness_timeout_seconds"] == 120.0
+    assert allocation["model_call_advisory_seconds"] == 120.0
+    assert allocation["model_call_hard_timeout_seconds"] is None
 
 
 def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> None:
@@ -1515,7 +1598,9 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> 
     assert seen["visibility_scope_mode"] is None
 
 
-def test_invalid_effect_arguments_are_returned_for_correction_without_poisoning_turn() -> None:
+def test_invalid_effect_arguments_are_returned_for_correction_without_poisoning_turn() -> (
+    None
+):
     invoked: list[dict[str, Any]] = []
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -1918,9 +2003,7 @@ def test_effect_removes_false_draft_from_fresh_final_context(
                     call_id=f"effect-before-{answer_reserve}",
                     payload={
                         "name": "create_concepts",
-                        "arguments": {
-                            "concepts": [{"name": "A represented concept"}]
-                        },
+                        "arguments": {"concepts": [{"name": "A represented concept"}]},
                     },
                 )
             ],
@@ -1947,9 +2030,7 @@ def test_effect_removes_false_draft_from_fresh_final_context(
     assert result.response_text == "The represented concept was created."
     assert len(client.calls) == 2
     final_call = client.calls[1]
-    assert {
-        tool.name for tool in final_call["available_tools"]
-    } == {
+    assert {tool.name for tool in final_call["available_tools"]} == {
         "turn_capabilities",
         "turn_invoke_capability",
         "turn_list_evidence",
@@ -1974,7 +2055,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
     def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
         while not internal_mcp_cancellation_requested():
             time.sleep(0.001)
-        assert release_handler.wait(timeout=1.0)
+        assert release_handler.wait(timeout=10.0)
         return {
             "success": True,
             "effect_status": "succeeded",
@@ -2002,9 +2083,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
                     call_id="late-effect",
                     payload={
                         "name": "create_concepts",
-                        "arguments": {
-                            "concepts": [{"name": "A late real concept"}]
-                        },
+                        "arguments": {"concepts": [{"name": "A late real concept"}]},
                     },
                 )
             ],
@@ -2013,7 +2092,11 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
     )
 
     result = execute_adaptive_turn(
-        gateway=_effect_gateway(handler, write_timeout_sec=0.02),
+        gateway=_effect_gateway(
+            handler,
+            write_timeout_sec=0.02,
+            hard_timeout_enabled=True,
+        ),
         prompt="Represent this concept.",
         context=[],
         llm_client=client,
@@ -2032,9 +2115,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 
     release_handler.set()
     assert observation_persisted.wait(timeout=1.0)
-    late_phases = [
-        item for item in persisted if item.get("phase") == "late_terminal"
-    ]
+    late_phases = [item for item in persisted if item.get("phase") == "late_terminal"]
     assert len(late_phases) == 1
     durable = late_phases[0]
     assert durable["request_id"] == "late-effect-request"
@@ -2294,10 +2375,14 @@ def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
         clock=clock,
     )
 
-    assert result.terminal_status == "effect_failed"
-    assert result.effect_finality_fallback is True
-    assert "1 failed" in result.response_text
-    assert "The valid effect completed." not in result.response_text
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is False
+    assert "The valid effect completed." in result.response_text
+    assert "1 succeeded and 1 failed or not started" in result.response_text
+    assert any(
+        call.get("type") == "adaptive_turn_mixed_effect_response_preserved"
+        for call in result.aux_llm_calls
+    )
     assert invoked == ["create_concepts"]
     assert len(result.tool_invocations) == 2
     assert len({item["effect_id"] for item in result.tool_invocations}) == 2
@@ -2409,9 +2494,7 @@ def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     assert "indeterminate" in result.response_text
     assert "The first effect needs canonical inspection." not in result.response_text
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
-    assert result.tool_invocations[1]["result_target_ids"] == [
-        "#V#created_if_present"
-    ]
+    assert result.tool_invocations[1]["result_target_ids"] == ["#V#created_if_present"]
     blocked = result.tool_invocations[2]
     assert blocked["status"] == "error"
     assert blocked["effect_status"] == "not_started"
@@ -2515,9 +2598,7 @@ def test_effect_is_not_dispatched_when_durable_intent_is_unavailable(
                     call_id="effect-without-durable-intent",
                     payload={
                         "name": "create_concepts",
-                        "arguments": {
-                            "concepts": [{"name": "Must not be dispatched"}]
-                        },
+                        "arguments": {"concepts": [{"name": "Must not be dispatched"}]},
                     },
                 )
             ],
@@ -2681,9 +2762,7 @@ def test_canonical_text_denial_exposes_scoped_assertion_recovery(
                     payload={
                         "name": "upsert_scoped_assertion",
                         "arguments": {
-                            "subject_concept_id": (
-                                "#V#globally_visible_subject"
-                            ),
+                            "subject_concept_id": ("#V#globally_visible_subject"),
                             "predicate": "hasNote",
                             "target_text": "Actor-relative observation.",
                             "language": "en-NZ",
@@ -2692,9 +2771,7 @@ def test_canonical_text_denial_exposes_scoped_assertion_recovery(
                 )
             ],
         ),
-        LLMResponse(
-            text_response="The actor-scoped assertion was recorded."
-        ),
+        LLMResponse(text_response="The actor-scoped assertion was recorded."),
     )
 
     result = execute_adaptive_turn(
@@ -2811,9 +2888,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
                     payload={
                         "name": "upsert_scoped_assertion",
                         "arguments": {
-                            "subject_concept_id": (
-                                "#V#globally_visible_subject"
-                            ),
+                            "subject_concept_id": ("#V#globally_visible_subject"),
                             "predicate": "#V#hasResearchInterest",
                             "target_concept_id": "#V#represented_topic",
                         },
@@ -2821,9 +2896,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
                 )
             ],
         ),
-        LLMResponse(
-            text_response="The actor-scoped relationship was recorded."
-        ),
+        LLMResponse(text_response="The actor-scoped relationship was recorded."),
     )
 
     result = execute_adaptive_turn(
@@ -2849,9 +2922,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     assert len(invoked) == 1
     recovered_name, recovered_arguments = invoked[0]
     assert recovered_name == "upsert_scoped_assertion"
-    assert recovered_arguments["subject_concept_id"] == (
-        "#V#globally_visible_subject"
-    )
+    assert recovered_arguments["subject_concept_id"] == ("#V#globally_visible_subject")
     assert recovered_arguments["predicate"] == "#V#hasResearchInterest"
     assert recovered_arguments["target_concept_id"] == "#V#represented_topic"
     assert recovered_arguments["acting_user_concept_id"] == "#V#person"
@@ -2871,9 +2942,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     assert recovery["effect_status"] == "succeeded"
     assert recovery["changed"] is True
     assert result.terminal_status == "completed"
-    assert result.response_text == (
-        "The actor-scoped relationship was recorded."
-    )
+    assert result.response_text == ("The actor-scoped relationship was recorded.")
     assert denial["recovery_status"] == "succeeded"
     assert denial["recovered_by_effect_id"] == recovery["effect_id"]
 
@@ -2950,9 +3019,7 @@ def test_canonical_literal_relationship_denial_recovers_in_chosen_scope(
                     payload={
                         "name": "upsert_scoped_assertion",
                         "arguments": {
-                            "subject_concept_id": (
-                                "#V#globally_visible_subject"
-                            ),
+                            "subject_concept_id": ("#V#globally_visible_subject"),
                             "predicate": "#V#has_email",
                             "target_text": "Actor-relative observation.",
                             "language": "en-NZ",
@@ -3103,8 +3170,10 @@ def test_canonical_literal_relationship_recovery_requires_same_object(
     )
 
     denial = result.tool_invocations[0]
+    unrelated_recovery = result.tool_invocations[1]
     assert denial["effect_status"] == "failed"
-    assert "recovery_status" not in denial
+    assert denial["recovery_status"] == "mismatched"
+    assert denial["attempted_recovery_effect_id"] == unrelated_recovery["effect_id"]
     assert "recovered_by_effect_id" not in denial
     assert result.terminal_status == "effect_failed"
     assert result.response_text != "The scoped assertion was recorded."
@@ -3269,8 +3338,7 @@ def test_existing_predicate_value_kind_comes_from_canonical_typing() -> None:
             return None
 
     assert (
-        resolve_existing_predicate_value_kind("#V#has_email", _PredicateRepo)
-        == "text"
+        resolve_existing_predicate_value_kind("#V#has_email", _PredicateRepo) == "text"
     )
     assert (
         resolve_existing_predicate_value_kind(
@@ -3434,10 +3502,7 @@ def test_capability_query_ranks_without_eliminating_the_delegated_set(
         "internal_record_search",
         "public_web_search",
     ]
-    assert all(
-        item["query_match"] is False
-        for item in unmatched_query["capabilities"]
-    )
+    assert all(item["query_match"] is False for item in unmatched_query["capabilities"])
 
     web_query = _capability_catalogue(
         gateway,
@@ -3495,9 +3560,7 @@ def test_complete_purpose_index_keeps_zero_overlap_direct_tool_visible(
         "zotero_search",
     )
     filler_names = [
-        f"{family}_{index:02d}"
-        for family in families
-        for index in range(12)
+        f"{family}_{index:02d}" for family in families for index in range(12)
     ][:95]
     capability_names = (target_name, *filler_names)
     catalogue = MethodCatalogue()
@@ -3508,9 +3571,7 @@ def test_complete_purpose_index_keeps_zero_overlap_direct_tool_visible(
                 handler=lambda **_kwargs: {"success": True},
                 input_schema=Schema(
                     required={"query": str},
-                    optional={
-                        f"bounded_field_{index}": str for index in range(8)
-                    },
+                    optional={f"bounded_field_{index}": str for index in range(8)},
                     allow_unknown=False,
                 ),
                 category="read",
@@ -3592,9 +3653,7 @@ def test_complete_purpose_index_keeps_zero_overlap_direct_tool_visible(
         (*capability_names, *(workflow.name for workflow in workflows)),
         key=str.lower,
     )
-    target_purpose = next(
-        entry for entry in entries if entry["name"] == target_name
-    )
+    target_purpose = next(entry for entry in entries if entry["name"] == target_name)
     assert target_purpose["purpose"].endswith("...")
     assert len(target_purpose["purpose"]) <= 160
     assert "second sentence" not in target_purpose["purpose"].lower()
@@ -3699,6 +3758,82 @@ def test_schema_discovery_metadata_is_retrievable_without_list_word_trigger(
         assert "relation-bearing read" in planner_hint
         assert "what is possible, not what is actually used" in planner_hint
         assert negative["capabilities"][0]["query_match"] is False
+    finally:
+        tool_metadata_service.invalidate_cache()
+
+
+def test_possible_duplicate_review_intent_discovers_uncertain_assertion_lifecycle(
+    monkeypatch,
+) -> None:
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.services import tool_metadata_service
+
+    catalogue = build_default_catalogue()
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(tool_metadata_service, "_load_from_vontology", dict)
+    tool_metadata_service.invalidate_cache()
+    try:
+        delegated = ordinary_turn_capability_delegation(
+            gateway,
+            user_concept_id="#V#ordinary_actor",
+        )
+        assert "list_uncertain_relationship_assertions" in delegated
+        assert "upsert_uncertain_relationship_assertion" in delegated
+
+        discovered = _capability_catalogue(
+            gateway,
+            delegated,
+            {"query": "mark as a possible duplicate for later review", "limit": 50},
+        )
+        discovered_by_name = {
+            item["name"]: item for item in discovered["capabilities"]
+        }
+        assert discovered_by_name[
+            "upsert_uncertain_relationship_assertion"
+        ]["query_match"] is True
+        assert discovered_by_name[
+            "list_uncertain_relationship_assertions"
+        ]["query_match"] is True
+
+        purpose_by_name = {
+            item["name"]: item["purpose"]
+            for item in discovered["purpose_index"]["entries"]
+        }
+        assert "possible duplicate" in purpose_by_name[
+            "upsert_uncertain_relationship_assertion"
+        ]
+        assert "later review" in purpose_by_name[
+            "list_uncertain_relationship_assertions"
+        ]
+
+        exact = _capability_catalogue(
+            gateway,
+            delegated,
+            {
+                "names": [
+                    "list_uncertain_relationship_assertions",
+                    "upsert_uncertain_relationship_assertion",
+                ]
+            },
+        )
+        exact_by_name = {
+            item["name"]: item for item in exact["capabilities"]
+        }
+        upsert = exact_by_name["upsert_uncertain_relationship_assertion"]
+        listed = exact_by_name["list_uncertain_relationship_assertions"]
+        assert upsert["semantic_effect"] is True
+        assert upsert["plan_profile"]["shape"] == "single_capability"
+        assert "reuse an existing represented predicate" in upsert[
+            "planner_hint"
+        ].lower()
+        assert "do not mint a predicate" in upsert["planner_hint"].lower()
+        assert "upsert_uncertain_relationship_assertion" in listed[
+            "planner_hint"
+        ]
     finally:
         tool_metadata_service.invalidate_cache()
 
@@ -4327,17 +4462,12 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
                 input_schema=Schema(
                     optional={
                         "actor_id": (str, type(None)),
-                        **{
-                            f"field_{field}_{index}": str
-                            for field in range(30)
-                        },
+                        **{f"field_{field}_{index}": str for field in range(30)},
                     },
                     allow_unknown=False,
                 ),
                 category="read",
-                description=(
-                    "Search research material. " + ("description " * 30)
-                ),
+                description=("Search research material. " + ("description " * 30)),
                 ordinary_turn_trusted_argument_bindings={
                     "actor_id": "actor",
                 },
@@ -4558,10 +4688,7 @@ def test_single_oversized_capability_remains_visible_as_schema_reference(
             input_schema=Schema(
                 optional={
                     "actor_id": (str, type(None)),
-                    **{
-                        f"field_{index}": str
-                        for index in range(2_000)
-                    },
+                    **{f"field_{index}": str for index in range(2_000)},
                 },
                 allow_unknown=False,
             ),
@@ -4722,9 +4849,7 @@ def test_bulky_capability_metadata_falls_back_without_hiding_the_schema(
     assert exact_results is not None
     exact_capability = exact_results[0].output["capabilities"][0]
     assert exact_capability["name"] == name
-    assert exact_capability[
-        "capability_metadata_omitted_for_model_context"
-    ] is True
+    assert exact_capability["capability_metadata_omitted_for_model_context"] is True
     assert exact_capability["server_bound_arguments"] == ["actor_id"]
     assert set(exact_capability["input_schema"]["properties"]) == {"query"}
     assert "input_schema_hydration" not in exact_capability
@@ -4977,9 +5102,7 @@ def test_fresh_evidence_projection_prioritises_hydrated_slices_mechanically() ->
         item["schema_version"] == "turn_evidence_slice.v1"
         for item in included_views[:first_envelope]
     )
-    assert included_slices[0]["selector"]["json_pointer"] == (
-        "/records/0/summary"
-    )
+    assert included_slices[0]["selector"]["json_pointer"] == ("/records/0/summary")
     assert included_slices[0]["source_sha256"] == f"{12:064x}"
     assert included_slices[0]["provenance"] == {"source": "source-12"}
 
@@ -5300,9 +5423,7 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
         "upsert_text_relation",
     ]
     assert seen[2][1]["provenance"] is None
-    assert result.tool_invocations[1]["evidence"]["preview"].find(
-        '"created":true'
-    ) >= 0
+    assert result.tool_invocations[1]["evidence"]["preview"].find('"created":true') >= 0
 
 
 def test_relation_progress_emits_one_human_start_and_terminal_summary(
@@ -5494,7 +5615,9 @@ def test_concept_search_progress_emits_query_and_bounded_results() -> None:
     }
 
 
-def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> None:
+def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> (
+    None
+):
     seen_cases: list[str] = []
     progress_events: list[dict[str, Any]] = []
     release_timeout_handler = Event()
@@ -5539,7 +5662,11 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
     )
 
     result = execute_adaptive_turn(
-        gateway=_effect_gateway(handler, write_timeout_sec=0.02),
+        gateway=_effect_gateway(
+            handler,
+            write_timeout_sec=0.02,
+            hard_timeout_enabled=True,
+        ),
         prompt="Exercise bounded effects.",
         context=[],
         llm_client=client,
@@ -5579,7 +5706,9 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
     assert "partial_failures" in result.tool_invocations[1]["evidence"]["preview"]
     assert result.tool_invocations[2]["changed"] is False
     assert result.tool_invocations[3]["changed"] is None
-    assert all(item.get("evidence", {}).get("evidence_id") for item in result.tool_invocations)
+    assert all(
+        item.get("evidence", {}).get("evidence_id") for item in result.tool_invocations
+    )
     partial_progress = next(
         event
         for event in progress_events
@@ -6092,7 +6221,9 @@ def test_non_liveness_model_failure_is_not_retried_after_compaction(
     )
 
 
-def test_elapsed_thresholds_are_one_time_model_advisories_without_removing_tools() -> None:
+def test_elapsed_thresholds_are_one_time_model_advisories_without_removing_tools() -> (
+    None
+):
     clock = _ManualClock()
     progress_events: list[dict[str, Any]] = []
     all_tool_names = {
@@ -6170,9 +6301,11 @@ def test_elapsed_thresholds_are_one_time_model_advisories_without_removing_tools
         for call in client.calls
     )
     assert all(
-        call["llm_params"]["request_timeout_seconds"] == 7.0
-        for call in client.calls
+        "request_timeout_seconds" not in call["llm_params"] for call in client.calls
     )
+    assert all("timeout_seconds" not in call["llm_params"] for call in client.calls)
+    assert all(call["request_timeout_seconds"] is None for call in result.llm_calls)
+    assert all(call["request_advisory_seconds"] >= 7.0 for call in result.llm_calls)
     advisory_events = [
         item
         for item in result.aux_llm_calls
@@ -6247,13 +6380,51 @@ def test_model_result_returned_after_turn_advisory_remains_usable() -> None:
         "answer_reserve",
         "turn_budget",
     ]
-    assert len(
-        [
-            event
-            for event in progress_events
-            if event.get("stage") == "elapsed_time_advisory"
-        ]
-    ) == 3
+    assert (
+        len(
+            [
+                event
+                for event in progress_events
+                if event.get("stage") == "elapsed_time_advisory"
+            ]
+        )
+        == 3
+    )
+
+
+def test_model_call_duration_is_advisory_and_late_result_is_retained() -> None:
+    clock = _ManualClock()
+    client = _LateResponseClient(
+        clock,
+        2.0,
+        LLMResponse(text_response="Useful result after the model advisory."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Answer when the model has finished.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        model_parameters={"request_timeout_seconds": 1.0},
+        turn_id="turn-model-call-advisory",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Useful result after the model advisory."
+    assert "request_timeout_seconds" not in client.calls[0]["llm_params"]
+    assert result.llm_calls[0]["request_timeout_seconds"] is None
+    assert result.llm_calls[0]["request_advisory_seconds"] == 1.0
+    assert result.llm_calls[0]["advisory_budget_exceeded"] is True
+    advisory = next(
+        event
+        for event in result.aux_llm_calls
+        if event.get("type") == "adaptive_turn_model_call_advisory"
+    )
+    assert advisory["result_retained"] is True
 
 
 def test_elapsed_advisory_preserves_native_continuation_and_bounded_evidence() -> None:
@@ -6397,9 +6568,7 @@ def test_hydrated_evidence_survives_research_advisory_for_provider_styles(
     else:
         assert "continuation" not in final_call
         tool_messages = [
-            item
-            for item in final_call["context"]
-            if item.get("role") == "tool"
+            item for item in final_call["context"] if item.get("role") == "tool"
         ]
         assert json.loads(tool_messages[-1]["content"]) == delivered_slice
     assert raw_tail not in json.dumps(final_call, default=str)
@@ -6523,19 +6692,17 @@ def test_correlation_shell_overflow_switches_to_bounded_final_synthesis() -> Non
     assert len(client.calls) == 2
     assert "continuation" not in client.calls[1]
     assert "tool_results" not in client.calls[1]
-    assert {
-        tool.name for tool in client.calls[1]["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
+    assert {tool.name for tool in client.calls[1]["available_tools"]} == {
+        "turn_list_evidence",
+        "turn_read_evidence",
+    }
     overflow = next(
         item
         for item in result.aux_llm_calls
         if item.get("type") == "adaptive_turn_tool_result_batch_overflow"
     )
     assert overflow["tool_call_count"] == 500
-    assert (
-        overflow["action"]
-        == "fresh_final_synthesis_with_pageable_evidence_index"
-    )
+    assert overflow["action"] == "fresh_final_synthesis_with_pageable_evidence_index"
 
 
 def test_trusted_gmail_profile_overrides_model_profile_and_aliases() -> None:
@@ -6635,7 +6802,7 @@ def test_model_cannot_select_gmail_profile_without_a_trusted_binding() -> None:
     assert result.tool_invocations[0]["status"] == "error"
     assert (
         result.tool_invocations[0]["effective_payload"]["error_code"]
-            == "capability_not_delegated"
+        == "capability_not_delegated"
     )
 
 
@@ -6833,9 +7000,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert invocation["execution_method"] == "workflow_execute"
     assert invocation["capability_kind"] == "represented_workflow"
     assert invocation["capability_display_name"] == "Represented test workflow"
-    assert invocation["represented_workflow_id"] == (
-        "#V#represented_test_workflow"
-    )
+    assert invocation["represented_workflow_id"] == ("#V#represented_test_workflow")
     assert invocation["effect_status"] == "succeeded"
     assert invocation["changed"] is True
     assert invocation["instance_id"] == "workflow-instance-1"
@@ -6882,9 +7047,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert selection_trace["selection_policy"]["representedness_priority"] is False
     assert selection_trace["plan_profile"]["shape"] == ("represented_workflow")
     workflow_events = [
-        event
-        for event in progress_events
-        if event.get("call_id") == "invoke-workflow"
+        event for event in progress_events if event.get("call_id") == "invoke-workflow"
     ]
     assert [event["event_kind"] for event in workflow_events] == [
         "tool_call_start",
@@ -6894,9 +7057,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         "Represented test workflow",
         "Represented test workflow",
     ]
-    assert workflow_events[0]["result_summary"] == (
-        "Using Represented test workflow."
-    )
+    assert workflow_events[0]["result_summary"] == ("Using Represented test workflow.")
     assert workflow_events[1]["result_summary"] == (
         "Finished Represented test workflow."
     )
@@ -6919,9 +7080,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         "selected_workflow_name": "Represented test workflow",
         "selected_execution_mode": "adaptive_turn_capability",
     }
-    completed_execution = workflow_events[1][
-        "selected_workflow_execution_event"
-    ]
+    completed_execution = workflow_events[1]["selected_workflow_execution_event"]
     assert completed_execution["status"] == "workflow_execution_complete"
     assert completed_execution["state_id"] == "record_description"
     assert completed_execution["action_id"] == "upsert_research_description"
@@ -6932,9 +7091,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         "Student",
         "Description date",
     ]
-    assert workflow_events[1]["progress_facts"] == completed_execution[
-        "progress_facts"
-    ]
+    assert workflow_events[1]["progress_facts"] == completed_execution["progress_facts"]
     assert result.response_text == "The represented work product was completed."
 
 
@@ -6951,9 +7108,7 @@ def test_represented_workflow_failure_progress_is_actionable() -> None:
             "changed": False,
             "mutation_outcome": "partial",
             "outcome_finality": "terminal_for_turn",
-            "recovery_affordances": [
-                {"action_type": "inspect_workflow_instance"}
-            ],
+            "recovery_affordances": [{"action_type": "inspect_workflow_instance"}],
             "workflow_execution": {
                 "current_state": "extract_attachment",
                 "error": "Attachment text extraction failed.",
@@ -6996,9 +7151,7 @@ def test_represented_workflow_failure_progress_is_actionable() -> None:
     assert event["next_action"] == "Inspect workflow instance"
     assert event["progress_facts"][0]["label"] == "Attachment"
     assert progress_evidence is not None
-    assert progress_evidence["facts"][0]["value"] == (
-        "research-description.pdf"
-    )
+    assert progress_evidence["facts"][0]["value"] == ("research-description.pdf")
 
 
 def test_represented_workflow_nonfinite_wait_is_typed_not_started_feedback(
@@ -7085,9 +7238,7 @@ def test_represented_workflow_nonfinite_wait_is_typed_not_started_feedback(
         for item in result.tool_invocations
         if item.get("tool") == workflow_capability.name
     )
-    assert invocation["error_code"] == (
-        "invalid_workflow_capability_arguments"
-    )
+    assert invocation["error_code"] == ("invalid_workflow_capability_arguments")
     assert invocation["effect_status"] == "not_started"
     assert invocation["changed"] is False
     assert invocation["mutation_outcome"] == "not_started"
@@ -7319,6 +7470,266 @@ def test_workflow_instance_readback_reconciles_only_exact_terminal_effect(
         assert result.response_text == "The durable work product was verified."
 
 
+@pytest.mark.parametrize(
+    ("read_back_trip", "expected_status", "expected_fallback"),
+    [
+        (True, "effect_partially_completed", False),
+        (False, "effect_failed", True),
+    ],
+    ids=["exact-direct-readback", "unverified-direct-success"],
+)
+def test_failed_workflow_and_later_direct_trip_effects_preserve_only_verified_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    read_back_trip: bool,
+    expected_status: str,
+    expected_fallback: bool,
+) -> None:
+    """Regress request 95c16c12: a failed route must not erase verified recovery."""
+
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_trip_creation_test",
+        workflow_id="#V#represented_trip_creation_workflow",
+        display_name="Represented trip creation workflow",
+        description="Create one trip and connect its existing flight components.",
+        relevance_score=0.99,
+        semantic_effect=True,
+        semantic_effect_source="represented_workflow_declaration",
+        input_schema={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+
+    instance_id = "workflow-trip-failed-before-domain-mutation"
+    trip_id = "#V#american_airlines_confirmation_trip_gmail_derived"
+    leg_ids = [
+        f"#V#flight_trip_component_gmail_19febb3feda7b024_leg_0{index}"
+        for index in (1, 2, 3)
+    ]
+
+    def execute_workflow(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "workflow_id": workflow_capability.workflow_id,
+            "created_new": True,
+            "final_status": "failed",
+            "workflow_execution": {
+                "final_status": "failed",
+                "current_state": "initialise_from_item_request",
+                "error": "metadata validation failed before domain mutation",
+            },
+        }
+
+    def read_instance(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "workflow_id": workflow_capability.workflow_id,
+            "status": "failed",
+        }
+
+    gateway = _workflow_gateway(
+        execute_workflow,
+        hard_timeout_enabled=False,
+        instance_handler=read_instance,
+    )
+
+    def direct_effect(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "create_concepts":
+            return {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "created_concept_ids": [trip_id],
+            }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "source_id": arguments["source_id"],
+            "target": arguments["target"],
+        }
+
+    for capability_name in ("create_concepts", "add_relationship"):
+        gateway._catalogue.register(
+            MethodDefinition(
+                name=capability_name,
+                handler=lambda _name=capability_name, **kwargs: direct_effect(
+                    _name,
+                    kwargs,
+                ),
+                input_schema=Schema(allow_unknown=True),
+                output_schema=Schema(required={"success": bool}, allow_unknown=True),
+                category="write",
+                ordinary_turn_effect=True,
+            )
+        )
+        gateway.register_metrics_if_missing(capability_name)
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="fetch_concept",
+            handler=lambda concept_id: {
+                "success": True,
+                "concept_id": concept_id,
+                "relations": [
+                    {
+                        "source_id": trip_id,
+                        "predicate": "#V#has_trip_component",
+                        "target_id": leg_id,
+                    }
+                    for leg_id in leg_ids
+                ],
+            },
+            input_schema=Schema(required={"concept_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway.register_metrics_if_missing("fetch_concept")
+
+    responses = [
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-trip-workflow",
+                    payload={"query": "create and connect the trip"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-trip-workflow",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-failed-trip-workflow",
+                    payload={
+                        "name": "workflow_get_instance",
+                        "arguments": {"instance_id": instance_id},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-trip-directly",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {"concepts": [{"concept_id": trip_id}]},
+                    },
+                ),
+                *[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id=f"link-trip-leg-{index}",
+                        payload={
+                            "name": "add_relationship",
+                            "arguments": {
+                                "source_id": trip_id,
+                                "predicate": "#V#has_trip_component",
+                                "target": leg_id,
+                            },
+                        },
+                    )
+                    for index, leg_id in enumerate(leg_ids, start=1)
+                ],
+            ],
+        ),
+    ]
+    if read_back_trip:
+        responses.append(
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="read-trip-direct-result",
+                        payload={
+                            "name": "fetch_concept",
+                            "arguments": {"concept_id": trip_id},
+                        },
+                    )
+                ],
+            )
+        )
+    useful_answer = (
+        f"The neutral trip {trip_id} and its three component links persist; "
+        f"the earlier workflow instance {instance_id} failed."
+    )
+    responses.append(LLMResponse(text_response=useful_answer))
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create the agreed trip and tell me what actually persisted.",
+        context=[],
+        llm_client=_SequenceClient(*responses),
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"trip-mixed-finality-{read_back_trip}",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == expected_status
+    assert result.effect_finality_fallback is expected_fallback
+    workflow_invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert workflow_invocation["effect_status"] == "failed"
+    assert workflow_invocation["changed"] is True
+    assert workflow_invocation["canonical_readback"]["status"] == "failed"
+    if read_back_trip:
+        assert useful_answer in result.response_text
+        preservation = next(
+            item
+            for item in result.aux_llm_calls
+            if item.get("type") == "adaptive_turn_mixed_effect_response_preserved"
+        )
+        assert preservation["preservation_basis"] == (
+            "failed_workflow_and_material_successes_exactly_read_back"
+        )
+        assert preservation["canonically_verified_succeeded_count"] == 4
+        assert preservation["failed_workflow_count"] == 1
+        assert preservation["known_no_change_count"] == 0
+    else:
+        assert useful_answer not in result.response_text
+
+
 def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) -> None:
     from src.backend.services.workflow_turn_capability_service import (
         WorkflowTurnCapability,
@@ -7443,9 +7854,7 @@ def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) ->
         final_synthesis_reserve_seconds=2,
     )
 
-    assert instance_reads == [
-        {"instance_id": instance_id, "await_terminal": False}
-    ]
+    assert instance_reads == [{"instance_id": instance_id, "await_terminal": False}]
     assert result.terminal_status == "effect_partially_completed"
     assert result.effect_finality_fallback is False
     assert result.response_text == final_text
@@ -7530,7 +7939,9 @@ def test_workflow_instance_readback_does_not_reconcile_unrelated_effect() -> Non
     )
 
     effect_invocation = next(
-        item for item in result.tool_invocations if item.get("tool") == "create_concepts"
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "create_concepts"
     )
     assert effect_invocation["capability_kind"] == "registered_tool"
     assert effect_invocation["effect_status"] == "partial"
@@ -7639,9 +8050,7 @@ def test_read_only_workflow_not_started_preserves_successful_direct_recovery(
         final_synthesis_reserve_seconds=2,
     )
 
-    assert result.response_text == (
-        "The recent messages were summarised successfully."
-    )
+    assert result.response_text == ("The recent messages were summarised successfully.")
     assert result.terminal_status == "completed"
     assert result.effect_finality_fallback is False
     workflow_invocation = next(
@@ -7657,9 +8066,7 @@ def test_read_only_workflow_not_started_preserves_successful_direct_recovery(
     assert workflow_invocation["evidence"]["semantic_effect"] is None
     assert workflow_invocation["evidence"]["turn_finality_required"] is False
     direct_invocation = next(
-        item
-        for item in result.tool_invocations
-        if item.get("tool") == "general_read"
+        item for item in result.tool_invocations if item.get("tool") == "general_read"
     )
     assert direct_invocation["status"] == "ok"
 
@@ -7798,8 +8205,7 @@ def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
     handler_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
-        "src.backend.services.adaptive_turn_service."
-        "_effect_subject_authorised",
+        "src.backend.services.adaptive_turn_service." "_effect_subject_authorised",
         lambda *_args, **_kwargs: True,
     )
 
@@ -7868,9 +8274,7 @@ def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
 
     assert handler_calls == [effect_arguments]
     assert len(result.tool_invocations) == 2
-    assert result.tool_invocations[0]["error_code"] == (
-        "invalid_predicate_format"
-    )
+    assert result.tool_invocations[0]["error_code"] == ("invalid_predicate_format")
     assert result.tool_invocations[1]["error_code"] == (
         "effect_request_unchanged_after_terminal_failure"
     )

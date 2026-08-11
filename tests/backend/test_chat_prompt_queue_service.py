@@ -217,7 +217,7 @@ def test_queue_transition_miss_reports_wrong_state_details() -> None:
     assert exc_info.value.details["current_status"] == queue_service.STATUS_COMPLETED
 
 
-def test_list_active_queue_records_expires_stale_in_progress_records() -> None:
+def test_list_active_queue_records_marks_stale_in_progress_as_advisory() -> None:
     scope = queue_service.build_queue_scope(
         user_concept_id="#V#user",
         organisation_concept_id="#V#org",
@@ -237,11 +237,33 @@ def test_list_active_queue_records_expires_stale_in_progress_records() -> None:
         {"$set": {"claimed_at": old, "updated_at": old}},
     )
 
-    assert queue_service.list_active_queue_records(scope=scope) == []
+    records = queue_service.list_active_queue_records(scope=scope)
+    assert len(records) == 1
+    assert records[0]["queue_id"] == active["queue_id"]
+    assert records[0]["status"] == queue_service.STATUS_IN_PROGRESS
+    assert records[0]["stale_advisory"] is True
+    assert records[0]["stale_advisory_reason"] == (
+        queue_service.STALE_IN_PROGRESS_ADVISORY_REASON
+    )
+    assert records[0]["reconciliation_required"] is True
     persisted = coll.find_one({"queue_id": active["queue_id"]})
     assert persisted is not None
-    assert persisted["status"] == queue_service.STATUS_FAILED
-    assert persisted["last_error"] == queue_service.STALE_IN_PROGRESS_LAST_ERROR
+    assert persisted["status"] == queue_service.STATUS_IN_PROGRESS
+    assert persisted["completed_at"] is None
+    assert persisted["last_error"] is None
+    assert persisted["stale_advisory"] is True
+    assert persisted["stale_advisory_reason"] == (
+        queue_service.STALE_IN_PROGRESS_ADVISORY_REASON
+    )
+
+    requeued = queue_service.requeue_prompt_record(
+        scope=scope,
+        queue_id=active["queue_id"],
+    )
+    assert requeued["status"] == queue_service.STATUS_QUEUED
+    assert requeued["stale_advisory"] is False
+    assert requeued["stale_advisory_reason"] is None
+    assert requeued["reconciliation_required"] is False
 
 
 def test_list_recent_failed_queue_records_is_bounded_and_scoped() -> None:

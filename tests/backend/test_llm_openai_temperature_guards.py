@@ -239,9 +239,7 @@ def test_llm_interface_answer_only_uses_required_responses_profile(
     assert result.transport_metadata["profile_concept_id"] == (
         "#V#openai_gpt_5_6_terra_responses_profile"
     )
-    assert captured["client_options"] == [
-        {"timeout": pytest.approx(20.0, abs=0.2), "max_retries": 0}
-    ]
+    assert captured["client_options"] == []
 
 
 def test_llm_interface_openai_generate_omits_temperature_for_gpt5_mini(
@@ -310,7 +308,7 @@ def test_llm_interface_openai_generate_preserves_temperature_for_gpt4(
     assert captured_kwargs["temperature"] == 0.7
 
 
-def test_llm_interface_openai_generate_applies_timeout_as_request_option(
+def test_llm_interface_openai_generate_treats_timeout_alias_as_advisory(
     monkeypatch,
 ) -> None:
     import src.backend.languagemodels.llm_interface as mod
@@ -346,7 +344,7 @@ def test_llm_interface_openai_generate_applies_timeout_as_request_option(
     )
 
     assert result == "ok"
-    assert captured_options == {"timeout": 12.0, "max_retries": 0}
+    assert captured_options == {}
     assert captured_kwargs["temperature"] == 0.7
     assert "timeout_seconds" not in captured_kwargs
 
@@ -463,3 +461,27 @@ def test_llm_interface_openai_generate_defaults_luna_to_responses(
     assert result == "ok"
     assert captured_responses_kwargs["model"] == "gpt-5.6-luna"
     assert captured_responses_kwargs["max_output_tokens"] == 4096
+
+
+def test_openai_embedding_does_not_impose_fixed_request_timeout(monkeypatch) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    captured_options: dict[str, object] = {}
+
+    def _embedding_create(**_kwargs):
+        return types.SimpleNamespace(
+            data=[types.SimpleNamespace(embedding=[0.25, 0.75])]
+        )
+
+    class _FakeClient:
+        embeddings = types.SimpleNamespace(create=_embedding_create)
+
+        def with_options(self, **kwargs):
+            captured_options.update(kwargs)
+            return self
+
+    client = object.__new__(mod.OpenAIClient)
+    client.client = _FakeClient()
+
+    assert client.get_embedding("hello") == [0.25, 0.75]
+    assert captured_options == {"max_retries": 0}

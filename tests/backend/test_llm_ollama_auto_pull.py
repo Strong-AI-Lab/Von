@@ -142,8 +142,7 @@ def test_generate_passes_remaining_request_budget_to_model_readiness_wait(
             llm_params={"timeout_seconds": 2.0},
         )
 
-    assert captured["wait_timeout_seconds"] is not None
-    assert 0.0 < float(captured["wait_timeout_seconds"] or 0.0) <= 1.5
+    assert captured["wait_timeout_seconds"] is None
     assert "model_readiness_wait_budget_exhausted" in str(exc_info.value)
 
 

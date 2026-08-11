@@ -64,7 +64,11 @@ def test_dynamic_loader_supports_fixed_payload_with_gateway_invoke(monkeypatch):
         ),
         output_schema=Schema(
             required={"success": bool},
-            optional={"name": (str, type(None)), "value": (str, type(None)), "fixed": (str, type(None))},
+            optional={
+                "name": (str, type(None)),
+                "value": (str, type(None)),
+                "fixed": (str, type(None)),
+            },
             allow_unknown=False,
             description="Echo output.",
         ),
@@ -83,8 +87,7 @@ def test_dynamic_loader_supports_fixed_payload_with_gateway_invoke(monkeypatch):
     assert dynamic_definition.input_schema.required == {}
     assert "name" not in dynamic_definition.input_schema.optional
     assert (
-        dynamic_definition.ordinary_turn_excluded_reason
-        == "operator_only_test_surface"
+        dynamic_definition.ordinary_turn_excluded_reason == "operator_only_test_surface"
     )
 
     catalogue = MethodCatalogue()
@@ -140,11 +143,44 @@ def test_dynamic_proxy_preserves_target_timing_policy(monkeypatch):
     assert len(definitions) == 1
     proxy = definitions[0]
     assert proxy.successful_duration_bootstrap_sec == 12.0
-    assert proxy.hard_timeout_enabled is True
-    assert proxy.resolved_advisory_timeout(
-        InternalMCPTransport()
-    ) == 15.0
-    assert proxy.resolved_timeout(InternalMCPTransport()) == 24.0
+    assert proxy.hard_timeout_enabled is False
+    assert proxy.resolved_advisory_timeout(InternalMCPTransport()) == 15.0
+    assert proxy.resolved_timeout(InternalMCPTransport()) is None
+
+
+def test_dynamic_timeout_override_is_advisory_not_a_new_hard_boundary(monkeypatch):
+    _set_dynamic_tool_docs(
+        monkeypatch,
+        [
+            {
+                "concept_id": "#V#dynamic_timing_proxy",
+                "attributes": {
+                    "mcp_tool_name": "timing_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "timing_base",
+                    "dynamic_timeout_sec": 9.0,
+                },
+            }
+        ],
+    )
+    base_definition = MethodDefinition(
+        name="timing_base",
+        handler=lambda: {"success": True},
+        input_schema=Schema(allow_unknown=False),
+        category="write",
+    )
+
+    definitions = load_dynamic_method_definitions(
+        base_definitions={"timing_base": base_definition},
+        protected_method_names={"timing_base"},
+    ).definitions
+
+    assert len(definitions) == 1
+    proxy = definitions[0]
+    assert proxy.hard_timeout_enabled is False
+    assert proxy.resolved_advisory_timeout(InternalMCPTransport()) == 9.0
+    assert proxy.resolved_timeout(InternalMCPTransport()) is None
 
 
 def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):

@@ -1040,6 +1040,10 @@ def test_execute_target_workflow_action_projects_pending_child_worker_blocker(
         "running_instance_count": 0,
     }
     assert execution["durable_system_status"]["worker_running"] is False
+    assert execution["elapsed_time_enforcement"] == "advisory"
+    assert execution["advisory_exceeded"] is True
+    assert execution["timed_out"] is False
+    assert execution["hard_timeout_seconds"] is None
     assert result.outputs["quality_signals"]["requires_follow_up"] is True
 
     observation = recorded["observations"][0]
@@ -1051,7 +1055,7 @@ def test_execute_target_workflow_action_projects_pending_child_worker_blocker(
     assert observation["workflow_execution"]["durable_system_status"][
         "worker_running"
     ] is False
-    assert observation["quality_signals"]["timed_out"] is True
+    assert observation["quality_signals"]["timed_out"] is False
 
 
 def test_execute_target_workflow_action_fast_fails_when_worker_is_absent(
@@ -1146,6 +1150,10 @@ def test_execute_target_workflow_action_fast_fails_when_worker_is_absent(
     assert execution["early_timeout_reason"] == "durable_worker_not_running"
     assert execution["failure_family"] == "workflow_instance_never_started"
     assert execution["durable_system_status"]["worker_running"] is False
+    assert execution["elapsed_time_enforcement"] == "advisory"
+    assert execution["advisory_exceeded"] is True
+    assert execution["timed_out"] is False
+    assert execution["hard_timeout_seconds"] is None
 
 
 def test_execute_target_workflow_action_fail_closes_invalid_candidate_and_records_observation(

@@ -147,6 +147,18 @@ def test_get_profile_missing(monkeypatch):
         gs.get_profile("anything")
 
 
+def test_compose_query_groups_profile_and_caller_clauses():
+    profile = SimpleNamespace(query_prefix="to:owner@example.test OR from:owner@example.test")
+
+    assert gs._compose_query(  # noqa: SLF001
+        profile,
+        'newer_than:2d subject:"booking confirmation"',
+    ) == (
+        "(to:owner@example.test OR from:owner@example.test) "
+        '(newer_than:2d subject:"booking confirmation")'
+    )
+
+
 @patch("src.backend.integrations.google.gmail_service.build")
 @patch(
     "src.backend.integrations.google.gmail_service.os.path.exists", return_value=True
@@ -231,6 +243,188 @@ def test_list_and_get_message(mock_get_profile, mock_get_service):
     assert message_result == {"id": "123"}
     assert attachment_result == {"data": "abc"}
     assert labels_result == {"labels": []}
+
+
+@patch("src.backend.integrations.google.gmail_service.get_service")
+@patch("src.backend.integrations.google.gmail_service.get_profile")
+def test_list_messages_projects_requested_metadata_without_body(
+    mock_get_profile, mock_get_service
+):
+    mock_get_profile.return_value = SimpleNamespace(
+        profile_id="test",
+        user_id="me",
+        label_filter=None,
+        query_prefix=None,
+    )
+    messages_mock = MagicMock()
+    mock_get_service.return_value.users.return_value.messages.return_value = (
+        messages_mock
+    )
+    messages_mock.list.return_value.execute.return_value = {
+        "messages": [{"id": "message-1", "threadId": "thread-1"}],
+        "resultSizeEstimate": 1,
+    }
+    metadata_requests = []
+
+    def fake_metadata_get(**kwargs):
+        metadata_requests.append(kwargs)
+        request = MagicMock()
+        request.execute.return_value = {
+            "id": "message-1",
+            "threadId": "thread-1",
+            "labelIds": ["INBOX"],
+            "snippet": "Your booking is confirmed.",
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": "Airline <travel@example.test>"},
+                    {"name": "Subject", "value": "Booking confirmation"},
+                    {"name": "Date", "value": "Mon, 10 Aug 2026 18:00:00 +0000"},
+                ],
+                "parts": [{"body": {"data": "must-not-escape"}}],
+            },
+            "body": "must-not-escape",
+        }
+        return request
+
+    messages_mock.get.side_effect = fake_metadata_get
+
+    result = gs.list_messages(
+        "test",
+        query='newer_than:2d subject:"booking confirmation"',
+        max_results=3,
+        include_metadata=[
+            "id",
+            "thread_id",
+            "from",
+            "subject",
+            "date",
+            "snippet",
+            "label_ids",
+        ],
+    )
+
+    assert result["messages"] == [
+        {
+            "id": "message-1",
+            "message_id": "message-1",
+            "threadId": "thread-1",
+            "thread_id": "thread-1",
+            "labelIds": ["INBOX"],
+            "label_ids": ["INBOX"],
+            "snippet": "Your booking is confirmed.",
+            "sender": "Airline <travel@example.test>",
+            "from": "Airline <travel@example.test>",
+            "subject": "Booking confirmation",
+            "date": "Mon, 10 Aug 2026 18:00:00 +0000",
+        }
+    ]
+    assert metadata_requests == [
+        {
+            "userId": "me",
+            "id": "message-1",
+            "format": "metadata",
+            "fields": "id,threadId,labelIds,snippet,payload(headers)",
+            "metadataHeaders": ["From", "Subject", "Date"],
+        }
+    ]
+    assert "payload" not in result["messages"][0]
+    assert "body" not in result["messages"][0]
+
+
+@patch("src.backend.integrations.google.gmail_service.get_service")
+@patch("src.backend.integrations.google.gmail_service.get_profile")
+def test_list_messages_preserves_ids_when_one_metadata_read_fails(
+    mock_get_profile, mock_get_service
+):
+    mock_get_profile.return_value = SimpleNamespace(
+        profile_id="test",
+        user_id="me",
+        label_filter=None,
+        query_prefix=None,
+    )
+    messages_mock = MagicMock()
+    mock_get_service.return_value.users.return_value.messages.return_value = (
+        messages_mock
+    )
+    messages_mock.list.return_value.execute.return_value = {
+        "messages": [
+            {"id": "message-1", "threadId": "thread-1"},
+            {"id": "message-2", "threadId": "thread-2"},
+        ],
+        "resultSizeEstimate": 2,
+    }
+
+    first_request = MagicMock()
+    first_request.execute.return_value = {
+        "id": "message-1",
+        "threadId": "thread-1",
+        "snippet": "Available",
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "First message"},
+            ]
+        },
+    }
+
+    def fake_metadata_get(**kwargs):
+        if kwargs["id"] == "message-1":
+            return first_request
+        raise TimeoutError("metadata read raced with a transient Gmail failure")
+
+    messages_mock.get.side_effect = fake_metadata_get
+
+    result = gs.list_messages(
+        "test",
+        max_results=2,
+        include_metadata=["subject", "snippet"],
+    )
+
+    assert result["messages"][0] == {
+        "id": "message-1",
+        "message_id": "message-1",
+        "threadId": "thread-1",
+        "thread_id": "thread-1",
+        "snippet": "Available",
+        "subject": "First message",
+    }
+    assert result["messages"][1] == {
+        "id": "message-2",
+        "message_id": "message-2",
+        "threadId": "thread-2",
+        "thread_id": "thread-2",
+        "metadata_error": {
+            "code": "gmail_metadata_projection_unavailable",
+            "exception_type": "TimeoutError",
+        },
+        "metadata_missing_fields": ["subject", "snippet"],
+    }
+
+
+@patch("src.backend.integrations.google.gmail_service.get_service")
+@patch("src.backend.integrations.google.gmail_service.get_profile")
+def test_list_messages_default_does_not_hydrate_rows(
+    mock_get_profile, mock_get_service
+):
+    mock_get_profile.return_value = SimpleNamespace(
+        profile_id="test",
+        user_id="me",
+        label_filter=None,
+        query_prefix=None,
+    )
+    messages_mock = MagicMock()
+    mock_get_service.return_value.users.return_value.messages.return_value = (
+        messages_mock
+    )
+    raw_result = {
+        "messages": [{"id": "message-1", "threadId": "thread-1"}],
+        "resultSizeEstimate": 1,
+    }
+    messages_mock.list.return_value.execute.return_value = raw_result
+
+    result = gs.list_messages("test", max_results=1)
+
+    assert result == raw_result
+    messages_mock.get.assert_not_called()
 
 
 @patch("src.backend.integrations.google.gmail_service.get_service")

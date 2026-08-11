@@ -9,7 +9,7 @@ request-local authority).
 Elapsed thresholds have two deliberately separate meanings:
 
 * the advisory budget is telemetry only and never changes a successful result;
-* an explicitly enabled hard deadline is terminal for the current turn and
+* an explicitly justified hard deadline is terminal for the current turn and
   returns a typed MCP timeout payload. A handler that later completes cannot
   rewrite that outcome.
   Reads and calls without an observer discard the late payload; an explicitly
@@ -208,18 +208,11 @@ def _mongo_timeout_consumed_transport_deadline(
         return False
     details = getattr(exc, "details", None)
     detail_message = (
-        str(details.get("errmsg") or "")
-        if isinstance(details, Mapping)
-        else ""
+        str(details.get("errmsg") or "") if isinstance(details, Mapping) else ""
     )
-    if _MONGO_CSOT_ADMISSION_REFUSAL_MARKER in (
-        f"{exc} {detail_message}".lower()
-    ):
+    if _MONGO_CSOT_ADMISSION_REFUSAL_MARKER in (f"{exc} {detail_message}".lower()):
         return True
-    return (
-        scope.remaining_seconds
-        <= _MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC
-    )
+    return scope.remaining_seconds <= _MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC
 
 
 def _handler_payload_reports_mongo_deadline(
@@ -237,15 +230,12 @@ def _handler_payload_reports_mongo_deadline(
     details = payload.get("details")
     if isinstance(details, Mapping):
         messages.extend((details.get("error"), details.get("errmsg")))
-    combined_message = " ".join(
-        str(message or "") for message in messages
-    ).lower()
+    combined_message = " ".join(str(message or "") for message in messages).lower()
     if _MONGO_CSOT_ADMISSION_REFUSAL_MARKER in combined_message:
         return True
     return bool(
         _MONGO_CSOT_CONFIGURED_TIMEOUT_MARKER in combined_message
-        and scope.remaining_seconds
-        <= _MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC
+        and scope.remaining_seconds <= _MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC
     )
 
 
@@ -399,12 +389,9 @@ class _HandlerTask:
                 )
             database_completion_reserve_sec = min(
                 _MONGO_DEADLINE_COMPLETION_RESERVE_SEC,
-                remaining_seconds
-                * _MONGO_DEADLINE_COMPLETION_RESERVE_FRACTION,
+                remaining_seconds * _MONGO_DEADLINE_COMPLETION_RESERVE_FRACTION,
             )
-            database_timeout_sec = (
-                remaining_seconds - database_completion_reserve_sec
-            )
+            database_timeout_sec = remaining_seconds - database_completion_reserve_sec
             try:
                 # PyMongo CSOT is context-local, applies the remaining budget
                 # across all nested database operations, and leaves only a
@@ -455,8 +442,7 @@ class _HandlerTask:
                 )
                 self.admission_remaining_window_sec = remaining_window_sec
                 if (
-                    remaining_window_sec
-                    + _EFFECT_ADMISSION_START_TOLERANCE_SEC
+                    remaining_window_sec + _EFFECT_ADMISSION_START_TOLERANCE_SEC
                     < self.minimum_execution_window_sec
                 ):
                     self.admission_denied_before_start = True
@@ -719,12 +705,12 @@ class InternalMCPTransport:
             payload_truncated = False
             error_text = None
             if task.exception is None:
-                bounded_payload, payload_truncated = (
-                    _bounded_late_completion_value(task.result)
+                bounded_payload, payload_truncated = _bounded_late_completion_value(
+                    task.result
                 )
             else:
-                bounded_error, payload_truncated = (
-                    _bounded_late_completion_value(str(task.exception))
+                bounded_error, payload_truncated = _bounded_late_completion_value(
+                    str(task.exception)
                 )
                 error_text = str(bounded_error)
             observation = {
@@ -778,8 +764,7 @@ class InternalMCPTransport:
                 }
             )
         logger.warning(
-            "[mcp_transport] %s late %s for %s "
-            "(execution_id=%s, handler=%.2fms)",
+            "[mcp_transport] %s late %s for %s " "(execution_id=%s, handler=%.2fms)",
             "observed" if observer_notified else "discarded",
             "error" if task.exception is not None else "result",
             task.method_name,
@@ -811,9 +796,7 @@ class InternalMCPTransport:
                 f"{timeout_sec:.1f}s hard deadline."
             ),
             "error_code": (
-                "tool_timeout_outcome_unknown"
-                if outcome_unknown
-                else "tool_timeout"
+                "tool_timeout_outcome_unknown" if outcome_unknown else "tool_timeout"
             ),
             "error_type": "deadline_exceeded",
             "retryable": not outcome_unknown,
@@ -947,11 +930,7 @@ class InternalMCPTransport:
             "queue_duration_ms": queue_duration_ms,
             "outcome_finality": "terminal_for_turn",
             "recovery_affordances": [
-                {
-                    "action_type": (
-                        "return_bounded_failure_or_retry_in_new_turn"
-                    )
-                }
+                {"action_type": ("return_bounded_failure_or_retry_in_new_turn")}
             ],
         }
         if is_write:
@@ -971,7 +950,7 @@ class InternalMCPTransport:
         minimum_execution_window_sec: float | None = None,
         log_tag: str = "[mcp_gateway]",
         late_completion_observer: LateCompletionObserver | None = None,
-        hard_timeout_enabled: bool = True,
+        hard_timeout_enabled: bool = False,
     ) -> TransportResult:
         """Execute a handler with an advisory and optional hard deadline.
 
@@ -1053,9 +1032,7 @@ class InternalMCPTransport:
             and late_completion_observer is not None
         )
         dispatched_late_result_policy = (
-            "observe_out_of_band"
-            if observe_late_write
-            else "discard_from_turn"
+            "observe_out_of_band" if observe_late_write else "discard_from_turn"
         )
 
         if (
@@ -1224,12 +1201,8 @@ class InternalMCPTransport:
             result = task.result
             exception = task.exception
             started_at = task.started_at
-            admission_denied_before_start = (
-                task.admission_denied_before_start
-            )
-            admission_remaining_window_sec = (
-                task.admission_remaining_window_sec
-            )
+            admission_denied_before_start = task.admission_denied_before_start
+            admission_remaining_window_sec = task.admission_remaining_window_sec
             effect_receipt = (
                 dict(task.effect_receipt)
                 if isinstance(task.effect_receipt, Mapping)

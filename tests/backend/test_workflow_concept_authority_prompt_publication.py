@@ -93,3 +93,81 @@ def test_publish_canonical_graphs_preserves_step_prompt_links(
     prompt_contract = action.prompt_contract
     assert isinstance(prompt_contract, dict)
     assert prompt_contract.get("resolved_prompt_concept_id") == prompt_concept_id
+
+
+def test_publish_canonical_graphs_removes_undeclared_step_prompt_links(
+    _reset_mock_db: Any,
+) -> None:
+    workflow_id = "#V#prompt_link_reconciliation_test_workflow"
+    prompt_concept_id = "#V#prompt_link_reconciliation_test_prompt"
+    concept_service.create_concept(
+        name="Prompt link reconciliation test prompt",
+        concept_id=prompt_concept_id,
+        description="Prompt used to verify exact canonical prompt reconciliation.",
+        parent_concept_ids=["#V#prompt_for_llm"],
+        create_as_instance=True,
+        visibility_scope_mode="global_general",
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=prompt_concept_id,
+        predicate="hasContent",
+        text="Return JSON only.",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+
+    prompt_spec = authority_service._CanonicalWorkflowPublicationSpec(
+        initial_state="infer",
+        steps=(
+            authority_service._CanonicalStepPublicationSpec(
+                state_id="infer",
+                action_id="llm.action",
+                prompt_concept_ids=(prompt_concept_id,),
+                execution_mode="llm",
+                validation_policy={"output_format": "json_value"},
+                next_state="complete",
+            ),
+            authority_service._CanonicalStepPublicationSpec(state_id="complete"),
+        ),
+    )
+    authority_service.publish_canonical_chat_workflow_graphs(
+        target_workflow_ids=[workflow_id],
+        publication_specs={workflow_id: prompt_spec},
+        publication_definitions=authority_service._build_definition_map_from_publication_specs(
+            {workflow_id: prompt_spec}
+        ),
+        validate_after_publish=False,
+    )
+
+    deterministic_spec = authority_service._CanonicalWorkflowPublicationSpec(
+        initial_state="infer",
+        steps=(
+            authority_service._CanonicalStepPublicationSpec(
+                state_id="infer",
+                action_id="workflow_control.kr_relationship_resolution",
+                execution_mode="deterministic",
+                next_state="complete",
+            ),
+            authority_service._CanonicalStepPublicationSpec(state_id="complete"),
+        ),
+    )
+    report = authority_service.publish_canonical_chat_workflow_graphs(
+        target_workflow_ids=[workflow_id],
+        publication_specs={workflow_id: deterministic_spec},
+        publication_definitions=authority_service._build_definition_map_from_publication_specs(
+            {workflow_id: deterministic_spec}
+        ),
+        validate_after_publish=False,
+    )
+
+    assert (report.get("counts") or {}).get("workflows_published") == 1
+    definition = load_workflow_definition_from_vontology(workflow_id)
+    assert definition is not None
+    step_id = authority_service._step_concept_id(
+        workflow_id=workflow_id,
+        state_id="infer",
+    )
+    action = definition.states[step_id].actions[0]
+    assert action.action_id == "workflow_control.kr_relationship_resolution"
+    assert action.execution_mode == "deterministic"
+    assert action.prompt_contract is None

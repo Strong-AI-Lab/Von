@@ -111,7 +111,8 @@ def _configured_registration_timeout_seconds(
         return max(0.001, min(float(override), 600.0))
     return float(
         _coerce_configured_int(
-            os.getenv("VON_REMOTE_FILE_COPY_REGISTRATION_TIMEOUT_SECONDS"),
+            os.getenv("VON_REMOTE_FILE_COPY_REGISTRATION_ADVISORY_SECONDS")
+            or os.getenv("VON_REMOTE_FILE_COPY_REGISTRATION_TIMEOUT_SECONDS"),
             default=_DEFAULT_REGISTRATION_TIMEOUT_SECONDS,
             minimum=1,
             maximum=600,
@@ -675,12 +676,15 @@ def import_remote_url_file_copy(
     max_redirects: int | None = None,
     timeout_seconds: float | int | None = None,
     registration_timeout_seconds: float | int | None = None,
+    registration_advisory_seconds: float | int | None = None,
 ) -> dict[str, Any]:
     """Download a remote artefact, persist it durably, and register a file copy."""
 
     download_timeout_seconds = _configured_total_timeout_seconds(timeout_seconds)
     resolved_registration_timeout_seconds = _configured_registration_timeout_seconds(
-        registration_timeout_seconds
+        registration_advisory_seconds
+        if registration_advisory_seconds is not None
+        else registration_timeout_seconds
     )
     started_at = time.monotonic()
 
@@ -748,8 +752,11 @@ def import_remote_url_file_copy(
     timeout_policy = {
         "download_timeout_seconds": download_timeout_seconds,
         "registration_timeout_seconds": resolved_registration_timeout_seconds,
+        "registration_advisory_seconds": resolved_registration_timeout_seconds,
         "download_phase": "remote_download",
         "registration_phase": "file_copy_registration",
+        "download_elapsed_time_enforcement": "hard_external_resource",
+        "registration_elapsed_time_enforcement": "advisory",
     }
     download_context = {
         "requested_url": download_result.get("requested_url"),
@@ -760,6 +767,7 @@ def import_remote_url_file_copy(
         "timeout_seconds": download_timeout_seconds,
         "download_timeout_seconds": download_timeout_seconds,
         "registration_timeout_seconds": resolved_registration_timeout_seconds,
+        "registration_advisory_seconds": resolved_registration_timeout_seconds,
         "timeout_policy": timeout_policy,
         "registration_lookup": registration_lookup,
         "response": {
@@ -783,43 +791,14 @@ def import_remote_url_file_copy(
         thread_name_prefix="remote-file-copy-register",
     )
     future = executor.submit(import_bytes_file_copy, **import_kwargs)
+    registration_advisory_exceeded = False
     try:
         import_result = future.result(
             timeout=max(0.001, resolved_registration_timeout_seconds)
         )
     except concurrent.futures.TimeoutError:
-        future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        return {
-            "success": False,
-            "error": "remote_file_copy_timeout",
-            "message": (
-                "Remote artefact file-copy registration exceeded the registration "
-                "timeout after the download completed."
-            ),
-            "timeout_phase": "file_copy_registration",
-            "elapsed_seconds": _elapsed_seconds(),
-            "download": {
-                "status": "completed",
-                "timeout_seconds": download_timeout_seconds,
-                "status_code": download_result.get("status_code"),
-                "size_bytes": download_result.get("size_bytes"),
-            },
-            "registration": {
-                "status": "timed_out",
-                "timeout_seconds": resolved_registration_timeout_seconds,
-                "may_complete_late": True,
-                "recovery_affordance": (
-                    "Read back the file-copy result or retry the registration phase "
-                    "before re-downloading the remote artefact."
-                ),
-                "readback_affordance": {
-                    "lookup": registration_lookup,
-                    "retriable_without_policy_change": True,
-                },
-            },
-            **download_context,
-        }
+        registration_advisory_exceeded = True
+        import_result = future.result()
     finally:
         if future.done():
             executor.shutdown(wait=True)
@@ -853,6 +832,14 @@ def import_remote_url_file_copy(
                 "registration_timeout_seconds": resolved_registration_timeout_seconds,
                 "timeout_policy": timeout_policy,
                 "registration_lookup": registration_lookup,
+                "registration_timing": {
+                    "elapsed_time_enforcement": "advisory",
+                    "advisory_timeout_seconds": (
+                        resolved_registration_timeout_seconds
+                    ),
+                    "advisory_exceeded": registration_advisory_exceeded,
+                    "hard_timeout_seconds": None,
+                },
             }
         )
         return merged_failure
@@ -862,6 +849,12 @@ def import_remote_url_file_copy(
         {
             **download_context,
             "elapsed_seconds": _elapsed_seconds(),
+            "registration_timing": {
+                "elapsed_time_enforcement": "advisory",
+                "advisory_timeout_seconds": resolved_registration_timeout_seconds,
+                "advisory_exceeded": registration_advisory_exceeded,
+                "hard_timeout_seconds": None,
+            },
         }
     )
     return result

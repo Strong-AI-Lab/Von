@@ -11,7 +11,8 @@ from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
 from ..client import (
     LLMClient,
     LLMClientConfig,
-    split_request_timeout_from_llm_params,
+    observe_request_advisory,
+    split_request_advisory_from_llm_params,
 )
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 
@@ -54,22 +55,11 @@ class OllamaClient(LLMClient):
             self._validate_input_schema(tool)
 
         request_kwargs = dict(kwargs)
-        _, request_timeout_seconds = split_request_timeout_from_llm_params(
+        _, request_advisory_seconds = split_request_advisory_from_llm_params(
             request_kwargs.pop("llm_params", None)
         )
-        request_deadline_monotonic = (
-            monotonic() + request_timeout_seconds
-            if request_timeout_seconds is not None
-            else None
-        )
+        request_started_monotonic = monotonic()
         request_client_kwargs: dict[str, Any] = {"host": self._base_url}
-        if request_deadline_monotonic is not None:
-            remaining_seconds = request_deadline_monotonic - monotonic()
-            if remaining_seconds <= 0.0:
-                raise ToolCallError(
-                    "Ollama structured-tool request deadline exhausted."
-                )
-            request_client_kwargs["timeout"] = remaining_seconds
         request_client = self._ollama.AsyncClient(**request_client_kwargs)
 
         try:
@@ -101,23 +91,15 @@ class OllamaClient(LLMClient):
                     full_response += str(content or "")
                 return full_response
 
-            if request_deadline_monotonic is None:
-                full_response = await _request()
-            else:
-                remaining_seconds = request_deadline_monotonic - monotonic()
-                if remaining_seconds <= 0.0:
-                    raise TimeoutError(
-                        "Ollama structured-tool request deadline exhausted."
-                    )
-                async with asyncio.timeout(remaining_seconds):
-                    full_response = await _request()
+            full_response = await _request()
 
+            observe_request_advisory(
+                provider="ollama",
+                advisory_seconds=request_advisory_seconds,
+                started_monotonic=request_started_monotonic,
+                event_logger=self.logger,
+            )
             return self._parse_response(full_response, available_tools)
-        except TimeoutError as exc:
-            self.logger.error("Ollama structured-tool request deadline exhausted.")
-            raise ToolCallError(
-                "Ollama structured-tool request deadline exhausted."
-            ) from exc
         except Exception as exc:
             self.logger.error("Ollama API error: %s", exc)
             if self.config.fallback_to_json_text:

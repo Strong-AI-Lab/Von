@@ -33129,20 +33129,28 @@ async function handleSendPrompt(options = {}) {
             || turnExecutionDiagnostics?.completion_gate_decision
         );
         const payloadTerminalStatus = normaliseThinkingProgressStatusValue(data?.terminal_status);
+        const partialEffectOutcome = payloadTerminalStatus === 'effect_partially_completed';
         const turnOutcomeStatus = canonicalThinkingTerminalStatus(completionGateDecision)
             || canonicalThinkingTerminalStatus(payloadTerminalStatus)
+            || (partialEffectOutcome ? THINKING_STATUS_COMPLETED : null)
             || (data?.success === false ? THINKING_STATUS_FAILED : null)
             || THINKING_STATUS_COMPLETED;
         const typedNonSuccess = data?.success === false;
         request.turnOutcome = {
             status: turnOutcomeStatus,
-            phase_label: turnOutcomeStatus === THINKING_STATUS_FAILED
-                ? (typedNonSuccess ? 'Turn incomplete' : 'Turn failed')
-                : (turnOutcomeStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'),
+            phase_label: partialEffectOutcome
+                ? 'Partially complete'
+                : (
+                    turnOutcomeStatus === THINKING_STATUS_FAILED
+                        ? (typedNonSuccess ? 'Turn incomplete' : 'Turn failed')
+                        : (turnOutcomeStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed')
+                ),
             summary: turnOutcomeStatus === 'follow_up_required'
                 ? 'The turn completed, but a follow-up step is still required.'
                 : (
-                    typedNonSuccess
+                    partialEffectOutcome
+                        ? 'A useful response was delivered with an explicitly partial effect outcome.'
+                        : typedNonSuccess
                         ? `Response returned with status ${payloadTerminalStatus || 'incomplete'}`
                         : 'Response generated'
                 )

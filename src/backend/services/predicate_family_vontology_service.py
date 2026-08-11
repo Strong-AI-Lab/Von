@@ -17,7 +17,6 @@ FOCAL_ROLE_PREDICATE_ID = "#V#has_focal_role_predicate"
 RELATED_ROLE_PREDICATE_ID = "#V#has_related_role_predicate"
 REIFIED_RELATION_TYPE_PREDICATE_ID = "#V#has_reified_relation_type"
 _MAX_EXPANDED_PREDICATES = 100
-_CANONICAL_FAMILY_FALLBACK_MAX_TIME_MS = 8_000
 
 
 def _canonical_ids(value: Any) -> list[str]:
@@ -149,7 +148,6 @@ def expand_relation_predicate_family(
                     },
                     projection=family_projection,
                     limit=resolved_limit,
-                    max_time_ms=_CANONICAL_FAMILY_FALLBACK_MAX_TIME_MS,
                 )
             )
             for document in family_documents:

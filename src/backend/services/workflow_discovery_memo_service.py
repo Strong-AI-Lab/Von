@@ -160,12 +160,16 @@ def _has_zero_candidate_operational_blocker(payload: Mapping[str, Any]) -> bool:
 
     def _iter_reason_text() -> list[str]:
         values: list[str] = []
-        for key in (
-            "match_absence_reason",
-            "blocker_reason",
-            "budget_exhaustion_stage",
-            "budget_exhaustion_detail",
-        ):
+        elapsed_time_is_advisory = (
+            str(payload.get("elapsed_time_enforcement") or "").strip().lower()
+            == "advisory"
+        )
+        reason_keys = ["match_absence_reason", "blocker_reason"]
+        if not elapsed_time_is_advisory:
+            reason_keys.extend(
+                ("budget_exhaustion_stage", "budget_exhaustion_detail")
+            )
+        for key in reason_keys:
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 values.append(value.strip().lower())
@@ -194,7 +198,13 @@ def _has_zero_candidate_operational_blocker(payload: Mapping[str, Any]) -> bool:
                     )
         return values
 
-    if bool(payload.get("budget_exhausted")):
+    if bool(payload.get("hard_timeout_exceeded")):
+        return True
+    if (
+        bool(payload.get("budget_exhausted"))
+        and str(payload.get("elapsed_time_enforcement") or "").strip().lower()
+        != "advisory"
+    ):
         return True
     reasons = _iter_reason_text()
     return any(

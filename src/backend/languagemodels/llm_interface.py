@@ -274,7 +274,11 @@ def _build_auto_pull_error_message(
 def _split_request_timeout_from_llm_params(
     llm_params: Optional[Mapping[str, Any]],
 ) -> tuple[Dict[str, Any], float | None]:
-    """Separate provider options from the caller-owned request budget."""
+    """Separate provider options from a legacy request-duration advisory.
+
+    The timeout-shaped aliases are compatibility inputs only. They are not
+    passed to a provider transport and do not cancel a usable late result.
+    """
 
     if not isinstance(llm_params, Mapping):
         return {}, None
@@ -289,6 +293,26 @@ def _split_request_timeout_from_llm_params(
     if timeout_seconds is not None:
         timeout_seconds = max(1.0, min(600.0, timeout_seconds))
     return params, timeout_seconds
+
+
+def _observe_request_advisory(
+    *,
+    provider: str,
+    advisory_seconds: float | None,
+    started_monotonic: float,
+) -> None:
+    if advisory_seconds is None or advisory_seconds <= 0.0:
+        return
+    elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+    if elapsed_seconds <= advisory_seconds:
+        return
+    logger.warning(
+        "llm_request_advisory_crossed provider=%s advisory_seconds=%.3f "
+        "elapsed_seconds=%.3f action=result_preserved",
+        provider,
+        advisory_seconds,
+        elapsed_seconds,
+    )
 
 
 def resolve_openai_responses_max_output_tokens(
@@ -1151,20 +1175,10 @@ class OllamaClient(LLMInterface):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        ollama_params, request_timeout_seconds = _split_request_timeout_from_llm_params(
+        ollama_params, request_advisory_seconds = _split_request_timeout_from_llm_params(
             llm_params
         )
         request_started = time.monotonic()
-        request_deadline = (
-            request_started + request_timeout_seconds
-            if request_timeout_seconds is not None
-            else None
-        )
-
-        def _remaining_request_seconds(*, reserve_seconds: float = 0.0) -> float | None:
-            if request_deadline is None:
-                return None
-            return max(0.0, request_deadline - time.monotonic() - reserve_seconds)
 
         # JVNAUTOSCI-2506: opt-in exact-match response cache for test/replay
         # loops. Enabled only via VON_LLM_RESPONSE_CACHE or on agent-test
@@ -1265,27 +1279,7 @@ class OllamaClient(LLMInterface):
                 # self._ensure_model_pulled(target_model)
 
                 _generate_started = time.perf_counter()
-                remaining_request_seconds = _remaining_request_seconds()
-                if (
-                    remaining_request_seconds is not None
-                    and remaining_request_seconds <= 0
-                ):
-                    raise TimeoutError(
-                        "ollama_request_timeout: caller request budget exhausted"
-                    )
                 request_client = self.client
-                if remaining_request_seconds is not None:
-                    _ollama_mod = _import_ollama()
-                    client_type = (
-                        getattr(_ollama_mod, "Client", None)
-                        if _ollama_mod is not None
-                        else None
-                    )
-                    if callable(client_type):
-                        request_client = client_type(
-                            host=self.host,
-                            timeout=max(0.1, remaining_request_seconds),
-                        )
                 response = request_client.chat(
                     model=target_model,
                     messages=messages,
@@ -1314,6 +1308,11 @@ class OllamaClient(LLMInterface):
                         ),
                         prompt_key=response_prompt_key,
                     )
+                _observe_request_advisory(
+                    provider="ollama",
+                    advisory_seconds=request_advisory_seconds,
+                    started_monotonic=request_started,
+                )
                 return content
             except Exception as e:
                 # Handle known Ollama ResponseError distinctly if library present
@@ -1334,9 +1333,6 @@ class OllamaClient(LLMInterface):
                         auto_pull_retry_consumed = True
                         auto_pull_result = self._attempt_model_auto_pull(
                             target_model,
-                            wait_timeout_seconds=_remaining_request_seconds(
-                                reserve_seconds=0.5
-                            ),
                         )
                         if bool(auto_pull_result.get("succeeded")):
                             logger.info(
@@ -1371,15 +1367,6 @@ class OllamaClient(LLMInterface):
                         and attempt < max_retries - 1
                     ):
                         delay = base_delay * (2**attempt)
-                        remaining_request_seconds = _remaining_request_seconds()
-                        if (
-                            remaining_request_seconds is not None
-                            and remaining_request_seconds <= delay
-                        ):
-                            raise RuntimeError(
-                                "ollama_request_timeout: retry backoff would exceed "
-                                "the caller request budget"
-                            ) from e
                         logger.info(
                             f"Retrying after {delay} seconds due to CUDA error (500)..."
                         )
@@ -1397,15 +1384,6 @@ class OllamaClient(LLMInterface):
                 )
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
-                    remaining_request_seconds = _remaining_request_seconds()
-                    if (
-                        remaining_request_seconds is not None
-                        and remaining_request_seconds <= delay
-                    ):
-                        raise RuntimeError(
-                            "ollama_request_timeout: retry backoff would exceed "
-                            "the caller request budget"
-                        ) from e
                     logger.info(
                         f"Retrying after {delay} seconds due to unexpected error..."
                     )
@@ -2006,18 +1984,12 @@ class OpenAIClient(LLMInterface):
             logger.debug(
                 "[LLM PROMPT][OpenAI][%s]: %s", target_model, _truncate_for_log(prompt)
             )
+        request_started_monotonic = time.monotonic()
         try:
-            llm_params_for_model, request_timeout_seconds = (
+            llm_params_for_model, request_advisory_seconds = (
                 self._split_request_timeout_from_llm_params(llm_params)
             )
-            request_client = (
-                self.client.with_options(
-                    timeout=request_timeout_seconds,
-                    max_retries=0,
-                )
-                if request_timeout_seconds is not None
-                else self.client
-            )
+            request_client = self.client
             conv = build_conversation(prompt, context)
             messages = to_openai_messages(conv)
             responses_params = openai_responses_kwargs_from_model_parameters(
@@ -2061,6 +2033,11 @@ class OpenAIClient(LLMInterface):
                         actual_model,
                         _truncate_for_log(content),
                     )
+                _observe_request_advisory(
+                    provider="openai",
+                    advisory_seconds=request_advisory_seconds,
+                    started_monotonic=request_started_monotonic,
+                )
                 return content
 
             openai_params = {}
@@ -2124,6 +2101,11 @@ class OpenAIClient(LLMInterface):
                     f"Token usage - Input: {response.usage.prompt_tokens}, Output: {response.usage.completion_tokens}"
                 )
 
+            _observe_request_advisory(
+                provider="openai",
+                advisory_seconds=request_advisory_seconds,
+                started_monotonic=request_started_monotonic,
+            )
             return content
         except openai.APIConnectionError:
             msg = "Failed to connect to OpenAI API"
@@ -2167,7 +2149,6 @@ class OpenAIClient(LLMInterface):
         try:
             response = self.client.with_options(
                 max_retries=0,
-                timeout=8.0,
             ).embeddings.create(input=[text], model=target_model)
             return response.data[0].embedding
         except Exception as e:

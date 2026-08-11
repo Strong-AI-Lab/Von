@@ -99,9 +99,9 @@ def test_active_only_no_tool_policy_bypasses_gateway_registry_setup(
     assert result.status == "success"
     assert gateway_runtime_calls == 0
     llm_client.generate.assert_called_once()
-    assert llm_client.generate.call_args.kwargs["llm_params"][
-        "max_output_tokens"
-    ] == 2048
+    assert (
+        llm_client.generate.call_args.kwargs["llm_params"]["max_output_tokens"] == 2048
+    )
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["selection_policy"] == "active_only"
     assert envelope["selected_model"] == "gpt-5.6-luna"
@@ -163,9 +163,7 @@ def test_represented_llm_policy_suppresses_raw_io_sentinel_across_timeout_thread
 
     assert result.status == "success", result.outputs
     assert raw_io_decisions == [False]
-    assert worker_thread_names == [
-        "workflow-llm-step-call-represented_policy_step"
-    ]
+    assert worker_thread_names == ["workflow-llm-step-call-represented_policy_step"]
     assert raw_prompt_sentinel not in caplog.text
     assert raw_response_sentinel not in caplog.text
 
@@ -1594,17 +1592,23 @@ def test_gateway_runtime_refreshes_inherited_policy_timeout(monkeypatch) -> None
     )
 
 
-def test_gateway_runtime_times_out_policy_load_with_telemetry(monkeypatch) -> None:
+def test_gateway_runtime_retains_policy_loaded_after_advisory(monkeypatch) -> None:
     registry_snapshot = {"source": "parent_turn_snapshot", "models": []}
-    blocker = threading.Event()
+    late_policy = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={"stages": {}},
+        policy_id="#V#late_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
 
     class _StubOrchestrator:
         def __init__(self, **_kwargs):
             self._turn_model_failures_local = threading.local()
 
         def _load_workflow_model_policy(self, _preferred_language):
-            blocker.wait(1.0)
-            raise AssertionError("policy load should have timed out")
+            time.sleep(0.03)
+            return late_policy, {"type": "workflow_model_policy", "loaded": True}
 
     monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setattr(
@@ -1624,29 +1628,27 @@ def test_gateway_runtime_times_out_policy_load_with_telemetry(monkeypatch) -> No
         lse._build_gateway_runtime(request)
     )
 
-    assert tuple(getattr(resolved_policy, "errors", ())) == (
-        "workflow_model_policy_timeout",
-    )
+    assert resolved_policy is late_policy
     assert resolved_registry is registry_snapshot
     diagnostics = request.data["aux_llm_calls"]
     assert any(
         entry.get("type") == "workflow_llm_step_setup"
         and entry.get("step_id") == "workflow_model_policy"
-        and entry.get("status") == "timed_out"
+        and entry.get("status") == "advisory_exceeded_continuing"
+        and entry.get("hard_timeout_seconds") is None
         for entry in diagnostics
     )
     assert any(
         entry.get("type") == "workflow_model_policy"
-        and entry.get("policy_source") == "timeout"
+        and entry.get("loaded") is True
         for entry in diagnostics
     )
 
 
-def test_gateway_runtime_times_out_registry_snapshot_with_telemetry(
+def test_gateway_runtime_retains_registry_snapshot_loaded_after_advisory(
     monkeypatch,
 ) -> None:
     policy_state = object()
-    blocker = threading.Event()
 
     class _StubOrchestrator:
         def __init__(self, **_kwargs):
@@ -1656,8 +1658,8 @@ def test_gateway_runtime_times_out_registry_snapshot_with_telemetry(
             raise AssertionError("parent policy_state should be reused")
 
     def _blocking_registry_snapshot():
-        blocker.wait(1.0)
-        raise AssertionError("registry load should have timed out")
+        time.sleep(0.03)
+        return {"source": "late_registry", "models": []}
 
     monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setattr(
@@ -1682,13 +1684,13 @@ def test_gateway_runtime_times_out_registry_snapshot_with_telemetry(
     )
 
     assert resolved_policy is policy_state
-    assert resolved_registry["source"] == "timeout"
-    assert resolved_registry["loaded"] is False
+    assert resolved_registry["source"] == "late_registry"
     diagnostics = request.data["aux_llm_calls"]
     assert any(
         entry.get("type") == "workflow_llm_step_setup"
         and entry.get("step_id") == "model_registry_snapshot"
-        and entry.get("status") == "timed_out"
+        and entry.get("status") == "advisory_exceeded_continuing"
+        and entry.get("hard_timeout_seconds") is None
         for entry in diagnostics
     )
 
@@ -2631,7 +2633,7 @@ def test_bounded_llm_step_progress_event_does_not_block_execution_guard(
     assert progress_entered.wait(1.0)
 
 
-def test_direct_llm_step_passes_separate_hard_guard_to_client_llm_params() -> None:
+def test_direct_llm_step_keeps_elapsed_threshold_out_of_client_params() -> None:
     captured: dict[str, object] = {}
 
     class _CapturingClient:
@@ -2658,10 +2660,10 @@ def test_direct_llm_step_passes_separate_hard_guard_to_client_llm_params() -> No
     result = execute_llm_step(request)
 
     assert result.status == "success"
-    assert captured["llm_params"] == {"request_timeout_seconds": 13.0}
+    assert captured["llm_params"] is None
 
 
-def test_llm_call_can_finish_after_advisory_budget_before_hard_guard() -> None:
+def test_llm_call_can_finish_after_advisory_budget_without_hard_guard() -> None:
     import time
 
     import src.backend.workflows.llm_step_executor as mod
@@ -2696,7 +2698,7 @@ def test_llm_call_can_finish_after_advisory_budget_before_hard_guard() -> None:
     assert len(advisory_entries) == 1
     assert advisory_entries[0]["status"] == "exceeded_continuing"
     assert advisory_entries[0]["advisory_timeout_seconds"] == 0.02
-    assert advisory_entries[0]["hard_guard_timeout_seconds"] == 0.6
+    assert advisory_entries[0]["hard_guard_timeout_seconds"] is None
 
 
 def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(
@@ -2965,20 +2967,22 @@ def test_structured_transport_failure_after_tool_records_side_effect_accounting(
     assert result.outputs["tool_messages"] == envelope["tool_messages"]
 
 
-def test_execute_llm_step_bounds_blocked_context_adjudication_gateway_call(
+def test_execute_llm_step_retains_slow_context_adjudication_gateway_result(
     monkeypatch,
 ) -> None:
-    blocker = threading.Event()
-
     class _StubOrchestrator:
         def _select_model_for_stage(self, **_kwargs):
             return "gpt-4.1-mini"
 
         def _run_llm_with_fallbacks(self, **_kwargs):
-            blocker.wait(3.0)
-            raise AssertionError("blocked LLM call should have timed out")
+            time.sleep(0.3)
+            return ('{"ok": true}', "gpt-4.1-mini", {"provider": "openai"})
 
-    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        lse,
+        "_conversation_turn_llm_timeout_override_sec",
+        lambda _request: 0.02,
+    )
     monkeypatch.setattr(
         "src.backend.workflows.llm_step_executor._build_gateway_runtime",
         lambda request: (_StubOrchestrator(), object(), {"models": []}, None, None),
@@ -3014,52 +3018,32 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_gateway_call(
 
     result = execute_llm_step(request)
 
-    assert result.status == "failed"
-    assert "workflow_llm_step_timeout:" in str(result.error or "")
+    assert result.status == "success"
     envelope = result.outputs["llm_step_envelope"]
-    assert envelope["completion_reason"] == "timeout"
-    assert envelope["timeout_stage"] == "context_adjudication"
-    assert envelope["workflow_state_id"] == (
-        "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
-        "context_adjudication_decision"
-    )
-    assert (
-        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
-    )
-    assert envelope["selected_model"] == "gpt-4.1-mini"
-    assert envelope["selected_model_candidate"]["provider"] == "openai"
-    assert envelope["timeout_seconds"] == 2.0
-    assert envelope["fail_closed"] is True
-    assert envelope["fallback_used"] is False
-    assert envelope["fallback_policy"] == "none"
-    timeout_entries = [
-        entry
-        for entry in envelope["llm_calls"]
-        if entry.get("failure_kind") == "llm_call_timeout"
+    assert envelope["validated_json"] == {"ok": True}
+    assert not [
+        entry for entry in envelope["llm_calls"] if entry.get("status") == "timed_out"
     ]
-    assert len(timeout_entries) == 1
-    assert timeout_entries[0]["stage"] == "context_adjudication"
-    assert timeout_entries[0]["workflow_stage_id"] == (
-        "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
-        "context_adjudication_decision"
-    )
-    assert timeout_entries[0]["provider"] == "openai"
-    assert (
-        timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert any(
+        entry.get("type") == "workflow_llm_advisory_budget"
+        and entry.get("status") == "exceeded_continuing"
+        for entry in result.outputs["aux_llm_calls"]
     )
 
 
-def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
+def test_execute_llm_step_retains_slow_context_adjudication_direct_result(
     monkeypatch,
 ) -> None:
-    blocker = threading.Event()
-
     class _BlockingClient:
         def generate(self, *_args, **_kwargs):
-            blocker.wait(3.0)
-            raise AssertionError("blocked direct LLM call should have timed out")
+            time.sleep(0.3)
+            return '{"ok": true}'
 
-    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        lse,
+        "_conversation_turn_llm_timeout_override_sec",
+        lambda _request: 0.02,
+    )
     monkeypatch.setattr(
         lse,
         "resolve_model_prompt_variant",
@@ -3102,36 +3086,21 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
 
     result = execute_llm_step(request)
 
-    assert result.status == "failed"
+    assert result.status == "success"
     envelope = result.outputs["llm_step_envelope"]
-    assert envelope["completion_reason"] == "timeout"
-    assert envelope["timeout_stage"] == "context_adjudication"
-    assert (
-        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
-    )
-    assert envelope["selected_model"] == "gpt-4.1-mini"
-    assert envelope["selected_model_candidate"]["provider"] == "openai"
-    assert envelope["timeout_seconds"] == 2.0
-    assert envelope["advisory_timeout_seconds"] == 1.0
-    assert envelope["hard_guard_timeout_seconds"] == 2.0
-    assert envelope["fail_closed"] is True
-    timeout_entries = [
-        entry
-        for entry in envelope["llm_calls"]
-        if entry.get("failure_kind") == "llm_call_timeout"
+    assert envelope["validated_json"] == {"ok": True}
+    assert not [
+        entry for entry in envelope["llm_calls"] if entry.get("status") == "timed_out"
     ]
-    assert len(timeout_entries) == 1
-    assert timeout_entries[0]["stage"] == "context_adjudication"
-    assert timeout_entries[0]["provider"] == "openai"
-    assert timeout_entries[0]["timeout_seconds"] == 2.0
-    assert timeout_entries[0]["advisory_timeout_seconds"] == 1.0
+    assert any(
+        entry.get("type") == "workflow_llm_advisory_budget"
+        for entry in result.outputs["aux_llm_calls"]
+    )
 
 
-def test_execute_llm_step_bounds_blocked_context_adjudication_tool_planner(
+def test_execute_llm_step_retains_slow_context_adjudication_tool_plan(
     monkeypatch,
 ) -> None:
-    blocker = threading.Event()
-
     class _StubGateway:
         def describe_methods(self):
             return {}
@@ -3141,10 +3110,19 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_tool_planner(
             return "gpt-4.1-mini"
 
         def _action_tool_calling_plan(self, _request):
-            blocker.wait(3.0)
-            raise AssertionError("blocked tool planner should have timed out")
+            time.sleep(0.3)
+            return WorkflowActionResult(
+                outputs={
+                    "tool_calls_present": False,
+                    "final_response": '{"ok": true}',
+                }
+            )
 
-    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        lse,
+        "_conversation_turn_llm_timeout_override_sec",
+        lambda _request: 0.02,
+    )
     monkeypatch.setattr(
         "src.backend.workflows.llm_step_executor._build_gateway_runtime",
         lambda request, **_kwargs: (
@@ -3190,52 +3168,50 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_tool_planner(
 
     result = execute_llm_step(request)
 
-    assert result.status == "failed"
+    assert result.status == "success"
     envelope = result.outputs["llm_step_envelope"]
-    assert envelope["completion_reason"] == "timeout"
-    assert envelope["timeout_stage"] == "context_adjudication"
-    assert (
-        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
-    )
-    assert envelope["selected_model"] == "gpt-4.1-mini"
-    assert envelope["selected_model_candidate"]["provider"] == "openai"
-    assert envelope["timeout_seconds"] == 2.0
-    assert envelope["fail_closed"] is True
-    assert envelope["fallback_used"] is False
-    timeout_entries = [
-        entry
-        for entry in envelope["llm_calls"]
-        if entry.get("failure_kind") == "llm_call_timeout"
+    assert envelope["validated_json"] == {"ok": True}
+    assert not [
+        entry for entry in envelope["llm_calls"] if entry.get("status") == "timed_out"
     ]
-    assert len(timeout_entries) == 1
-    assert timeout_entries[0]["stage"] == "context_adjudication"
-    assert timeout_entries[0]["provider"] == "openai"
+    assert any(
+        entry.get("type") == "workflow_llm_advisory_budget"
+        for entry in result.outputs["aux_llm_calls"]
+    )
 
 
-def test_execute_llm_step_bounds_blocked_context_adjudication_prompt_render(
+def test_execute_llm_step_retains_result_after_slow_prompt_render(
     monkeypatch,
 ) -> None:
-    blocker = threading.Event()
-
     class _BlockingPromptService:
         def __init__(self, **_kwargs):
             pass
 
         def render_prompt(self, *_args, **_kwargs):
-            blocker.wait(3.0)
-            raise AssertionError("blocked prompt render should have timed out")
+            time.sleep(0.3)
+            return pts.RenderedPrompt(
+                prompt_id="#V#turn_prompt_context_adjudication_prompt",
+                text='{"ok": true}',
+                variables={},
+            )
 
-    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        lse,
+        "_conversation_turn_llm_timeout_override_sec",
+        lambda _request: 0.02,
+    )
     monkeypatch.setattr(
         "src.backend.workflows.llm_step_executor.PromptTemplateService",
         _BlockingPromptService,
     )
 
+    client = MagicMock()
+    client.generate.return_value = '{"ok": true}'
     request = WorkflowActionRequest(
         action_id="llm.action",
         inputs={},
         environment=WorkflowEnvironment(
-            llm_client=MagicMock(),
+            llm_client=client,
             model="gpt-4.1-mini",
         ),
         data={
@@ -3261,26 +3237,15 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_prompt_render(
 
     result = execute_llm_step(request)
 
-    assert result.status == "failed"
+    assert result.status == "success"
     envelope = result.outputs["llm_step_envelope"]
-    assert envelope["completion_reason"] == "timeout"
-    assert envelope["timeout_stage"] == "context_adjudication"
-    assert (
-        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
-    )
-    assert envelope["selected_model"] == "gpt-4.1-mini"
-    assert envelope["selected_model_candidate"]["provider"] == "openai"
-    assert envelope["timeout_seconds"] == 2.0
-    assert envelope["fail_closed"] is True
-    timeout_entries = [
-        entry
-        for entry in envelope["llm_calls"]
-        if entry.get("failure_kind") == "llm_call_timeout"
+    assert envelope["validated_json"] == {"ok": True}
+    assert not [
+        entry for entry in envelope["llm_calls"] if entry.get("status") == "timed_out"
     ]
-    assert len(timeout_entries) == 1
-    assert timeout_entries[0]["stage"] == "context_adjudication"
-    assert (
-        timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert any(
+        entry.get("type") == "workflow_llm_advisory_budget"
+        for entry in result.outputs["aux_llm_calls"]
     )
 
 

@@ -74,6 +74,13 @@ class AwaitedWorkflowTerminalResult:
     instance: Any | None
     poll_count: int
     timed_out: bool
+    elapsed_time_enforcement: str = "advisory"
+
+    @property
+    def advisory_exceeded(self) -> bool:
+        return bool(
+            self.timed_out and self.elapsed_time_enforcement == "advisory"
+        )
 
     @property
     def final_status(self) -> str | None:
@@ -90,7 +97,13 @@ def await_workflow_terminal_state(
     timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> AwaitedWorkflowTerminalResult:
-    """Poll a durable instance until it becomes terminal or the timeout expires."""
+    """Observe a durable instance until terminal or an advisory crossing.
+
+    The workflow continues under its durable controller after this observation
+    window. ``timed_out`` is retained on the internal result for compatibility;
+    consumers must use ``elapsed_time_enforcement`` and project the crossing as
+    pending progress, not as execution failure.
+    """
 
     poll_count = 0
     latest_instance: Any | None = None
@@ -414,6 +427,8 @@ def build_workflow_execution_response(
     poll_interval_seconds: float | None = None,
     poll_count: int | None = None,
     timed_out: bool = False,
+    advisory_exceeded: bool = False,
+    elapsed_time_enforcement: str = "legacy_hard",
     include_step_result_envelopes: bool = False,
     include_trace: bool = False,
     durable_system_status: Mapping[str, Any] | None = None,
@@ -435,12 +450,24 @@ def build_workflow_execution_response(
         workflow_execution["await_terminal"] = True
     if timeout_seconds is not None:
         workflow_execution["timeout_seconds"] = float(timeout_seconds)
+        if elapsed_time_enforcement == "advisory":
+            workflow_execution["advisory_seconds"] = float(timeout_seconds)
     if poll_interval_seconds is not None:
         workflow_execution["poll_interval_seconds"] = float(poll_interval_seconds)
     if poll_count is not None:
         workflow_execution["poll_count"] = int(poll_count)
     if await_terminal or poll_count is not None or timeout_seconds is not None:
         workflow_execution["timed_out"] = bool(timed_out)
+        workflow_execution["elapsed_time_enforcement"] = str(
+            elapsed_time_enforcement or "legacy_hard"
+        )
+        workflow_execution["advisory_exceeded"] = bool(advisory_exceeded)
+        workflow_execution["hard_timeout_seconds"] = (
+            float(timeout_seconds)
+            if timed_out and elapsed_time_enforcement != "advisory"
+            and timeout_seconds is not None
+            else None
+        )
 
     final_status: str | None = None
     if instance is not None:
@@ -466,18 +493,32 @@ def build_workflow_execution_response(
         if final_status:
             workflow_execution["final_status"] = final_status
             payload["final_status"] = final_status
+        worker_unavailable = bool(
+            isinstance(durable_system_status, Mapping)
+            and durable_system_status.get("worker_running") is False
+        )
         if (
             await_terminal
-            and timed_out
             and _workflow_instance_appears_not_started(instance_payload)
+            and (timed_out or worker_unavailable)
         ):
             _apply_not_started_timeout_projection(
                 payload,
                 workflow_execution,
                 durable_system_status=durable_system_status,
             )
-    if await_terminal or timed_out:
+    if await_terminal or timed_out or advisory_exceeded:
         payload["timed_out"] = bool(timed_out)
+        payload["elapsed_time_enforcement"] = str(
+            elapsed_time_enforcement or "legacy_hard"
+        )
+        payload["advisory_exceeded"] = bool(advisory_exceeded)
+        payload["hard_timeout_seconds"] = (
+            float(timeout_seconds)
+            if timed_out and elapsed_time_enforcement != "advisory"
+            and timeout_seconds is not None
+            else None
+        )
 
     trace_id = _safe_str(workflow_execution.get("execution_trace_id")) or None
     if include_trace:

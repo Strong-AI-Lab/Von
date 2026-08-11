@@ -42,11 +42,11 @@ _ACTOR_CONTEXT_SOURCE: ContextVar[str | None] = ContextVar(
     "internal_mcp_actor_context_source",
     default=None,
 )
-_PREEXISTING_ACTOR_CONTEXT: ContextVar[
-    tuple[str | None, str | None] | None
-] = ContextVar(
-    "internal_mcp_preexisting_actor_context",
-    default=None,
+_PREEXISTING_ACTOR_CONTEXT: ContextVar[tuple[str | None, str | None] | None] = (
+    ContextVar(
+        "internal_mcp_preexisting_actor_context",
+        default=None,
+    )
 )
 
 
@@ -103,11 +103,10 @@ class MethodDefinition:
     category: str = "read"
     timeout_sec: float | None = None
     advisory_timeout_sec: float | None = None
-    # Compatibility defaults remain bounded while legacy catalogue entries are
-    # reviewed. Long-running capabilities with a durable outer coordinator can
-    # explicitly make elapsed time advisory-only instead of discarding a live
-    # handler result at an arbitrary wall-clock boundary.
-    hard_timeout_enabled: bool = True
+    # Elapsed time is advisory by default. A method may opt into a hard boundary
+    # only when it protects a named liveness, authority, or external-resource
+    # constraint; ordinary slow handlers retain their usable result.
+    hard_timeout_enabled: bool = False
     # Seed adaptive warning/hard windows with the longest successful duration
     # already observed before this process. Omit unless that evidence exists.
     successful_duration_bootstrap_sec: float | None = None
@@ -126,10 +125,9 @@ class MethodDefinition:
     # This is an access/effect ceiling, not a request classifier or preferred
     # solution route.
     ordinary_turn_effect: bool = False
-    # Minimum caller window required before an ordinary effect may start.  The
-    # hard timeout remains an upper bound; this separate mechanical threshold
-    # prevents a generic maximum from starving normally fast later effects.
-    # Omission retains the conservative full-hard-window requirement.
+    # Minimum caller window required before an ordinary effect may start when,
+    # and only when, the method has an explicitly justified hard boundary.
+    # Advisory-only methods never use this value to deny or delay an effect.
     effect_admission_window_sec: float | None = None
     # Existing concepts may be changed only when this authoritative forward
     # subject is scoped to the trusted actor or organisation. Creation effects
@@ -162,6 +160,14 @@ class MethodDefinition:
             if value <= 0.0:
                 raise ValueError("advisory_timeout_sec must be positive")
             return value
+        # Legacy method-specific ``timeout_sec`` values become advisory
+        # thresholds when no hard boundary is enabled. This preserves their
+        # useful per-capability signal without preserving arbitrary cutoffs.
+        if self.timeout_sec is not None:
+            value = float(self.timeout_sec)
+            if value <= 0.0:
+                raise ValueError("timeout_sec must be positive")
+            return value
         hard_timeout = self.resolved_timeout(transport)
         fallback_timeout = (
             transport.write_timeout_sec
@@ -186,10 +192,11 @@ class MethodDefinition:
     def resolved_effect_admission_window(
         self,
         transport: InternalMCPTransport,
-    ) -> float:
-        hard_timeout = float(
-            self.resolved_timeout(transport) or transport.write_timeout_sec
-        )
+    ) -> float | None:
+        resolved_timeout = self.resolved_timeout(transport)
+        if resolved_timeout is None:
+            return None
+        hard_timeout = float(resolved_timeout)
         raw_window = self.effect_admission_window_sec
         if raw_window is None:
             return hard_timeout
@@ -324,9 +331,7 @@ class MethodCatalogue:
                     else None
                 ),
                 "ordinary_turn_effect": definition.ordinary_turn_effect,
-                "effect_admission_window_sec": (
-                    definition.effect_admission_window_sec
-                ),
+                "effect_admission_window_sec": (definition.effect_admission_window_sec),
                 "ordinary_turn_mutation_subject_argument": (
                     definition.ordinary_turn_mutation_subject_argument
                 ),
@@ -353,9 +358,7 @@ class InternalMCPGateway:
         self._transport = transport
         self._enabled = bool(enabled)
         self._log_tag = log_tag
-        self._trusted_actor_payload_fallback = bool(
-            trusted_actor_payload_fallback
-        )
+        self._trusted_actor_payload_fallback = bool(trusted_actor_payload_fallback)
         self._total_calls = 0
         self._total_failures = 0
         self._method_metrics: Dict[str, MethodMetrics] = {
@@ -390,25 +393,20 @@ class InternalMCPGateway:
         """Return bootstrap, adaptive, and hard-boundary-clamped advisories."""
 
         bootstrap_sec = definition.resolved_advisory_timeout(self._transport)
-        successful_max_duration_ms = self._successful_max_duration_ms(
-            definition.name
-        )
+        successful_max_duration_ms = self._successful_max_duration_ms(definition.name)
         successful_duration_basis_sec = (
             float(successful_max_duration_ms) / 1000.0
             if successful_max_duration_ms is not None
             else None
         )
-        configured_bootstrap_sec = (
-            definition.resolved_successful_duration_bootstrap()
-        )
+        configured_bootstrap_sec = definition.resolved_successful_duration_bootstrap()
         if configured_bootstrap_sec is not None:
             successful_duration_basis_sec = max(
                 configured_bootstrap_sec,
                 successful_duration_basis_sec or 0.0,
             )
         adaptive_sec = (
-            successful_duration_basis_sec
-            * _SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER
+            successful_duration_basis_sec * _SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER
             if successful_duration_basis_sec is not None
             else bootstrap_sec
         )
@@ -426,14 +424,10 @@ class InternalMCPGateway:
         """Return configured bootstrap and next adaptive hard boundaries."""
 
         bootstrap_sec = definition.resolved_timeout(self._transport)
-        configured_bootstrap_sec = (
-            definition.resolved_successful_duration_bootstrap()
-        )
+        configured_bootstrap_sec = definition.resolved_successful_duration_bootstrap()
         if bootstrap_sec is None or configured_bootstrap_sec is None:
             return bootstrap_sec, bootstrap_sec
-        successful_max_duration_ms = self._successful_max_duration_ms(
-            definition.name
-        )
+        successful_max_duration_ms = self._successful_max_duration_ms(definition.name)
         successful_duration_basis_sec = max(
             configured_bootstrap_sec,
             (
@@ -444,8 +438,7 @@ class InternalMCPGateway:
         )
         return (
             bootstrap_sec,
-            successful_duration_basis_sec
-            * _SUCCESSFUL_DURATION_HARD_MULTIPLIER,
+            successful_duration_basis_sec * _SUCCESSFUL_DURATION_HARD_MULTIPLIER,
         )
 
     def _successful_max_duration_ms(self, method_name: str) -> float | None:
@@ -620,9 +613,7 @@ class InternalMCPGateway:
                         validation_errors = [type(exc).__name__]
                     validation = "valid" if valid else "invalid"
                     validation_error = (
-                        None
-                        if valid
-                        else "; ".join(validation_errors)[:2_000]
+                        None if valid else "; ".join(validation_errors)[:2_000]
                     )
                 enriched.update(
                     {
@@ -703,9 +694,7 @@ class InternalMCPGateway:
                         maybe_inject_agent_test_mcp_fault,
                     )
 
-                    injected_fault = maybe_inject_agent_test_mcp_fault(
-                        method_name
-                    )
+                    injected_fault = maybe_inject_agent_test_mcp_fault(method_name)
                     if injected_fault is not None:
                         self._record_failure(
                             method_name,
@@ -851,14 +840,12 @@ class InternalMCPGateway:
         for name, metrics in self._method_metrics.items():
             snapshot = metrics.snapshot()
             definition = self._catalogue.get(name)
-            bootstrap_hard_timeout_sec, hard_timeout_sec = (
-                self._hard_timeout_values(definition)
+            bootstrap_hard_timeout_sec, hard_timeout_sec = self._hard_timeout_values(
+                definition
             )
-            bootstrap_sec, adaptive_sec, next_sec = (
-                self._advisory_timeout_values(
-                    definition,
-                    hard_boundary_sec=hard_timeout_sec,
-                )
+            bootstrap_sec, adaptive_sec, next_sec = self._advisory_timeout_values(
+                definition,
+                hard_boundary_sec=hard_timeout_sec,
             )
             snapshot.update(
                 {
@@ -916,16 +903,14 @@ class InternalMCPGateway:
 
         definition = self.get_method_definition(method_name)
         return (
-            self._hard_timeout_values(definition)[1]
-            if definition is not None
-            else None
+            self._hard_timeout_values(definition)[1] if definition is not None else None
         )
 
     def get_method_effect_admission_window_sec(
         self,
         method_name: str,
     ) -> float | None:
-        """Return the resolved minimum window for one delegated effect."""
+        """Return an active hard-boundary admission window, if one exists."""
 
         definition = self.get_method_definition(method_name)
         if definition is None or not definition.ordinary_turn_effect:

@@ -502,10 +502,6 @@ def _mongo_connect_timeout_ms() -> int:
     return _get_positive_int_env("MONGO_CONNECT_TIMEOUT_MS", 5000)
 
 
-def _mongo_socket_timeout_ms() -> int:
-    return _get_positive_int_env("MONGO_SOCKET_TIMEOUT_MS", 5000)
-
-
 def _build_ssh_tunnel_mongo_uri(primary_uri: str, endpoint: str) -> str:
     """Derive a direct loopback Mongo URI without decoding URI credentials.
 
@@ -786,13 +782,20 @@ def _collection_indexes_are_ready(db: Database, collection_name: str) -> bool:
 def _new_mongo_client(
     uri: str, server_selection_timeout_ms: int | None = None
 ) -> MongoClient:
-    """Create a MongoClient with explicit timeout defaults for faster failure/recovery."""
+    """Create a MongoClient with bounded connection discovery.
+
+    Server selection and connection establishment are liveness boundaries: no
+    Mongo operation can begin until they succeed.  A global ``socketTimeoutMS``
+    is different because it cancels every in-flight operation after the same
+    arbitrary interval, including canonical reads that are still making useful
+    progress.  Leave operation duration unbounded at the driver level and use
+    the command/operation observers above to surface unusually slow work.
+    """
     return MongoClient(
         uri,
         serverSelectionTimeoutMS=server_selection_timeout_ms
         or _mongo_server_selection_timeout_ms(),
         connectTimeoutMS=_mongo_connect_timeout_ms(),
-        socketTimeoutMS=_mongo_socket_timeout_ms(),
         retryWrites=True,
         retryReads=True,
     )

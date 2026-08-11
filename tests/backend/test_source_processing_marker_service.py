@@ -30,10 +30,7 @@ def test_find_existing_concept_ids_matches_canonicalised_ids(monkeypatch) -> Non
 
     assert result == {service.SOURCE_PROCESSING_EVIDENCE_PREDICATE_ID}
     assert "#V#hassourceprocessingevidencejson" in observed_query["concept_id"]["$in"]
-    assert observed_options == {
-        "limit": 2,
-        "max_time_ms": service.SOURCE_PROCESSING_MARKER_EXISTENCE_LOOKUP_MAX_TIME_MS,
-    }
+    assert observed_options == {"limit": 2}
 
 
 def test_find_existing_concept_ids_uses_repository_access_filter(monkeypatch) -> None:

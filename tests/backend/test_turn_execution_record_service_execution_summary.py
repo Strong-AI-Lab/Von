@@ -3426,6 +3426,31 @@ def test_build_turn_execution_correctness_summary_marks_successful_completion() 
     assert summary["metric_labels"]["false_success"] is False
 
 
+def test_discovery_advisory_crossing_is_not_labelled_timeout_failure() -> None:
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "completed",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0, "inconclusive_count": 0},
+        final_response={"completion_claim_validated": True},
+        workflow_selection={},
+        workflow_routing_diagnostics={
+            "discovery": {
+                "budget_exhausted": True,
+                "elapsed_time_enforcement": "advisory",
+                "advisory_budget_exceeded": True,
+                "hard_timeout_exceeded": False,
+                "match_absence_reason": "no_discovery_candidates",
+            }
+        },
+    )
+
+    assert summary["metric_labels"]["workflow_discovery_timeout"] is False
+
+
 def test_build_turn_execution_correctness_summary_marks_plain_response_misrouting() -> (
     None
 ):

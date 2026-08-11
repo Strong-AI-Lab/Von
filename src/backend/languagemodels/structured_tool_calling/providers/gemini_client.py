@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import math
 from time import monotonic
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -10,7 +9,8 @@ from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
 from ..client import (
     LLMClient,
     LLMClientConfig,
-    split_request_timeout_from_llm_params,
+    observe_request_advisory,
+    split_request_advisory_from_llm_params,
 )
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 
@@ -59,16 +59,11 @@ class GeminiClient(LLMClient):
             self._validate_input_schema(tool)
 
         request_kwargs = dict(kwargs)
-        _, request_timeout_seconds = split_request_timeout_from_llm_params(
+        _, request_advisory_seconds = split_request_advisory_from_llm_params(
             request_kwargs.pop("llm_params", None)
         )
-        request_deadline_monotonic = (
-            monotonic() + request_timeout_seconds
-            if request_timeout_seconds is not None
-            else None
-        )
+        request_started_monotonic = monotonic()
         request_client = self._client
-        owns_request_client = False
 
         try:
             tools = self._convert_tools_to_gemini_format(available_tools)
@@ -79,51 +74,23 @@ class GeminiClient(LLMClient):
                 tools=tools,
             )
 
-            if request_deadline_monotonic is not None:
-                remaining_seconds = request_deadline_monotonic - monotonic()
-                if remaining_seconds <= 0.0:
-                    raise TimeoutError(
-                        "Gemini structured-tool request deadline exhausted."
-                    )
-                request_client = self._genai.Client(
-                    **self._client_kwargs,
-                    http_options=self._genai.types.HttpOptions(
-                        timeout=max(1, math.ceil(remaining_seconds * 1000.0))
-                    ),
-                )
-                owns_request_client = True
-
-            async def _request() -> Any:
-                return await request_client.aio.models.generate_content(
-                    model=self._model_name,
-                    contents=messages,  # type: ignore[arg-type]
-                    config=config,
-                )
-
-            if request_deadline_monotonic is None:
-                response = await _request()
-            else:
-                remaining_seconds = request_deadline_monotonic - monotonic()
-                if remaining_seconds <= 0.0:
-                    raise TimeoutError(
-                        "Gemini structured-tool request deadline exhausted."
-                    )
-                async with asyncio.timeout(remaining_seconds):
-                    response = await _request()
+            response = await request_client.aio.models.generate_content(
+                model=self._model_name,
+                contents=messages,  # type: ignore[arg-type]
+                config=config,
+            )
+            observe_request_advisory(
+                provider="gemini",
+                advisory_seconds=request_advisory_seconds,
+                started_monotonic=request_started_monotonic,
+                event_logger=self.logger,
+            )
             return self._parse_response(response, available_tools)
-        except TimeoutError as exc:
-            self.logger.error("Gemini structured-tool request deadline exhausted.")
-            raise ToolCallError(
-                "Gemini structured-tool request deadline exhausted."
-            ) from exc
         except Exception as exc:
             self.logger.error("Gemini API error: %s", exc)
             if self.config.fallback_to_json_text:
                 self.logger.info("Falling back to JSON-in-text parsing")
             raise ToolCallError(f"Gemini call failed: {exc}") from exc
-        finally:
-            if owns_request_client:
-                await request_client.aio.aclose()
 
     def generate_with_tools_sync(
         self,

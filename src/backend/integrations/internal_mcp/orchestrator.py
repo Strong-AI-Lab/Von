@@ -167,8 +167,8 @@ from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_path,
 )
 from ...workflows.conversation_turn_llm_timeout import (
-    coerce_conversation_turn_llm_timeout_sec,
-    default_conversation_turn_llm_timeout_sec,
+    coerce_conversation_turn_llm_advisory_sec,
+    default_conversation_turn_llm_advisory_sec,
 )
 from ...workflows.engine import (
     WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY,
@@ -329,13 +329,26 @@ def _resolve_identity_context(
 def _coerce_conversation_turn_llm_timeout_override_sec(
     raw_timeout: Any,
 ) -> float | None:
-    return coerce_conversation_turn_llm_timeout_sec(raw_timeout)
+    return coerce_conversation_turn_llm_advisory_sec(raw_timeout)
 
 
 def _default_conversation_turn_llm_timeout_override_sec() -> float | None:
-    return default_conversation_turn_llm_timeout_sec(
-        os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
+    return default_conversation_turn_llm_advisory_sec(
+        os.getenv("VON_CONVERSATION_TURN_LLM_ADVISORY_SEC")
+        or os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
     )
+
+
+def _without_elapsed_hard_timeout_params(
+    parameters: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return provider parameters without repository-created wall-clock caps."""
+
+    params = dict(parameters or {})
+    params.pop("request_timeout_seconds", None)
+    params.pop("timeout_seconds", None)
+    params.pop("request_advisory_seconds", None)
+    return params or None
 
 
 def _provider_from_llm_client(llm_client: Any) -> str | None:
@@ -465,9 +478,6 @@ class OrchestratorResult:
     completion_report: Mapping[str, Any] | None = None
 
 
-
-
-
 class _ToolCallRequest(TypedDict):
     action: Required[str]
     tool: Required[str]
@@ -540,7 +550,6 @@ class _MissingToolCallDetectorSpec:
     prompt_id: Optional[str]
     prompt_text: str
     model: Optional[str]
-
 
 
 @dataclass(frozen=True)
@@ -730,7 +739,6 @@ def _workflow_required_tools_from_contract(
     return _workflow_required_tools_from_contract_support(contract)
 
 
-
 _WORKFLOW_AMBIENT_INPUT_KEYS_KEY = "__workflow_ambient_input_keys"
 _NAMESPACED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS: frozenset[str] = frozenset(
     {
@@ -848,13 +856,6 @@ def _evaluate_workflow_required_effects_tool_policy(
     workflow_def: Any | None,
 ) -> dict[str, Any]:
     return _evaluate_workflow_required_effects_tool_policy_support(workflow_def)
-
-
-
-
-
-
-
 
 
 def _workflow_terminal_success_evaluation_from_result(
@@ -1007,9 +1008,6 @@ def _normalise_workflow_failure_detail_for_user(error_text: Any) -> str | None:
         )
 
     return cleaned_error
-
-
-
 
 
 def _safe_workflow_execution_aux_snapshot_value(
@@ -1549,8 +1547,6 @@ def _derive_workflow_selection_rationale(
     return f"routing_source:{source}"
 
 
-
-
 def _normalise_selector_candidate_role(candidate: Mapping[str, Any]) -> str | None:
     raw_role = candidate.get("routing_profile_role")
     if isinstance(raw_role, str) and raw_role.strip():
@@ -1561,7 +1557,6 @@ def _normalise_selector_candidate_role(candidate: Mapping[str, Any]) -> str | No
         if isinstance(nested_role, str) and nested_role.strip():
             return nested_role.strip().lower()
     return None
-
 
 
 def _workflow_execute_required(required_tools: Sequence[str] | None) -> bool:
@@ -1641,7 +1636,6 @@ def _build_workflow_execute_candidate_review_payload(
         ],
         "eligible_workflow_execute_candidates": candidates,
     }
-
 
 
 @dataclass(frozen=True)
@@ -1823,6 +1817,7 @@ class InternalMCPChatOrchestrator:
         "source_concept_not_found": ("source_id",),
         "predicate_concept_not_found": ("predicate",),
     }
+
     def __init__(
         self,
         *,
@@ -2824,9 +2819,7 @@ class InternalMCPChatOrchestrator:
         recovery_outcome = (
             "retry_needed"
             if retry_needed
-            else "retry_suppressed"
-            if retry_suppressed
-            else "no_retry_required"
+            else "retry_suppressed" if retry_suppressed else "no_retry_required"
         )
         if retry_suppressed:
             try:
@@ -4020,9 +4013,9 @@ class InternalMCPChatOrchestrator:
             retry_suppressed = True
             retry_attempts = max(retry_attempts, retry_budget)
             retries_remaining_after = 0
-            cast(MutableMapping[str, Any], data)["missing_tool_call_retry_attempts"] = (
-                retry_attempts
-            )
+            cast(MutableMapping[str, Any], data)[
+                "missing_tool_call_retry_attempts"
+            ] = retry_attempts
             try:
                 aux_log.append(
                     annotate_python_decision_event(
@@ -4292,9 +4285,7 @@ class InternalMCPChatOrchestrator:
             classifier_verdict_text = (
                 "yes"
                 if classifier_verdict is True
-                else "no"
-                if classifier_verdict is False
-                else "unavailable"
+                else "no" if classifier_verdict is False else "unavailable"
             )
             if "missing_tool_call_detection" not in existing_types:
                 aux_log.append(
@@ -4355,9 +4346,7 @@ class InternalMCPChatOrchestrator:
         retry_stage = (
             "completed"
             if retry_success
-            else "skipped"
-            if retry_suppressed
-            else "failed"
+            else "skipped" if retry_suppressed else "failed"
         )
         aux_log.append(
             {
@@ -8211,9 +8200,7 @@ class InternalMCPChatOrchestrator:
                 }
                 transport_metadata_fn = getattr(result, "telemetry_metadata", None)
                 transport_metadata = (
-                    transport_metadata_fn()
-                    if callable(transport_metadata_fn)
-                    else None
+                    transport_metadata_fn() if callable(transport_metadata_fn) else None
                 )
                 if isinstance(transport_metadata, Mapping):
                     invocation_record["transport"] = dict(transport_metadata)
@@ -10996,9 +10983,7 @@ class InternalMCPChatOrchestrator:
         batch_propagated_fields = mcp_schema.get("batch_propagated_fields")
         enum_values = mcp_schema.get("enum_values")
         scalar_source_fields = mcp_schema.get("scalar_source_fields")
-        comma_separated_list_fields = mcp_schema.get(
-            "comma_separated_list_fields"
-        )
+        comma_separated_list_fields = mcp_schema.get("comma_separated_list_fields")
         description = mcp_schema.get("description")
 
         properties: Dict[str, Any] = {}
@@ -11095,9 +11080,7 @@ class InternalMCPChatOrchestrator:
             }
         if (
             isinstance(comma_separated_list_fields, Sequence)
-            and not isinstance(
-                comma_separated_list_fields, (str, bytes, bytearray)
-            )
+            and not isinstance(comma_separated_list_fields, (str, bytes, bytearray))
             and comma_separated_list_fields
         ):
             json_schema["x-von-comma-separated-list-fields"] = [
@@ -15202,14 +15185,26 @@ class InternalMCPChatOrchestrator:
             ),
         )
         if stage_name in {"screen_backfill", "summariser", "summarizer"}:
-            timeout_sec = max(
+            advisory_sec = max(
                 0.0,
-                _coerce_float_env("VON_SCREEN_BACKFILL_LLM_TIMEOUT_SEC", 180.0),
+                _coerce_float_env(
+                    "VON_SCREEN_BACKFILL_LLM_ADVISORY_SEC",
+                    _coerce_float_env(
+                        "VON_SCREEN_BACKFILL_LLM_TIMEOUT_SEC",
+                        180.0,
+                    ),
+                ),
             )
         else:
-            timeout_sec = max(0.0, _coerce_float_env("VON_LLM_CALL_TIMEOUT_SEC", 0.0))
+            advisory_sec = max(
+                0.0,
+                _coerce_float_env(
+                    "VON_LLM_CALL_ADVISORY_SEC",
+                    _coerce_float_env("VON_LLM_CALL_TIMEOUT_SEC", 0.0),
+                ),
+            )
         if isinstance(timeout_override_sec, (int, float)):
-            timeout_sec = max(0.0, float(timeout_override_sec))
+            advisory_sec = max(0.0, float(timeout_override_sec))
 
         state: dict[str, Any] = {}
         done = threading.Event()
@@ -15230,6 +15225,7 @@ class InternalMCPChatOrchestrator:
             name=f"von-llm-{stage_name}",
         ).start()
 
+        advisory_crossing_emitted = False
         while not done.wait(timeout=heartbeat_interval_sec):
             elapsed_ms = int((time.perf_counter() - started) * 1000.0)
             heartbeat_payload: dict[str, Any] = {
@@ -15245,9 +15241,24 @@ class InternalMCPChatOrchestrator:
             emit_progress(heartbeat_payload)
             if callable(check_cancellation):
                 check_cancellation()
-            if timeout_sec > 0 and (elapsed_ms / 1000.0) >= timeout_sec:
-                raise TimeoutError(
-                    f"LLM call timed out after {int(timeout_sec)}s (stage={stage_name}, model={model_name or 'default'})"
+            if (
+                advisory_sec > 0
+                and (elapsed_ms / 1000.0) >= advisory_sec
+                and not advisory_crossing_emitted
+            ):
+                advisory_crossing_emitted = True
+                emit_progress(
+                    {
+                        **heartbeat_payload,
+                        "status": "llm_call_advisory_exceeded",
+                        "liveness_state": "slow",
+                        "liveness_reason": "elapsed_advisory_crossed_continuing",
+                        "llm_advisory_budget_seconds": advisory_sec,
+                        "result_summary": (
+                            "The model call exceeded its advisory duration and "
+                            "is still running."
+                        ),
+                    }
                 )
 
         error = state.get("error")
@@ -15499,7 +15510,7 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
-            model_parameters = (
+            model_parameters = _without_elapsed_hard_timeout_params(
                 dict(candidate.model_parameters)
                 if isinstance(candidate.model_parameters, Mapping)
                 and candidate.model_parameters
@@ -15509,7 +15520,7 @@ class InternalMCPChatOrchestrator:
                 attempt_meta["model_parameters"] = model_parameters
                 attempt_meta["effective_model_parameters"] = model_parameters
             if timeout_override_sec is not None:
-                attempt_meta["timeout_override_sec"] = timeout_override_sec
+                attempt_meta["advisory_timeout_seconds"] = timeout_override_sec
 
             if _dead_cache is not None and cache_key in _dead_cache:
                 dead_entry = _dead_cache[cache_key]
@@ -16798,7 +16809,7 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
-            model_parameters = (
+            model_parameters = _without_elapsed_hard_timeout_params(
                 dict(candidate.model_parameters)
                 if isinstance(candidate.model_parameters, Mapping)
                 and candidate.model_parameters
@@ -16808,7 +16819,7 @@ class InternalMCPChatOrchestrator:
                 attempt_meta["model_parameters"] = model_parameters
                 attempt_meta["effective_model_parameters"] = model_parameters
             if timeout_override_sec is not None:
-                attempt_meta["timeout_override_sec"] = timeout_override_sec
+                attempt_meta["advisory_timeout_seconds"] = timeout_override_sec
 
             if _dead_cache is not None and cache_key in _dead_cache:
                 dead_entry = _dead_cache[cache_key]
@@ -16911,12 +16922,6 @@ class InternalMCPChatOrchestrator:
             if provider == "openai":
                 structured_call_kwargs["parallel_tool_calls"] = False
                 provider_llm_params = dict(model_parameters or {})
-                if isinstance(timeout_override_sec, (int, float)) and float(
-                    timeout_override_sec
-                ) > 0:
-                    provider_llm_params["request_timeout_seconds"] = float(
-                        timeout_override_sec
-                    )
                 if provider_llm_params:
                     structured_call_kwargs["llm_params"] = provider_llm_params
                 if tool_choice_override is not None:
@@ -19008,14 +19013,10 @@ class InternalMCPChatOrchestrator:
             comma_separated_list_fields=(
                 tuple(
                     str(field_name).strip()
-                    for field_name in raw_schema.get(
-                        "comma_separated_list_fields", ()
-                    )
+                    for field_name in raw_schema.get("comma_separated_list_fields", ())
                     if isinstance(field_name, str) and field_name.strip()
                 )
-                if isinstance(
-                    raw_schema.get("comma_separated_list_fields"), Sequence
-                )
+                if isinstance(raw_schema.get("comma_separated_list_fields"), Sequence)
                 and not isinstance(
                     raw_schema.get("comma_separated_list_fields"),
                     (str, bytes, bytearray),
@@ -21032,9 +21033,7 @@ class InternalMCPChatOrchestrator:
                 related_concept_id = source_id
                 direction_from_focal_entity = "incoming"
             if related_concept_id:
-                predicate_id = str(
-                    hit.get("predicate_concept_id") or ""
-                ).strip()
+                predicate_id = str(hit.get("predicate_concept_id") or "").strip()
                 related_predicates = related_predicates_by_concept_id.setdefault(
                     related_concept_id,
                     [],
@@ -28837,7 +28836,6 @@ class InternalMCPChatOrchestrator:
                 *guidance_lines,
             ]
         )
-
 
 
 __all__ = [

@@ -118,17 +118,6 @@ def _is_agent_test_instance() -> bool:
     return _parse_bool_env("VON_AGENT_TEST_INSTANCE", False)
 
 
-def _positive_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        parsed = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
 def _positive_float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -144,11 +133,9 @@ def _chat_history_use_primary_preferred_reads() -> bool:
     return _parse_bool_env("VON_CHAT_HISTORY_PRIMARY_PREFERRED_READS", True)
 
 
-def _chat_history_read_max_time_ms() -> int:
-    return _positive_int_env("VON_CHAT_HISTORY_READ_MAX_TIME_MS", 2200)
-
-
 def _chat_history_read_circuit_seconds() -> float:
+    """Return how long a recent read failure remains visible as an advisory."""
+
     return _positive_float_env("VON_CHAT_HISTORY_READ_CIRCUIT_SECONDS", 3.0)
 
 
@@ -165,17 +152,12 @@ def is_transient_chat_history_error(exc: Exception) -> bool:
     return _is_transient_chat_history_error(exc)
 
 
-def get_chat_history_read_max_time_ms() -> int:
-    """Expose read max-time for route-level point reads in conversation endpoints."""
-    return _chat_history_read_max_time_ms()
-
-
 def find_chat_history_document_for_read(
     chat_history_coll,
     query: Dict[str, Any],
     projection: Optional[Dict[str, Any]] = None,
 ):
-    """Run a bounded read-only find_one against chat_history."""
+    """Run an observed read-only find_one against chat_history."""
     return _read_find_one(chat_history_coll, query, projection)
 
 
@@ -186,15 +168,27 @@ def _current_chat_history_read_circuit_remaining_seconds() -> float:
 
 
 def _guard_chat_history_read(op_name: str) -> None:
+    """Surface recent read degradation without rejecting a fresh read.
+
+    The former circuit breaker treated a transient failure as grounds to reject
+    all canonical reads for several seconds.  That made availability worse and
+    could hide a recovery that had already happened.  Keep the short-lived
+    state as operator-facing context, but let each authorised read attempt
+    proceed and reconcile its own result.
+    """
+
     remaining = _current_chat_history_read_circuit_remaining_seconds()
     if remaining <= 0:
         return
     with _CHAT_HISTORY_READ_CIRCUIT_LOCK:
         last_error = _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR
     detail = f"; last_error={last_error}" if last_error else ""
-    raise ChatHistoryServiceError(
-        f"Chat history temporarily unavailable for {op_name}; "
-        f"read circuit open for {remaining:.1f}s{detail}"
+    logger.warning(
+        "Chat history read advisory active for %s (%.1fs remaining%s); "
+        "continuing canonical read.",
+        op_name,
+        remaining,
+        detail,
     )
 
 
@@ -211,7 +205,8 @@ def _record_chat_history_read_failure(op_name: str, exc: Exception) -> None:
         )
         _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR = str(exc)
     logger.warning(
-        "Opening chat history read circuit for %.1fs after %s failure: %s",
+        "Marking chat history reads degraded for %.1fs after %s failure; "
+        "subsequent reads will still proceed: %s",
         cooldown_seconds,
         op_name,
         exc,
@@ -236,10 +231,7 @@ def _read_find_one(
     operation: str = "find_one",
     detail: Optional[str] = None,
 ):
-    max_time_ms = _chat_history_read_max_time_ms()
     kwargs: Dict[str, Any] = {}
-    if max_time_ms > 0:
-        kwargs["max_time_ms"] = max_time_ms
     comment = build_mongo_operation_comment(
         service="chat_history_service",
         collection=chat_history_collection_name,
@@ -256,7 +248,7 @@ def _read_find_one(
         success = True
         return result
     except TypeError as exc:
-        # Test doubles may not accept max_time_ms kwargs.
+        # Test doubles may not accept PyMongo comment kwargs.
         error_type = type(exc).__name__
         try:
             result = chat_history_coll.find_one(query, projection)
@@ -325,13 +317,6 @@ def _read_find(
             detail=detail,
             error_type=error_type,
         )
-    max_time_ms = _chat_history_read_max_time_ms()
-    if max_time_ms > 0:
-        try:
-            cursor = cursor.max_time_ms(max_time_ms)
-        except Exception:
-            # Some fake cursor implementations in tests may not support max_time_ms.
-            pass
     return cursor
 
 
@@ -342,10 +327,7 @@ def _read_aggregate(
     operation: str = "aggregate",
     detail: Optional[str] = None,
 ):
-    max_time_ms = _chat_history_read_max_time_ms()
     kwargs: Dict[str, Any] = {}
-    if max_time_ms > 0:
-        kwargs["maxTimeMS"] = max_time_ms
     comment = build_mongo_operation_comment(
         service="chat_history_service",
         collection=chat_history_collection_name,
@@ -362,7 +344,7 @@ def _read_aggregate(
         success = True
         return cursor
     except TypeError as exc:
-        # Test doubles may not accept maxTimeMS kwargs.
+        # Test doubles may not accept PyMongo comment kwargs.
         error_type = type(exc).__name__
         try:
             cursor = chat_history_coll.aggregate(pipeline)

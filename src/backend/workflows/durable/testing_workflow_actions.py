@@ -659,10 +659,14 @@ def _compact_workflow_execution_payload(
         "launch_mode",
         "await_terminal",
         "timeout_seconds",
+        "advisory_seconds",
         "configured_timeout_seconds",
         "poll_interval_seconds",
         "poll_count",
         "timed_out",
+        "elapsed_time_enforcement",
+        "advisory_exceeded",
+        "hard_timeout_seconds",
         "early_timeout_reason",
         "current_status",
         "current_state",
@@ -843,6 +847,9 @@ def _build_execution_quality_signals(
     }
     quality_signals["requires_follow_up"] = bool(
         quality_signals["timed_out"]
+        or _safe_str(workflow_execution.get("current_status"))
+        in {"pending", "running", "paused"}
+        or bool(_safe_str(workflow_execution.get("failure_code")))
         or quality_signals["candidate_validation_valid"] is False
         or quality_signals["metadata_validation_failed_count"] > 0
         or quality_signals["mutation_guardrail_blocked_count"] > 0
@@ -1572,6 +1579,8 @@ def _handle_experiment_execute_target_workflow(
             durable_system_status = get_durable_system_status()
         except Exception:
             durable_system_status = None
+    advisory_exceeded = bool(wait_result.advisory_exceeded)
+    hard_timed_out = bool(wait_result.timed_out and not advisory_exceeded)
     payload = build_workflow_execution_response(
         submission,
         workflow_inputs=workflow_inputs,
@@ -1580,7 +1589,9 @@ def _handle_experiment_execute_target_workflow(
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
         poll_count=wait_result.poll_count,
-        timed_out=wait_result.timed_out,
+        timed_out=hard_timed_out,
+        advisory_exceeded=advisory_exceeded,
+        elapsed_time_enforcement=wait_result.elapsed_time_enforcement,
         durable_system_status=durable_system_status,
     )
     workflow_execution = _compact_workflow_execution_payload(

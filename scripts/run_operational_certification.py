@@ -1601,7 +1601,10 @@ def _execute_represented_workflow_synchronously(
     ):
         response["error_code"] = "synchronous_workflow_timeout_invalid"
         return response
-    effective_timeout_seconds = max(1.0, min(float(timeout_seconds), 600.0))
+    if not math.isfinite(float(timeout_seconds)):
+        response["error_code"] = "synchronous_workflow_timeout_invalid"
+        return response
+    effective_timeout_seconds = max(1.0, float(timeout_seconds))
     response["workflow_inputs_sha256"] = stable_payload_digest(projected_inputs)
     response["timeout_seconds"] = effective_timeout_seconds
     trace = WorkflowExecutionTrace(
@@ -2488,6 +2491,13 @@ def _task_evidence_projection(task_evidence: Mapping[str, Any]) -> dict[str, Any
                 stable_payload_digest(last_status) if last_status else None
             ),
             "timed_out": task_evidence.get("timed_out"),
+            "observer_window_expired": task_evidence.get(
+                "observer_window_expired"
+            ),
+            "observation_pending": task_evidence.get("observation_pending"),
+            "task_id": task_evidence.get("task_id"),
+            "request_id": task_evidence.get("request_id"),
+            "reconciliation": _mapping(task_evidence.get("reconciliation")),
             "task_status_count": len(_sequence(task_evidence.get("task_statuses"))),
             "progress_snapshot_count": len(
                 _sequence(task_evidence.get("progress_snapshots"))
@@ -3904,13 +3914,21 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         "inputs": turn_inputs,
                     },
                 )
-                turn_results.append(
-                    _execute_primary_scenario(
-                        single_turn_scenario,
-                        trial_index,
-                        reset_evidence,
-                    )
+                turn_result = _execute_primary_scenario(
+                    single_turn_scenario,
+                    trial_index,
+                    reset_evidence,
                 )
+                turn_results.append(turn_result)
+                if (
+                    _text(turn_result.get("terminal_state")).lower()
+                    == "inconclusive"
+                    and _mapping(turn_result.get("path_analysis")).get(
+                        "observation_pending"
+                    )
+                    is True
+                ):
+                    break
             return _aggregate_authenticated_multi_turn_results(turn_results)
         if adapter_id == AUTHENTICATED_GENERATE_ADAPTER_ID:
             prompt = _text(inputs.get("prompt"))
@@ -3954,8 +3972,70 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 request_id=request_id,
                 timeout_seconds=args.timeout_seconds,
                 poll_interval_seconds=args.poll_interval_seconds,
-                cancel_on_timeout=True,
+                cancel_on_timeout=bool(
+                    getattr(args, "cancel_on_observer_expiry", False)
+                ),
             )
+            if task_evidence.get("observation_pending") is True:
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                return {
+                    "terminal_state": "inconclusive",
+                    "visible_answer": "",
+                    "path_analysis": {
+                        "observation_pending": True,
+                        "reconciliation": _bounded_safe_evidence(
+                            _mapping(task_evidence.get("reconciliation"))
+                        ),
+                    },
+                    "forbidden_mutations": [],
+                    "namespace_violations": [],
+                    "false_success_claims": [],
+                    "execution_budget_units": len(
+                        _sequence(task_evidence.get("task_statuses"))
+                    )
+                    + len(_sequence(task_evidence.get("progress_snapshots"))),
+                    "operational_metrics": {
+                        "duration_ms": elapsed_ms,
+                        "timeout": False,
+                        "observation_pending": True,
+                        "model_cost_units": None,
+                        "tool_cost_units": None,
+                        "follow_up_request_count": None,
+                        "follow_up_request_count_applicable": True,
+                        "follow_up_request_count_complete": False,
+                        "follow_up_request_count_evidence_kind": "pending",
+                        "clarification_count": None,
+                        "clarification_count_applicable": True,
+                        "clarification_count_complete": False,
+                        "clarification_count_evidence_kind": "pending",
+                        "correction_count": None,
+                        "correction_count_applicable": True,
+                        "correction_count_complete": False,
+                        "correction_count_evidence_kind": "pending",
+                        "false_success_count": 0,
+                        "namespace_violation_count": 0,
+                    },
+                    "turn_execution_request_ids": [request_id],
+                    "submission": _bounded_safe_evidence(
+                        {
+                            "task_id": task_id,
+                            "request_id": request_id,
+                            "client_request_id": client_request_id,
+                            "agent_test_selector_replay_mode": (
+                                AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+                            ),
+                        }
+                    ),
+                    "task_evidence": _task_evidence_projection(task_evidence),
+                    "turn_execution_record": {},
+                    "final_state_snapshot": {
+                        "schema_version": "operational_state_snapshot.v1",
+                        "isolation_id": isolation_id,
+                        "task_id": task_id,
+                        "request_id": request_id,
+                        "status": "pending",
+                    },
+                }
             task_result = _mapping(task_evidence.get("task_result"))
             turn_record = fetch_turn_record(
                 session=session,
@@ -4351,6 +4431,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 raise RuntimeError("durable_workflow_required_worker_build_unavailable")
             payload_operations: list[str] = []
             active_instance_id: str | None = None
+            observation_pending = False
             for step_index, raw_step in enumerate(submission_plan, start=1):
                 step = dict(raw_step)
                 operation = _text(step.get("operation") or "execute").lower()
@@ -4375,7 +4456,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     raise ValueError(
                         f"represented_durable_timeout_invalid:{step_index}"
                     )
-                timeout_seconds = min(max(0.0, timeout_value), 600.0)
+                timeout_seconds = max(0.0, timeout_value)
                 if operation == "execute":
                     step_payload = _mapping(
                         _workflow_execute(
@@ -4472,12 +4553,23 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         ):
                             break
                         if time.monotonic() >= deadline:
-                            raise RuntimeError(
-                                "durable_workflow_await_status_timed_out:"
-                                f"step_{step_index}:"
-                                f"status={observed_status or 'missing'}:"
-                                f"state={observed_state or 'missing'}"
-                            )
+                            observation_pending = True
+                            step_payload = {
+                                **step_payload,
+                                "observation_pending": True,
+                                "observation_window_seconds": timeout_seconds,
+                                "expected_statuses": sorted(expected_statuses),
+                                "expected_state": expected_state,
+                                "reconciliation": {
+                                    "schema_version": (
+                                        "durable_workflow_reconciliation.v1"
+                                    ),
+                                    "instance_id": active_instance_id,
+                                    "operation": "workflow_get_instance",
+                                    "task_left_running": True,
+                                },
+                            }
+                            break
                         time.sleep(poll_interval_seconds)
                 else:
                     if active_instance_id is None:
@@ -4497,6 +4589,8 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         )
                 payloads.append(step_payload)
                 payload_operations.append(operation)
+                if observation_pending:
+                    break
             payload = payloads[-1]
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             observed_tools = _observed_tool_names(payloads)
@@ -4709,6 +4803,8 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             )
             if not terminal_state:
                 terminal_state = "inconclusive"
+            if observation_pending:
+                terminal_state = "inconclusive"
             return {
                 "terminal_state": terminal_state,
                 "path_analysis": {
@@ -4732,6 +4828,10 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "pause_resume_continuity_observed": (
                         pause_resume_continuity_observed
                     ),
+                    "observation_pending": observation_pending,
+                    "reconciliation": _bounded_safe_evidence(
+                        _mapping(payload.get("reconciliation"))
+                    ),
                     "agent_test_fault_events": json_serialisable_projection(
                         fault_events
                     ),
@@ -4746,6 +4846,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 "operational_metrics": {
                     "duration_ms": elapsed_ms,
                     "timeout": timed_out,
+                    "observation_pending": observation_pending,
                     "model_cost_units": None,
                     "tool_cost_units": None,
                     "follow_up_request_count": None,
@@ -5104,8 +5205,24 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--model", default="")
-    parser.add_argument("--timeout-seconds", type=float, default=600.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=600.0,
+        help=(
+            "Observation/advisory window for live certification work. Elapsing "
+            "this window is inconclusive by default and does not cancel work."
+        ),
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=0.75)
+    parser.add_argument(
+        "--cancel-on-observer-expiry",
+        action="store_true",
+        help=(
+            "Explicitly cancel a still-live background chat task when the "
+            "certification observer window elapses."
+        ),
+    )
     parser.add_argument("--allow-non-agent-test-server", action="store_true")
     parser.add_argument("--experiment-run-id", default="")
     parser.add_argument(

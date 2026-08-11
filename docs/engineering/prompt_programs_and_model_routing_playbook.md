@@ -109,6 +109,76 @@ Maintain an explicit model registry or equivalent metadata covering:
 
 Routing policies should be measurable and revisable. Prefer explicit routers or decision surfaces over feature-specific model choices scattered through code.
 
+### 6A. Elapsed-time policy
+
+Conversation-turn and workflow LLM duration thresholds are advisories. The
+runtime records a crossing, keeps emitting progress, and retains a usable late
+result. Legacy `timeout` configuration names are interpreted as advisory
+durations and are not forwarded as provider request deadlines. Successful
+durations may raise later advisories with conservative headroom.
+
+The same rule applies to turn-support work that can still yield useful state:
+workflow model-policy and registry setup, represented-memory context
+resolution, and post-download file-copy registration continue after their
+advisory crossings. Their result telemetry records the crossing rather than
+substituting a synthetic timeout result.
+
+It also applies below orchestration. Semantic-query embedding is not forced
+through the former fixed eight-second request deadline, and derived
+relationship-extent index reads and synchronisation do not acquire 1-, 5-, or
+10-second PyMongo deadlines. Those paths retain slow results, record advisory
+crossings, and raise later advisories from observed successful duration with
+headroom. A bounded extent page may still cap the number of rows inspected;
+its elapsed-time value is an advisory and cannot end the scan by itself.
+
+Observation windows over durable external or workflow effects may return
+control at an advisory crossing when a stable task or instance identifier is
+available. The result must remain pending rather than failed and expose the
+canonical identifier plus a polling affordance. Jira bulk-move observation and
+durable workflow terminal observation follow this rule.
+
+The read-only stdio `von_chat_run` wrapper also treats its legacy
+`timeout_seconds` input as an advisory (with `advisory_seconds` preferred). It
+uses a bounded worker pool but waits for and returns a usable late turn result.
+
+Legacy model-provider `timeout_seconds` and `request_timeout_seconds` inputs
+are likewise duration advisories, not provider cancellation settings. The
+OpenAI, Gemini, and Ollama adapters remove them from model parameters, do not
+pass them to native transport timeout controls, and retain a completed result
+after logging an advisory crossing. Conversation-turn supervision adapts its
+next advisory from observed successful durations with capability-specific
+headroom.
+
+Workflow-discovery thresholds follow the same rule: crossing the advisory is
+telemetry, not permission to skip semantic or Vontology fallback substrates.
+A cold capability index may be observed for a short interval before those
+alternatives run, but the interval does not cancel the index build or terminate
+discovery.
+
+The canonical conversation transcript is also not replayed without bound into
+every stateless provider round. The ordinary-turn model projection keeps the
+recent transcript window, while the separately supplied represented
+conversation situation and bounded observations carry older material
+objectives, referents, commitments, and exact observations. The full transcript
+remains durable and readable; this projection is a model-context boundary, not
+history deletion.
+
+Compatibility payloads may still contain `budget_exhausted` and legacy
+`timeout_*` names. Consumers must use `elapsed_time_enforcement`,
+`advisory_budget_exceeded`, and `hard_timeout_exceeded` to distinguish a slow
+successful search from a real resource failure. Advisory crossings are latency
+learning signals; they are not routing failures, zero-result cache blockers, or
+negative workflow-selection rewards by themselves.
+
+Legacy represented dynamic-tool `dynamic_timeout_sec` values also configure
+an advisory. They do not create a hard boundary that the target capability did
+not independently declare and justify.
+
+Explicit user cancellation, provider failure, connection/resource protection,
+and durable authority or lease expiry remain real boundaries. A hard model-call
+cutoff requires one of those named constraints; elapsed time alone is not
+evidence that a call has stopped making useful progress.
+
 For structured tool calls, model capability is not enough on its own: the
 provider connection, deployment, model, and API surface form one transport
 capability. Represent surface-specific support on the model API profile. An

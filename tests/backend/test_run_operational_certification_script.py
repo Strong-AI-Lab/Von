@@ -2084,6 +2084,83 @@ def test_turn_record_evaluator_projection_includes_only_public_tool_evidence() -
     assert private_prompt not in json.dumps(projection)
 
 
+def test_authenticated_certification_observer_expiry_is_inconclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_preflight(monkeypatch)
+    observed_execution: dict[str, Any] = {}
+    poll_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        certification_script,
+        "create_replay_chat_session",
+        lambda **_kwargs: {"session_id": "chat-1"},
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "submit_background_generate",
+        lambda **_kwargs: {"task_id": "task-1", "request_id": "request-1"},
+    )
+
+    def poll(**kwargs: Any) -> dict[str, Any]:
+        poll_calls.append(dict(kwargs))
+        return {
+            "task_result": {"observation_pending": True},
+            "last_task_status": {"status": "running"},
+            "task_statuses": [{"status": "running"}],
+            "progress_snapshots": [],
+            "observer_window_expired": True,
+            "observation_pending": True,
+            "task_id": "task-1",
+            "request_id": "request-1",
+            "reconciliation": {
+                "task_id": "task-1",
+                "request_id": "request-1",
+                "task_left_running": True,
+            },
+        }
+
+    monkeypatch.setattr(certification_script, "poll_replay_task", poll)
+    monkeypatch.setattr(
+        certification_script,
+        "fetch_turn_record",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pending task must not require a terminal turn record")
+        ),
+    )
+
+    def inspect_execution(
+        contract,
+        *,
+        reset_scenario,
+        execute_scenario,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        scenario = contract.scenarios[0]
+        reset = reset_scenario(scenario, 1)
+        observed_execution.update(execute_scenario(scenario, 1, reset))
+        return {
+            "campaign_result": {
+                "certified": False,
+                "experiment_persistence_complete": False,
+            }
+        }
+
+    monkeypatch.setattr(
+        certification_script,
+        "run_operational_certification_campaign",
+        inspect_execution,
+    )
+
+    certification_script._live_execution(_args(), _contract())
+
+    assert poll_calls[0]["cancel_on_timeout"] is False
+    assert observed_execution["terminal_state"] == "inconclusive"
+    assert observed_execution["path_analysis"]["observation_pending"] is True
+    assert observed_execution["submission"]["task_id"] == "task-1"
+    assert observed_execution["task_evidence"]["observation_pending"] is True
+
+
 def test_turn_record_must_match_submitted_session_and_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2459,7 +2536,7 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
     certification_script._live_execution(_args(), contract)
 
     assert len(workflow_calls) == 2
-    assert workflow_calls[0]["timeout_seconds"] == 600.0
+    assert workflow_calls[0]["timeout_seconds"] == 10_000.0
     assert sleep_calls == [0.05]
     assert observed_execution["terminal_state"] == "completed"
     path = observed_execution["path_analysis"]

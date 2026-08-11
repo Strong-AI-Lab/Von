@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +21,11 @@ from src.backend.services.text_value_service import (
     upsert_singleton_text_relation,
 )
 from src.backend.services.workflow_discovery_service import (
+    ROUTING_EXCLUSION_EXPLICITLY_DISABLED,
+    WorkflowMatch,
+    _annotate_and_rank_candidates,
+    _filter_routing_candidates,
+    assess_workflow_routing_authority,
     invalidate_workflow_discovery_executability_caches,
 )
 from src.backend.workflows import (
@@ -33,6 +39,24 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_discovery_exemplars,
     resolve_workflow_launch_input_contract,
     resolve_workflow_routing_profile,
+)
+
+_SEED_BUNDLE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "backend"
+    / "workflows"
+    / "repo_seed_bundles"
+    / "represented_artefact_creation_workflow_seed_bundle.json"
+)
+_REVIEWED_V6_PARENT_AUTHORITY_SHA256 = (
+    "8d8667342c20b0f97b99ee48bfb9e875568b28ba5ea022d17fd8a69891f3d2db"
+)
+_REVIEWED_V7_PARENT_AUTHORITY_SHA256 = (
+    "76a561b09bf0e4ae165ffb25e775373ef8afb1d79a7cee0859aac2212a28d0f9"
+)
+_REVIEWED_V7_ITEM_AUTHORITY_SHA256 = (
+    "39d510b47d947bcb5d6f77697fa68a770d6c8ed64b579d8f004f382d6d87e532"
 )
 
 
@@ -136,6 +160,209 @@ def _assert_existing_artefact_was_not_mutated(
     assert forbidden_description not in descriptions
 
 
+def test_represented_artefact_workflow_family_has_reviewed_parent_only_routing() -> (
+    None
+):
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+
+    assert bundle["seed_version"] == "8"
+    assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
+        REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID: {
+            "5": ["2061801c8da0d8437f021ef49dd3af40d405f98fdc5388752d0b831ce689bb48"],
+            "6": [_REVIEWED_V6_PARENT_AUTHORITY_SHA256],
+            "7": [_REVIEWED_V7_PARENT_AUTHORITY_SHA256],
+        },
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID: {
+            "5": ["cc17479ee5df029a7baed2b1d21a1f0c098979afcda730c91a2e7acce624771e"],
+            "7": [_REVIEWED_V7_ITEM_AUTHORITY_SHA256],
+        },
+    }
+
+    workflows = {row["workflow_id"]: row for row in bundle["workflows"]}
+    parent = workflows[REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID]
+    parent_relations = {
+        row["predicate"]: json.loads(row["text"]) for row in parent["text_relations"]
+    }
+    routing = parent_relations["#V#hasWorkflowRoutingProfileJson"]
+    lifecycle = parent_relations["#V#hasWorkflowLifecycleJson"]
+
+    assert routing["routing_eligible"] is False
+    assert routing["explicit_workflow_context_required"] is True
+    assert lifecycle["routing_eligible"] is False
+    assert lifecycle["review_state"] == "approved"
+    assert lifecycle["reviewed_by"] == "Codex"
+    assert lifecycle["review_reason"] == (
+        "2026-08-10 explicit-only generic represented-artefact routing repair"
+    )
+
+    item = workflows[REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID]
+    item_relations = {
+        row["predicate"]: json.loads(row["text"]) for row in item["text_relations"]
+    }
+    item_routing = item_relations["#V#hasWorkflowRoutingProfileJson"]
+    item_lifecycle = item_relations["#V#hasWorkflowLifecycleJson"]
+    assert item_routing["routing_eligible"] is False
+    assert item_routing["explicit_workflow_context_required"] is True
+    assert item_lifecycle["routing_eligible"] is False
+    assert item_lifecycle["rollout_state"] == "support_subworkflow"
+    assert item_lifecycle["review_state"] == "approved"
+    assert item["publication_spec"]["initial_state"] == ("initialise_from_item_request")
+
+
+def test_normal_bootstrap_migrates_exact_reviewed_v6_parent_authority() -> None:
+    bootstrap_canonical_represented_artefact_creation_workflow()
+
+    upsert_singleton_text_relation(
+        subject_concept_id=REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRoutingProfileJson",
+        text=json.dumps(
+            {
+                "authoring_intent_required": False,
+                "prefer_existing_capability": False,
+                "role": "execution",
+                "schema_version": "workflow_routing_profile.v1",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v6_parent_authority"},
+        garbage_collect=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowLifecycleJson",
+        text=json.dumps(
+            {
+                "phase": "published",
+                "published": True,
+                "schema_version": "workflow_publication_lifecycle.v1",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v6_parent_authority"},
+        garbage_collect=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRepoSeedVersionJson",
+        text=json.dumps(
+            {
+                "authority_payload_sha256": _REVIEWED_V6_PARENT_AUTHORITY_SHA256,
+                "family_id": "represented_artefact_creation_workflow_seed_bundle",
+                "schema_version": "workflow_repo_seed_version.v1",
+                "seed_version": "6",
+                "source_tag": "JVNAUTOSCI-2577",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v6_parent_authority"},
+        garbage_collect=True,
+    )
+    invalidate_workflow_discovery_executability_caches()
+
+    report = bootstrap_canonical_represented_artefact_creation_workflow()
+    publication = report.get("publication") or {}
+    gate = publication.get("repo_seed_version_gate") or {}
+    adjudication = (gate.get("authority_adjudication_by_workflow") or {}).get(
+        REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID
+    ) or {}
+
+    assert adjudication["reason"] == "exact_reviewed_legacy_migration"
+    assert adjudication["observed_authority_payload_sha256"] == (
+        _REVIEWED_V6_PARENT_AUTHORITY_SHA256
+    )
+    assert publication["counts"]["workflows_published"] == 1
+    assert publication["counts"]["errors"] == 0
+
+    routing_profile, _ = resolve_workflow_routing_profile(
+        REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID
+    )
+    assert routing_profile["routing_eligible"] is False
+    assert routing_profile["explicit_workflow_context_required"] is True
+
+
+def test_normal_bootstrap_migrates_exact_reviewed_v7_item_authority() -> None:
+    bootstrap_canonical_represented_artefact_creation_workflow()
+
+    upsert_singleton_text_relation(
+        subject_concept_id=REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRoutingProfileJson",
+        text=json.dumps(
+            {
+                "authoring_intent_required": False,
+                "prefer_existing_capability": False,
+                "role": "execution",
+                "schema_version": "workflow_routing_profile.v1",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v7_item_authority"},
+        garbage_collect=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowLifecycleJson",
+        text=json.dumps(
+            {
+                "phase": "published",
+                "published": True,
+                "schema_version": "workflow_publication_lifecycle.v1",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v7_item_authority"},
+        garbage_collect=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRepoSeedVersionJson",
+        text=json.dumps(
+            {
+                "authority_payload_sha256": _REVIEWED_V7_ITEM_AUTHORITY_SHA256,
+                "family_id": "represented_artefact_creation_workflow_seed_bundle",
+                "schema_version": "workflow_repo_seed_version.v1",
+                "seed_version": "7",
+                "source_tag": "JVNAUTOSCI-2577",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v7_item_authority"},
+        garbage_collect=True,
+    )
+    invalidate_workflow_discovery_executability_caches()
+
+    report = bootstrap_canonical_represented_artefact_creation_workflow()
+    publication = report.get("publication") or {}
+    gate = publication.get("repo_seed_version_gate") or {}
+    adjudication = (gate.get("authority_adjudication_by_workflow") or {}).get(
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID
+    ) or {}
+
+    assert adjudication["reason"] == "exact_reviewed_legacy_migration"
+    assert adjudication["observed_authority_payload_sha256"] == (
+        _REVIEWED_V7_ITEM_AUTHORITY_SHA256
+    )
+    assert publication["counts"]["workflows_published"] == 1
+    assert publication["counts"]["errors"] == 0
+
+    routing_profile, _ = resolve_workflow_routing_profile(
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID
+    )
+    assert routing_profile["routing_eligible"] is False
+    assert routing_profile["explicit_workflow_context_required"] is True
+
+
 def test_bootstrap_materialises_represented_artefact_creation_workflow() -> None:
     report = bootstrap_canonical_represented_artefact_creation_workflow()
 
@@ -170,6 +397,26 @@ def test_bootstrap_materialises_represented_artefact_creation_workflow() -> None
     assert isinstance(routing_profile, dict)
     assert routing_source.startswith("text_relation:")
     assert routing_profile.get("role") == "execution"
+    assert routing_profile.get("routing_eligible") is False
+    assert routing_profile.get("explicit_workflow_context_required") is True
+
+    routing_authority = assess_workflow_routing_authority(
+        REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,
+        query="Keep the useful travel details somewhere sensible.",
+    )
+    assert routing_authority["routing_eligible"] is False
+    assert routing_authority["routing_exclusion_reason"] == (
+        ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    )
+
+    item_routing_profile, item_routing_source = resolve_workflow_routing_profile(
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID
+    )
+    assert isinstance(item_routing_profile, dict)
+    assert item_routing_source.startswith("text_relation:")
+    assert item_routing_profile.get("role") == "execution"
+    assert item_routing_profile.get("routing_eligible") is False
+    assert item_routing_profile.get("explicit_workflow_context_required") is True
 
     discovery_exemplars, discovery_source = resolve_workflow_discovery_exemplars(
         REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID
@@ -423,6 +670,119 @@ def test_bootstrap_materialises_represented_artefact_creation_workflow() -> None
         "hasContent",
         "hasNote",
     ]
+
+
+def test_internal_item_workflow_is_excluded_from_ordinary_routing_candidates() -> None:
+    bootstrap_canonical_represented_artefact_creation_workflow()
+
+    ordinary_query = (
+        "That design makes sense. Go ahead, reusing anything that's already there."
+    )
+    routing_authority = assess_workflow_routing_authority(
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+        query=ordinary_query,
+    )
+    assert routing_authority["routing_eligible"] is False
+    assert routing_authority["routing_exclusion_reason"] == (
+        ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    )
+
+    annotated = _annotate_and_rank_candidates(
+        [
+            WorkflowMatch(
+                concept_id=REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+                name="Represented Artefact Item Creation Workflow",
+                relevance_score=1.0,
+            )
+        ],
+        max_results=1,
+        query=ordinary_query,
+    )
+    assert len(annotated) == 1
+    assert annotated[0].is_executable is True
+    assert annotated[0].routing_eligible is False
+    assert annotated[0].is_policy_safe is False
+    assert annotated[0].routing_exclusion_reason == (
+        ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    )
+    assert (
+        _filter_routing_candidates(
+            annotated,
+            allow_non_executable=False,
+        )
+        == []
+    )
+
+
+def test_parent_fanout_can_invoke_non_routing_internal_item_workflow() -> None:
+    bootstrap_canonical_represented_artefact_creation_workflow()
+    definition = load_workflow_definition_from_vontology(
+        REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    artefact_specs = []
+    for suffix in ("a", "b"):
+        concept_id = f"#V#existing_parent_fanout_marker_{suffix}"
+        name = f"Existing parent fan-out marker {suffix.upper()}"
+        description = f"Original parent fan-out description {suffix.upper()}."
+        _seed_existing_represented_artefact(
+            concept_id=concept_id,
+            name=name,
+            description=description,
+        )
+        artefact_specs.append(
+            {
+                "name": name,
+                "decision": "reuse_existing",
+                "target_name": name,
+                "target_code": f"existing/parent_fanout/{suffix}",
+                "target_kind": "individual",
+                "parent_id": None,
+                "existing_concept_id": concept_id,
+                "concepts": [],
+                "description_text": description,
+                "parent_rationale": "Reuse the already represented marker.",
+                "blocking_reason": None,
+                "prompt": f"Reuse {name} and read it back.",
+            }
+        )
+
+    queued_llm = _QueuedLLM(
+        [
+            json.dumps(
+                {
+                    "mode": "set",
+                    "artefact_specs": artefact_specs,
+                    "set_summary": "Two existing represented markers.",
+                    "blocking_reason": None,
+                }
+            )
+        ]
+    )
+    result = WorkflowExecutor(
+        registry=build_durable_action_registry(),
+        max_transitions=20,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=queued_llm,
+            user_namespace="#V#test_user",
+        ),
+        data={"prompt": "Reuse these two represented markers."},
+    )
+
+    assert result.completed is True
+    assert result.final_state == _step_id("completed")
+    assert queued_llm.remaining_count == 0
+    assert result.data.get("represented_artefact_set_success_count") == 2
+    assert result.data.get("represented_artefact_set_error_count") == 0
+    invocations = result.data.get("invocations") or []
+    action_ids = {item.get("tool") for item in invocations if isinstance(item, dict)}
+    assert {"fetch_concept", "get_text_relations_summary"}.issubset(action_ids)
+    assert action_ids.isdisjoint(
+        {"create_concepts", "add_relationship", "upsert_singleton_text_relation"}
+    )
 
 
 def test_represented_artefact_creation_prompt_support_seeds_parent_policy() -> None:

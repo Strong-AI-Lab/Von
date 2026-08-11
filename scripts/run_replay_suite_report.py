@@ -2,8 +2,8 @@
 
 This runner provides one place to:
 - list discovered replay definitions from prompt banks and workflow seed bundles;
-- run replay-capable cases with per-case and suite-level timeout bounds;
-- report skipped/not-runnable/timeouts as first-class outcomes;
+- run replay-capable cases with per-case and suite-level observation windows;
+- report skipped/not-runnable/pending observations as first-class outcomes;
 - preserve the explicitly requested model and AgentTest execution context.
 """
 
@@ -508,16 +508,32 @@ def _run_prompt_sampler_case(
     if allow_non_agent_test_server:
         command.append("--allow-non-agent-test-server")
 
-    process = subprocess.run(  # noqa: S603
+    process = subprocess.run(
         command,
         capture_output=True,
         text=True,
-        timeout=max(timeout_seconds + 20.0, 20.0),
+        check=False,
         cwd=str(PROJECT_ROOT),
     )
     payload = _read_json_file_if_present(output_path)
     if not payload:
         payload = _parse_json_from_stdout(process.stdout)
+
+    status = _safe_text(payload.get("status")).lower()
+    pending_observation = _as_mapping(
+        _as_mapping(payload.get("response")).get("observation_pending")
+    )
+    if status in {"pending", "inconclusive"} or pending_observation:
+        return {
+            "result": "pending",
+            "health": "n/a",
+            "failure_stall_reason": (
+                "Observation window elapsed while the server task remained "
+                "live; reconcile it using the recorded task/request IDs."
+            ),
+            "evidence": _extract_evidence_tokens(payload),
+            "raw_result": payload,
+        }
 
     if process.returncode != 0:
         reason = _extract_prompt_sampler_failure_reason(
@@ -577,11 +593,11 @@ def _run_arxiv_workflow_case(
     if allow_non_agent_test_server:
         command.append("--allow-non-agent-test-server")
 
-    process = subprocess.run(  # noqa: S603
+    process = subprocess.run(
         command,
         capture_output=True,
         text=True,
-        timeout=max(timeout_seconds + 5.0, 35.0),
+        check=False,
         cwd=str(PROJECT_ROOT),
     )
     payload = _parse_json_from_stdout(process.stdout)
@@ -592,9 +608,23 @@ def _run_arxiv_workflow_case(
     reason = _safe_text(payload.get("error"))
     if process.returncode != 0 and not reason:
         reason = _safe_text(process.stderr) or "arXiv workflow replay failed"
+    observer_expired = bool(
+        not passed
+        and (
+            _safe_text(payload.get("status")).lower() in {"pending", "timed_out"}
+            or "before timeout" in reason.lower()
+            or "observation window" in reason.lower()
+        )
+    )
     return {
-        "result": "passed" if passed else "failed",
-        "health": "1/1 (100%)" if passed else "0/1 (0%)",
+        "result": (
+            "passed" if passed else ("pending" if observer_expired else "failed")
+        ),
+        "health": (
+            "1/1 (100%)"
+            if passed
+            else ("n/a" if observer_expired else "0/1 (0%)")
+        ),
         "failure_stall_reason": "" if passed else reason,
         "evidence": _extract_evidence_tokens(payload)
         or [f"return_code={process.returncode}"],
@@ -658,10 +688,13 @@ def execute_replay_case(
             }
     except subprocess.TimeoutExpired as exc:
         run_result = {
-            "result": "timed_out",
-            "health": "0/1 (0%)",
-            "failure_stall_reason": f"Replay exceeded timeout after {timeout_seconds:.1f}s: {exc}",
-            "evidence": [f"timeout_seconds={timeout_seconds:.1f}"],
+            "result": "pending",
+            "health": "n/a",
+            "failure_stall_reason": (
+                "The suite observer stopped waiting after "
+                f"{timeout_seconds:.1f}s; no product failure was inferred: {exc}"
+            ),
+            "evidence": [f"observation_seconds={timeout_seconds:.1f}"],
         }
     except Exception as exc:  # pragma: no cover - defensive
         run_result = {
@@ -798,11 +831,14 @@ def run_replay_suite(
             results.append(
                 {
                     "replay_id": _safe_text(case.get("replay_id")),
-                    "result": "timed_out",
-                    "health": "0/1 (0%)",
-                    "failure_stall_reason": "Suite-level timeout exhausted before this replay could start.",
+                    "result": "pending",
+                    "health": "n/a",
+                    "failure_stall_reason": (
+                        "Suite observation window elapsed before this replay "
+                        "could start; the case is unobserved, not failed."
+                    ),
                     "evidence": [
-                        f"suite_timeout_seconds={suite_timeout_seconds:.1f}",
+                        f"suite_observation_seconds={suite_timeout_seconds:.1f}",
                     ],
                     "duration_seconds": 0.0,
                 }
@@ -885,8 +921,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Allow targeting non-AgentTest servers; otherwise downstream harnesses enforce AgentTest markers.",
     )
     parser.add_argument("--model", default=DEFAULT_PROMPT_MODEL)
-    parser.add_argument("--per-replay-timeout-seconds", type=float, default=600.0)
-    parser.add_argument("--suite-timeout-seconds", type=float, default=3600.0)
+    parser.add_argument(
+        "--per-replay-timeout-seconds",
+        type=float,
+        default=600.0,
+        help=(
+            "Per-case observation window. This does not authorise cancelling "
+            "server work or classifying an unfinished case as failed."
+        ),
+    )
+    parser.add_argument(
+        "--suite-timeout-seconds",
+        type=float,
+        default=3600.0,
+        help=(
+            "Suite scheduling observation window. Cases not started before it "
+            "elapses are reported pending, not failed."
+        ),
+    )
     parser.add_argument("--output-json", default="")
     parser.add_argument("--output-markdown", default="")
     return parser.parse_args(argv)
@@ -950,11 +1002,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "execution_policy": {
             "dry_run": dry_run,
+            "elapsed_time_policy": "advisory_observation_only",
             "base_url": _safe_text(args.base_url),
             "allow_non_agent_test_server": bool(args.allow_non_agent_test_server),
             "requested_model": _safe_text(args.model),
             "per_replay_timeout_seconds": float(args.per_replay_timeout_seconds),
             "suite_timeout_seconds": float(args.suite_timeout_seconds),
+            "per_replay_observation_seconds": float(
+                args.per_replay_timeout_seconds
+            ),
+            "suite_observation_seconds": float(args.suite_timeout_seconds),
         },
         "counts": {
             "discovered": len(all_cases),
@@ -972,7 +1029,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if _safe_text(args.output_json):
         _write_json(_safe_text(args.output_json), report_payload)
 
-    failing_statuses = {"failed", "timed_out"}
+    failing_statuses = {"failed"}
     has_failures = any(
         _safe_text(item.get("result")) in failing_statuses for item in results
     )

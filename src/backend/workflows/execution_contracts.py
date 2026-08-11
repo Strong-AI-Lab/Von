@@ -36,6 +36,12 @@ WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID = "workflow_control.context_project"
 WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID = (
     "workflow_control.kr_materialisation_guard"
 )
+WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID = (
+    "workflow_control.kr_relationship_resolution"
+)
+WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID = (
+    "workflow_control.kr_relationship_readback"
+)
 WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID = (
     "workflow_control.pause_at_checkpoint"
 )

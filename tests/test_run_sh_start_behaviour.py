@@ -908,6 +908,42 @@ PY
     assert payload == {"stable": False, "calls": 3}
 
 
+def test_run_sh_readiness_observation_is_pending_while_process_lives() -> None:
+    payload = _run_bash_probe(
+        r"""
+logs=()
+tail_calls=0
+removed_pidfile=0
+log() { logs+=("$*"); }
+process_exists() { [ "$1" = "4242" ]; }
+remove_pidfile() { removed_pidfile=$((removed_pidfile + 1)); }
+show_server_start_failure_tail() { tail_calls=$((tail_calls + 1)); }
+
+if report_server_readiness_observation 4242 "Health remains pending."; then alive_status=0; else alive_status=$?; fi
+if report_server_readiness_observation 5252 "Health remains pending."; then dead_status=0; else dead_status=$?; fi
+
+LOGS="$(printf '%s\n' "${logs[@]}")" python3 - <<PY
+import json
+import os
+print(json.dumps({
+    "alive_status": $alive_status,
+    "dead_status": $dead_status,
+    "tail_calls": $tail_calls,
+    "removed_pidfile": $removed_pidfile,
+    "logs": os.environ.get("LOGS", "").splitlines(),
+}))
+PY
+"""
+    )
+
+    assert payload["alive_status"] == 0
+    assert payload["dead_status"] == 1
+    assert payload["tail_calls"] == 1
+    assert payload["removed_pidfile"] == 1
+    assert any("Returning with readiness pending" in line for line in payload["logs"])
+    assert any("server process PID=5252 has exited" in line for line in payload["logs"])
+
+
 def test_run_sh_von_main_process_accepts_relative_script_from_repo_root() -> None:
     payload = _run_bash_probe(
         r"""

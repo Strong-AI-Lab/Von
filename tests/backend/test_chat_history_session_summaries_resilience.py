@@ -45,6 +45,7 @@ class _TrackingCursor:
         self.sort_calls = []
         self.limit_calls = []
         self.batch_size_calls = []
+        self.max_time_ms_calls = []
 
     def sort(self, sort_spec):
         self.sort_calls.append(sort_spec)
@@ -66,7 +67,8 @@ class _TrackingCursor:
         self.batch_size_calls.append(batch_size)
         return self
 
-    def max_time_ms(self, _max_time_ms):
+    def max_time_ms(self, max_time_ms):
+        self.max_time_ms_calls.append(max_time_ms)
         return self
 
     def __iter__(self):
@@ -188,6 +190,7 @@ def test_light_session_summaries_sort_and_limit_before_materialising(monkeypatch
         [("updated_at", -1), ("created_at", -1)]
     ]
     assert collection.cursor.limit_calls == [3]
+    assert collection.cursor.max_time_ms_calls == []
     assert [session["session_id"] for session in result["sessions"]] == [
         "s-7",
         "s-6",
@@ -229,6 +232,7 @@ def test_light_session_summaries_bound_agent_visibility_overfetch(monkeypatch):
     assert collection.cursor is not None
     assert collection.cursor.limit_calls == [250]
     assert collection.cursor.batch_size_calls == [250]
+    assert collection.cursor.max_time_ms_calls == []
     assert result["metadata_query_limit"] == 250
     assert result["raw_session_count_is_bounded"] is True
 

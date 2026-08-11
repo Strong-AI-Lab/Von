@@ -1340,6 +1340,8 @@ def test_workflow_get_instance_wait_expiry_returns_current_state_without_restart
             instance=awaited_manager.get_instance(awaited_instance_id),
             poll_count=3,
             timed_out=True,
+            elapsed_time_enforcement="advisory",
+            advisory_exceeded=True,
         )
 
     monkeypatch.setattr(
@@ -1369,7 +1371,10 @@ def test_workflow_get_instance_wait_expiry_returns_current_state_without_restart
     assert detail.get("success") is True
     assert detail.get("status") == "pending"
     assert detail.get("poll_count") == 3
-    assert detail.get("timed_out") is True
+    assert detail.get("timed_out") is False
+    assert detail.get("elapsed_time_enforcement") == "advisory"
+    assert detail.get("advisory_exceeded") is True
+    assert detail.get("hard_timeout_seconds") is None
 
     for field, value in (
         ("timeout_seconds", float("inf")),

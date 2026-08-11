@@ -34,7 +34,13 @@ _LLAMAINDEX_MISSING_MESSAGE = (
     "LlamaIndex dependencies missing. Install the optional dependency group(s) "
     "that provide `llama-index` for this backend."
 )
-_QUERY_EMBED_TIMEOUT_SECONDS = 8.0
+_QUERY_EMBED_ADVISORY_SECONDS = max(
+    0.1,
+    float(
+        os.environ.get("VON_RAG_QUERY_EMBED_ADVISORY_SECONDS")
+        or os.environ.get("VON_RAG_QUERY_EMBED_TIMEOUT_SECONDS", "8")
+    ),
+)
 _QUERY_EMBED_MAX_RETRIES = 0
 _INDEX_METADATA_FILENAME = "index_metadata.json"
 _RUNTIME_CONFIGURATION_CACHE_TTL_SECONDS = 2.0
@@ -485,7 +491,12 @@ class LlamaIndexRAGService(RAGService):
         return dict(self._runtime_configuration or {})
 
     def _temporarily_bound_query_embed_model(self) -> tuple[Any, Dict[str, Any]]:
-        """Keep semantic-query embedding failures bounded so callers can fall back."""
+        """Disable excess retries without imposing a query-time deadline.
+
+        Provider and transport resource boundaries remain authoritative. The
+        former fixed eight-second timeout was an orchestration cutoff: it made
+        a slow, otherwise usable embedding fail and forced a retrieval fallback.
+        """
         embed_model = self.get_runtime_embed_model()
         if embed_model is None:
             return None, {}
@@ -498,14 +509,8 @@ class LlamaIndexRAGService(RAGService):
             setattr(embed_model, "max_retries", _QUERY_EMBED_MAX_RETRIES)
             settings_changed = True
 
-        current_timeout = getattr(embed_model, "timeout", None)
-        if isinstance(current_timeout, (int, float)) and current_timeout > _QUERY_EMBED_TIMEOUT_SECONDS:
-            previous["timeout"] = current_timeout
-            setattr(embed_model, "timeout", _QUERY_EMBED_TIMEOUT_SECONDS)
-            settings_changed = True
-
         # LlamaIndex may keep a cached OpenAI client built with the previous retry
-        # budget. Reset it so the bounded query settings actually take effect.
+        # count. Reset it so the retry setting actually takes effect.
         if settings_changed:
             if hasattr(embed_model, "_client"):
                 previous["_client"] = getattr(embed_model, "_client")
@@ -1289,6 +1294,17 @@ class LlamaIndexRAGService(RAGService):
         try:
             retriever = index.as_retriever(similarity_top_k=similarity_top_k)
             nodes = retriever.retrieve(query_text)
+            query_elapsed_seconds = time.perf_counter() - start
+            query_advisory_exceeded = (
+                query_elapsed_seconds >= _QUERY_EMBED_ADVISORY_SECONDS
+            )
+            if query_advisory_exceeded:
+                logger.warning(
+                    "RAG query crossed its %.3fs embedding/retrieval advisory; "
+                    "the usable result was retained after %.3fs.",
+                    _QUERY_EMBED_ADVISORY_SECONDS,
+                    query_elapsed_seconds,
+                )
         except Exception as exc:
             state = build_rag_retrieval_state(
                 "degraded",
@@ -1539,6 +1555,10 @@ class LlamaIndexRAGService(RAGService):
                 "retrieved": visible_result_count,
                 "returned": len(results),
                 "elapsed_ms": elapsed_ms,
+                "elapsed_time_enforcement": "advisory",
+                "advisory_seconds": _QUERY_EMBED_ADVISORY_SECONDS,
+                "advisory_exceeded": query_advisory_exceeded,
+                "hard_timeout_seconds": None,
                 "retrieval_state": dict(query_results.retrieval_state),
             }
         except Exception:

@@ -540,14 +540,153 @@ def get_service(profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = N
 
 
 def _compose_query(profile: GmailProfile, query: Optional[str]) -> Optional[str]:
-    parts = []
-    if profile.query_prefix:
-        parts.append(profile.query_prefix)
-    if query:
-        parts.append(query)
-    if not parts:
-        return None
-    return " ".join(parts)
+    profile_query = (
+        profile.query_prefix
+        if isinstance(profile.query_prefix, str) and profile.query_prefix.strip()
+        else None
+    )
+    caller_query = query if isinstance(query, str) and query.strip() else None
+    if profile_query and caller_query:
+        # Gmail treats adjacent clauses as AND. Group each independently so an
+        # OR-bearing profile restriction cannot absorb or reorder caller terms.
+        return f"({profile_query}) ({caller_query})"
+    return profile_query or caller_query
+
+
+_LIST_MESSAGE_METADATA_FIELD_ALIASES: Mapping[str, str] = {
+    "id": "message_id",
+    "message_id": "message_id",
+    "threadid": "thread_id",
+    "thread_id": "thread_id",
+    "from": "sender",
+    "sender": "sender",
+    "subject": "subject",
+    "date": "date",
+    "received_at": "date",
+    "received_date": "date",
+    "snippet": "snippet",
+    "labelids": "label_ids",
+    "label_ids": "label_ids",
+    "labels": "label_ids",
+}
+_LIST_MESSAGE_SUMMARY_FIELDS: tuple[str, ...] = (
+    "sender",
+    "subject",
+    "date",
+    "snippet",
+)
+_LIST_MESSAGE_HEADER_NAMES: Mapping[str, str] = {
+    "sender": "From",
+    "subject": "Subject",
+    "date": "Date",
+}
+
+
+def _normalise_list_message_metadata_fields(
+    include_metadata: Optional[List[str]],
+) -> tuple[str, ...]:
+    """Return supported list-row projection fields in caller order.
+
+    Gmail's list endpoint returns only message and thread identifiers. Treat a
+    request for ``metadata``/``headers`` as the ordinary message-summary view,
+    while accepting common wire-key aliases for more selective projections.
+    Unknown hints are ignored so an older planner cannot expand the response
+    surface accidentally.
+    """
+
+    fields: list[str] = []
+    for raw_field in include_metadata or []:
+        if not isinstance(raw_field, str):
+            continue
+        cleaned = raw_field.strip().lower().replace("-", "_")
+        if cleaned in {
+            "all",
+            "headers",
+            "metadata",
+            "payload.headers",
+            "summary",
+        }:
+            candidates = (
+                "message_id",
+                "thread_id",
+                *_LIST_MESSAGE_SUMMARY_FIELDS,
+            )
+        else:
+            canonical = _LIST_MESSAGE_METADATA_FIELD_ALIASES.get(cleaned)
+            candidates = (canonical,) if canonical else ()
+        for candidate in candidates:
+            if candidate not in fields:
+                fields.append(candidate)
+    return tuple(fields)
+
+
+def _gmail_headers_to_mapping(message: Mapping[str, Any]) -> dict[str, str]:
+    payload = message.get("payload")
+    if not isinstance(payload, Mapping):
+        return {}
+    raw_headers = payload.get("headers")
+    if not isinstance(raw_headers, list):
+        return {}
+
+    headers: dict[str, str] = {}
+    for raw_header in raw_headers:
+        if not isinstance(raw_header, Mapping):
+            continue
+        name = raw_header.get("name")
+        value = raw_header.get("value")
+        if isinstance(name, str) and isinstance(value, str):
+            headers[name.strip().lower()] = value
+    return headers
+
+
+def _project_list_message_metadata(
+    listed_message: Mapping[str, Any],
+    metadata_message: Mapping[str, Any],
+    *,
+    requested_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    """Merge only the requested safe metadata fields into one list row."""
+
+    # Gmail currently emits only id/threadId from list(), but allow-list the
+    # stable identifiers so an upstream expansion cannot smuggle a MIME
+    # payload or body into this deliberately small projection.
+    row = {
+        key: listed_message[key]
+        for key in ("id", "message_id", "threadId", "thread_id")
+        if key in listed_message
+    }
+    message_id = metadata_message.get("id") or row.get("id")
+    if isinstance(message_id, str) and message_id.strip():
+        row.setdefault("id", message_id.strip())
+        row["message_id"] = message_id.strip()
+
+    thread_id = metadata_message.get("threadId") or row.get("threadId")
+    if isinstance(thread_id, str) and thread_id.strip():
+        row.setdefault("threadId", thread_id.strip())
+        row["thread_id"] = thread_id.strip()
+
+    requested = set(requested_fields)
+    if "label_ids" in requested:
+        label_ids = metadata_message.get("labelIds")
+        if isinstance(label_ids, list):
+            row["labelIds"] = list(label_ids)
+            row["label_ids"] = list(label_ids)
+
+    if "snippet" in requested:
+        snippet = metadata_message.get("snippet")
+        if isinstance(snippet, str):
+            row["snippet"] = snippet
+
+    headers = _gmail_headers_to_mapping(metadata_message)
+    if "sender" in requested and "from" in headers:
+        row["sender"] = headers["from"]
+        row["from"] = headers["from"]
+    if "subject" in requested and "subject" in headers:
+        row["subject"] = headers["subject"]
+    if "date" in requested and "date" in headers:
+        row["date"] = headers["date"]
+
+    return row
 
 
 def list_messages(
@@ -555,6 +694,7 @@ def list_messages(
     query: Optional[str] = None,
     label_ids: Optional[List[str]] = None,
     max_results: int = 25,
+    include_metadata: Optional[List[str]] = None,
     profiles: Optional[Dict[str, GmailProfile]] = None,
     audit_context: Optional[Mapping[str, object]] = None,
     bypass_profile_query_prefix: bool = False,
@@ -567,6 +707,10 @@ def list_messages(
     an unfiltered mailbox view when the profile-level filter would silently
     exclude relevant mail (e.g. mailing-list deliveries that do not match a
     ``to:``/``from:`` prefix).
+
+    ``include_metadata`` is an opt-in list-row projection. It performs at most
+    one Gmail ``format=metadata`` read for each row returned by the list call
+    and never requests or returns the message body or MIME payload.
     """
 
     profile = get_profile(profile_id, profiles)
@@ -587,17 +731,106 @@ def list_messages(
         effective_label_ids = label_ids or profile.label_filter or None
         composed_query = _compose_query(profile, query)
 
-    request = (
-        service.users()
-        .messages()
-        .list(
-            userId=profile.user_id,
-            q=composed_query,
-            labelIds=effective_label_ids,
-            maxResults=max_results,
-        )
+    messages_resource = service.users().messages()
+    request = messages_resource.list(
+        userId=profile.user_id,
+        q=composed_query,
+        labelIds=effective_label_ids,
+        maxResults=max_results,
     )
-    return request.execute() or {}
+    result = request.execute() or {}
+
+    requested_fields = _normalise_list_message_metadata_fields(include_metadata)
+    if not requested_fields:
+        return result
+    raw_messages = result.get("messages")
+    if not isinstance(raw_messages, list):
+        result["metadata_projection"] = {
+            "requested_fields": list(requested_fields),
+            "metadata_format": "metadata",
+            "body_included": False,
+            "attempted_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+        }
+        return result
+
+    requested_detail_fields = tuple(
+        field_name
+        for field_name in requested_fields
+        if field_name in {*_LIST_MESSAGE_SUMMARY_FIELDS, "label_ids"}
+    )
+    detail_fields = set(requested_detail_fields)
+    header_names = [
+        header_name
+        for field_name, header_name in _LIST_MESSAGE_HEADER_NAMES.items()
+        if field_name in detail_fields
+    ]
+
+    projected_messages: list[Any] = []
+    metadata_reads_attempted = 0
+    metadata_reads_succeeded = 0
+    metadata_reads_failed = 0
+    for listed_message in raw_messages:
+        if not isinstance(listed_message, Mapping):
+            projected_messages.append(listed_message)
+            continue
+        message_id = listed_message.get("id") or listed_message.get("message_id")
+        metadata_message: Mapping[str, Any] = {}
+        metadata_error: dict[str, Any] | None = None
+        if isinstance(message_id, str) and message_id.strip() and detail_fields:
+            metadata_reads_attempted += 1
+            metadata_request_kwargs: dict[str, Any] = {
+                "userId": profile.user_id,
+                "id": message_id.strip(),
+                "format": "metadata",
+                # A partial-response mask prevents MIME parts or bodies from
+                # entering the list result even if Gmail changes its defaults.
+                "fields": "id,threadId,labelIds,snippet,payload(headers)",
+            }
+            if header_names:
+                metadata_request_kwargs["metadataHeaders"] = header_names
+            try:
+                metadata_result = messages_resource.get(
+                    **metadata_request_kwargs
+                ).execute()
+                if isinstance(metadata_result, Mapping):
+                    metadata_message = metadata_result
+                    metadata_reads_succeeded += 1
+                else:
+                    metadata_reads_failed += 1
+                    metadata_error = {
+                        "code": "gmail_metadata_projection_unavailable",
+                        "reason": "empty_or_invalid_metadata_response",
+                    }
+            except Exception as exc:  # noqa: BLE001 - preserve successful ID list
+                metadata_reads_failed += 1
+                metadata_error = {
+                    "code": "gmail_metadata_projection_unavailable",
+                    "exception_type": type(exc).__name__,
+                }
+        projected_message = _project_list_message_metadata(
+            listed_message,
+            metadata_message,
+            requested_fields=requested_fields,
+        )
+        if metadata_error is not None:
+            projected_message["metadata_error"] = metadata_error
+            projected_message["metadata_missing_fields"] = list(
+                requested_detail_fields
+            )
+        projected_messages.append(projected_message)
+
+    result["messages"] = projected_messages
+    result["metadata_projection"] = {
+        "requested_fields": list(requested_fields),
+        "metadata_format": "metadata",
+        "body_included": False,
+        "attempted_count": metadata_reads_attempted,
+        "succeeded_count": metadata_reads_succeeded,
+        "failed_count": metadata_reads_failed,
+    }
+    return result
 
 
 def get_message(

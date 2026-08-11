@@ -153,7 +153,7 @@ def test_kr_seed_bundle_uses_prompt_concepts_not_inline_prompt_text() -> None:
         for step in _iter_publication_steps(bundle)
         if step.get("action_id") == "llm.action"
     ]
-    assert len(llm_steps) == 2
+    assert len(llm_steps) == 1
     prompt_ids_by_state = {
         step.get("state_id"): tuple(step.get("prompt_concept_ids") or ())
         for step in llm_steps
@@ -164,13 +164,21 @@ def test_kr_seed_bundle_uses_prompt_concepts_not_inline_prompt_text() -> None:
     assert prompt_ids_by_state["extract_kr_materialisation_plan"] == (
         mod.PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID,
     )
-    assert prompt_ids_by_state["resolve_relationship_specs"] == (
-        mod.PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID,
-    )
     assert all(
         policy.get("suppress_raw_io_logging") is True
         for policy in llm_policy_by_state.values()
     )
+    resolution_step = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID,
+        state_id="resolve_relationship_specs",
+    )
+    assert resolution_step["action_id"] == (
+        "workflow_control.kr_relationship_resolution"
+    )
+    assert resolution_step["execution_mode"] == "deterministic"
+    assert "prompt_concept_ids" not in resolution_step
+    assert "llm_policy" not in resolution_step
 
 
 def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
@@ -202,23 +210,31 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "8"
+    assert bundle["seed_version"] == "9"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
         mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID: {
             "6": [
                 "c027e848fe7860016bdc91fd1efa5809c3cfb57e667eb021bc638d1cfb34d8d8"
             ]
         },
+        mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID: {
+            "8": [
+                "69904fc11dd094666fc5c429329b923e834d18cce51ae099b541765cdd5352d7"
+            ]
+        },
         mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID: {
             "7": [
                 "217607c88af869b891bba73bd4f776bec1297df91445c71ebff8aa84cbd41f1e"
+            ],
+            "8": [
+                "032a62452010744f5988f1e66e8781ff05032b1a0e537db62e7f3864489a16b5"
             ]
         }
     }
     assert (
         mod._REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION
         == {
-            "8": {
+            "9": {
                 mod.PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID: {
                     "7": (
                         "cfadd26376e176bbd87bffce74cab180edcd12b03d1e10ca9ba2bfb7501ed8a2",
@@ -359,7 +375,72 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     ]
 
 
-def test_kr_relationship_resolution_uses_bounded_exact_endpoint_checks() -> None:
+def test_main_kr_materialisation_workflow_is_explicit_only() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        row
+        for row in bundle["workflows"]
+        if row["workflow_id"] == mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID
+    )
+    text_relations = {
+        row["predicate"]: json.loads(row["text"])
+        for row in workflow["text_relations"]
+    }
+
+    lifecycle = text_relations["#V#hasWorkflowLifecycleJson"]
+    routing = text_relations["#V#hasWorkflowRoutingProfileJson"]
+    assert lifecycle["routing_eligible"] is False
+    assert lifecycle["reviewed_by"] == "Codex"
+    assert lifecycle["review_reason"] == (
+        "2026-08-10 deterministic relationship resolution and exact read-back repair"
+    )
+    assert routing["routing_eligible"] is False
+    assert routing["explicit_workflow_context_required"] is True
+
+
+def test_kr_relationship_child_requires_exact_readback_before_completion() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    relationship_workflow = next(
+        row
+        for row in bundle["workflows"]
+        if row["workflow_id"]
+        == mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID
+    )
+    states = {
+        row["state_id"]: row
+        for row in relationship_workflow["publication_spec"]["steps"]
+    }
+
+    assert states["read_back_target"]["next_state"] == (
+        "validate_relationship_readback"
+    )
+    verifier = states["validate_relationship_readback"]
+    assert verifier["action_id"] == "workflow_control.kr_relationship_readback"
+    assert verifier["conditional_transitions"][0] == {
+        "condition_spec": {
+            "key": "kr_relationship_readback_verified",
+            "kind": "context_flag",
+            "expected": True,
+        },
+        "reason": "exact_relationship_readback_verified",
+        "to_state": "emit_relationship_payload",
+    }
+    assert verifier["conditional_transitions"][1]["to_state"] == (
+        "summarise_blocker"
+    )
+    emitted_keys = {
+        row["key"]
+        for row in dict(states["emit_relationship_payload"]["static_input_bindings"])[
+            "assignments"
+        ]
+    }
+    assert {
+        "kr_relationship_readback_verified",
+        "kr_relationship_verified_relationship",
+    }.issubset(emitted_keys)
+
+
+def test_kr_relationship_resolution_is_a_bounded_deterministic_join() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
     plan_step = _publication_step(
         bundle,
@@ -385,25 +466,19 @@ def test_kr_relationship_resolution_uses_bounded_exact_endpoint_checks() -> None
     }
     assert "kr_materialisation_guard" in plan_context_fields
 
-    resolution_policy = resolution_step["llm_policy"]
-    assert resolution_policy["allowed_tools"] == ["concept_exists", "fetch_concept"]
-    assert resolution_policy["tool_argument_defaults"]["fetch_concept"] == {
-        "include_concept_preview": False,
-        "include_relations_any_arg": False,
-        "include_text_relations_arg1": False,
-        "limit": 1,
-    }
-    assert "search_concepts" not in resolution_policy["tool_argument_defaults"]
-    context_fields = {
-        row["context_key"] for row in resolution_policy["context_fields"]
-    }
+    assert resolution_step["action_id"] == (
+        "workflow_control.kr_relationship_resolution"
+    )
+    assert resolution_step["execution_mode"] == "deterministic"
+    assert "llm_policy" not in resolution_step
+    assert "validation_policy" not in resolution_step
     assert {
-        "kr_materialisation_guard",
-        "kr_materialisation_guard_passed",
-    }.issubset(context_fields)
+        row["tool_output_field"]
+        for row in resolution_step["tool_output_mapping_specs"]
+    } == {"blocking_reason", "decision", "resolved_relationship_specs"}
 
 
-def test_kr_relationship_resolution_policy_round_trips_and_detects_v7_drift() -> None:
+def test_kr_relationship_resolution_action_round_trips_and_detects_v8_drift() -> None:
     raw_bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
     bundle = authority_service.load_repo_seed_workflow_bundle(_SEED_BUNDLE_PATH)
     workflow_id = mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID
@@ -417,29 +492,30 @@ def test_kr_relationship_resolution_policy_round_trips_and_detects_v7_drift() ->
         definition=definition,
     )
     exported_steps = {step["state_id"]: step for step in exported["steps"]}
-    raw_policy = _publication_step(
+    raw_step = _publication_step(
         raw_bundle,
         workflow_id=workflow_id,
         state_id="resolve_relationship_specs",
-    )["llm_policy"]
+    )
 
-    assert exported_steps["resolve_relationship_specs"]["llm_policy"] == raw_policy
+    assert exported_steps["resolve_relationship_specs"]["action_id"] == (
+        raw_step["action_id"]
+    )
+    assert exported_steps["resolve_relationship_specs"]["execution_mode"] == (
+        "deterministic"
+    )
+    assert "llm_policy" not in exported_steps["resolve_relationship_specs"]
 
-    legacy_policy = json.loads(json.dumps(raw_policy))
-    legacy_policy["allowed_tools"] = ["search_concepts", "fetch_concept"]
-    legacy_policy["context_fields"] = [
-        row
-        for row in legacy_policy["context_fields"]
-        if row["context_key"]
-        not in {"kr_materialisation_guard", "kr_materialisation_guard_passed"}
-    ]
-    legacy_policy["tool_argument_defaults"]["fetch_concept"] = {
-        "include_relations_any_arg": True,
-        "include_text_relations_arg1": True,
-        "limit": 50,
-    }
     legacy_steps = tuple(
-        replace(step, llm_policy=legacy_policy)
+        replace(
+            step,
+            action_id="llm.action",
+            execution_mode="llm",
+            prompt_concept_ids=(
+                mod.PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID,
+            ),
+            llm_policy={"tool_mode": "allowed"},
+        )
         if step.state_id == "resolve_relationship_specs"
         else step
         for step in expected_spec.steps
@@ -603,12 +679,12 @@ def test_normal_bootstrap_migrates_exact_reviewed_v7_prompt_content(
         "ensure_prompt_concept_support",
         lambda **_kwargs: _base_prompt_support_report(),
     )
-    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "8")
+    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "9")
     monkeypatch.setattr(
         mod,
         "_REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION",
         {
-            "8": {
+            "9": {
                 prompt_id: {
                     "7": (mod._prompt_content_sha256(legacy_content),)
                 }
@@ -689,7 +765,7 @@ def test_arbitrary_prompt_edit_is_preserved_and_blocks_workflow_publication(
         "ensure_prompt_concept_support",
         lambda **_kwargs: _base_prompt_support_report(),
     )
-    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "8")
+    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "9")
     monkeypatch.setattr(
         mod,
         "_load_prompt_content_values",
@@ -746,12 +822,12 @@ def test_prompt_migration_fails_when_canonical_readback_does_not_match(
         "ensure_prompt_concept_support",
         lambda **_kwargs: _base_prompt_support_report(),
     )
-    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "8")
+    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "9")
     monkeypatch.setattr(
         mod,
         "_REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION",
         {
-            "8": {
+            "9": {
                 prompt_id: {
                     "7": (mod._prompt_content_sha256(legacy_content),)
                 }

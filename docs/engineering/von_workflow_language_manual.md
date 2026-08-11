@@ -232,21 +232,37 @@ Runtime semantics:
 - the action returns the workflow-visible MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
 - the action reports `event_workflow_launch_suppression_requested` so traces
   distinguish an authored suppression request from ordinary tool execution;
-- internal MCP advisory budgets are telemetry only. Crossing one records and
-  exposes slow progress without changing a successful result;
-- where a named liveness boundary justifies a hard policy, hard-deadline expiry
-  is a terminal failed action for the current turn. The
+- internal MCP elapsed thresholds are advisory by default for every catalogue
+  method. Crossing one records and exposes slow progress without cancelling the
+  handler or changing a successful result. Successful-duration observations
+  raise the next advisory with conservative headroom when needed;
+- advisory-only effects expose no minimum admission window to the planner and
+  are never denied merely because an old 5- or 8-second calibration value was
+  crossed. Admission windows exist only as part of an explicitly enabled hard
+  boundary;
+- where a separately named liveness, authority, or external-resource boundary
+  justifies a hard policy, a method may opt in explicitly. Hard-deadline expiry
+  is then a terminal failed action for the current turn. The
   action preserves the typed timeout under `mcp_result` and the bounded
   transport facts under `mcp_transport`, including execution identity,
   queue/handler/transport timing, deadline, timeout phase, and the explicit
   `discard_from_turn` late-result policy;
-- the transport applies the same remaining hard-deadline budget as a PyMongo
+- only an explicitly enabled hard boundary is propagated as a PyMongo
   client-side operation timeout around the handler. Nested Vontology database
-  operations therefore release their bounded isolation worker at the deadline
-  instead of continuing under a succession of independent driver timeouts. A
-  small bounded part of that budget is reserved for caught database exceptions
-  to unwind into the typed terminal outcome. Non-database handlers remain
-  bounded by the fixed worker pool and cooperative cancellation scope;
+  operations on ordinary advisory-only methods therefore do not inherit the
+  generic 20-second transport cutoff. When a justified hard boundary exists, a
+  small bounded part of it is reserved for caught database exceptions to unwind
+  into the typed terminal outcome. Non-database handlers remain isolated by the
+  fixed worker pool and remain responsive to explicit cancellation;
+- derived relationship-extent maintenance and query support use adaptive
+  elapsed advisories rather than PyMongo deadlines. Because the index is a
+  support projection rather than canonical relationship authority, a slow
+  refresh must not make a completed canonical mutation look failed;
+- `workflow_execute` and `workflow_get_instance` terminal-observation windows
+  are advisories over a durable instance, not execution deadlines. Crossing
+  one returns the canonical pending/running instance, instance ID, polling
+  affordance, and `advisory_exceeded=true`; it does not set `timed_out`, cancel,
+  retry, relaunch, or project the workflow as failed;
 - a late handler completion cannot rewrite the workflow action outcome. Reads
   expose represented recovery affordances such as bounded retry or alternate
   path selection; writes report an indeterminate mutation outcome and require

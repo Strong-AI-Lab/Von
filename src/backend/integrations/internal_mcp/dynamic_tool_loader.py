@@ -494,6 +494,7 @@ def load_dynamic_method_definitions(
             continue
 
         timeout_sec = target_definition.timeout_sec
+        advisory_timeout_sec = target_definition.advisory_timeout_sec
         timeout_override = attributes.get("dynamic_timeout_sec")
         has_timeout_override = timeout_override not in (None, "")
         if has_timeout_override:
@@ -502,7 +503,11 @@ def load_dynamic_method_definitions(
                 and not isinstance(timeout_override, bool)
                 and float(timeout_override) > 0.0
             ):
-                timeout_sec = float(timeout_override)
+                # Legacy represented ``dynamic_timeout_sec`` values are
+                # advisory. A proxy may inherit a target's independently
+                # justified hard boundary, but a generic override must not
+                # invent one.
+                advisory_timeout_sec = float(timeout_override)
             else:
                 status["failed"].append(
                     {
@@ -562,12 +567,8 @@ def load_dynamic_method_definitions(
             output_schema=target_definition.output_schema,
             category=target_definition.category,
             timeout_sec=timeout_sec,
-            advisory_timeout_sec=target_definition.advisory_timeout_sec,
-            hard_timeout_enabled=(
-                True
-                if has_timeout_override
-                else target_definition.hard_timeout_enabled
-            ),
+            advisory_timeout_sec=advisory_timeout_sec,
+            hard_timeout_enabled=target_definition.hard_timeout_enabled,
             successful_duration_bootstrap_sec=(
                 None
                 if has_timeout_override

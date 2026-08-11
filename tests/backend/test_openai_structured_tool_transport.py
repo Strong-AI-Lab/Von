@@ -1557,13 +1557,9 @@ def test_advertised_chat_to_responses_fallback_uses_pristine_surface_parameters(
     ]
 
 
-def test_advertised_surface_attempts_share_one_request_deadline(
+def test_advertised_surface_attempts_preserve_request_advisory_without_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.backend.languagemodels.structured_tool_calling.providers import (
-        openai_client as provider_module,
-    )
-
     model = "gpt-5.6-deadline-fallback"
     _install_profiles(
         monkeypatch,
@@ -1578,12 +1574,6 @@ def test_advertised_surface_attempts_share_one_request_deadline(
         chat_response=_CapabilityError(
             "Function tools are not supported; use /v1/responses."
         ),
-    )
-    monotonic_values = iter((100.0, 100.0, 104.0))
-    monkeypatch.setattr(
-        provider_module,
-        "monotonic",
-        lambda: next(monotonic_values),
     )
     client = OpenAIClient(
         LLMClientConfig(
@@ -1603,10 +1593,7 @@ def test_advertised_surface_attempts_share_one_request_deadline(
     )
 
     assert result.text_response == "ok"
-    assert captured["client_options"] == [
-        {"timeout": 10.0, "max_retries": 0},
-        {"timeout": 6.0, "max_retries": 0},
-    ]
+    assert captured.get("client_options", []) == []
 
 
 def test_chat_to_responses_fallback_continuation_remains_on_responses(
@@ -2941,7 +2928,7 @@ def test_chat_tools_unsupported_profile_still_allows_text_only_chat(
     assert result.transport_metadata["reason"] == "no_structured_tools_in_request"
 
 
-def test_responses_request_timeout_is_transport_option_not_model_parameter(
+def test_responses_request_advisory_is_not_a_transport_deadline_or_model_parameter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = "responses-timeout-model"
@@ -2973,12 +2960,7 @@ def test_responses_request_timeout_is_transport_option_not_model_parameter(
     assert "timeout" not in request
     assert "request_timeout_seconds" not in request
     assert "timeout_seconds" not in request
-    assert len(captured["client_options"]) == 1
-    assert captured["client_options"][0]["max_retries"] == 0
-    assert captured["client_options"][0]["timeout"] == pytest.approx(
-        17.0,
-        abs=0.1,
-    )
+    assert captured.get("client_options", []) == []
 
 
 def test_explicitly_unsupported_profile_raises_typed_error_before_request(

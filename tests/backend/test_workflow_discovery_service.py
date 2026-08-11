@@ -19,7 +19,6 @@ from src.backend.services.workflow_discovery_service import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_RELEVANCE_THRESHOLD,
     DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION,
-    DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES,
     EXECUTABILITY_DRAFT_NOT_PUBLISHED,
     EXECUTABILITY_EXECUTABLE_NOW,
     EXECUTABILITY_GRAPH_INCOMPLETE,
@@ -243,6 +242,9 @@ class TestWorkflowDiscoveryResult:
         assert output["match_absence_reason"] == "capability_index_build_in_progress"
         assert output["timeout_budget_seconds"] == 2.5
         assert output["budget_exhausted"] is True
+        assert output["elapsed_time_enforcement"] == "advisory"
+        assert output["advisory_budget_exceeded"] is True
+        assert output["hard_timeout_exceeded"] is False
         assert output["budget_exhaustion_stage"] == "semantic_search"
         assert (
             output["budget_exhaustion_detail"]
@@ -652,7 +654,9 @@ class TestDiscoverWorkflows:
 
         assert "Choose the route" in projection["text"]
         assert projection["query_text"] == ""
-        assert _apply_contract_projection_to_query(query, projection=projection) == query
+        assert (
+            _apply_contract_projection_to_query(query, projection=projection) == query
+        )
 
     def test_structural_contract_hints_still_reach_retrieval_query(self) -> None:
         projection = _build_expected_outcome_contract_projection(
@@ -996,7 +1000,7 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_records_capability_index_timeout_cause_and_uses_bounded_wait(
+    def test_records_capability_index_advisory_and_continues_other_searches(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
@@ -1023,16 +1027,11 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_capability.call_args.kwargs["max_wait_seconds"] == pytest.approx(
             1.0 * DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION
         )
-        assert "capability_index_wait_timed_out" in result.errors
+        assert "capability_index_advisory_wait_elapsed" in result.errors
         assert "capability_index_build_in_progress" in result.errors
-        assert (
-            result.match_absence_reason
-            == "capability_index_wait_timed_out_build_in_progress"
-        )
-        assert result.budget_exhausted is True
-        assert result.budget_exhaustion_stage == "semantic_search"
-        assert mock_semantic.called is False
-        assert mock_vontology.called is False
+        assert result.match_absence_reason == "capability_index_build_in_progress"
+        assert mock_semantic.called is True
+        assert mock_vontology.called is True
         assert any(
             timing.get("stage") == "contract_direct_workflow_resolution"
             and timing.get("match_count") == 0
@@ -1040,12 +1039,12 @@ class TestDiscoverWorkflowsForTurn:
         )
         assert any(
             timing.get("stage") == "semantic_search"
-            and timing.get("status") == "skipped_budget_insufficient"
+            and timing.get("status") == "completed"
             for timing in result.stage_timings
         )
         assert any(
             timing.get("stage") == "vontology_search"
-            and timing.get("status") == "skipped_budget_insufficient"
+            and timing.get("status") == "completed"
             for timing in result.stage_timings
         )
 
@@ -1171,10 +1170,7 @@ class TestDiscoverWorkflowsForTurn:
 
         assert mock_capability.call_count == 1
         assert result.routing_matches == []
-        assert (
-            result.match_absence_reason
-            == "capability_index_wait_timed_out_build_in_progress"
-        )
+        assert result.match_absence_reason == "capability_index_build_in_progress"
         assert any(
             timing.get("stage") == "capability_index_reconciliation"
             and timing.get("status") == "still_building"
@@ -1219,9 +1215,7 @@ class TestDiscoverWorkflowsForTurn:
                 relevance_score=0.83,
                 source="contract_capability_metadata",
                 metadata={
-                    "routing_index_schema_version": (
-                        "workflow_routing_index_entry.v1"
-                    ),
+                    "routing_index_schema_version": ("workflow_routing_index_entry.v1"),
                     "has_authoritative_routing_text": True,
                     "required_tools": ["gmail_list_messages"],
                     "workflow_action_ids": ["gmail_list_messages"],
@@ -1655,11 +1649,12 @@ class TestDiscoverWorkflowsForTurn:
         assert "capability_index_search exceeded" in str(
             result.budget_exhaustion_detail
         )
-        assert result.match_absence_reason == (
-            "capability_index_wait_timed_out_build_in_progress"
-        )
-        assert mock_semantic.called is False
-        assert mock_vontology.called is False
+        assert result.match_absence_reason == "capability_index_build_in_progress"
+        assert mock_semantic.called is True
+        assert mock_vontology.called is True
+        payload = result.to_dict()
+        assert payload["advisory_budget_exceeded"] is True
+        assert payload["hard_timeout_exceeded"] is False
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
@@ -1672,7 +1667,7 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_skips_blocking_semantic_search_when_budget_insufficient(
+    def test_runs_semantic_search_after_discovery_advisory_crossing(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
@@ -1686,9 +1681,7 @@ class TestDiscoverWorkflowsForTurn:
             "build_in_progress": False,
             "last_error": None,
         }
-        mock_semantic.side_effect = AssertionError(
-            "semantic search should not run when too little budget remains"
-        )
+        mock_semantic.return_value = []
         mock_vontology.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
@@ -1700,12 +1693,14 @@ class TestDiscoverWorkflowsForTurn:
 
         assert result.budget_exhausted is True
         assert result.budget_exhaustion_stage == "semantic_search"
-        assert "skipped semantic_search" in str(result.budget_exhaustion_detail)
-        assert result.blocker_reason == DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES
+        assert "semantic_search" in str(result.budget_exhaustion_detail)
+        assert result.blocker_reason == "no_discovery_candidates"
         assert result.search_time_ms < 100.0
         assert result.timeout_budget_seconds == 0.06
-        assert mock_semantic.called is False
-        assert mock_vontology.called is False
+        assert mock_semantic.called is True
+        assert mock_vontology.called is True
+        assert result.to_dict()["elapsed_time_enforcement"] == "advisory"
+        assert result.to_dict()["hard_timeout_exceeded"] is False
 
     @patch(
         "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"

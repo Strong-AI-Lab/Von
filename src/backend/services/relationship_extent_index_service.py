@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
-from pymongo import DeleteMany, ReplaceOne, timeout
+from pymongo import DeleteMany, ReplaceOne
 from pymongo.collection import Collection
 
 from ..db.mongo_client import (
@@ -41,34 +41,43 @@ RELATIONSHIP_EXTENT_PAGE_BATCH_SIZE = int(
 RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN = int(
     os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN", "128")
 )
-RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS = int(
-    os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS", "1200")
+RELATIONSHIP_EXTENT_PAGE_TIME_ADVISORY_MS = int(
+    os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_TIME_ADVISORY_MS")
+    or os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS", "1200")
 )
-RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS = max(
+RELATIONSHIP_EXTENT_SYNC_ADVISORY_SECONDS = max(
     0.1,
-    float(os.environ.get("VON_RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS", "5")),
+    float(
+        os.environ.get("VON_RELATIONSHIP_EXTENT_SYNC_ADVISORY_SECONDS")
+        or os.environ.get("VON_RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS", "5")
+    ),
 )
 RELATIONSHIP_EXTENT_SYNC_SLOW_MS = max(
     1.0,
     float(os.environ.get("VON_RELATIONSHIP_EXTENT_SYNC_SLOW_MS", "1000")),
 )
-RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS = max(
+RELATIONSHIP_EXTENT_STATE_WRITE_ADVISORY_SECONDS = max(
     0.1,
     float(
-        os.environ.get(
-            "VON_RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS",
-            "1",
-        )
+        os.environ.get("VON_RELATIONSHIP_EXTENT_STATE_WRITE_ADVISORY_SECONDS")
+        or os.environ.get("VON_RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS", "1")
     ),
 )
-RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS = max(
+RELATIONSHIP_EXTENT_READ_ADVISORY_SECONDS = max(
     0.1,
-    float(os.environ.get("VON_RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS", "10")),
+    float(
+        os.environ.get("VON_RELATIONSHIP_EXTENT_READ_ADVISORY_SECONDS")
+        or os.environ.get("VON_RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS", "10")
+    ),
 )
-RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS = max(
+RELATIONSHIP_EXTENT_READINESS_ADVISORY_SECONDS = max(
     0.1,
-    float(os.environ.get("VON_RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS", "1")),
+    float(
+        os.environ.get("VON_RELATIONSHIP_EXTENT_READINESS_ADVISORY_SECONDS")
+        or os.environ.get("VON_RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS", "1")
+    ),
 )
+_SUCCESSFUL_OPERATION_MAX_SECONDS: dict[str, float] = {}
 _DEFERRED_SYNC_DEPTH: ContextVar[int] = ContextVar(
     "relationship_extent_deferred_sync_depth",
     default=0,
@@ -81,6 +90,46 @@ _DEFERRED_SYNC_SOURCE_IDS: ContextVar[set[str] | None] = ContextVar(
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _adaptive_advisory_seconds(operation: str, configured_seconds: float) -> float:
+    """Return an advisory with headroom for successful observed durations."""
+
+    observed_max = float(_SUCCESSFUL_OPERATION_MAX_SECONDS.get(operation) or 0.0)
+    return max(float(configured_seconds), observed_max * 1.25)
+
+
+def _record_successful_operation(operation: str, elapsed_seconds: float) -> None:
+    previous = float(_SUCCESSFUL_OPERATION_MAX_SECONDS.get(operation) or 0.0)
+    _SUCCESSFUL_OPERATION_MAX_SECONDS[operation] = max(
+        previous,
+        max(0.0, float(elapsed_seconds)),
+    )
+
+
+def _advisory_timing(
+    *,
+    operation: str,
+    configured_seconds: float,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    advisory_seconds = _adaptive_advisory_seconds(operation, configured_seconds)
+    advisory_exceeded = elapsed_seconds >= advisory_seconds
+    _record_successful_operation(operation, elapsed_seconds)
+    if advisory_exceeded:
+        logger.warning(
+            "[relationship_extent_index] advisory_exceeded "
+            "operation=%s elapsed_seconds=%.3f advisory_seconds=%.3f",
+            operation,
+            elapsed_seconds,
+            advisory_seconds,
+        )
+    return {
+        "elapsed_time_enforcement": "advisory",
+        "advisory_seconds": round(advisory_seconds, 3),
+        "advisory_exceeded": advisory_exceeded,
+        "hard_timeout_seconds": None,
+    }
 
 
 def _normalise_targets(raw: Any) -> list[str]:
@@ -202,18 +251,26 @@ def _mark_relationship_extent_index_degraded(
     now = _utc_now()
     _READINESS_CACHE["ready"] = False
     _READINESS_CACHE["checked_at"] = time.monotonic()
+    advisory_seconds = _adaptive_advisory_seconds(
+        "state_write",
+        RELATIONSHIP_EXTENT_STATE_WRITE_ADVISORY_SECONDS,
+    )
+    started = time.perf_counter()
     try:
-        with timeout(RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS):
-            _record_rebuild_state(
-                {
-                    "status": "degraded",
-                    "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
-                    "reason": reason,
-                    "degraded_at": now.isoformat(),
-                    "source_count": max(0, int(source_count)),
-                    "error_type": error_type,
-                }
-            )
+        _record_rebuild_state(
+            {
+                "status": "degraded",
+                "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+                "reason": reason,
+                "degraded_at": now.isoformat(),
+                "source_count": max(0, int(source_count)),
+                "error_type": error_type,
+            }
+        )
+        _record_successful_operation(
+            "state_write",
+            time.perf_counter() - started,
+        )
     except Exception:
         logger.warning(
             "[relationship_extent_index] unable_to_record_degraded_state "
@@ -222,6 +279,15 @@ def _mark_relationship_extent_index_degraded(
             error_type,
             exc_info=True,
         )
+    else:
+        elapsed = time.perf_counter() - started
+        if elapsed >= advisory_seconds:
+            logger.warning(
+                "[relationship_extent_index] advisory_exceeded "
+                "operation=state_write elapsed_seconds=%.3f advisory_seconds=%.3f",
+                elapsed,
+                advisory_seconds,
+            )
 
 
 def sync_relationship_extent_index_for_concept_doc(
@@ -245,14 +311,18 @@ def sync_relationship_extent_index_for_concept_doc(
         return {"success": False, "reason": "collection_unavailable"}
 
     docs = _index_docs_for_concept(concept_doc)
+    operation = "sync"
+    advisory_seconds = _adaptive_advisory_seconds(
+        operation,
+        RELATIONSHIP_EXTENT_SYNC_ADVISORY_SECONDS,
+    )
     started = time.perf_counter()
     try:
-        with timeout(RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS):
-            deleted, inserted = _replace_relationship_extent_rows(
-                collection=coll,
-                source_id=source_id,
-                docs=docs,
-            )
+        deleted, inserted = _replace_relationship_extent_rows(
+            collection=coll,
+            source_id=source_id,
+            docs=docs,
+        )
     except Exception as exc:
         _mark_relationship_extent_index_degraded(
             reason="source_refresh_failed",
@@ -260,7 +330,8 @@ def sync_relationship_extent_index_for_concept_doc(
             error_type=type(exc).__name__,
         )
         raise
-    duration_ms = (time.perf_counter() - started) * 1000.0
+    elapsed_seconds = time.perf_counter() - started
+    duration_ms = elapsed_seconds * 1000.0
     if duration_ms >= RELATIONSHIP_EXTENT_SYNC_SLOW_MS:
         logger.warning(
             "[relationship_extent_index] sync_slow duration_ms=%.1f "
@@ -269,12 +340,18 @@ def sync_relationship_extent_index_for_concept_doc(
             deleted,
             inserted,
         )
+    timing = _advisory_timing(
+        operation=operation,
+        configured_seconds=advisory_seconds,
+        elapsed_seconds=elapsed_seconds,
+    )
     return {
         "success": True,
         "source_concept_id": source_id,
         "deleted": deleted,
         "inserted": inserted,
         "duration_ms": round(duration_ms, 3),
+        **timing,
     }
 
 
@@ -288,25 +365,29 @@ def _sync_relationship_extent_index_for_concept_id_now(
     if coll is None:
         return {"success": False, "reason": "collection_unavailable"}
 
+    operation = "sync"
+    advisory_seconds = _adaptive_advisory_seconds(
+        operation,
+        RELATIONSHIP_EXTENT_SYNC_ADVISORY_SECONDS,
+    )
     started = time.perf_counter()
     try:
-        with timeout(RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS):
-            with bypass_access_control():
-                concept_doc = ConceptsRepository.find_one(
-                    {"concept_id": source_id},
-                    {"concept_id": 1, "relationships": 1, "updated_at": 1},
-                )
-            if not concept_doc:
-                deleted = coll.delete_many(
-                    {"source_concept_id": source_id}
-                ).deleted_count
-                inserted = 0
-            else:
-                deleted, inserted = _replace_relationship_extent_rows(
-                    collection=coll,
-                    source_id=source_id,
-                    docs=_index_docs_for_concept(concept_doc),
-                )
+        with bypass_access_control():
+            concept_doc = ConceptsRepository.find_one(
+                {"concept_id": source_id},
+                {"concept_id": 1, "relationships": 1, "updated_at": 1},
+            )
+        if not concept_doc:
+            deleted = coll.delete_many(
+                {"source_concept_id": source_id}
+            ).deleted_count
+            inserted = 0
+        else:
+            deleted, inserted = _replace_relationship_extent_rows(
+                collection=coll,
+                source_id=source_id,
+                docs=_index_docs_for_concept(concept_doc),
+            )
     except Exception as exc:
         _mark_relationship_extent_index_degraded(
             reason="source_refresh_failed",
@@ -314,7 +395,8 @@ def _sync_relationship_extent_index_for_concept_id_now(
             error_type=type(exc).__name__,
         )
         raise
-    duration_ms = (time.perf_counter() - started) * 1000.0
+    elapsed_seconds = time.perf_counter() - started
+    duration_ms = elapsed_seconds * 1000.0
     if duration_ms >= RELATIONSHIP_EXTENT_SYNC_SLOW_MS:
         logger.warning(
             "[relationship_extent_index] sync_slow duration_ms=%.1f "
@@ -329,6 +411,11 @@ def _sync_relationship_extent_index_for_concept_id_now(
         "deleted": deleted,
         "inserted": inserted,
         "duration_ms": round(duration_ms, 3),
+        **_advisory_timing(
+            operation=operation,
+            configured_seconds=advisory_seconds,
+            elapsed_seconds=elapsed_seconds,
+        ),
     }
     if not concept_doc:
         result["source_missing"] = True
@@ -359,56 +446,60 @@ def _sync_relationship_extent_index_for_concept_ids_now(
     if coll is None:
         return {"success": False, "reason": "collection_unavailable"}
 
+    operation = "batch_sync"
+    advisory_seconds = _adaptive_advisory_seconds(
+        operation,
+        RELATIONSHIP_EXTENT_SYNC_ADVISORY_SECONDS,
+    )
     started = time.perf_counter()
     try:
-        with timeout(RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS):
-            with bypass_access_control():
-                concept_docs = list(
-                    ConceptsRepository.find(
-                        {"concept_id": {"$in": normalised_ids}},
-                        {"concept_id": 1, "relationships": 1, "updated_at": 1},
-                    )
+        with bypass_access_control():
+            concept_docs = list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": normalised_ids}},
+                    {"concept_id": 1, "relationships": 1, "updated_at": 1},
                 )
-
-            docs_by_source_id: dict[str, Mapping[str, Any]] = {}
-            for concept_doc in concept_docs:
-                source_id = concept_doc.get("concept_id")
-                if not isinstance(source_id, str) or not source_id.strip():
-                    continue
-                docs_by_source_id[source_id.strip()] = concept_doc
-
-            docs_by_source: dict[str, list[dict[str, Any]]] = {
-                source_id: (
-                    _index_docs_for_concept(docs_by_source_id[source_id])
-                    if source_id in docs_by_source_id
-                    else []
-                )
-                for source_id in normalised_ids
-            }
-            index_docs = [
-                doc
-                for source_id in normalised_ids
-                for doc in docs_by_source[source_id]
-            ]
-            _upsert_relationship_extent_rows(collection=coll, docs=index_docs)
-
-            stale_delete_operations = []
-            for source_id in normalised_ids:
-                relation_ids = [
-                    str(doc["relation_id"])
-                    for doc in docs_by_source[source_id]
-                    if doc.get("relation_id")
-                ]
-                stale_filter: dict[str, Any] = {"source_concept_id": source_id}
-                if relation_ids:
-                    stale_filter["relation_id"] = {"$nin": relation_ids}
-                stale_delete_operations.append(DeleteMany(stale_filter))
-            delete_result = coll.bulk_write(
-                stale_delete_operations,
-                ordered=False,
             )
-            deleted = delete_result.deleted_count
-            inserted = len(index_docs)
+
+        docs_by_source_id: dict[str, Mapping[str, Any]] = {}
+        for concept_doc in concept_docs:
+            source_id = concept_doc.get("concept_id")
+            if not isinstance(source_id, str) or not source_id.strip():
+                continue
+            docs_by_source_id[source_id.strip()] = concept_doc
+
+        docs_by_source: dict[str, list[dict[str, Any]]] = {
+            source_id: (
+                _index_docs_for_concept(docs_by_source_id[source_id])
+                if source_id in docs_by_source_id
+                else []
+            )
+            for source_id in normalised_ids
+        }
+        index_docs = [
+            doc
+            for source_id in normalised_ids
+            for doc in docs_by_source[source_id]
+        ]
+        _upsert_relationship_extent_rows(collection=coll, docs=index_docs)
+
+        stale_delete_operations = []
+        for source_id in normalised_ids:
+            relation_ids = [
+                str(doc["relation_id"])
+                for doc in docs_by_source[source_id]
+                if doc.get("relation_id")
+            ]
+            stale_filter: dict[str, Any] = {"source_concept_id": source_id}
+            if relation_ids:
+                stale_filter["relation_id"] = {"$nin": relation_ids}
+            stale_delete_operations.append(DeleteMany(stale_filter))
+        delete_result = coll.bulk_write(
+            stale_delete_operations,
+            ordered=False,
+        )
+        deleted = delete_result.deleted_count
+        inserted = len(index_docs)
     except Exception as exc:
         _mark_relationship_extent_index_degraded(
             reason="batch_refresh_failed",
@@ -416,7 +507,8 @@ def _sync_relationship_extent_index_for_concept_ids_now(
             error_type=type(exc).__name__,
         )
         raise
-    duration_ms = (time.perf_counter() - started) * 1000.0
+    elapsed_seconds = time.perf_counter() - started
+    duration_ms = elapsed_seconds * 1000.0
     if duration_ms >= RELATIONSHIP_EXTENT_SYNC_SLOW_MS:
         logger.warning(
             "[relationship_extent_index] batch_sync_slow duration_ms=%.1f "
@@ -433,6 +525,11 @@ def _sync_relationship_extent_index_for_concept_ids_now(
         "deleted": deleted,
         "inserted": inserted,
         "duration_ms": round(duration_ms, 3),
+        **_advisory_timing(
+            operation=operation,
+            configured_seconds=advisory_seconds,
+            elapsed_seconds=elapsed_seconds,
+        ),
     }
 
 
@@ -532,28 +629,39 @@ def relationship_extent_index_ready() -> bool:
         return cached_ready
 
     ready = False
+    operation = "readiness"
+    advisory_seconds = _adaptive_advisory_seconds(
+        operation,
+        RELATIONSHIP_EXTENT_READINESS_ADVISORY_SECONDS,
+    )
+    started = time.perf_counter()
     try:
-        with timeout(RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS):
-            settings = get_application_settings_collection()
-            if settings is not None:
-                state = settings.find_one(
-                    {"setting_name": RELATIONSHIP_EXTENT_INDEX_STATE_SETTING},
-                    {"value": 1},
+        settings = get_application_settings_collection()
+        if settings is not None:
+            state = settings.find_one(
+                {"setting_name": RELATIONSHIP_EXTENT_INDEX_STATE_SETTING},
+                {"value": 1},
+            )
+            value = state.get("value") if isinstance(state, Mapping) else None
+            if isinstance(value, Mapping):
+                state_is_current = (
+                    value.get("schema_version")
+                    == RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION
                 )
-                value = state.get("value") if isinstance(state, Mapping) else None
-                if isinstance(value, Mapping):
-                    state_is_current = (
-                        value.get("schema_version")
-                        == RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION
-                    )
-                    if value.get("status") == "ready" and state_is_current:
-                        ready = True
+                if value.get("status") == "ready" and state_is_current:
+                    ready = True
     except Exception as exc:
         logger.warning(
             "[relationship_extent_index] readiness_query_failed error_type=%s",
             type(exc).__name__,
         )
         ready = False
+    else:
+        _advisory_timing(
+            operation=operation,
+            configured_seconds=advisory_seconds,
+            elapsed_seconds=time.perf_counter() - started,
+        )
 
     _READINESS_CACHE["ready"] = ready
     _READINESS_CACHE["checked_at"] = now_monotonic
@@ -772,24 +880,34 @@ def query_relationship_extent_index(
     if not should_query:
         return [], 0
 
+    operation = "read"
+    advisory_seconds = _adaptive_advisory_seconds(
+        operation,
+        RELATIONSHIP_EXTENT_READ_ADVISORY_SECONDS,
+    )
+    started = time.perf_counter()
     try:
-        with timeout(RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS):
-            cursor = (
-                coll.find(query, dict(projection))
-                if projection is not None
-                else coll.find(query)
-            )
-            if sort:
-                cursor = cursor.sort(sort)
-            if offset:
-                cursor = cursor.skip(max(0, int(offset)))
-            if limit:
-                cursor = cursor.limit(max(0, int(limit)))
-            if batch_size:
-                cursor = cursor.batch_size(max(1, int(batch_size)))
-            docs = list(cursor)
-            total = coll.count_documents(query) if count_total else len(docs)
-            return docs, total
+        cursor = (
+            coll.find(query, dict(projection))
+            if projection is not None
+            else coll.find(query)
+        )
+        if sort:
+            cursor = cursor.sort(sort)
+        if offset:
+            cursor = cursor.skip(max(0, int(offset)))
+        if limit:
+            cursor = cursor.limit(max(0, int(limit)))
+        if batch_size:
+            cursor = cursor.batch_size(max(1, int(batch_size)))
+        docs = list(cursor)
+        total = coll.count_documents(query) if count_total else len(docs)
+        _advisory_timing(
+            operation=operation,
+            configured_seconds=advisory_seconds,
+            elapsed_seconds=time.perf_counter() - started,
+        )
+        return docs, total
     except Exception as exc:
         logger.warning(
             "[relationship_extent_index] extent_query_failed error_type=%s",
@@ -892,9 +1010,10 @@ def incoming_dynamic_extent_rows_page_for_target(
     visible_limit: int = 50,
     batch_size: int | None = None,
     max_index_rows_scanned: int | None = None,
+    time_advisory_ms: int | None = None,
     time_budget_ms: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
-    """Return a bounded visible incoming extent page from the derived index."""
+    """Return a row-bounded visible page with an elapsed-time advisory."""
 
     clean_offset = max(0, int(visible_offset or 0))
     clean_limit = max(1, int(visible_limit or 1))
@@ -906,9 +1025,14 @@ def incoming_dynamic_extent_rows_page_for_target(
         clean_batch_size,
         int(max_index_rows_scanned or RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN or 1),
     )
-    clean_time_budget_ms = max(
+    clean_time_advisory_ms = max(
         1,
-        int(time_budget_ms or RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS or 1),
+        int(
+            time_advisory_ms
+            or time_budget_ms
+            or RELATIONSHIP_EXTENT_PAGE_TIME_ADVISORY_MS
+            or 1
+        ),
     )
     wanted_visible = clean_offset + clean_limit + 1
     rows: list[dict[str, Any]] = []
@@ -967,7 +1091,11 @@ def incoming_dynamic_extent_rows_page_for_target(
                 "visible_limit": clean_limit,
                 "batch_size": clean_batch_size,
                 "max_index_rows_scanned": clean_max_scan,
-                "time_budget_ms": clean_time_budget_ms,
+                "time_budget_ms": clean_time_advisory_ms,
+                "time_advisory_ms": clean_time_advisory_ms,
+                "elapsed_time_enforcement": "advisory",
+                "advisory_exceeded": False,
+                "hard_timeout_seconds": None,
                 "elapsed_ms": 0,
             },
         )
@@ -1000,36 +1128,22 @@ def incoming_dynamic_extent_rows_page_for_target(
         pending_docs.clear()
 
     try:
-        elapsed_before_cursor_ms = int((time.monotonic() - started_at) * 1000)
-        remaining_budget_seconds = max(
-            0.001,
-            (clean_time_budget_ms - elapsed_before_cursor_ms) / 1000.0,
-        )
-        cursor_timeout_seconds = min(
-            RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS,
-            remaining_budget_seconds,
-        )
-        with timeout(cursor_timeout_seconds):
-            for item in cursor:
-                pending_docs.append(item)
-                scanned += 1
-                if len(pending_docs) < clean_batch_size and scanned < clean_max_scan:
-                    continue
-                _process_pending_batch()
-                elapsed_ms = int((time.monotonic() - started_at) * 1000)
-                if len(rows) >= wanted_visible:
-                    stop_reason = "visible_page_filled"
-                    break
-                if scanned >= clean_max_scan:
-                    stop_reason = "scan_cap_exhausted"
-                    break
-                if elapsed_ms >= clean_time_budget_ms:
-                    stop_reason = "time_budget_exhausted"
-                    break
-            else:
-                source_exhausted = True
-            if pending_docs and len(rows) < wanted_visible:
-                _process_pending_batch()
+        for item in cursor:
+            pending_docs.append(item)
+            scanned += 1
+            if len(pending_docs) < clean_batch_size and scanned < clean_max_scan:
+                continue
+            _process_pending_batch()
+            if len(rows) >= wanted_visible:
+                stop_reason = "visible_page_filled"
+                break
+            if scanned >= clean_max_scan:
+                stop_reason = "scan_cap_exhausted"
+                break
+        else:
+            source_exhausted = True
+        if pending_docs and len(rows) < wanted_visible:
+            _process_pending_batch()
     except Exception as exc:
         logger.warning(
             "[relationship_extent_index] extent_page_query_failed error_type=%s",
@@ -1050,6 +1164,7 @@ def incoming_dynamic_extent_rows_page_for_target(
     complete = source_exhausted
     bounded = not complete
     page_rows = rows[clean_offset : clean_offset + clean_limit]
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
     diagnostics = {
         "used_extent_index": True,
         "complete": complete,
@@ -1065,8 +1180,12 @@ def incoming_dynamic_extent_rows_page_for_target(
         "visible_limit": clean_limit,
         "batch_size": clean_batch_size,
         "max_index_rows_scanned": clean_max_scan,
-        "time_budget_ms": clean_time_budget_ms,
-        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "time_budget_ms": clean_time_advisory_ms,
+        "time_advisory_ms": clean_time_advisory_ms,
+        "elapsed_time_enforcement": "advisory",
+        "advisory_exceeded": elapsed_ms >= clean_time_advisory_ms,
+        "hard_timeout_seconds": None,
+        "elapsed_ms": elapsed_ms,
         "stop_reason": stop_reason or ("source_exhausted" if complete else None),
     }
     return page_rows, True, diagnostics

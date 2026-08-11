@@ -699,7 +699,7 @@ def test_jira_move_issue_await_completion_through_gateway_invoke(monkeypatch):
             "approved": True,
             "await_completion": True,
             "poll_interval_seconds": 0.01,
-            "timeout_seconds": 1.0,
+            "advisory_seconds": 1.0,
         },
     )
     payload = result.payload
@@ -711,6 +711,58 @@ def test_jira_move_issue_await_completion_through_gateway_invoke(monkeypatch):
     assert payload.get("awaited_completion") is True
     assert payload.get("bulk_progress", {}).get("status") == "COMPLETE"
     assert payload.get("bulk_progress", {}).get("terminal") is True
+
+
+def test_jira_move_issue_observation_advisory_returns_pending_task(monkeypatch):
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None, expand=None):
+            assert fields == ["project", "issuetype", "parent"]
+            assert expand is None
+            return _jira_issue_payload(
+                issue_key,
+                issue_type_id="10122",
+                issue_type_name="Task",
+                subtask=False,
+            )
+
+        async def get_project_issue_types(self, *, project_key: str):
+            return _team_managed_project_issue_type_context(project_key)
+
+        async def move_issue(self, *, payload):
+            assert payload.get("targetToSourcesMapping")
+            return {"taskId": "9002"}
+
+        async def get_bulk_operation_progress(self, *, task_id: str):
+            assert task_id == "9002"
+            return {"taskId": task_id, "status": "RUNNING", "progressPercent": 10}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+    payload = _jira_move_issue(
+        issue_key="JVNAUTOSCI-1874",
+        target_project_key="JVNAUTOSCI",
+        target_issue_type="Task",
+        dry_run=False,
+        approved=True,
+        await_completion=True,
+        advisory_seconds=0.0,
+        poll_interval_seconds=0.01,
+    )
+
+    assert payload.get("success") is True
+    assert payload.get("bulk_task_id") == "9002"
+    assert payload.get("completion_pending") is True
+    assert payload.get("elapsed_time_enforcement") == "advisory"
+    assert payload.get("advisory_exceeded") is True
+    assert payload.get("hard_timeout_seconds") is None
+    assert payload.get("outcome_finality") == (
+        "pending_external_operation_observation"
+    )
 
 
 def test_jira_delete_issue_link_success_through_gateway_invoke(monkeypatch):

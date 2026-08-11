@@ -674,7 +674,7 @@ def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
                 "updated_at": 1,
                 "relationships.#V#supervises": 1,
             },
-            8_000,
+            None,
         )
     ]
     assert payload["total_hits"] == 1

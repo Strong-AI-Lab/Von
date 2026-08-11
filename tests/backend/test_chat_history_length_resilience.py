@@ -33,6 +33,7 @@ def test_get_chat_history_length_uses_aggregate_pipeline(monkeypatch):
     pipeline = coll.aggregate_calls[0]["pipeline"]
     assert pipeline[0]["$match"]["user_id"] == "#V#u"
     assert pipeline[0]["$match"]["namespace"] == "#V#u@org"
+    assert "maxTimeMS" not in coll.aggregate_calls[0]["kwargs"]
 
 
 def test_get_chat_history_session_count_uses_aggregate_pipeline(monkeypatch):
@@ -49,12 +50,13 @@ def test_get_chat_history_session_count_uses_aggregate_pipeline(monkeypatch):
 
     assert total == 4
     assert len(coll.aggregate_calls) == 1
+    assert "maxTimeMS" not in coll.aggregate_calls[0]["kwargs"]
     pipeline = coll.aggregate_calls[0]["pipeline"]
     assert pipeline[0]["$match"]["user_id"] == "#V#u"
     assert pipeline[0]["$match"]["namespace"] == "#V#u@org"
 
 
-def test_chat_history_length_opens_read_circuit_after_transient_timeout(monkeypatch):
+def test_chat_history_length_retries_despite_recent_transient_timeout(monkeypatch):
     class _FailingAggregateCollection:
         def __init__(self):
             self.calls = 0
@@ -80,7 +82,10 @@ def test_chat_history_length_opens_read_circuit_after_transient_timeout(monkeypa
     with pytest.raises(chat_history_service.ChatHistoryServiceError, match="Could not retrieve chat history length"):
         chat_history_service.get_chat_history_length("#V#u")
 
-    with pytest.raises(chat_history_service.ChatHistoryServiceError, match="read circuit open"):
+    with pytest.raises(
+        chat_history_service.ChatHistoryServiceError,
+        match="Could not retrieve chat history length",
+    ):
         chat_history_service.get_chat_history_length("#V#u")
 
-    assert coll.calls == 1
+    assert coll.calls == 2

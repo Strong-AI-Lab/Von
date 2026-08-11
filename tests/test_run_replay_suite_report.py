@@ -106,7 +106,32 @@ def test_non_runnable_case_is_classified_without_execution() -> None:
     assert "No dedicated harness" in result["failure_stall_reason"]
 
 
-def test_timeout_is_classified_when_subprocess_expires(
+def test_suite_window_leaves_unstarted_case_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monotonic_values = iter((0.0, 2.0))
+    monkeypatch.setattr(
+        replay_suite.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    results = replay_suite.run_replay_suite(
+        [{"replay_id": "prompt-bank:not-started", "runnable": True}],
+        base_url="http://von.test",
+        per_replay_timeout_seconds=10.0,
+        suite_timeout_seconds=1.0,
+        dry_run=False,
+        model="gemma4:26b",
+        allow_non_agent_test_server=False,
+    )
+
+    assert results[0]["result"] == "pending"
+    assert results[0]["health"] == "n/a"
+    assert "unobserved, not failed" in results[0]["failure_stall_reason"]
+
+
+def test_observer_expiry_is_pending_when_subprocess_reports_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _raise_timeout(*_args: object, **_kwargs: object) -> None:
@@ -127,11 +152,12 @@ def test_timeout_is_classified_when_subprocess_expires(
         allow_non_agent_test_server=False,
     )
 
-    assert result["result"] == "timed_out"
-    assert "timeout" in result["failure_stall_reason"].lower()
+    assert result["result"] == "pending"
+    assert result["health"] == "n/a"
+    assert "no product failure" in result["failure_stall_reason"].lower()
 
 
-def test_prompt_sampler_subprocess_timeout_allows_post_cancel_reporting(
+def test_prompt_sampler_subprocess_has_no_outer_kill_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -165,7 +191,7 @@ def test_prompt_sampler_subprocess_timeout_allows_post_cancel_reporting(
     )
 
     assert result["result"] == "collected"
-    assert captured["timeout"] == pytest.approx(25.0)
+    assert captured["timeout"] is None
 
 
 def test_prompt_sampler_failure_reason_reports_post_cancel_status(
