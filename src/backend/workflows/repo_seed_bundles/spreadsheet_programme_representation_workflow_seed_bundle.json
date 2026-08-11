@@ -21,12 +21,12 @@
   "managed_by": "spreadsheet_programme_workflow_vontology_service",
   "processing_authority_dependencies": {
     "kr_materialisation_workflow_seed_bundle": {
-      "canonical_payload_sha256": "sha256:1fc1458caa2698417e1d7821d0a13d4c70431449cbfba69b72afcac3e43834aa",
+      "canonical_payload_sha256": "sha256:dfe4a8ba011e32e430bfb844658a1a94ad1dc154dae88374e970cf9c8a2e65ee",
       "family_id": "#V#kr_design_materialisation_workflow_family",
       "seed_version": "9"
     }
   },
-  "processing_authority_fingerprint": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0",
+  "processing_authority_fingerprint": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901",
   "schema_version": "repo_seed_workflow_bundle.v1",
   "seed_version": "23",
   "source_tag": "JVNAUTOSCI-2592",
@@ -324,7 +324,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0"
+                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
               }
             ],
             "tool_output_mapping_specs": [
@@ -720,7 +720,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0"
+                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
               }
             ],
             "tool_output_mapping_specs": [
@@ -794,7 +794,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0"
+                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1252,7 +1252,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0"
+                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1575,7 +1575,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0"
+                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1643,7 +1643,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:bf6297c97102796453b29883cfc3ebccaae7fd0e87cbe3e84b4cb287774fd4f0"
+                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
               }
             ],
             "tool_output_mapping_specs": [
