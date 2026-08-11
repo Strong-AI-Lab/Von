@@ -82,22 +82,25 @@ def build_gmail_profile_turn_scope(
             continue
         summary = configured_summaries.get(runtime_alias) or {}
         authorised_email = str(summary.get("authorised_email") or "").strip()
-        choices.append(
-            {
-                "selector": resource_id,
-                "value": runtime_alias,
-                "source_family": "gmail",
-                "resource_id": resource_id,
-                "runtime_alias": runtime_alias,
-                "display_label": authorised_email or runtime_alias,
-                "is_default": profile.get("is_default") is True,
-                "represented_identity_concept_ids": [
-                    str(value)
-                    for value in profile.get("represented_identity_concept_ids") or []
-                    if isinstance(value, str) and value.strip()
-                ],
-            }
-        )
+        choice = {
+            "selector": resource_id,
+            "value": runtime_alias,
+            "source_family": "gmail",
+            "resource_id": resource_id,
+            "runtime_alias": runtime_alias,
+            "is_default": profile.get("is_default") is True,
+            "represented_identity_concept_ids": [
+                str(value)
+                for value in profile.get("represented_identity_concept_ids") or []
+                if isinstance(value, str) and value.strip()
+            ],
+        }
+        # Runtime aliases are operational selectors, not user-facing account
+        # labels.  Omit presentation metadata when the connector cannot supply
+        # an explicitly human-readable identity.
+        if authorised_email:
+            choice["display_label"] = authorised_email
+        choices.append(choice)
 
     requested = str(requested_profile_id or "").strip() or None
     represented_request_match = next(

@@ -441,6 +441,114 @@ def test_presenter_mode_projects_tagged_adaptive_answer(app: Flask) -> None:
     }
 
 
+def test_presenter_screen_identifies_first_trusted_connector_resource(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    stored_situation: dict[str, Any] = {"text": None, "revision": 0}
+
+    def _session_state(**kwargs: Any) -> dict[str, Any]:
+        situation = (
+            {
+                "text": stored_situation["text"],
+                "revision": stored_situation["revision"],
+                "source": "adaptive_turn",
+                "updated_by": "#V#michael_witbrock",
+                "source_request_id": "turn-resource-presentation",
+            }
+            if stored_situation["text"]
+            else None
+        )
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": situation,
+            "conversation_observations": [],
+        }
+
+    def _set_situation(**kwargs: Any) -> dict[str, Any]:
+        stored_situation["text"] = kwargs["text"]
+        stored_situation["revision"] = kwargs["expected_revision"] + 1
+        return {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": stored_situation["revision"],
+            "session_id": kwargs["session_id"],
+        }
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        _session_state,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "set_chat_history_conversation_situation",
+        _set_situation,
+    )
+    app.config["_ADAPTIVE_TURN_STATE"]["response_text"] = (
+        "<spoken>I checked the Zhan mailbox.</spoken>\n"
+        "<screen>These messages need your attention.</screen>"
+    )
+    app.config["_ADAPTIVE_TURN_STATE"]["tool_invocations"] = (
+        {
+            "tool": "gmail_list_messages",
+            "status": "ok",
+            "resource_scope": {
+                "source_family": "gmail",
+                "resource_id": "#V#gmail_profile_zhan",
+                "runtime_alias": "must-not-be-presented",
+                "display_label": "zhan@example.test",
+                "selection_source": "represented_default",
+                "view_scope": "whole_mailbox",
+            },
+            "evidence": {"status": "ok", "projected_payload": {}},
+        },
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Check my recent email.", "presenter_mode": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    expected_screen = (
+        "_Gmail: zhan@example.test_\n\n"
+        "These messages need your attention."
+    )
+    assert payload["response"] == expected_screen
+    assert payload["response_channels"] == {
+        "spoken": "I checked the Zhan mailbox.",
+        "screen": expected_screen,
+        "format": "tagged_blocks_v1",
+    }
+    assert "presented connector resources:" in payload["conversation_situation"][
+        "text"
+    ]
+    assert "must-not-be-presented" not in payload["response"]
+    assert "#V#" not in payload["response"]
+
+    repeated = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Anything else in the same mailbox?",
+            "presenter_mode": True,
+            "conversation_session_id": "session-adaptive-route-test",
+        },
+    )
+    assert repeated.status_code == 200
+    repeated_payload = repeated.get_json()
+    assert repeated_payload["response"] == "These messages need your attention."
+    assert repeated_payload["response_channels"]["spoken"] == (
+        "I checked the Zhan mailbox."
+    )
+
+
 def test_presenter_mode_recovers_unclosed_terminal_screen_block(app: Flask) -> None:
     app.config["_ADAPTIVE_TURN_STATE"]["response_text"] = (
         "<spoken>It was in the email itself, not an attachment.</spoken>\n"

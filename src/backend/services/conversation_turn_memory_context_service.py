@@ -39,7 +39,11 @@ _RUNTIME_TURN_FACTS_END = "[/Runtime-observed turn facts]"
 _MAX_RUNTIME_TURN_FACT_BLOCKS = 6
 _SELECTED_REFERENT_CAPSULE_SCHEMA_VERSION = "selected_referent_capsule.v1"
 _SELECTED_REFERENT_CAPSULE_LINE_PREFIX = "selected referent capsule: "
+_PRESENTED_CONNECTOR_RESOURCES_SCHEMA_VERSION = "presented_connector_resources.v1"
+_PRESENTED_CONNECTOR_RESOURCES_LINE_PREFIX = "presented connector resources: "
 _MAX_SELECTED_REFERENT_CAPSULES_PER_BLOCK = 12
+_MAX_PRESENTED_CONNECTOR_RESOURCE_CAPSULES_PER_BLOCK = 4
+_MAX_PRESENTED_CONNECTOR_RESOURCES_PER_FAMILY = 8
 _MAX_SELECTED_REFERENT_CAPSULE_TEXT_CHARS = 512
 _SELECTED_REFERENT_CAPSULE_FIELDS = (
     "stable_id",
@@ -322,6 +326,79 @@ def selected_referent_capsules_from_conversation_situation(
     return capsules
 
 
+def _normalise_presented_connector_resources(
+    value: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    if value.get("schema_version") != _PRESENTED_CONNECTOR_RESOURCES_SCHEMA_VERSION:
+        return None
+    source_family = _selected_referent_capsule_text(value.get("source_family"))
+    raw_resources = value.get("resources")
+    if not source_family or not isinstance(raw_resources, Sequence) or isinstance(
+        raw_resources, (str, bytes, bytearray)
+    ):
+        return None
+    resources: list[dict[str, str]] = []
+    seen_resource_ids: set[str] = set()
+    for raw_resource in raw_resources[
+        :_MAX_PRESENTED_CONNECTOR_RESOURCES_PER_FAMILY
+    ]:
+        resource = _selected_referent_capsule_mapping(
+            raw_resource,
+            allowed_fields=("resource_id", "display_label"),
+        )
+        if not resource or not all(
+            resource.get(field_name)
+            for field_name in ("resource_id", "display_label")
+        ):
+            continue
+        resource_key = resource["resource_id"].casefold()
+        if resource_key in seen_resource_ids:
+            continue
+        seen_resource_ids.add(resource_key)
+        resources.append(resource)
+    if not resources:
+        return None
+    return {
+        "schema_version": _PRESENTED_CONNECTOR_RESOURCES_SCHEMA_VERSION,
+        "source_family": source_family,
+        "resources": resources,
+    }
+
+
+def presented_connector_resources_from_conversation_situation(
+    conversation_situation: str | None,
+) -> list[dict[str, Any]]:
+    """Return only server-authored connector-resource presentation capsules."""
+
+    _base, blocks = _separate_runtime_turn_fact_blocks(conversation_situation)
+    capsules: list[dict[str, Any]] = []
+    for block in blocks[-_MAX_RUNTIME_TURN_FACT_BLOCKS:]:
+        block_capsules = 0
+        for line in block.splitlines():
+            if not line.startswith(_PRESENTED_CONNECTOR_RESOURCES_LINE_PREFIX):
+                continue
+            if (
+                block_capsules
+                >= _MAX_PRESENTED_CONNECTOR_RESOURCE_CAPSULES_PER_BLOCK
+            ):
+                break
+            raw_json = line.removeprefix(
+                _PRESENTED_CONNECTOR_RESOURCES_LINE_PREFIX
+            )
+            try:
+                raw_capsule = json.loads(raw_json)
+            except (TypeError, ValueError):
+                continue
+            capsule = _normalise_presented_connector_resources(raw_capsule)
+            if capsule is None:
+                continue
+            capsules.append(capsule)
+            block_capsules += 1
+    return capsules
+
+
 def latest_resource_scope_from_conversation_situation(
     conversation_situation: str | None,
     *,
@@ -387,6 +464,7 @@ def _retain_runtime_turn_fact_blocks(
         return list(blocks)
 
     latest_scope_block_by_family: dict[str, int] = {}
+    latest_presentation_block_by_family: dict[str, int] = {}
     for block_index, candidate_block in enumerate(blocks):
         for capsule in selected_referent_capsules_from_conversation_situation(
             candidate_block
@@ -399,8 +477,17 @@ def _retain_runtime_turn_fact_blocks(
             )
             if source_family:
                 latest_scope_block_by_family[source_family] = block_index
+        for capsule in presented_connector_resources_from_conversation_situation(
+            candidate_block
+        ):
+            source_family = _safe_str(capsule.get("source_family"))
+            if source_family:
+                latest_presentation_block_by_family[source_family] = block_index
 
-    retained_indexes = set(latest_scope_block_by_family.values())
+    retained_indexes = {
+        *latest_scope_block_by_family.values(),
+        *latest_presentation_block_by_family.values(),
+    }
     retained_indexes.add(len(blocks) - 1)
     if len(retained_indexes) > limit:
         retained_indexes = set(sorted(retained_indexes)[-limit:])
@@ -465,6 +552,27 @@ def _render_runtime_turn_fact_block(projection: Mapping[str, Any]) -> str | None
                 continue
             lines.append(
                 _SELECTED_REFERENT_CAPSULE_LINE_PREFIX
+                + json.dumps(
+                    capsule,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+
+    presented_resources = projection.get("presented_connector_resources")
+    if isinstance(presented_resources, Sequence) and not isinstance(
+        presented_resources,
+        (str, bytes, bytearray),
+    ):
+        for raw_capsule in presented_resources[
+            :_MAX_PRESENTED_CONNECTOR_RESOURCE_CAPSULES_PER_BLOCK
+        ]:
+            capsule = _normalise_presented_connector_resources(raw_capsule)
+            if capsule is None:
+                continue
+            lines.append(
+                _PRESENTED_CONNECTOR_RESOURCES_LINE_PREFIX
                 + json.dumps(
                     capsule,
                     ensure_ascii=False,
@@ -1470,6 +1578,7 @@ __all__ = [
     "build_selected_workflow_policy_memory_state",
     "build_turn_memory_context_state",
     "latest_resource_scope_from_conversation_situation",
+    "presented_connector_resources_from_conversation_situation",
     "render_selected_workflow_policy_memory_messages",
     "render_turn_memory_context_messages",
     "selected_referent_capsules_from_conversation_situation",

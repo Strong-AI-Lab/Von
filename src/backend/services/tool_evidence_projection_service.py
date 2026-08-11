@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from .selected_referent_contract import (
@@ -18,7 +19,6 @@ from .selected_referent_contract import (
     normalise_exact_referent_id,
 )
 from .workflow_vontology_materialisation_helpers import (
-    load_concept,
     normalise_relationship_targets,
 )
 
@@ -132,6 +132,7 @@ class ToolProjectionContract:
     output_field_ids: tuple[str, ...]
     collection_field_ids: tuple[str, ...]
     entity_type_concept_ids: tuple[str, ...] = ()
+    identity_field_entity_type_pairs: tuple[tuple[str, str], ...] = ()
 
 
 REFERENT_CANDIDATE_SCHEMA_VERSION = "tool_referent_candidate.v1"
@@ -867,12 +868,8 @@ def _referent_entity_type_for_identifier_field(
 ) -> str:
     """Resolve a candidate's represented entity type from its identity field."""
 
-    for entity_type_id in contract.entity_type_concept_ids:
-        entity_doc = load_concept(entity_type_id)
-        if identity_field.concept_id in _relationship_targets(
-            entity_doc,
-            "#V#entity_type_has_tool_field",
-        ):
+    for field_concept_id, entity_type_id in contract.identity_field_entity_type_pairs:
+        if field_concept_id == identity_field.concept_id:
             return entity_type_id
     return (
         contract.entity_type_concept_ids[0]
@@ -1208,12 +1205,32 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
                 field_id for field_id in preserve_field_ids if field_id in output_set
             ]
 
+    primary_documents = _bulk_load_concepts_by_id(
+        [*selected_field_ids, *entity_type_concept_ids]
+    )
+    related_concept_ids = _ordered_unique(
+        [
+            target_id
+            for field_id in selected_field_ids
+            for predicate_id in (
+                "#V#field_has_wire_alias",
+                "#V#field_extracts_from_payload_path",
+            )
+            for target_id in _relationship_targets(
+                primary_documents.get(field_id),
+                predicate_id,
+            )
+        ]
+    )
+    related_documents = _bulk_load_concepts_by_id(related_concept_ids)
     fields = tuple(
         field
         for field_id in selected_field_ids
         if (
             field := _load_field_contract(
                 field_id,
+                field_doc=primary_documents.get(field_id),
+                related_documents=related_documents,
                 required=field_id in required_field_ids,
                 included=field_id in included_field_ids
                 or field_id in preserve_field_ids,
@@ -1225,10 +1242,20 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
     collection_field_ids = tuple(
         field.concept_id
         for field in fields
-        if "#V#tool_field_role_collection_membership"
-        in _relationship_targets(
-            load_concept(field.concept_id),
-            "#V#field_has_role",
+        if "#V#tool_field_role_collection_membership" in field.role_concept_ids
+    )
+    resolved_field_ids = {field.concept_id for field in fields}
+    identity_field_entity_type_pairs = tuple(
+        _ordered_unique_pairs(
+            [
+                (field_id, entity_type_id)
+                for entity_type_id in entity_type_concept_ids
+                for field_id in _relationship_targets(
+                    primary_documents.get(entity_type_id),
+                    "#V#entity_type_has_tool_field",
+                )
+                if field_id in resolved_field_ids
+            ]
         )
     )
 
@@ -1239,6 +1266,7 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
         output_field_ids=output_field_ids,
         collection_field_ids=collection_field_ids,
         entity_type_concept_ids=entity_type_concept_ids,
+        identity_field_entity_type_pairs=identity_field_entity_type_pairs,
     )
 
 
@@ -1279,17 +1307,55 @@ def _select_evidence_views(tool_concept_id: str) -> tuple[Mapping[str, Any], ...
     return tuple(fallback)
 
 
+def _bulk_load_concepts_by_id(
+    concept_ids: Sequence[str],
+) -> dict[str, Mapping[str, Any]]:
+    """Load one actor-visible concept batch without cross-turn caching.
+
+    ``ConceptsRepository.find`` retains the repository's query filtering,
+    relationship-target sanitisation, and request-local access evaluation.  A
+    missing or inaccessible concept is therefore indistinguishable here and is
+    handled like the former per-concept soft miss.
+    """
+
+    cleaned_ids = _ordered_unique(
+        [
+            cleaned
+            for concept_id in concept_ids
+            if (cleaned := _clean_str(concept_id)) is not None
+        ]
+    )
+    if not cleaned_ids:
+        return {}
+    documents: dict[str, Mapping[str, Any]] = {}
+    try:
+        for doc in ConceptsRepository.find(
+            {"concept_id": {"$in": cleaned_ids}},
+        ):
+            if not isinstance(doc, Mapping):
+                continue
+            concept_id = _clean_str(doc.get("concept_id"))
+            if concept_id and concept_id in cleaned_ids:
+                documents[concept_id] = doc
+    except Exception:  # noqa: BLE001 - represented reads fail softly
+        # Match the former ``load_concept`` fail-soft boundary while retaining
+        # any documents yielded before a cursor-level failure.
+        return documents
+    return documents
+
+
 def _load_field_contract(
     field_id: str,
     *,
+    field_doc: Mapping[str, Any] | None,
+    related_documents: Mapping[str, Mapping[str, Any]],
     required: bool,
     included: bool,
     redacted: bool,
 ) -> ToolFieldContract | None:
-    doc = load_concept(field_id)
-    if not isinstance(doc, Mapping):
+    if not isinstance(field_doc, Mapping):
         return None
-    raw_attributes = doc.get("attributes")
+    raw_attributes = field_doc.get("attributes")
     attributes: Mapping[str, Any] = (
         raw_attributes if isinstance(raw_attributes, Mapping) else {}
     )
@@ -1298,18 +1364,34 @@ def _load_field_contract(
     )
     aliases = tuple(
         alias
-        for alias_id in _relationship_targets(doc, "#V#field_has_wire_alias")
-        if (alias := _wire_key_value(alias_id))
+        for alias_id in _relationship_targets(
+            field_doc,
+            "#V#field_has_wire_alias",
+        )
+        if (
+            alias := _represented_attribute_value(
+                related_documents.get(alias_id),
+                "wire_key",
+            )
+        )
     )
     paths = tuple(
         path
-        for path_id in _relationship_targets(doc, "#V#field_extracts_from_payload_path")
-        if (path := _payload_path_value(path_id))
+        for path_id in _relationship_targets(
+            field_doc,
+            "#V#field_extracts_from_payload_path",
+        )
+        if (
+            path := _represented_attribute_value(
+                related_documents.get(path_id),
+                "payload_path",
+            )
+        )
     )
     if output_key not in aliases:
         aliases = (output_key, *aliases)
     role_concept_ids = tuple(
-        _normalise_unique(_relationships(doc).get("#V#field_has_role"))
+        _normalise_unique(_relationships(field_doc).get("#V#field_has_role"))
     )
     return ToolFieldContract(
         concept_id=field_id,
@@ -1548,27 +1630,20 @@ def _field_by_id(
     return None
 
 
-def _wire_key_value(concept_id: str) -> str | None:
-    doc = load_concept(concept_id)
+def _represented_attribute_value(
+    doc: Mapping[str, Any] | None,
+    attribute_key: str,
+) -> str | None:
     attributes = doc.get("attributes") if isinstance(doc, Mapping) else None
     if isinstance(attributes, Mapping):
-        return _clean_str(attributes.get("wire_key"))
-    return None
-
-
-def _payload_path_value(concept_id: str) -> str | None:
-    doc = load_concept(concept_id)
-    attributes = doc.get("attributes") if isinstance(doc, Mapping) else None
-    if isinstance(attributes, Mapping):
-        return _clean_str(attributes.get("payload_path"))
+        return _clean_str(attributes.get(attribute_key))
     return None
 
 
 def _fallback_field_key(field_id: str) -> str:
     cleaned = field_id.removeprefix("#V#")
     for suffix in ("_field", "_argument_field"):
-        if cleaned.endswith(suffix):
-            cleaned = cleaned[: -len(suffix)]
+        cleaned = cleaned.removesuffix(suffix)
     return cleaned
 
 
@@ -1597,6 +1672,20 @@ def _ordered_unique(values: Sequence[str]) -> list[str]:
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             ordered.append(cleaned)
+    return ordered
+
+
+def _ordered_unique_pairs(
+    values: Sequence[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    ordered: list[tuple[str, str]] = []
+    for field_concept_id, entity_type_concept_id in values:
+        pair = (field_concept_id.strip(), entity_type_concept_id.strip())
+        if not all(pair) or pair in seen:
+            continue
+        seen.add(pair)
+        ordered.append(pair)
     return ordered
 
 

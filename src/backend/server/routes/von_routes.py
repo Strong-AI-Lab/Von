@@ -59,6 +59,10 @@ from ...services.adaptive_turn_service import (
 from ...services.conversation_turn_memory_context_service import (
     merge_conversation_situation_turn_projection,
 )
+from ...services.turn_resource_presentation_service import (
+    annotate_turn_screen_text,
+    plan_turn_resource_presentation,
+)
 from ...services.background_task_service import background_task_registry
 from ...services.workflow_payload_store import is_workflow_payload_blob_ref
 from ...services.live_request_load import (
@@ -142,6 +146,7 @@ from ...services.turn_timing_telemetry_service import (
     merge_timing_spans,
 )
 from ...services.turn_execution_record_service import (
+    CONVERSATION_SITUATION_TURN_PROJECTION_SCHEMA_VERSION,
     build_conversation_situation_turn_projection,
     build_search_tool_evidence,
     build_workflow_routing_diagnostics,
@@ -11591,6 +11596,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         tool_messages = [dict(msg) for msg in adaptive_turn_result.extra_messages]
         tool_invocations = list(adaptive_turn_result.tool_invocations)
         auxiliary_llm_calls.extend(adaptive_turn_result.aux_llm_calls)
+        deterministic_situation_projection: Mapping[str, Any] | None = None
+        resource_presentation_plan: Mapping[str, Any] | None = None
+        try:
+            resource_presentation_plan = plan_turn_resource_presentation(
+                tool_invocations=tool_invocations,
+                prior_situation=conversation_situation_text,
+            )
+        except Exception as exc:
+            current_app.logger.warning(
+                "Turn resource presentation planning unavailable for "
+                "request_id=%s: %s",
+                request_id,
+                exc,
+            )
         try:
             deterministic_situation_projection = (
                 build_conversation_situation_turn_projection(
@@ -11600,20 +11619,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     tool_invocations=tool_invocations,
                 )
             )
-            updated_conversation_situation_text = (
-                merge_conversation_situation_turn_projection(
-                    current_situation=conversation_situation_text,
-                    model_situation=updated_conversation_situation_text,
-                    projection=deterministic_situation_projection,
-                )
-            )
-            if isinstance(deterministic_situation_projection, Mapping):
-                auxiliary_llm_calls.append(
-                    {
-                        "type": "conversation_situation_turn_projection",
-                        **dict(deterministic_situation_projection),
-                    }
-                )
         except Exception as exc:
             # The visible answer and canonical effect records remain usable if
             # this optional conversation-carrier projection is unavailable.
@@ -12575,6 +12580,92 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             else:
                 if isinstance(screen_text_value, str) and screen_text_value.strip():
                     response_text = screen_text_value.strip()
+
+        resource_annotation_applied = False
+        if adaptive_delivery_success and resource_presentation_plan:
+            try:
+                response_text, resource_annotation_applied = annotate_turn_screen_text(
+                    response_text,
+                    presentation_plan=resource_presentation_plan,
+                )
+            except Exception as exc:
+                current_app.logger.warning(
+                    "Turn resource presentation unavailable for request_id=%s: %s",
+                    request_id,
+                    exc,
+                )
+            if resource_annotation_applied and isinstance(
+                presenter_channels, Mapping
+            ):
+                presenter_channels = {
+                    **dict(presenter_channels),
+                    "screen": response_text,
+                }
+            if resource_annotation_applied:
+                presentation_capsules = resource_presentation_plan.get(
+                    "presentation_capsules"
+                )
+                if isinstance(presentation_capsules, Sequence) and not isinstance(
+                    presentation_capsules,
+                    (str, bytes, bytearray),
+                ):
+                    projection_with_presentation = dict(
+                        deterministic_situation_projection or {}
+                    )
+                    projection_with_presentation.setdefault(
+                        "schema_version",
+                        CONVERSATION_SITUATION_TURN_PROJECTION_SCHEMA_VERSION,
+                    )
+                    projection_with_presentation.setdefault("request_id", request_id)
+                    projection_with_presentation.setdefault(
+                        "terminal_status", adaptive_terminal_status
+                    )
+                    projection_with_presentation.setdefault(
+                        "provenance", "canonical_turn_tool_records"
+                    )
+                    projection_with_presentation["presented_connector_resources"] = [
+                        dict(capsule)
+                        for capsule in presentation_capsules
+                        if isinstance(capsule, Mapping)
+                    ]
+                    deterministic_situation_projection = (
+                        projection_with_presentation
+                    )
+                auxiliary_llm_calls.append(
+                    {
+                        "type": "turn_resource_presentation",
+                        "schema_version": resource_presentation_plan.get(
+                            "schema_version"
+                        ),
+                        "applied": True,
+                        "annotations": resource_presentation_plan.get(
+                            "annotations"
+                        ),
+                    }
+                )
+
+        try:
+            updated_conversation_situation_text = (
+                merge_conversation_situation_turn_projection(
+                    current_situation=conversation_situation_text,
+                    model_situation=updated_conversation_situation_text,
+                    projection=deterministic_situation_projection,
+                )
+            )
+            if isinstance(deterministic_situation_projection, Mapping):
+                auxiliary_llm_calls.append(
+                    {
+                        "type": "conversation_situation_turn_projection",
+                        **dict(deterministic_situation_projection),
+                    }
+                )
+        except Exception as exc:
+            current_app.logger.warning(
+                "Conversation situation turn projection merge unavailable for "
+                "request_id=%s: %s",
+                request_id,
+                exc,
+            )
 
         if tool_invocations:
             tool_names = sorted(

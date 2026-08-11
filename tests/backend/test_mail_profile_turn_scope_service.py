@@ -79,6 +79,39 @@ def test_turn_scope_intersects_authority_with_runtime_and_uses_default(
     }
 
 
+def test_turn_scope_never_uses_runtime_alias_as_a_display_label(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service,
+        "list_authorised_gmail_profiles_for_user",
+        lambda **_kwargs: _authority(
+            {
+                "profile_id": "private-runtime-alias",
+                "profile_resource_concept_id": "#V#gmail_profile_private",
+                "is_default": True,
+                "represented_identity_concept_ids": ["#V#michael"],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_profiles_from_env",
+        lambda: {"private-runtime-alias": object()},
+    )
+    monkeypatch.setattr(
+        service,
+        "list_profile_summaries",
+        lambda _profiles: [
+            {"profile_id": "private-runtime-alias", "authorised_email": None}
+        ],
+    )
+
+    result = service.build_gmail_profile_turn_scope(user_concept_id="#V#michael")
+
+    assert result["success"] is True
+    assert "display_label" not in result["choices"][0]
+    assert "display_label" not in result["selected_resource_scope"]
+
+
 def test_turn_scope_does_not_silently_choose_conflicting_defaults(monkeypatch) -> None:
     represented = tuple(
         {
