@@ -12,6 +12,7 @@ import concurrent.futures
 import importlib
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
@@ -500,10 +501,18 @@ _LOG = logging.getLogger(__name__)
 
 _STDIO_MAX_RESPONSE_CHARS_DEFAULT = 100_000
 _STDIO_MAX_RESPONSE_CHARS_MIN = 10_000
+_VON_CHAT_RUN_MAX_WORKERS = 4
 _VON_CHAT_RUN_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4,
+    max_workers=_VON_CHAT_RUN_MAX_WORKERS,
     thread_name_prefix="von_chat_run",
 )
+_VON_CHAT_RUN_WORKER_SLOTS = threading.BoundedSemaphore(
+    value=_VON_CHAT_RUN_MAX_WORKERS
+)
+
+
+class VonChatRunCapacityUnavailable(RuntimeError):
+    """Raised when all bounded ``von_chat_run`` worker slots are occupied."""
 
 _TOOL_LIST_CACHE: list[Tool] | None = None
 _TOOL_LIST_CACHE_PATH = (
@@ -881,19 +890,32 @@ async def _run_blocking_with_timeout(func, *, timeout_seconds: float):
 
     import asyncio
     import os
-    import threading
-
     pid = os.getpid()
     thread_id_holder: dict[str, int | None] = {"thread_id": None}
 
+    if not _VON_CHAT_RUN_WORKER_SLOTS.acquire(blocking=False):
+        raise VonChatRunCapacityUnavailable(
+            f"All {_VON_CHAT_RUN_MAX_WORKERS} supervised von_chat_run worker "
+            "slots are active. No additional work was queued; retry after a "
+            "running call completes, or restart the supervised MCP process if "
+            "the calls are wedged."
+        )
+
     def _wrapped():
         thread_id_holder["thread_id"] = threading.get_ident()
-        return func()
+        try:
+            return func()
+        finally:
+            _VON_CHAT_RUN_WORKER_SLOTS.release()
 
     # A shared bounded pool prevents slow calls from creating an unbounded
     # family of live threads.
     loop = asyncio.get_running_loop()
-    future = loop.run_in_executor(_VON_CHAT_RUN_EXECUTOR, _wrapped)
+    try:
+        future = loop.run_in_executor(_VON_CHAT_RUN_EXECUTOR, _wrapped)
+    except BaseException:
+        _VON_CHAT_RUN_WORKER_SLOTS.release()
+        raise
     try:
         if timeout_seconds <= 0:
             return await future
@@ -1590,6 +1612,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             payload["error_code"] = adaptive_result.terminal_status
             payload["error"] = adaptive_result.response_text
     except Exception as exc:
+        capacity_unavailable = isinstance(exc, VonChatRunCapacityUnavailable)
         payload = {
             "success": False,
             "model": model_name,
@@ -1601,9 +1624,21 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "elapsed_time_enforcement": "advisory",
             "advisory_seconds_requested": timeout_seconds,
             "hard_timeout_seconds": None,
-            "error_code": type(exc).__name__,
+            "error_code": (
+                "von_chat_run_capacity_exhausted"
+                if capacity_unavailable
+                else type(exc).__name__
+            ),
             "error": str(exc),
         }
+        if capacity_unavailable:
+            payload.update(
+                {
+                    "retryable": True,
+                    "capacity_boundary": "bounded_worker_admission",
+                    "active_worker_limit": _VON_CHAT_RUN_MAX_WORKERS,
+                }
+            )
 
     return [_json_text(payload)]
 
