@@ -160,6 +160,42 @@ def test_relationship_effect_readback_correlates_result_confirmed_exact_edge() -
         "relation_kind": "binary",
         "relation_id": "struct::documentary_evidence_for",
     }
+    assert result["verified_relationships"] == [result["verified_relationship"]]
+
+
+def test_relationship_effect_readback_accepts_one_deterministic_action_receipt() -> (
+    None
+):
+    result = _verify_effect(
+        tool_invocations=None,
+        relationship_effect_receipt=_effect_invocation(),
+    )
+
+    assert result["relationship_effect_readback_verified"] is True
+    assert result["relationship_effect_matching_mutation_count"] == 1
+    assert result["represented_target_concept_id"] == "#V#meeting"
+
+
+def test_relationship_effect_readback_rejects_a_bare_deterministic_claim() -> None:
+    result = _verify_effect(
+        tool_invocations=None,
+        relationship_effect_receipt={
+            "tool": "add_relationship",
+            "status": "ok",
+            "effective_payload": {
+                "success": True,
+                "source_id": "#V#file_copy",
+                "predicate": "#V#documentary_evidence_for",
+                "target": "#V#meeting",
+            },
+        },
+    )
+
+    assert result["relationship_effect_readback_verified"] is False
+    assert (
+        result["relationship_effect_readback_failure_code"]
+        == "relationship_effect_successful_mutation_missing"
+    )
 
 
 def test_relationship_effect_readback_requires_success_in_the_write_result() -> None:
@@ -223,4 +259,115 @@ def test_relationship_effect_readback_marks_a_partial_page_inconclusive() -> Non
     assert (
         result["relationship_effect_readback_failure_code"]
         == "relationship_effect_readback_incomplete"
+    )
+
+
+def test_relationship_effect_readback_verifies_every_unique_target_in_multi_mode() -> (
+    None
+):
+    result = _verify_effect(
+        allow_multiple_targets=True,
+        minimum_unique_targets=2,
+        tool_invocations=[
+            _effect_invocation(target_id="#V#person_one"),
+            _effect_invocation(target_id="#V#person_two"),
+            _effect_invocation(target_id="#V#person_one"),
+        ],
+        readback_total_hits=2,
+        readback_hits=[
+            _effect_hit(target_id="#V#person_two"),
+            _effect_hit(target_id="#V#person_one"),
+        ],
+    )
+
+    assert result["relationship_effect_readback_verified"] is True
+    assert result["relationship_effect_readback_failure_code"] is None
+    assert result["relationship_effect_matching_mutation_count"] == 3
+    assert result["relationship_effect_mutation_targets"] == [
+        "#V#person_one",
+        "#V#person_two",
+    ]
+    assert result["represented_target_concept_id"] is None
+    assert result["verified_relationship"] is None
+    assert [row["target_id"] for row in result["verified_relationships"]] == [
+        "#V#person_one",
+        "#V#person_two",
+    ]
+
+
+def test_relationship_effect_readback_multi_mode_requires_the_minimum_unique_targets() -> (
+    None
+):
+    result = _verify_effect(
+        allow_multiple_targets=True,
+        minimum_unique_targets=2,
+    )
+
+    assert result["relationship_effect_readback_verified"] is False
+    assert (
+        result["relationship_effect_readback_failure_code"]
+        == "relationship_effect_minimum_unique_targets_not_met"
+    )
+    assert result["represented_target_concept_id"] == "#V#meeting"
+    assert result["verified_relationships"] == []
+
+
+def test_relationship_effect_readback_multi_mode_rejects_one_missing_exact_hit() -> (
+    None
+):
+    result = _verify_effect(
+        allow_multiple_targets=True,
+        minimum_unique_targets=2,
+        tool_invocations=[
+            _effect_invocation(target_id="#V#person_one"),
+            _effect_invocation(target_id="#V#person_two"),
+        ],
+        readback_total_hits=1,
+        readback_hits=[_effect_hit(target_id="#V#person_one")],
+    )
+
+    assert result["relationship_effect_readback_verified"] is False
+    assert (
+        result["relationship_effect_readback_failure_code"]
+        == "relationship_effect_exact_readback_missing"
+    )
+    assert [row["target_id"] for row in result["verified_relationships"]] == [
+        "#V#person_one"
+    ]
+
+
+def test_relationship_effect_readback_multi_mode_marks_missing_hit_on_partial_page_incomplete() -> (
+    None
+):
+    result = _verify_effect(
+        allow_multiple_targets=True,
+        minimum_unique_targets=2,
+        tool_invocations=[
+            _effect_invocation(target_id="#V#person_one"),
+            _effect_invocation(target_id="#V#person_two"),
+        ],
+        readback_total_hits=2,
+        readback_total_hits_is_lower_bound=True,
+        readback_hits=[_effect_hit(target_id="#V#person_one")],
+    )
+
+    assert result["relationship_effect_readback_verified"] is False
+    assert (
+        result["relationship_effect_readback_failure_code"]
+        == "relationship_effect_readback_incomplete"
+    )
+
+
+def test_relationship_effect_readback_rejects_out_of_bounds_multi_target_minimum() -> (
+    None
+):
+    result = _verify_effect(
+        allow_multiple_targets=True,
+        minimum_unique_targets=81,
+    )
+
+    assert result["relationship_effect_readback_verified"] is False
+    assert (
+        result["relationship_effect_readback_failure_code"]
+        == "relationship_effect_readback_inputs_invalid"
     )

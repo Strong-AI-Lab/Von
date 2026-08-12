@@ -1280,6 +1280,10 @@ _CREATE_CONCEPTS_SCOPE_DEFAULT = "user_org_default"
 _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL = "organisation_general"
 _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL = "global_general"
 _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY = "canonical_id_only"
+_CREATE_CONCEPTS_PER_ITEM_IDENTITY_REVIEW_FIELDS = (
+    "identity_candidate_concept_ids",
+    "identity_rejected_candidate_concept_ids",
+)
 _CREATE_CONCEPTS_SCOPE_MODE_ALIASES: dict[str, str] = {
     "default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
     "user_org_default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
@@ -1312,6 +1316,36 @@ def _create_concepts(**kwargs):
     # A handler may sit in the bounded executor queue until after its caller's
     # deadline. Never begin a write-side preflight in that state.
     raise_if_internal_mcp_cancelled()
+
+    misplaced_identity_review_fields = [
+        field_name
+        for field_name in _CREATE_CONCEPTS_PER_ITEM_IDENTITY_REVIEW_FIELDS
+        if field_name in kwargs
+    ]
+    if misplaced_identity_review_fields:
+        expected_paths = [
+            f"concepts[i].{field_name}"
+            for field_name in misplaced_identity_review_fields
+        ]
+        return make_error_response(
+            "invalid_parameter",
+            (
+                "Identity candidate review fields apply to one concept item and "
+                "cannot be supplied at the create_concepts top level. Move them "
+                f"to {', '.join(expected_paths)}. No concepts were created."
+            ),
+            details={
+                "misplaced_top_level_fields": misplaced_identity_review_fields,
+                "expected_concept_item_paths": expected_paths,
+            },
+            suggestions=[
+                (
+                    f"Move {field_name} into the relevant concept object at "
+                    f"concepts[i].{field_name}"
+                )
+                for field_name in misplaced_identity_review_fields
+            ],
+        )
 
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
@@ -10409,6 +10443,78 @@ def _resolve_concept_by_name_output_schema() -> Schema:
         description=(
             "resolve_concept_by_name output: status in {resolved, ambiguous, not_found} with "
             "resolved_concept_id, optional match info, candidates (for ambiguous), and audit steps"
+        ),
+    )
+
+
+def _resolve_concept_by_text_relation(**kwargs):
+    from ...services.text_relation_resolution_service import (
+        resolve_concept_by_text_relation,
+    )
+
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="text-relation concept resolution",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+
+    raw_max_results = kwargs.get("max_results", 5)
+    max_results = 5 if raw_max_results is None else raw_max_results
+    with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+        return resolve_concept_by_text_relation(
+            predicate=kwargs.get("predicate"),
+            text=kwargs.get("text"),
+            instance_of=kwargs.get("instance_of"),
+            max_results=max_results,
+        )
+
+
+def _resolve_concept_by_text_relation_input_schema() -> Schema:
+    return Schema(
+        required={
+            "predicate": str,
+            "text": str,
+        },
+        optional={
+            "instance_of": (str, type(None)),
+            "max_results": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resolve_concept_by_text_relation input: exact predicate and exact text "
+            "plus optional instance_of restriction and max_results (1-20). Actor "
+            "identity is taken only from trusted Internal MCP context."
+        ),
+    )
+
+
+def _resolve_concept_by_text_relation_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "status": str,
+            "predicate": str,
+            "text": str,
+            "instance_of": (str, type(None)),
+            "resolved_concept_id": (str, type(None)),
+            "candidates": list,
+            "candidate_count": int,
+            "candidate_count_is_lower_bound": bool,
+            "candidates_truncated": bool,
+            "resolution_complete": bool,
+        },
+        optional={
+            "incomplete_stages": (list, type(None)),
+            "error_code": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resolve_concept_by_text_relation output: status in {resolved, "
+            "ambiguous, not_found}; only a complete singleton exact match is "
+            "resolved, and bounded incomplete scans remain ambiguous."
         ),
     )
 
@@ -36308,6 +36414,21 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "Resolve a Vontology concept deterministically from a user-provided surface form. "
                 "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
                 "Supports language preferences, instance_of restriction, and optional code-string matching."
+            ),
+        ),
+        MethodDefinition(
+            name="resolve_concept_by_text_relation",
+            handler=_resolve_concept_by_text_relation,
+            input_schema=_resolve_concept_by_text_relation_input_schema(),
+            output_schema=_resolve_concept_by_text_relation_output_schema(),
+            category="read",
+            hard_timeout_enabled=False,
+            description=(
+                "Resolve one actor-visible Vontology concept from an exact stored "
+                "predicate and exact text value, optionally restricted by "
+                "instance_of. Read-only and fail-closed: multiple matches or an "
+                "incomplete bounded scan return ambiguous rather than selecting a "
+                "candidate."
             ),
         ),
         MethodDefinition(

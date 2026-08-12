@@ -1398,12 +1398,12 @@ def _handle_kr_relationship_readback(
 def _handle_relationship_effect_readback(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
-    """Match one successful relationship write to exact canonical read-back.
+    """Match successful relationship writes to exact canonical read-back.
 
     The workflow supplies the domain-specific source and predicate. This
-    reusable mechanism binds the successful mutation target from the current
-    LLM tool history to a later canonical relation hit, so an earlier query or
-    a pre-existing edge to a different target cannot satisfy completion.
+    reusable mechanism binds successful mutation targets from the current LLM
+    tool history to later canonical relation hits. Single-target matching is
+    the default; represented workflows may opt into bounded multi-target mode.
     """
 
     inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
@@ -1413,6 +1413,7 @@ def _handle_relationship_effect_readback(
         expected_predicate_id=inputs.get("expected_predicate_id"),
         expected_relation_kind=inputs.get("expected_relation_kind"),
         tool_invocations=inputs.get("tool_invocations"),
+        relationship_effect_receipt=inputs.get("relationship_effect_receipt"),
         readback_concept_id=inputs.get("readback_concept_id"),
         readback_total_hits=inputs.get("readback_total_hits"),
         readback_hits=inputs.get("readback_hits"),
@@ -1420,6 +1421,8 @@ def _handle_relationship_effect_readback(
             "readback_total_hits_is_lower_bound",
             False,
         ),
+        allow_multiple_targets=inputs.get("allow_multiple_targets", False),
+        minimum_unique_targets=inputs.get("minimum_unique_targets", 1),
     )
     return WorkflowActionResult(status="success", outputs=outputs)
 
@@ -1917,9 +1920,10 @@ def register_control_flow_actions(
             action_id=WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
             handler=_handle_relationship_effect_readback,
             description=(
-                "Bind one successful relationship mutation target from the "
-                "current workflow's tool history to an exact canonical "
-                "relation read-back hit."
+                "Bind successful relationship mutation targets from the current "
+                "workflow's tool history to exact canonical relation read-back "
+                "hits, defaulting to one target unless multi-target mode is "
+                "explicitly enabled."
             ),
             input_schema={
                 "type": "object",
@@ -1928,7 +1932,6 @@ def register_control_flow_actions(
                     "expected_source_id",
                     "expected_predicate_id",
                     "expected_relation_kind",
-                    "tool_invocations",
                     "readback_concept_id",
                     "readback_total_hits",
                     "readback_hits",
@@ -1939,6 +1942,13 @@ def register_control_flow_actions(
                     "expected_predicate_id": {"type": "string"},
                     "expected_relation_kind": {"type": "string"},
                     "tool_invocations": {"type": "array"},
+                    "relationship_effect_receipt": {"type": "object"},
+                    "allow_multiple_targets": {"type": "boolean"},
+                    "minimum_unique_targets": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 80,
+                    },
                     "readback_concept_id": {"type": "string"},
                     "readback_total_hits": {"type": "integer"},
                     "readback_total_hits_is_lower_bound": {"type": "boolean"},
@@ -1954,6 +1964,7 @@ def register_control_flow_actions(
                     "relationship_effect_mutation_targets",
                     "represented_target_concept_id",
                     "verified_relationship",
+                    "verified_relationships",
                 ],
                 "properties": {
                     "relationship_effect_readback_verified": {"type": "boolean"},
@@ -1963,6 +1974,10 @@ def register_control_flow_actions(
                     "relationship_effect_mutation_targets": {"type": "array"},
                     "represented_target_concept_id": {"type": ["string", "null"]},
                     "verified_relationship": {"type": ["object", "null"]},
+                    "verified_relationships": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
                 },
             },
             side_effects="none",

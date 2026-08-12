@@ -197,6 +197,7 @@ def _relationship_effect_readback_outcome(
     matching_mutation_count: int = 0,
     readback_hit_count: int = 0,
     verified_relationship: Mapping[str, Any] | None = None,
+    verified_relationships: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     represented_target_id = mutation_targets[0] if len(mutation_targets) == 1 else None
     return {
@@ -216,6 +217,11 @@ def _relationship_effect_readback_outcome(
             if isinstance(verified_relationship, Mapping)
             else None
         ),
+        "verified_relationships": [
+            dict(relationship)
+            for relationship in verified_relationships
+            if isinstance(relationship, Mapping)
+        ],
     }
 
 
@@ -225,19 +231,23 @@ def verify_relationship_effect_readback(
     expected_source_id: Any,
     expected_predicate_id: Any,
     expected_relation_kind: Any,
-    tool_invocations: Any,
     readback_concept_id: Any,
     readback_total_hits: Any,
     readback_hits: Any,
+    tool_invocations: Any = None,
+    relationship_effect_receipt: Any = None,
     readback_total_hits_is_lower_bound: Any = False,
+    allow_multiple_targets: Any = False,
+    minimum_unique_targets: Any = 1,
 ) -> dict[str, Any]:
     """Correlate a successful relationship write with exact canonical read-back.
 
-    The expected source and predicate are workflow-authored. The target is
-    derived from one coherent, result-confirmed mutation tuple from this run,
-    then matched against one exact asserted relation hit. This prevents an
-    earlier query or an unrelated pre-existing edge from satisfying the
-    postcondition.
+    The expected source and predicate are workflow-authored. Targets are derived
+    from coherent, result-confirmed mutation tuples from this run, then matched
+    against exact asserted relation hits. Single-target behaviour remains the
+    default; callers must explicitly enable bounded multi-target verification.
+    This prevents an earlier query or unrelated pre-existing edges from
+    satisfying the postcondition.
     """
 
     tool_name = _clean_id(mutation_tool_name)
@@ -245,12 +255,28 @@ def verify_relationship_effect_readback(
     predicate_id = _clean_id(expected_predicate_id)
     relation_kind = _clean_id(expected_relation_kind) or "binary"
     observed_readback_concept_id = _clean_id(readback_concept_id)
+    multi_target_mode_valid = isinstance(allow_multiple_targets, bool)
+    multi_target_mode = allow_multiple_targets is True
+    minimum_target_count = (
+        minimum_unique_targets
+        if isinstance(minimum_unique_targets, int)
+        and not isinstance(minimum_unique_targets, bool)
+        else -1
+    )
     invocations = (
         list(tool_invocations)
         if isinstance(tool_invocations, Sequence)
         and not isinstance(tool_invocations, (str, bytes, bytearray))
-        else None
+        else []
     )
+    if isinstance(relationship_effect_receipt, Mapping):
+        # Deterministic workflow actions may own a compound mutation and return
+        # the exact gateway receipt instead of exposing an LLM tool-history
+        # list.  Treat that receipt as one invocation and subject it to the same
+        # coherent-arguments, result-success, tuple, and canonical-readback
+        # checks below.  A bare target ID or claimed success flag is never
+        # sufficient.
+        invocations.append(dict(relationship_effect_receipt))
     hits = (
         list(readback_hits)
         if isinstance(readback_hits, Sequence)
@@ -267,9 +293,12 @@ def verify_relationship_effect_readback(
         or not source_id
         or not predicate_id
         or not relation_kind
-        or invocations is None
+        or not invocations
         or hits is None
         or total_hits < 0
+        or not multi_target_mode_valid
+        or minimum_target_count < 1
+        or minimum_target_count > MAX_RELATIONSHIP_EFFECT_INVOCATIONS
     ):
         return _relationship_effect_readback_outcome(
             verified=False,
@@ -356,7 +385,7 @@ def verify_relationship_effect_readback(
             matching_mutation_count=matching_mutation_count,
             readback_hit_count=len(hits),
         )
-    if len(unique_targets) != 1:
+    if not multi_target_mode and len(unique_targets) != 1:
         return _relationship_effect_readback_outcome(
             verified=False,
             failure_code="relationship_effect_successful_mutation_ambiguous",
@@ -368,8 +397,21 @@ def verify_relationship_effect_readback(
             matching_mutation_count=matching_mutation_count,
             readback_hit_count=len(hits),
         )
+    if multi_target_mode and len(unique_targets) < minimum_target_count:
+        return _relationship_effect_readback_outcome(
+            verified=False,
+            failure_code="relationship_effect_minimum_unique_targets_not_met",
+            mutation_tool_name=tool_name,
+            source_id=source_id,
+            predicate_id=predicate_id,
+            relation_kind=relation_kind,
+            mutation_targets=unique_targets,
+            matching_mutation_count=matching_mutation_count,
+            readback_hit_count=len(hits),
+        )
 
-    expected_target_id = unique_targets[0]
+    expected_target_ids = set(unique_targets)
+    verified_by_target: dict[str, dict[str, Any]] = {}
     for hit in hits:
         if not isinstance(hit, Mapping) or hit.get("access_granted") is False:
             continue
@@ -397,7 +439,7 @@ def verify_relationship_effect_readback(
         if (
             _clean_id(hit.get("source_concept_id")) != source_id
             or _clean_id(hit.get("predicate_concept_id")) != predicate_id
-            or observed_target_id != expected_target_id
+            or observed_target_id not in expected_target_ids
             or _clean_id(hit.get("relation_kind")) != relation_kind
         ):
             continue
@@ -405,6 +447,26 @@ def verify_relationship_effect_readback(
             _clean_id(relation_metadata.get("relation_id"))
             if isinstance(relation_metadata, Mapping)
             else ""
+        )
+        verified_by_target.setdefault(
+            observed_target_id,
+            {
+                "source_id": source_id,
+                "predicate_id": predicate_id,
+                "target_id": observed_target_id,
+                "relation_kind": relation_kind,
+                "relation_id": relation_id or None,
+            },
+        )
+
+    verified_relationships = [
+        verified_by_target[target_id]
+        for target_id in unique_targets
+        if target_id in verified_by_target
+    ]
+    if len(verified_relationships) == len(unique_targets):
+        single_verified_relationship = (
+            verified_relationships[0] if len(verified_relationships) == 1 else None
         )
         return _relationship_effect_readback_outcome(
             verified=True,
@@ -416,13 +478,8 @@ def verify_relationship_effect_readback(
             mutation_targets=unique_targets,
             matching_mutation_count=matching_mutation_count,
             readback_hit_count=len(hits),
-            verified_relationship={
-                "source_id": source_id,
-                "predicate_id": predicate_id,
-                "target_id": expected_target_id,
-                "relation_kind": relation_kind,
-                "relation_id": relation_id or None,
-            },
+            verified_relationship=single_verified_relationship,
+            verified_relationships=verified_relationships,
         )
 
     page_incomplete = bool(readback_total_hits_is_lower_bound) or total_hits > len(hits)
@@ -440,6 +497,7 @@ def verify_relationship_effect_readback(
         mutation_targets=unique_targets,
         matching_mutation_count=matching_mutation_count,
         readback_hit_count=len(hits),
+        verified_relationships=verified_relationships,
     )
 
 

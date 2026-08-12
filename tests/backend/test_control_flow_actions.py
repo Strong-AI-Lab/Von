@@ -1030,29 +1030,38 @@ def _relationship_effect_hit(
 
 def _relationship_effect_readback_result(
     *,
-    invocations: list[dict[str, object]],
+    invocations: list[dict[str, object]] | None,
     hits: list[dict[str, object]],
+    relationship_effect_receipt: dict[str, object] | None = None,
     readback_concept_id: str = "#V#file_copy_1",
     readback_total_hits: int | None = None,
     readback_total_hits_is_lower_bound: bool = False,
+    allow_multiple_targets: bool | None = None,
+    minimum_unique_targets: int | None = None,
 ):
     registry = ActionRegistry()
     register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+    inputs = {
+        "mutation_tool_name": "add_relationship",
+        "expected_source_id": "#V#file_copy_1",
+        "expected_predicate_id": "#V#documentary_evidence_for",
+        "expected_relation_kind": "binary",
+        "tool_invocations": invocations,
+        "relationship_effect_receipt": relationship_effect_receipt,
+        "readback_concept_id": readback_concept_id,
+        "readback_total_hits": (
+            len(hits) if readback_total_hits is None else readback_total_hits
+        ),
+        "readback_total_hits_is_lower_bound": readback_total_hits_is_lower_bound,
+        "readback_hits": hits,
+    }
+    if allow_multiple_targets is not None:
+        inputs["allow_multiple_targets"] = allow_multiple_targets
+    if minimum_unique_targets is not None:
+        inputs["minimum_unique_targets"] = minimum_unique_targets
     return registry.execute(
         WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
-        inputs={
-            "mutation_tool_name": "add_relationship",
-            "expected_source_id": "#V#file_copy_1",
-            "expected_predicate_id": "#V#documentary_evidence_for",
-            "expected_relation_kind": "binary",
-            "tool_invocations": invocations,
-            "readback_concept_id": readback_concept_id,
-            "readback_total_hits": (
-                len(hits) if readback_total_hits is None else readback_total_hits
-            ),
-            "readback_total_hits_is_lower_bound": readback_total_hits_is_lower_bound,
-            "readback_hits": hits,
-        },
+        inputs=inputs,
         context={},
         env=WorkflowEnvironment(llm_client=None),
     )
@@ -1081,6 +1090,21 @@ def test_relationship_effect_readback_binds_successful_write_to_exact_hit() -> N
         "relation_kind": "binary",
         "relation_id": "struct::exact",
     }
+    assert result.outputs["verified_relationships"] == [
+        result.outputs["verified_relationship"]
+    ]
+
+
+def test_relationship_effect_readback_action_accepts_deterministic_receipt() -> None:
+    result = _relationship_effect_readback_result(
+        invocations=None,
+        relationship_effect_receipt=_relationship_effect_invocation(),
+        hits=[_relationship_effect_hit()],
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is True
+    assert result.outputs["represented_target_concept_id"] == "#V#meeting_1"
 
 
 def test_relationship_effect_readback_rejects_wrong_target_only() -> None:
@@ -1115,6 +1139,32 @@ def test_relationship_effect_readback_rejects_ambiguous_successful_targets() -> 
         result.outputs["relationship_effect_readback_failure_code"]
         == "relationship_effect_successful_mutation_ambiguous"
     )
+
+
+def test_relationship_effect_readback_action_supports_explicit_multi_target_mode() -> (
+    None
+):
+    result = _relationship_effect_readback_result(
+        invocations=[
+            _relationship_effect_invocation(target="#V#person_1"),
+            _relationship_effect_invocation(target="#V#person_2"),
+        ],
+        hits=[
+            _relationship_effect_hit(target="#V#person_2"),
+            _relationship_effect_hit(target="#V#person_1"),
+        ],
+        allow_multiple_targets=True,
+        minimum_unique_targets=2,
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is True
+    assert result.outputs["represented_target_concept_id"] is None
+    assert result.outputs["verified_relationship"] is None
+    assert [row["target_id"] for row in result.outputs["verified_relationships"]] == [
+        "#V#person_1",
+        "#V#person_2",
+    ]
 
 
 def test_relationship_effect_readback_accepts_idempotent_existing_edge_receipt() -> (
