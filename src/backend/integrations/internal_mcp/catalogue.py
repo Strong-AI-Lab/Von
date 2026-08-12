@@ -26571,6 +26571,10 @@ def _gmail_send_message(**kwargs):
     body_text_value = (
         body_text if isinstance(body_text, str) and body_text.strip() else None
     )
+    request_id = kwargs.get("request_id")
+    request_id_value = (
+        request_id if isinstance(request_id, str) and request_id.strip() else None
+    )
     allow_send = bool(kwargs.get("allow_send"))
     missing = [
         field
@@ -26579,6 +26583,7 @@ def _gmail_send_message(**kwargs):
             ("to", to_value),
             ("subject", subject_text),
             ("body_text", body_text_value),
+            ("request_id", request_id_value),
         )
         if value in (None, "")
     ]
@@ -26588,13 +26593,14 @@ def _gmail_send_message(**kwargs):
             "Missing required parameters for Gmail send",
             details={"missing": missing},
             suggestions=[
-                "Provide profile, to, subject, body_text, and allow_send=true",
+                "Provide profile, to, subject, body_text, request_id, and allow_send=true",
             ],
         )
     assert profile_text is not None
     assert to_value is not None
     assert subject_text is not None
     assert body_text_value is not None
+    assert request_id_value is not None
     if not allow_send:
         return make_error_response(
             "send_not_allowed",
@@ -26611,6 +26617,33 @@ def _gmail_send_message(**kwargs):
         return authority_error
     assert profile_authority is not None
     profile_text = profile_authority.profile_id
+    from ...services.coding_agent_identity_bootstrap_service import VON_SYSTEM_ID
+    from ...services.mail_profile_resource_vontology_service import (
+        mail_profile_resource_represents_identity,
+    )
+
+    profile_resource_id = profile_authority.profile_resource_concept_id
+    if not (
+        isinstance(profile_resource_id, str)
+        and mail_profile_resource_represents_identity(
+            profile_resource_concept_id=profile_resource_id,
+            identity_concept_id=VON_SYSTEM_ID,
+        )
+    ):
+        return make_error_response(
+            "gmail_agent_identity_not_represented",
+            (
+                "The selected Gmail profile is not represented as a Von "
+                "AI-agent mailbox, so sending is disabled for this profile."
+            ),
+            suggestions=[
+                (
+                    "Represent the configured agent mailbox as the Von system "
+                    "identity before enabling outbound sends"
+                ),
+            ],
+        )
+    principal = profile_authority.principal
 
     try:
         return gs.send_message(
@@ -26621,12 +26654,18 @@ def _gmail_send_message(**kwargs):
             cc=kwargs.get("cc"),
             bcc=kwargs.get("bcc"),
             reply_to=kwargs.get("reply_to"),
-            body_html=kwargs.get("body_html"),
             allow_send=allow_send,
+            profile_resource_concept_id=profile_resource_id,
+            request_id=request_id_value,
+            acting_user_concept_id=principal.user_concept_id,
+            organisation_concept_id=principal.organisation_concept_id,
             audit_context={
                 "namespace": profile_authority.audit_namespace,
                 "source": "internal_mcp_gateway",
                 "tool": "gmail_send_message",
+                "request_id": request_id_value,
+                "acting_user_concept_id": principal.user_concept_id,
+                "organisation_concept_id": principal.organisation_concept_id,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -36755,13 +36794,15 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "subject": str,
             "body_text": str,
             "allow_send": bool,
+            "request_id": str,
         },
         optional={
             "cc": (str, list),
             "bcc": (str, list),
             "reply_to": (str, list),
-            "body_html": str,
             "namespace": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
         },
         allow_unknown=False,
         description=(
@@ -37414,14 +37455,35 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_send_message_input_schema,
             output_schema=_gmail_send_message_output_schema(),
             category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "request_id": "turn_id",
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_trusted_argument_choice_bindings={
+                "profile": "gmail_profile",
+            },
+            ordinary_turn_fixed_arguments={
+                "allow_send": True,
+            },
+            write_guardrail={
+                "ordinary_turn_explicit_request": True,
+            },
             timeout_sec=20.0,
             description=(
-                "Send an outbound Gmail message from a configured profile "
-                "alias or authorised Gmail address. Use when the user has "
-                "explicitly asked Von to send email, not for drafts, reading, "
-                "or label changes. Required inputs are profile, to, subject, "
-                "body_text, and allow_send=true. Optional cc, bcc, reply_to, "
-                "and body_html are supported. The profile must have a "
+                "Send an outbound Gmail message from an actor-authorised "
+                "profile. Use only when the current user request, or bounded "
+                "recent request context, explicitly asks Von to send email; "
+                "the ordinary-turn runtime verifies that request evidence "
+                "before dispatch and supplies allow_send=true. This is not a "
+                "draft, read, or label-change capability. Required model "
+                "inputs are to, subject, and body_text; profile is selected "
+                "only from server-supplied authorised resources. Optional cc, "
+                "bcc, and reply_to are supported. HTML bodies are deliberately "
+                "unsupported so the mandatory AI-agent disclosure cannot be "
+                "visually hidden. The profile must have a "
                 "send-capable Gmail OAuth scope such as gmail.send, "
                 "gmail.compose, gmail.modify, or mail.google.com. The tool "
                 "returns Gmail send metadata and does not return the sent body."
@@ -38282,7 +38344,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             input_schema=Schema(
                 required={},
                 optional={
-                    "conversation_ref": (dict,),
+                    "conversation_ref": (dict, type(None)),
                     "session_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "user_concept_id": (str, type(None)),
@@ -38302,11 +38364,26 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "session_id": "conversation_id",
+                "namespace": "turn_namespace",
+                "user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "conversation_ref": None,
+                "include_debug": False,
+            },
             description=(
-                "Fetch the bounded stored conversation carrier: transcript segments, inspectable "
-                "situation text, exact observations, and optional assistant llm_debug_data with "
-                "history_location locators. Prefer conversation_ref over raw session_id on "
-                "model-driven paths; use offset/limit when a delegated response is paged."
+                "Fetch the bounded stored conversation carrier: transcript "
+                "segments, inspectable situation text, and exact observations. "
+                "On an ordinary turn, the server binds this read to the active "
+                "conversation and authenticated actor, and excludes assistant "
+                "llm_debug_data; the model cannot redirect it to another "
+                "session or supply a conversation reference. Direct diagnostic "
+                "callers may still use an authoritative conversation_ref and "
+                "history_location locators. Use offset/limit when a delegated "
+                "response is paged."
             ),
         ),
         MethodDefinition(

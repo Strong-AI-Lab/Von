@@ -34,6 +34,9 @@ from ...services.settings_service import (
     INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
     INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
     INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
+    get_gmail_outbound_rate_limit_settings,
+    parse_gmail_outbound_rate_limit_settings,
+    set_gmail_outbound_rate_limit_settings,
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
     get_global_mutation_authority_level,
@@ -256,6 +259,7 @@ _ADMIN_ONLY_SETTING_KEYS = _SHARED_RUNTIME_MODEL_SETTING_KEYS | frozenset(
     {
         "disable_write_tool_conservatism",
         "require_human_review_for_high_impact_kb_writes",
+        "gmail_outbound_rate_limits",
     }
 )
 
@@ -1031,10 +1035,14 @@ def get_all_settings():
             settings["require_human_review_for_high_impact_kb_writes"] = (
                 get_require_human_review_for_high_impact_kb_writes()
             )
+            settings["gmail_outbound_rate_limits"] = (
+                get_gmail_outbound_rate_limit_settings().as_dict()
+            )
         else:
             # Remove admin-only setting if it leaked via batch query
             settings.pop("disable_write_tool_conservatism", None)
             settings.pop("require_human_review_for_high_impact_kb_writes", None)
+            settings.pop("gmail_outbound_rate_limits", None)
         selected_model_scope = str(request.args.get("model_scope") or "").strip()
         if selected_model_scope and selected_model_scope not in {
             "user",
@@ -1282,12 +1290,49 @@ def save_all_settings():
         resolved_mutation_authority = None
         resolved_rag_embedder = None
         resolved_rag_llm = None
+        resolved_gmail_outbound_rate_limits = None
         prior_global_rag_embedder = resolve_rag_embedder_setting()
         prior_embedder_signature = _build_runtime_component_signature_from_resolution(
             "embedder",
             prior_global_rag_embedder,
         )
         internal_mcp_caps_updated = False
+        if "gmail_outbound_rate_limits" in data:
+            try:
+                resolved_gmail_outbound_rate_limits = (
+                    parse_gmail_outbound_rate_limit_settings(
+                        data.get("gmail_outbound_rate_limits"),
+                        current=get_gmail_outbound_rate_limit_settings(),
+                    )
+                )
+            except ValueError as exc:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": str(exc),
+                        }
+                    ),
+                    400,
+                )
+            if not set_gmail_outbound_rate_limit_settings(
+                resolved_gmail_outbound_rate_limits
+            ):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "Failed to persist gmail_outbound_rate_limits."
+                            ),
+                        }
+                    ),
+                    500,
+                )
+            current_app.logger.warning(
+                "gmail_outbound_rate_limits updated: enabled=%s",
+                resolved_gmail_outbound_rate_limits.enabled,
+            )
         if "disable_write_tool_conservatism" in data:
             try:
                 disabled = bool(data.get("disable_write_tool_conservatism"))
@@ -1671,6 +1716,11 @@ def save_all_settings():
                     "server_default_llm": get_server_default_llm_setting(),
                     "resolved_rag_embedder": resolved_rag_embedder,
                     "resolved_rag_llm": resolved_rag_llm,
+                    "gmail_outbound_rate_limits": (
+                        resolved_gmail_outbound_rate_limits.as_dict()
+                        if resolved_gmail_outbound_rate_limits is not None
+                        else None
+                    ),
                 }
             ),
             200,

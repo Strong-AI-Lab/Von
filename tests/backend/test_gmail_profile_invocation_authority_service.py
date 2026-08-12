@@ -135,6 +135,92 @@ def test_trusted_local_operator_can_select_configured_profile(monkeypatch):
     assert authority.principal.kind == "trusted_local_operator"
 
 
+def test_actor_send_requires_selected_profile_to_represent_von_system(monkeypatch):
+    from src.backend.integrations.google import gmail_service
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import mail_profile_resource_vontology_service
+
+    monkeypatch.setattr(
+        mail_profile_resource_vontology_service,
+        "resolve_authorised_gmail_profile_for_user",
+        lambda **_kwargs: {
+            "success": True,
+            "reason_code": "authorised_mail_profile_resolved",
+            "profile_id": "actor-mail",
+            "profile_resource_concept_id": "#V#gmail_profile_actor_mail",
+        },
+    )
+    monkeypatch.setattr(
+        gmail_service,
+        "load_profiles_from_env",
+        lambda: _runtime_profiles("actor-mail"),
+    )
+    monkeypatch.setattr(
+        mail_profile_resource_vontology_service,
+        "mail_profile_resource_represents_identity",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        gmail_service,
+        "send_message",
+        lambda **_kwargs: pytest.fail("identity denial must precede Gmail send"),
+    )
+
+    with override_current_actor("#V#actor", "#V#org"):
+        result = catalogue._gmail_send_message(
+            profile="#V#gmail_profile_actor_mail",
+            to="recipient@example.test",
+            subject="Identity boundary",
+            body_text="This must not be sent.",
+            allow_send=True,
+            request_id="actor-identity-denial-1",
+        )
+
+    assert result["error_code"] == "gmail_agent_identity_not_represented"
+
+
+def test_trusted_operator_send_requires_configured_profile_to_represent_von_system(
+    monkeypatch,
+):
+    from src.backend.integrations.google import gmail_service
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
+    )
+    from src.backend.services import mail_profile_resource_vontology_service
+
+    monkeypatch.setattr(
+        gmail_service,
+        "load_profiles_from_env",
+        lambda: _runtime_profiles("operator-profile"),
+    )
+    monkeypatch.setattr(
+        mail_profile_resource_vontology_service,
+        "mail_profile_resource_represents_identity",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        gmail_service,
+        "send_message",
+        lambda **_kwargs: pytest.fail("identity denial must precede Gmail send"),
+    )
+
+    with bind_internal_mcp_actor_context_source(
+        "trusted_operator_payload_fallback"
+    ):
+        result = catalogue._gmail_send_message(
+            profile="operator-profile",
+            to="recipient@example.test",
+            subject="Identity boundary",
+            body_text="This must not be sent.",
+            allow_send=True,
+            request_id="operator-identity-denial-1",
+        )
+
+    assert result["error_code"] == "gmail_agent_identity_not_represented"
+
+
 def test_unscoped_direct_call_is_not_implicitly_operator():
     from src.backend.services.gmail_profile_invocation_authority_service import (
         GmailInvocationAuthorityError,
@@ -215,9 +301,10 @@ def test_catalogue_global_profile_listing_is_operator_only(monkeypatch):
                 "profile": "victim-profile",
                 "to": "recipient@example.test",
                 "subject": "Forged actor check",
-                "body_text": "This must not be sent.",
-                "allow_send": True,
-                "namespace": "#V#victim@victim_org",
+                    "body_text": "This must not be sent.",
+                    "allow_send": True,
+                    "request_id": "forged-actor-send-1",
+                    "namespace": "#V#victim@victim_org",
             },
         ),
     ),

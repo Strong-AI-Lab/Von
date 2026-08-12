@@ -348,6 +348,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "upsert_uncertain_relationship_assertion",
         "add_relationship",
         "gmail_import_attachment",
+        "gmail_send_message",
         "message_send_direct",
         "task_create",
         "task_update_status",
@@ -499,6 +500,72 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }
     assert gmail_import_definition.ordinary_turn_trusted_argument_choice_bindings == {
         "profile": "gmail_profile",
+    }
+
+    gmail_send_definition = catalogue.get("gmail_send_message")
+    assert gmail_send_definition.category == "write"
+    assert gmail_send_definition.ordinary_turn_effect is True
+    assert gmail_send_definition.ordinary_turn_trusted_argument_bindings == {
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "request_id": "turn_id",
+        "namespace": "turn_namespace",
+    }
+    assert gmail_send_definition.ordinary_turn_trusted_argument_choice_bindings == {
+        "profile": "gmail_profile",
+    }
+    assert gmail_send_definition.ordinary_turn_fixed_arguments == {
+        "allow_send": True,
+    }
+    assert gmail_send_definition.write_guardrail == {
+        "ordinary_turn_explicit_request": True,
+    }
+
+    # Exact history recovery is constrained to the active conversation carrier.
+    # The model cannot redirect the session, actor, namespace, or signed-ref path.
+    assert "chat_history_get_segments" not in actor_reads
+    assert "chat_history_get_segments" in actor_mail_reads
+    history_definition = catalogue.get("chat_history_get_segments")
+    assert history_definition.ordinary_turn_trusted_argument_bindings == {
+        "session_id": "conversation_id",
+        "namespace": "turn_namespace",
+        "user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+    }
+    assert history_definition.ordinary_turn_fixed_arguments == {
+        "conversation_ref": None,
+        "include_debug": False,
+    }
+
+    from src.backend.services.adaptive_turn_service import _trusted_tool_payload
+
+    history_payload = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="chat_history_get_segments",
+        model_payload={
+            "session_id": "foreign-conversation",
+            "conversation_ref": {"session_id": "foreign-conversation"},
+            "namespace": "#V#foreign@foreign_org",
+            "user_concept_id": "#V#foreign",
+            "organisation_concept_id": "#V#foreign_org",
+            "include_debug": True,
+            "segment_size": 10,
+        },
+        trusted_argument_values={
+            "conversation_id": "conversation-1",
+            "turn_namespace": "#V#ordinary_actor@ordinary_org",
+            "actor_user_concept_id": "#V#ordinary_actor",
+            "actor_organisation_concept_id": "#V#ordinary_org",
+        },
+    )
+    assert history_payload == {
+        "session_id": "conversation-1",
+        "conversation_ref": None,
+        "namespace": "#V#ordinary_actor@ordinary_org",
+        "user_concept_id": "#V#ordinary_actor",
+        "organisation_concept_id": "#V#ordinary_org",
+        "include_debug": False,
+        "segment_size": 10,
     }
 
     # These are mechanism-level exclusions: they expose ambient deployment
@@ -1680,6 +1747,11 @@ def test_gmail_send_message_registered_and_gateway_invokes(
         "src.backend.integrations.google.gmail_service.send_message",
         fake_send_message,
     )
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_resource_vontology_service."
+        "mail_profile_resource_represents_identity",
+        lambda **_kwargs: True,
+    )
 
     catalogue = build_default_catalogue()
     method = catalogue.get("gmail_send_message")
@@ -1701,6 +1773,7 @@ def test_gmail_send_message_registered_and_gateway_invokes(
             "subject": "Hi From Von",
             "body": "An interesting body.",
             "allow_send": True,
+            "request_id": "turn-send-1",
         },
     ).payload
 
@@ -1709,6 +1782,11 @@ def test_gmail_send_message_registered_and_gateway_invokes(
     assert captured["to"] == ["witbrock@gmail.com"]
     assert captured["body_text"] == "An interesting body."
     assert captured["allow_send"] is True
+    assert captured["request_id"] == "turn-send-1"
+    assert (
+        captured["profile_resource_concept_id"]
+        == "#V#gmail_profile_zhan_gmail"
+    )
     assert captured["audit_context"]["tool"] == "gmail_send_message"
 
 
@@ -1744,6 +1822,7 @@ def test_gmail_send_message_gateway_fails_closed_without_allow_send(monkeypatch)
             "subject": "Hi From Von",
             "body_text": "An interesting body.",
             "allow_send": False,
+            "request_id": "turn-send-denied-1",
         },
     ).payload
 
@@ -1901,9 +1980,13 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
     from email import message_from_bytes
     from email.policy import default as email_policy
 
+    import mongomock
     import pytest
 
     from src.backend.integrations.google import gmail_service as gs
+    from src.backend.services.settings_service import (
+        GmailOutboundRateLimitSettings,
+    )
 
     captured: dict = {}
 
@@ -1920,6 +2003,13 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
         def messages(self):
             return _FakeMessages()
 
+        def getProfile(self, **_kwargs):
+            class _ProfileReq:
+                def execute(self):
+                    return {"emailAddress": "zhan@example.test"}
+
+            return _ProfileReq()
+
     class _FakeService:
         def users(self):
             return _FakeUsers()
@@ -1927,19 +2017,29 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
     send_profile = gs.GmailProfile(
         profile_id="zhan-gmail",
         token_path="/tmp/fake-token.json",
-        scopes=[gs.SEND_SCOPE],
+        scopes=[gs.SEND_SCOPE, *gs.DEFAULT_SCOPES],
     )
     read_profile = gs.GmailProfile(
         profile_id="read-only-gmail",
         token_path="/tmp/fake-token.json",
         scopes=list(gs.DEFAULT_SCOPES),
     )
+    send_only_profile = gs.GmailProfile(
+        profile_id="send-only-gmail",
+        token_path="/tmp/fake-token.json",
+        scopes=[gs.SEND_SCOPE],
+    )
     profiles = {
         "zhan-gmail": send_profile,
         "read-only-gmail": read_profile,
+        "send-only-gmail": send_only_profile,
     }
 
     monkeypatch.setattr(gs, "get_service", lambda *_a, **_kw: _FakeService())
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    test_database = mongomock.MongoClient().von_test
+    delivery_collection = test_database.gmail_outbound_deliveries
+    delivery_collection.create_index("delivery_fingerprint", unique=True)
 
     payload = gs.send_message(
         profile_id="zhan-gmail",
@@ -1948,6 +2048,11 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
         body_text="Here is a small interesting thought.",
         allow_send=True,
         profiles=profiles,
+        profile_resource_concept_id="#V#gmail_profile_zhan_gmail",
+        request_id="test-gmail-service-send",
+        outbound_rate_limit_settings=GmailOutboundRateLimitSettings(enabled=True),
+        outbound_quota_collection=test_database.gmail_outbound_quota,
+        outbound_delivery_collection=delivery_collection,
     )
 
     assert payload["message_id"] == "gmail-sent-1"
@@ -1959,8 +2064,10 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
     message = message_from_bytes(decoded, policy=email_policy)
     assert message["To"] == "witbrock@gmail.com"
     assert message["Subject"] == "Hi From Von"
+    assert message["From"] == "Von AI Agent <zhan@example.test>"
     assert message.get_body(preferencelist=("plain",)).get_content().strip() == (
-        "Here is a small interesting thought."
+        "Here is a small interesting thought.\n\n"
+        f"{gs.AI_AGENT_DISCLOSURE_TEXT}"
     )
 
     with pytest.raises(ValueError, match="allow_send"):
@@ -1976,6 +2083,16 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
     with pytest.raises(PermissionError, match="send-capable"):
         gs.send_message(
             profile_id="read-only-gmail",
+            to="witbrock@gmail.com",
+            subject="Hi From Von",
+            body_text="Body",
+            allow_send=True,
+            profiles=profiles,
+        )
+
+    with pytest.raises(PermissionError, match="read-back"):
+        gs.send_message(
+            profile_id="send-only-gmail",
             to="witbrock@gmail.com",
             subject="Hi From Von",
             body_text="Body",
