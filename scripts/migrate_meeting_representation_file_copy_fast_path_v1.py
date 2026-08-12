@@ -565,6 +565,12 @@ def _set_post_write_evidence_readback(
         else None
     ):
         readback_step["concept_id"] = VERIFY_EVIDENCE_STATE_ID
+    if isinstance(existing_readback_step, Mapping) and isinstance(
+        existing_readback_step.get("metadata"), Mapping
+    ):
+        readback_step["metadata"] = copy.deepcopy(
+            dict(existing_readback_step["metadata"])
+        )
     if matching_readback_indexes:
         steps[matching_readback_indexes[0]] = readback_step
     else:
@@ -680,6 +686,12 @@ def _set_post_write_evidence_readback(
         else None
     ):
         correlate_step["concept_id"] = CORRELATE_EVIDENCE_STATE_ID
+    if isinstance(existing_correlate_step, Mapping) and isinstance(
+        existing_correlate_step.get("metadata"), Mapping
+    ):
+        correlate_step["metadata"] = copy.deepcopy(
+            dict(existing_correlate_step["metadata"])
+        )
     matching_correlate_indexes = [
         index
         for index, step in enumerate(steps)

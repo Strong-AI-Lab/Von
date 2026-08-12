@@ -731,6 +731,24 @@ def test_rewrite_is_idempotent_after_vontology_loader_state_id_projection() -> N
         logical_state_id = step["state_id"]
         step["state_id"] = state_id_map[logical_state_id]
         step.pop("concept_id", None)
+        if logical_state_id == migration.VERIFY_EVIDENCE_STATE_KEY:
+            step["metadata"] = {
+                "reads_context_keys": ["file_copy_concept_id"],
+                "execution_modes": ["deterministic"],
+                "execution_mode": "deterministic",
+            }
+        elif logical_state_id == migration.CORRELATE_EVIDENCE_STATE_KEY:
+            step["metadata"] = {
+                "reads_context_keys": [
+                    "file_copy_concept_id",
+                    "tool_invocations",
+                    migration.EVIDENCE_READBACK_CONCEPT_ID_KEY,
+                    migration.EVIDENCE_READBACK_TOTAL_HITS_KEY,
+                    migration.EVIDENCE_READBACK_HITS_KEY,
+                ],
+                "execution_modes": ["deterministic"],
+                "execution_mode": "deterministic",
+            }
         for transition_key in transition_keys:
             target = step.get(transition_key)
             if target in state_id_map:
