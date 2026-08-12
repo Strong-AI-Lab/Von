@@ -7,8 +7,11 @@ import {
     __testOnly_formatServerDefaultSummary,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
+    __testOnly_normaliseGmailOutboundRateLimitSettings,
     __testOnly_normaliseInternalMcpCapSettings,
+    __testOnly_populateGmailOutboundRateLimitInputs,
     __testOnly_populateInternalMcpCapInputs,
+    __testOnly_readGmailOutboundRateLimitSettingsFromForm,
     __testOnly_readInternalMcpCapSettingsFromForm,
     __testOnly_populateServerDefaultLlmForm,
     __testOnly_readRuntimeModelSettingFromForm,
@@ -483,6 +486,79 @@ describe('settingsPage RAG status summary', () => {
             internal_mcp_max_tool_invocations: 500,
             internal_mcp_tool_batch_cap: 20,
         });
+    });
+
+    test('Gmail outbound limits default disabled and clamp to the backend contract', () => {
+        expect(__testOnly_normaliseGmailOutboundRateLimitSettings({})).toEqual({
+            schema_version: 'gmail_outbound_rate_limits.v1',
+            enabled: false,
+            max_messages_per_10_minutes: 5,
+            max_messages_per_day: 25,
+            max_recipients_per_message: 10,
+            max_recipient_deliveries_per_day: 50,
+        });
+
+        expect(__testOnly_normaliseGmailOutboundRateLimitSettings({
+            enabled: true,
+            max_messages_per_10_minutes: 999,
+            max_messages_per_day: 9999,
+            max_recipients_per_message: 100,
+            max_recipient_deliveries_per_day: 4,
+        })).toEqual({
+            schema_version: 'gmail_outbound_rate_limits.v1',
+            enabled: true,
+            max_messages_per_10_minutes: 100,
+            max_messages_per_day: 1000,
+            max_recipients_per_message: 4,
+            max_recipient_deliveries_per_day: 4,
+        });
+    });
+
+    test('Gmail outbound limit form counts messages and recipient deliveries separately', () => {
+        document.body.innerHTML = `
+            <input type="checkbox" id="gmailOutboundEnabled" checked />
+            <input id="gmailOutboundMaxMessagesPer10Minutes" value="4" />
+            <input id="gmailOutboundMaxMessagesPerDay" value="20" />
+            <input id="gmailOutboundMaxRecipientsPerMessage" value="8" />
+            <input id="gmailOutboundMaxRecipientDeliveriesPerDay" value="40" />
+        `;
+
+        expect(__testOnly_readGmailOutboundRateLimitSettingsFromForm()).toEqual({
+            schema_version: 'gmail_outbound_rate_limits.v1',
+            enabled: true,
+            max_messages_per_10_minutes: 4,
+            max_messages_per_day: 20,
+            max_recipients_per_message: 8,
+            max_recipient_deliveries_per_day: 40,
+        });
+    });
+
+    test('Gmail outbound limit inputs show the effective admin policy', () => {
+        document.body.innerHTML = `
+            <input type="checkbox" id="gmailOutboundEnabled" />
+            <input id="gmailOutboundMaxMessagesPer10Minutes" />
+            <input id="gmailOutboundMaxMessagesPerDay" />
+            <input id="gmailOutboundMaxRecipientsPerMessage" />
+            <input id="gmailOutboundMaxRecipientDeliveriesPerDay" />
+            <div id="gmailOutboundRateLimitStatus"></div>
+        `;
+
+        __testOnly_populateGmailOutboundRateLimitInputs({
+            gmail_outbound_rate_limits: {
+                enabled: true,
+                max_messages_per_10_minutes: 3,
+                max_messages_per_day: 15,
+                max_recipients_per_message: 5,
+                max_recipient_deliveries_per_day: 30,
+            },
+        });
+
+        expect(document.getElementById('gmailOutboundEnabled').checked).toBe(true);
+        expect(document.getElementById('gmailOutboundMaxMessagesPer10Minutes').value).toBe('3');
+        expect(document.getElementById('gmailOutboundMaxMessagesPerDay').value).toBe('15');
+        expect(document.getElementById('gmailOutboundMaxRecipientsPerMessage').value).toBe('5');
+        expect(document.getElementById('gmailOutboundMaxRecipientDeliveriesPerDay').value).toBe('30');
+        expect(document.getElementById('gmailOutboundRateLimitStatus').textContent).toContain('enabled');
     });
 
     test('internal MCP cap form values can persist 100 and 10', () => {

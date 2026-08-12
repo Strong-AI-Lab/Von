@@ -3112,20 +3112,307 @@ def _ordinary_effect_argument_denial(
     capability_name: str,
     arguments: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    """Deny the one relationship family that can widen represented visibility."""
+    """Deny relationship families that ordinary actors must not self-grant."""
 
     if capability_name != "add_relationship":
         return None
     from src.backend.security.visibility_predicates import (
         VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL,
     )
+    from src.backend.services.mail_profile_resource_vontology_service import (
+        HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID,
+        HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID,
+        HAS_OAUTH_SCOPE_PREDICATE_ID,
+        HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID,
+        MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID,
+    )
 
     predicate = str(arguments.get("predicate") or "").strip()
+    predicate_ref = arguments.get("predicate_ref")
+    predicate_references = [predicate]
+    if isinstance(predicate_ref, Mapping):
+        predicate_references.extend(
+            str(predicate_ref.get(field_name) or "").strip()
+            for field_name in ("concept_id", "name")
+        )
+
+    def _normalise_predicate_reference(value: str) -> str:
+        cleaned = value.strip().casefold().removeprefix("#v#")
+        return re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+
+    reserved_mail_profile_predicates = {
+        _normalise_predicate_reference(predicate_id)
+        for predicate_id in (
+            HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID,
+            HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID,
+            HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID,
+            HAS_OAUTH_SCOPE_PREDICATE_ID,
+            MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID,
+        )
+    }
+    if any(
+        _normalise_predicate_reference(reference)
+        in reserved_mail_profile_predicates
+        for reference in predicate_references
+        if reference
+    ):
+        return _error_payload(
+            "mail_profile_authority_effect_not_delegated",
+            (
+                "Ordinary-turn relationship effects cannot grant or alter "
+                "mail-profile authority or agent-mailbox identity."
+            ),
+        )
     if predicate not in VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL:
         return None
     return _error_payload(
         "visibility_effect_not_delegated",
         "Ordinary-turn relationship effects cannot change visibility scope.",
+    )
+
+
+def _bounded_recent_user_prompts(
+    context: Sequence[Mapping[str, Any]] | None,
+    *,
+    max_items: int = 3,
+    max_chars: int = 4_000,
+) -> list[str]:
+    """Return a small user-authored continuation window for request evidence.
+
+    Only user-role conversation messages can carry recent request context. Tool,
+    system, assistant, and caller-supplied structured turn-input messages are
+    deliberately excluded so retrieved or runtime-injected content cannot grant
+    an external effect.
+    """
+
+    retained_reversed: list[str] = []
+    retained_chars = 0
+    for message in reversed(tuple(context or ())):
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        cleaned = content.strip()
+        if (
+            '"type":"authorised_turn_inputs"' in cleaned.replace(" ", "")
+            or '"type": "authorised_turn_inputs"' in cleaned
+        ):
+            continue
+        remaining = max_chars - retained_chars
+        if remaining <= 0:
+            break
+        bounded = cleaned[-min(len(cleaned), remaining, 2_000) :]
+        retained_reversed.append(bounded)
+        retained_chars += len(bounded)
+        if len(retained_reversed) >= max_items:
+            break
+    retained_reversed.reverse()
+    return retained_reversed
+
+
+def _ordinary_turn_effect_request_guardrail(
+    *,
+    definition: Any,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    prompt: str,
+    context: Sequence[Mapping[str, Any]] | None,
+    llm_client: Any,
+    model: str | None,
+    user_concept_id: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Enforce an opt-in explicit-request boundary before effect dispatch.
+
+    ``ordinary_turn_effect`` establishes only the maximum effect capability.
+    External commitments that opt into this guard still require structured
+    request evidence inferred from the current user prompt (plus a bounded
+    user-role continuation window). Inference failure is a typed no-effect
+    result and occurs before the durable dispatch-intent journal entry.
+    """
+
+    guardrail = getattr(definition, "write_guardrail", None)
+    if not isinstance(guardrail, Mapping) or guardrail.get(
+        "ordinary_turn_explicit_request"
+    ) is not True:
+        return None, None
+
+    recent_user_prompts = _bounded_recent_user_prompts(context)
+    payload_summary = {
+        "provided_fields": sorted(
+            str(field_name)
+            for field_name in arguments
+            if isinstance(field_name, str) and field_name
+        )
+    }
+    try:
+        from src.backend.services.write_tool_request_evidence_vontology_service import (
+            infer_write_tool_request_evidence,
+        )
+
+        request_evidence_raw, diagnostics_raw = infer_write_tool_request_evidence(
+            llm_client=llm_client,
+            model=model,
+            prompt=prompt,
+            recent_user_prompts=recent_user_prompts,
+            requested_tools=[capability_name],
+            requested_tool_payloads={capability_name: payload_summary},
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed before dispatch
+        request_evidence_raw = {}
+        diagnostics_raw = {
+            "schema_version": "write_tool_request_evidence.v1",
+            "status": "inference_error",
+            "error_class": type(exc).__name__,
+        }
+
+    request_evidence = (
+        dict(request_evidence_raw)
+        if isinstance(request_evidence_raw, Mapping)
+        else {}
+    )
+    diagnostics = (
+        dict(diagnostics_raw)
+        if isinstance(diagnostics_raw, Mapping)
+        else {
+            "schema_version": "write_tool_request_evidence.v1",
+            "status": "invalid_inference_result",
+        }
+    )
+
+    inference_status = str(diagnostics.get("status") or "unknown").strip()
+    evidence = request_evidence.get(capability_name.lower())
+    evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+    request_state = str(evidence.get("request_state") or "").strip().lower()
+    event: dict[str, Any] = {
+        "type": "ordinary_turn_effect_request_guardrail",
+        "schema_version": "ordinary_turn_effect_request_guardrail.v1",
+        "capability_name": capability_name,
+        "inference_status": inference_status,
+        "request_state": request_state or None,
+        "recent_user_prompt_count": len(recent_user_prompts),
+    }
+
+    if inference_status != "ok":
+        event.update(status="blocked", reason="request_evidence_unavailable")
+        return (
+            {
+                **_error_payload(
+                    "ordinary_turn_request_evidence_unavailable",
+                    (
+                        "The external effect was not started because explicit "
+                        "user-request evidence could not be verified."
+                    ),
+                ),
+                "status": "not_started",
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "outcome_finality": "terminal_for_turn",
+                "changed": False,
+                "request_evidence_status": inference_status,
+            },
+            event,
+        )
+
+    try:
+        from src.backend.services.settings_service import (
+            get_global_mutation_authority_level,
+            get_user_mutation_authority_level,
+        )
+        from src.backend.workflows.write_tool_policy import (
+            compute_allowed_write_tools,
+        )
+
+        user_mutation_authority = (
+            get_user_mutation_authority_level(user_concept_id)
+            if isinstance(user_concept_id, str) and user_concept_id.strip()
+            else None
+        )
+        global_mutation_authority = get_global_mutation_authority_level()
+        decision = compute_allowed_write_tools(
+            prompt=prompt,
+            requested_tools=[capability_name],
+            requested_tool_payloads={capability_name: payload_summary},
+            request_evidence={capability_name: evidence},
+            request_evidence_diagnostics=diagnostics,
+            recent_user_prompts=recent_user_prompts,
+            user_mutation_authority=user_mutation_authority,
+            global_mutation_authority=global_mutation_authority,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed before dispatch
+        event.update(
+            status="blocked",
+            reason="write_policy_unavailable",
+            error_class=type(exc).__name__,
+        )
+        return (
+            {
+                **_error_payload(
+                    "ordinary_turn_write_policy_unavailable",
+                    (
+                        "The external effect was not started because its write "
+                        "policy could not be evaluated."
+                    ),
+                ),
+                "status": "not_started",
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "outcome_finality": "terminal_for_turn",
+                "changed": False,
+            },
+            event,
+        )
+
+    tool_decision = decision.decision_for_tool(capability_name)
+    event.update(
+        decision_basis=decision.decision_basis,
+        policy_outcome=(tool_decision.outcome if tool_decision is not None else None),
+        effective_mutation_authority=decision.effective_mutation_authority,
+    )
+    if capability_name in decision.allowed_tools and request_state in {
+        "explicit_request",
+        "recent_request_context",
+    }:
+        event.update(status="allowed", reason=decision.reason)
+        return None, event
+
+    blocked_reason = (
+        tool_decision.blocked_reason
+        if tool_decision is not None and tool_decision.blocked_reason
+        else decision.reason
+    )
+    event.update(status="blocked", reason=blocked_reason)
+    explicit_request_state = request_state in {
+        "explicit_request",
+        "recent_request_context",
+    }
+    return (
+        {
+            **_error_payload(
+                (
+                    "ordinary_turn_write_policy_blocked"
+                    if explicit_request_state
+                    else "external_write_requires_explicit_request"
+                ),
+                (
+                    "The external effect was not started because it exceeds "
+                    "the effective mutation authority."
+                    if explicit_request_state
+                    else (
+                        "The external effect was not started because the current "
+                        "request does not explicitly authorise it."
+                    )
+                ),
+            ),
+            "status": "not_started",
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "outcome_finality": "terminal_for_turn",
+            "changed": False,
+            "write_policy_reason": blocked_reason,
+            "request_state": request_state or "low_confidence",
+        },
+        event,
     )
 
 
@@ -3163,6 +3450,7 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
         "existing_concept_id",
         "file_copy_concept_id",
         "instance_id",
+        "message_id",
         "object_id",
         "relation_id",
         "source_concept_id",
@@ -3170,6 +3458,8 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
         "subject_id",
         "target_concept_id",
         "target_id",
+        "thread_id",
+        "delivery_fingerprint",
     }
     sequence_fields = {
         "concept_ids",
@@ -3233,6 +3523,42 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
     return collected
 
 
+def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | None:
+    """Project an embedded canonical read-back without private message fields."""
+
+    if not isinstance(raw_payload, Mapping):
+        return None
+    readback = raw_payload.get("canonical_readback")
+    if not isinstance(readback, Mapping):
+        return None
+    projected = {
+        key: readback[key]
+        for key in (
+            "status",
+            "verified",
+            "body_included",
+            "message_id",
+            "thread_id",
+            "label_ids",
+            "sent_label_verified",
+            "message_id_verified",
+            "sender_verified",
+            "recipient_count",
+            "bcc_count",
+            "recipients_verified",
+            "subject_verified",
+            "text_disclosure_verified",
+            "html_disclosure_verified",
+            "disclosure_verified",
+            "machine_disclosure_verified",
+            "delivery_fingerprint_verified",
+            "error_code",
+        )
+        if key in readback
+    }
+    return projected or None
+
+
 _EXACT_READBACK_ARGUMENT_FIELDS = (
     "concept_id",
     "document_id",
@@ -3294,6 +3620,14 @@ def _canonically_verified_material_effect_ids(
         ):
             continue
         material_effect_ids.add(effect_id)
+        embedded_readback = state.get("canonical_readback")
+        if isinstance(embedded_readback, Mapping) and (
+            embedded_readback.get("verified") is True
+            and str(embedded_readback.get("status") or "").strip().lower()
+            == "verified"
+        ):
+            verified_effect_ids.add(effect_id)
+            continue
         effect_targets = {
             str(item).strip()
             for item in invocation.get("result_target_ids") or ()
@@ -4141,6 +4475,7 @@ def execute_adaptive_turn(
         execution_id: str | None = None,
         instance_id: str | None = None,
         workflow_id: str | None = None,
+        canonical_readback: Mapping[str, Any] | None = None,
         late_observation: Mapping[str, Any] | None = None,
         evidence_id: str | None = None,
     ) -> None:
@@ -4160,6 +4495,8 @@ def execute_adaptive_turn(
                 "workflow_id": workflow_id,
                 "evidence_id": evidence_id,
             }
+            if canonical_readback is not None:
+                state["canonical_readback"] = dict(canonical_readback)
             if late_observation is not None:
                 state["late_observation"] = {
                     key: late_observation.get(key)
@@ -4182,6 +4519,7 @@ def execute_adaptive_turn(
                     "execution_id",
                     "instance_id",
                     "workflow_id",
+                    "canonical_readback",
                 ):
                     if not state.get(identity_field) and existing.get(identity_field):
                         state[identity_field] = existing[identity_field]
@@ -4378,6 +4716,7 @@ def execute_adaptive_turn(
                     if isinstance(payload, Mapping)
                     else None
                 ),
+                canonical_readback=_canonical_effect_readback_receipt(payload),
                 late_observation=observed,
                 evidence_id=envelope.evidence_id,
             )
@@ -5839,6 +6178,27 @@ def execute_adaptive_turn(
                         )
                     )
 
+            request_guardrail_denial: dict[str, Any] | None = None
+            request_guardrail_event: dict[str, Any] | None = None
+            if is_effect and definition is not None:
+                (
+                    request_guardrail_denial,
+                    request_guardrail_event,
+                ) = _ordinary_turn_effect_request_guardrail(
+                    definition=definition,
+                    capability_name=canonical_name,
+                    arguments=arguments,
+                    prompt=prompt,
+                    context=current_context,
+                    llm_client=llm_client,
+                    model=model,
+                    user_concept_id=scope.user_concept_id,
+                )
+            if request_guardrail_event is not None:
+                aux_calls.append(request_guardrail_event)
+            if request_guardrail_denial is not None:
+                return index, contained(request_guardrail_denial)
+
             effect_request_signature = (
                 _effect_request_signature(canonical_name, arguments)
                 if is_effect
@@ -6393,8 +6753,15 @@ def execute_adaptive_turn(
                     if projected_payload is not None:
                         envelope_payload["projected_payload"] = projected_payload
                 result_target_ids = _effect_result_target_ids(raw_payload)
+                canonical_effect_readback = _canonical_effect_readback_receipt(
+                    raw_payload
+                )
                 if result_target_ids:
                     envelope_payload["result_target_ids"] = result_target_ids
+                if canonical_effect_readback is not None:
+                    envelope_payload["canonical_readback"] = dict(
+                        canonical_effect_readback
+                    )
                 if is_effect:
                     remember_effect_state(
                         effect_identifier,
@@ -6424,6 +6791,7 @@ def execute_adaptive_turn(
                             if isinstance(raw_payload, Mapping)
                             else None
                         ),
+                        canonical_readback=canonical_effect_readback,
                     )
                     remember_recovery_affordance(
                         effect_id=effect_identifier,
@@ -6562,6 +6930,10 @@ def execute_adaptive_turn(
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
                                 invocation[receipt_key] = receipt_value
+                    if canonical_effect_readback is not None:
+                        invocation["canonical_readback"] = dict(
+                            canonical_effect_readback
+                        )
                 if transport_metadata:
                     invocation["transport"] = transport_metadata
                 invocation["result_projection_duration_ms"] = (

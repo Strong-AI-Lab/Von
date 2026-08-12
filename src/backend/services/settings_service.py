@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, Dict, List, Mapping, Sequence
 from pymongo.results import UpdateResult
 from pymongo.errors import DuplicateKeyError, OperationFailure
@@ -214,6 +215,60 @@ INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500
 INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10
 INTERNAL_MCP_TOOL_BATCH_CAP_MIN = 1
 INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20
+
+# Admin-governed outbound Gmail limits.  These limits are enforced again at
+# the canonical Gmail dispatch boundary; the Settings UI is only a control
+# surface and is not itself a security boundary.
+GMAIL_OUTBOUND_RATE_LIMITS_SETTING_NAME = "gmail_outbound_rate_limits"
+GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION = "gmail_outbound_rate_limits.v1"
+GMAIL_OUTBOUND_ENABLED_DEFAULT = False
+GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_DEFAULT = 5
+GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_DEFAULT = 25
+GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_DEFAULT = 10
+GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_DEFAULT = 50
+GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_MIN = 1
+GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_MAX = 100
+GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_MIN = 1
+GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_MAX = 1_000
+GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_MIN = 1
+GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_MAX = 100
+GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_MIN = 1
+GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_MAX = 5_000
+
+
+@dataclass(frozen=True)
+class GmailOutboundRateLimitSettings:
+    """Typed, application-wide policy for agent Gmail dispatch.
+
+    ``enabled`` defaults to false so adding a configured OAuth profile does not
+    silently release a new external-effect capability.  The remaining defaults
+    are deliberately useful but conservative for a research-team mailbox.
+    """
+
+    enabled: bool = GMAIL_OUTBOUND_ENABLED_DEFAULT
+    max_messages_per_10_minutes: int = (
+        GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_DEFAULT
+    )
+    max_messages_per_day: int = GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_DEFAULT
+    max_recipients_per_message: int = (
+        GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_DEFAULT
+    )
+    max_recipient_deliveries_per_day: int = (
+        GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_DEFAULT
+    )
+    schema_version: str = GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "enabled": self.enabled,
+            "max_messages_per_10_minutes": self.max_messages_per_10_minutes,
+            "max_messages_per_day": self.max_messages_per_day,
+            "max_recipients_per_message": self.max_recipients_per_message,
+            "max_recipient_deliveries_per_day": (
+                self.max_recipient_deliveries_per_day
+            ),
+        }
 
 # Chat UI: show tool use during the “Thinking…” indicator (JVNAUTOSCI-942)
 SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME = "show_tool_use_during_thinking"
@@ -497,6 +552,7 @@ def get_all_settings_batch() -> Dict[str, Any]:
         AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME,
         INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME,
         INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME,
+        GMAIL_OUTBOUND_RATE_LIMITS_SETTING_NAME,
         DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME,
         REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME,
         MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME,
@@ -549,6 +605,11 @@ def get_all_settings_batch() -> Dict[str, Any]:
             default=INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
             min_value=INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
             max_value=INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
+        ),
+        "gmail_outbound_rate_limits": (
+            normalise_gmail_outbound_rate_limit_settings(
+                raw.get(GMAIL_OUTBOUND_RATE_LIMITS_SETTING_NAME)
+            ).as_dict()
         ),
         "disable_write_tool_conservatism": _coerce_bool(
             raw.get(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME), default=False
@@ -2181,6 +2242,178 @@ def _coerce_int_setting(
         return default
 
     return max(min_value, min(max_value, parsed))
+
+
+_GMAIL_OUTBOUND_RATE_LIMIT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "enabled",
+        "max_messages_per_10_minutes",
+        "max_messages_per_day",
+        "max_recipients_per_message",
+        "max_recipient_deliveries_per_day",
+    }
+)
+
+
+def normalise_gmail_outbound_rate_limit_settings(
+    value: Any,
+) -> GmailOutboundRateLimitSettings:
+    """Return a safe policy for stored or otherwise untrusted setting data.
+
+    Invalid values fall back to conservative defaults and numeric values are
+    clamped.  Settings writes use the stricter parser below so an administrator
+    sees a typo instead of silently persisting a different policy.
+    """
+
+    raw = value if isinstance(value, Mapping) else {}
+    max_deliveries = _coerce_int_setting(
+        raw.get("max_recipient_deliveries_per_day"),
+        default=GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_DEFAULT,
+        min_value=GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_MIN,
+        max_value=GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_MAX,
+    )
+    max_recipients = _coerce_int_setting(
+        raw.get("max_recipients_per_message"),
+        default=GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_DEFAULT,
+        min_value=GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_MIN,
+        max_value=GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_MAX,
+    )
+    return GmailOutboundRateLimitSettings(
+        enabled=_coerce_bool(
+            raw.get("enabled"),
+            default=GMAIL_OUTBOUND_ENABLED_DEFAULT,
+        ),
+        max_messages_per_10_minutes=_coerce_int_setting(
+            raw.get("max_messages_per_10_minutes"),
+            default=GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_DEFAULT,
+            min_value=GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_MIN,
+            max_value=GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_MAX,
+        ),
+        max_messages_per_day=_coerce_int_setting(
+            raw.get("max_messages_per_day"),
+            default=GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_DEFAULT,
+            min_value=GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_MIN,
+            max_value=GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_MAX,
+        ),
+        max_recipients_per_message=min(max_recipients, max_deliveries),
+        max_recipient_deliveries_per_day=max_deliveries,
+    )
+
+
+def parse_gmail_outbound_rate_limit_settings(
+    value: Any,
+    *,
+    current: GmailOutboundRateLimitSettings | None = None,
+) -> GmailOutboundRateLimitSettings:
+    """Strictly validate an admin-supplied outbound Gmail policy payload.
+
+    Partial objects are supported and inherit omitted values from ``current``.
+    The schema version is server-owned and may only be supplied with its exact
+    current value.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValueError("gmail_outbound_rate_limits must be an object")
+    unknown_fields = sorted(set(value) - _GMAIL_OUTBOUND_RATE_LIMIT_FIELDS)
+    if unknown_fields:
+        raise ValueError(
+            "gmail_outbound_rate_limits contains unknown field(s): "
+            + ", ".join(str(field) for field in unknown_fields)
+        )
+    supplied_schema = value.get("schema_version")
+    if supplied_schema is not None and supplied_schema != (
+        GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "gmail_outbound_rate_limits.schema_version must be "
+            f"{GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION!r}"
+        )
+
+    base = current or GmailOutboundRateLimitSettings()
+    enabled = value.get("enabled", base.enabled)
+    if not isinstance(enabled, bool):
+        raise ValueError("gmail_outbound_rate_limits.enabled must be a boolean")
+
+    def _bounded_int(
+        field_name: str,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        raw_value = value.get(field_name, default)
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+            raise ValueError(
+                f"gmail_outbound_rate_limits.{field_name} must be an integer"
+            )
+        if raw_value < minimum or raw_value > maximum:
+            raise ValueError(
+                f"gmail_outbound_rate_limits.{field_name} must be between "
+                f"{minimum} and {maximum}"
+            )
+        return raw_value
+
+    max_messages_per_10_minutes = _bounded_int(
+        "max_messages_per_10_minutes",
+        base.max_messages_per_10_minutes,
+        GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_MIN,
+        GMAIL_OUTBOUND_MAX_MESSAGES_PER_10_MINUTES_MAX,
+    )
+    max_messages_per_day = _bounded_int(
+        "max_messages_per_day",
+        base.max_messages_per_day,
+        GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_MIN,
+        GMAIL_OUTBOUND_MAX_MESSAGES_PER_DAY_MAX,
+    )
+    max_recipients_per_message = _bounded_int(
+        "max_recipients_per_message",
+        base.max_recipients_per_message,
+        GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_MIN,
+        GMAIL_OUTBOUND_MAX_RECIPIENTS_PER_MESSAGE_MAX,
+    )
+    max_recipient_deliveries_per_day = _bounded_int(
+        "max_recipient_deliveries_per_day",
+        base.max_recipient_deliveries_per_day,
+        GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_MIN,
+        GMAIL_OUTBOUND_MAX_RECIPIENT_DELIVERIES_PER_DAY_MAX,
+    )
+    if max_recipients_per_message > max_recipient_deliveries_per_day:
+        raise ValueError(
+            "gmail_outbound_rate_limits.max_recipients_per_message cannot exceed "
+            "max_recipient_deliveries_per_day"
+        )
+
+    return GmailOutboundRateLimitSettings(
+        enabled=enabled,
+        max_messages_per_10_minutes=max_messages_per_10_minutes,
+        max_messages_per_day=max_messages_per_day,
+        max_recipients_per_message=max_recipients_per_message,
+        max_recipient_deliveries_per_day=max_recipient_deliveries_per_day,
+    )
+
+
+def get_gmail_outbound_rate_limit_settings() -> GmailOutboundRateLimitSettings:
+    """Return the effective application-wide outbound Gmail policy."""
+
+    return normalise_gmail_outbound_rate_limit_settings(
+        get_setting(GMAIL_OUTBOUND_RATE_LIMITS_SETTING_NAME)
+    )
+
+
+def set_gmail_outbound_rate_limit_settings(
+    value: GmailOutboundRateLimitSettings | Mapping[str, Any],
+) -> bool:
+    """Persist a validated canonical outbound Gmail policy."""
+
+    settings = (
+        value
+        if isinstance(value, GmailOutboundRateLimitSettings)
+        else parse_gmail_outbound_rate_limit_settings(value)
+    )
+    return update_setting(
+        GMAIL_OUTBOUND_RATE_LIMITS_SETTING_NAME,
+        settings.as_dict(),
+    )
 
 
 def get_internal_mcp_max_tool_invocations() -> int:

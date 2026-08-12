@@ -228,12 +228,15 @@
         },
         {
             "name": "chat_history_get_segments",
-            "description": "Fetch the bounded stored conversation carrier: transcript segments, inspectable situation text, exact observations, and optional assistant llm_debug_data with history_location locators. Prefer conversation_ref over raw session_id on model-driven paths; use offset/limit when a delegated response is paged.",
+            "description": "Fetch the bounded stored conversation carrier: transcript segments, inspectable situation text, and exact observations. On an ordinary turn, the server binds this read to the active conversation and authenticated actor, and excludes assistant llm_debug_data; the model cannot redirect it to another session or supply a conversation reference. Direct diagnostic callers may still use an authoritative conversation_ref and history_location locators. Use offset/limit when a delegated response is paged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "conversation_ref": {
-                        "type": "object",
+                        "type": [
+                            "object",
+                            "null"
+                        ],
                         "additionalProperties": true
                     },
                     "session_id": {
@@ -2937,7 +2940,7 @@
         },
         {
             "name": "gmail_send_message",
-            "description": "Send an outbound Gmail message from a configured profile alias or authorised Gmail address. Use when the user has explicitly asked Von to send email, not for drafts, reading, or label changes. Required inputs are profile, to, subject, body_text, and allow_send=true. Optional cc, bcc, reply_to, and body_html are supported. The profile must have a send-capable Gmail OAuth scope such as gmail.send, gmail.compose, gmail.modify, or mail.google.com. The tool returns Gmail send metadata and does not return the sent body.",
+            "description": "Send an outbound Gmail message from an actor-authorised profile. Use only when the current user request, or bounded recent request context, explicitly asks Von to send email; the ordinary-turn runtime verifies that request evidence before dispatch and supplies allow_send=true. This is not a draft, read, or label-change capability. Required model inputs are to, subject, and body_text; profile is selected only from server-supplied authorised resources. Optional cc, bcc, and reply_to are supported. HTML bodies are deliberately unsupported so the mandatory AI-agent disclosure cannot be visually hidden. The profile must have a send-capable Gmail OAuth scope such as gmail.send, gmail.compose, gmail.modify, or mail.google.com. The tool returns Gmail send metadata and does not return the sent body.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2960,6 +2963,9 @@
                     "allow_send": {
                         "type": "boolean"
                     },
+                    "request_id": {
+                        "type": "string"
+                    },
                     "cc": {
                         "type": [
                             "string",
@@ -2981,10 +2987,19 @@
                         ],
                         "items": {}
                     },
-                    "body_html": {
-                        "type": "string"
-                    },
                     "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "acting_user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
                         "type": [
                             "string",
                             "null"
@@ -2996,7 +3011,8 @@
                     "to",
                     "subject",
                     "body_text",
-                    "allow_send"
+                    "allow_send",
+                    "request_id"
                 ],
                 "additionalProperties": false,
                 "description": "Send an email through a configured Gmail profile. Requires allow_send=true after explicit user or workflow authorisation, and a profile with a Gmail send-capable OAuth scope.",

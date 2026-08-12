@@ -204,6 +204,35 @@ def gmail_profile_alias_concept_id(profile_id: str) -> str:
     return f"#V#gmail_runtime_profile_alias_{normalise_profile_id_for_concept_id(profile_id)}"
 
 
+def mail_profile_resource_represents_identity(
+    *,
+    profile_resource_concept_id: str,
+    identity_concept_id: str,
+) -> bool:
+    """Return whether one represented mail profile denotes ``identity_concept_id``.
+
+    Runtime aliases and actor-to-profile authority do not establish mailbox
+    identity.  Callers that depend on that meaning must read the dedicated
+    relation from the canonical profile resource and fail closed when the
+    resource or relation is unavailable.
+    """
+
+    resource_id = str(profile_resource_concept_id or "").strip()
+    identity_id = str(identity_concept_id or "").strip()
+    if not resource_id.startswith("#V#") or not identity_id.startswith("#V#"):
+        return False
+
+    resource_doc = load_concept(resource_id)
+    if not isinstance(resource_doc, Mapping):
+        return False
+    relationships = resource_doc.get("relationships")
+    relation_map = relationships if isinstance(relationships, Mapping) else {}
+    represented_identity_ids = normalise_relationship_targets(
+        relation_map.get(MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID)
+    )
+    return identity_id in represented_identity_ids
+
+
 def list_authorised_gmail_profiles_for_user(
     *,
     user_concept_id: str,
@@ -703,6 +732,7 @@ __all__ = [
     "gmail_profile_alias_concept_id",
     "gmail_profile_resource_concept_id",
     "list_authorised_gmail_profiles_for_user",
+    "mail_profile_resource_represents_identity",
     "materialise_gmail_profile_resources_for_user",
     "normalise_profile_id_for_concept_id",
     "resolve_authorised_gmail_profile_for_user",

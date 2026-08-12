@@ -1,13 +1,59 @@
 import base64
+import hashlib
 import json
 import socket
 from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.parser import BytesParser
+from email.policy import default as default_email_policy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import mongomock
 import pytest
 
 from src.backend.integrations.google import gmail_service as gs
+from src.backend.services.gmail_outbound_mailbox_identity_service import (
+    derive_canonical_gmail_mailbox_key,
+)
+from src.backend.services.settings_service import GmailOutboundRateLimitSettings
+
+
+def _outbound_test_collections():
+    database = mongomock.MongoClient().von_test
+    deliveries = database.gmail_outbound_deliveries
+    deliveries.create_index("delivery_fingerprint", unique=True)
+    return database.gmail_outbound_quota, deliveries
+
+
+def _enabled_outbound_settings(**overrides):
+    values = {
+        "enabled": True,
+        "max_messages_per_10_minutes": 5,
+        "max_messages_per_day": 25,
+        "max_recipients_per_message": 10,
+        "max_recipient_deliveries_per_day": 50,
+    }
+    values.update(overrides)
+    return GmailOutboundRateLimitSettings(**values)
+
+
+def _outbound_send_kwargs(
+    *,
+    quota_collection,
+    delivery_collection,
+    request_id,
+    profile_resource_concept_id="#V#gmail_profile_zhan_gmail",
+):
+    return {
+        "profile_resource_concept_id": profile_resource_concept_id,
+        "request_id": request_id,
+        "acting_user_concept_id": "#V#michael_witbrock",
+        "organisation_concept_id": "#V#strong_ai_lab",
+        "outbound_rate_limit_settings": _enabled_outbound_settings(),
+        "outbound_quota_collection": quota_collection,
+        "outbound_delivery_collection": delivery_collection,
+    }
 
 
 class _FakeSocket:
@@ -565,6 +611,645 @@ def test_find_attachment_part_metadata_bounds_mime_traversal():
         )
         == {}
     )
+
+
+def test_send_message_rejects_html_that_could_hide_agent_disclosure():
+    quota_collection, delivery_collection = _outbound_test_collections()
+
+    with pytest.raises(ValueError, match="body_html is not supported"):
+        gs.send_message(
+            profile_id="zhan-gmail",
+            to="recipient@example.test",
+            subject="Agent message",
+            body_text="Private research summary.",
+            body_html="<style>p{display:none}</style><p>Hidden notice</p>",
+            allow_send=True,
+            profiles={},
+            **_outbound_send_kwargs(
+                quota_collection=quota_collection,
+                delivery_collection=delivery_collection,
+                request_id="turn-hidden-disclosure-1",
+            ),
+        )
+
+    assert quota_collection.count_documents({}) == 0
+    assert delivery_collection.count_documents({}) == 0
+
+
+def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    quota_collection, delivery_collection = _outbound_test_collections()
+    request_id = "turn-verified-1"
+    expected_fingerprint = gs._outbound_delivery_identity(
+        canonical_mailbox_key=derive_canonical_gmail_mailbox_key(
+            "zhan@example.test"
+        ),
+        request_id=request_id,
+        to=["recipient@example.test"],
+        cc=["copy@example.test"],
+        bcc=["blind-copy@example.test"],
+        reply_to=[],
+        subject="Agent message",
+        body_text="Private research summary.",
+        body_html=None,
+    )[0]
+    canonical_message = EmailMessage()
+    canonical_message["From"] = "Zhan (Von AI Agent) <zhan@example.test>"
+    canonical_message["To"] = "recipient@example.test"
+    canonical_message["Cc"] = "copy@example.test"
+    canonical_message["Bcc"] = "blind-copy@example.test"
+    canonical_message["Subject"] = "Agent message"
+    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    canonical_message[gs.DELIVERY_FINGERPRINT_HEADER] = expected_fingerprint
+    canonical_message["Message-ID"] = (
+        "<provider-rewritten-message-id@example.test>"
+    )
+    canonical_message.set_content(
+        "Private research summary.\n\n" + gs.AI_AGENT_DISCLOSURE_TEXT
+    )
+    canonical_raw = base64.urlsafe_b64encode(
+        canonical_message.as_bytes()
+    ).decode("ascii")
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class _Messages:
+        def send(self, **kwargs):
+            captured["send_kwargs"] = kwargs
+            captured["send_count"] = captured.get("send_count", 0) + 1
+            return _Request(
+                {
+                    "id": "sent-1",
+                    "threadId": "thread-1",
+                    "raw": "private-provider-body",
+                    "payload": {"body": {"data": "private-provider-body"}},
+                }
+            )
+
+        def get(self, **kwargs):
+            captured["get_kwargs"] = kwargs
+            return _Request(
+                {
+                    "id": "sent-1",
+                    "threadId": "thread-1",
+                    "labelIds": ["SENT"],
+                    "raw": canonical_raw,
+                }
+            )
+
+    class _Users:
+        def __init__(self):
+            self._messages = _Messages()
+
+        def messages(self):
+            return self._messages
+
+        def getProfile(self, **kwargs):
+            captured["profile_kwargs"] = kwargs
+            return _Request({"emailAddress": "zhan@example.test"})
+
+    class _Service:
+        def __init__(self):
+            self._users = _Users()
+
+        def users(self):
+            return self._users
+
+    profiles = {
+        "zhan-gmail": gs.GmailProfile(
+            profile_id="zhan-gmail",
+            token_path="/tmp/fake-token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: _Service())
+
+    result = gs.send_message(
+        profile_id="zhan-gmail",
+        to="recipient@example.test",
+        cc="copy@example.test",
+        bcc="blind-copy@example.test",
+        subject="Agent message",
+        body_text="Private research summary.",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id=request_id,
+        ),
+    )
+
+    sent_message = BytesParser(policy=default_email_policy).parsebytes(
+        base64.urlsafe_b64decode(
+            captured["send_kwargs"]["body"]["raw"].encode("ascii")
+        )
+    )
+    assert gs.AI_AGENT_DISCLOSURE_TEXT in sent_message.get_body(
+        preferencelist=("plain",)
+    ).get_content()
+    assert sent_message.get_body(preferencelist=("html",)) is None
+    assert sent_message["From"] == "Von AI Agent <zhan@example.test>"
+    assert captured["profile_kwargs"] == {"userId": "me"}
+    assert captured["get_kwargs"] == {
+        "userId": "me",
+        "id": "sent-1",
+        "format": "raw",
+        "fields": "id,threadId,labelIds,raw",
+    }
+
+    readback = result["canonical_readback"]
+    assert result["success"] is True
+    assert result["status"] == "succeeded"
+    assert result["gmail_send_state_verified"] is True
+    assert result["effect_status"] == "succeeded"
+    assert result["outcome_finality"] == "canonical_durable_readback"
+    assert readback["verified"] is True
+    assert readback["body_included"] is False
+    assert readback["sent_label_verified"] is True
+    assert readback["sender_address"] == "zhan@example.test"
+    assert readback["sender_verified"] is True
+    assert readback["to"] == ["recipient@example.test"]
+    assert readback["cc"] == ["copy@example.test"]
+    assert readback["bcc_count"] == 1
+    assert readback["recipients_verified"] is True
+    assert readback["subject_verified"] is True
+    assert readback["disclosure_verified"] is True
+    assert readback["machine_disclosure_verified"] is True
+    assert readback["delivery_fingerprint_verified"] is True
+    assert result["delivery_ledger_status"] == "succeeded"
+    assert result["quota"]["allowed"] is True
+    assert "Private research summary." not in json.dumps(readback)
+    assert "raw" not in readback
+    assert "private-provider-body" not in json.dumps(result)
+    assert "payload" not in result
+
+    replay = gs.send_message(
+        profile_id="zhan-gmail",
+        to="recipient@example.test",
+        cc="copy@example.test",
+        bcc="blind-copy@example.test",
+        subject="Agent message",
+        body_text="Private research summary.",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id=request_id,
+        ),
+    )
+
+    assert captured["send_count"] == 1
+    assert replay["success"] is True
+    assert replay["idempotent_replay"] is True
+    assert replay["changed"] is False
+    assert replay["outcome_finality"] == "durable_idempotent_replay"
+
+
+def test_send_message_aliases_share_mailbox_delivery_and_quota_identity(monkeypatch):
+    """Two authorised aliases for one Gmail mailbox cannot bypass controls."""
+
+    quota_collection, delivery_collection = _outbound_test_collections()
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    canonical_address = "shared-mailbox@example.test"
+    mailbox_key = derive_canonical_gmail_mailbox_key(canonical_address)
+    request_id = "turn-same-mailbox-two-aliases-1"
+    expected_fingerprint = gs._outbound_delivery_identity(
+        canonical_mailbox_key=mailbox_key,
+        request_id=request_id,
+        to=["recipient@example.test"],
+        cc=[],
+        bcc=[],
+        reply_to=[],
+        subject="Alias-safe agent message",
+        body_text="Private research summary.",
+        body_html=None,
+    )[0]
+    canonical_message = EmailMessage()
+    canonical_message["From"] = f"Von AI Agent <{canonical_address}>"
+    canonical_message["To"] = "recipient@example.test"
+    canonical_message["Subject"] = "Alias-safe agent message"
+    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    canonical_message[gs.DELIVERY_FINGERPRINT_HEADER] = expected_fingerprint
+    canonical_message["Message-ID"] = (
+        "<provider-rewritten-message-id@example.test>"
+    )
+    canonical_message.set_content(
+        "Private research summary.\n\n" + gs.AI_AGENT_DISCLOSURE_TEXT
+    )
+    canonical_raw = base64.urlsafe_b64encode(
+        canonical_message.as_bytes()
+    ).decode("ascii")
+    captured = {"send_count": 0, "messages_calls": 0, "profile_reads": 0}
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class _Messages:
+        def send(self, **_kwargs):
+            captured["send_count"] += 1
+            return _Request({"id": "sent-alias-1", "threadId": "thread-alias-1"})
+
+        def get(self, **_kwargs):
+            return _Request(
+                {
+                    "id": "sent-alias-1",
+                    "threadId": "thread-alias-1",
+                    "labelIds": ["SENT"],
+                    "raw": canonical_raw,
+                }
+            )
+
+    class _Users:
+        def __init__(self):
+            self._messages = _Messages()
+
+        def getProfile(self, **_kwargs):
+            captured["profile_reads"] += 1
+            return _Request({"emailAddress": canonical_address})
+
+        def messages(self):
+            captured["messages_calls"] += 1
+            return self._messages
+
+    class _Service:
+        def __init__(self):
+            self._users = _Users()
+
+        def users(self):
+            return self._users
+
+    profiles = {
+        "alias-a": gs.GmailProfile(
+            profile_id="alias-a",
+            token_path="/tmp/fake-a.json",
+            scopes=[gs.MUTATION_SCOPE],
+        ),
+        "alias-b": gs.GmailProfile(
+            profile_id="alias-b",
+            token_path="/tmp/fake-b.json",
+            scopes=[gs.MUTATION_SCOPE],
+        ),
+    }
+    service = _Service()
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: service)
+
+    common = {
+        "to": "recipient@example.test",
+        "subject": "Alias-safe agent message",
+        "body_text": "Private research summary.",
+        "allow_send": True,
+        "profiles": profiles,
+    }
+    first = gs.send_message(
+        profile_id="alias-a",
+        **common,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id=request_id,
+            profile_resource_concept_id="#V#gmail_profile_alias_a",
+        ),
+    )
+    replay = gs.send_message(
+        profile_id="alias-b",
+        **common,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id=request_id,
+            profile_resource_concept_id="#V#gmail_profile_alias_b",
+        ),
+    )
+    rate_limited_kwargs = _outbound_send_kwargs(
+        quota_collection=quota_collection,
+        delivery_collection=delivery_collection,
+        request_id="turn-same-mailbox-two-aliases-2",
+        profile_resource_concept_id="#V#gmail_profile_alias_b",
+    )
+    rate_limited_kwargs["outbound_rate_limit_settings"] = (
+        _enabled_outbound_settings(max_messages_per_10_minutes=1)
+    )
+    denied = gs.send_message(
+        profile_id="alias-b",
+        **common,
+        **rate_limited_kwargs,
+    )
+
+    assert first["effect_status"] == "succeeded"
+    assert replay["success"] is True
+    assert replay["idempotent_replay"] is True
+    assert replay["delivery_fingerprint"] == first["delivery_fingerprint"]
+    assert denied["error_code"] == "gmail_outbound_rate_limit_exceeded"
+    assert denied["effect_status"] == "not_started"
+    assert captured["send_count"] == 1
+    assert captured["profile_reads"] == 4
+    assert quota_collection.count_documents({}) == 1
+    quota_document = quota_collection.find_one({})
+    assert quota_document["messages_in_day"] == 1
+    assert quota_document["canonical_mailbox_key"] == mailbox_key
+    assert delivery_collection.count_documents({}) == 2
+    delivery_document = delivery_collection.find_one(
+        {"delivery_fingerprint": first["delivery_fingerprint"]}
+    )
+    assert delivery_document["canonical_mailbox_key"] == mailbox_key
+    assert delivery_document["observed_profile_resource_concept_ids"] == [
+        "#V#gmail_profile_alias_a",
+        "#V#gmail_profile_alias_b",
+    ]
+    assert delivery_document["observed_profile_alias_digests"] == [
+        hashlib.sha256(b"alias-a").hexdigest(),
+        hashlib.sha256(b"alias-b").hexdigest(),
+    ]
+    assert canonical_address not in str(quota_document)
+    assert canonical_address not in str(list(delivery_collection.find({})))
+
+
+def test_send_message_canonical_mailbox_preflight_failure_has_no_effect(
+    monkeypatch,
+):
+    quota_collection, delivery_collection = _outbound_test_collections()
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    captured = {"messages_calls": 0}
+
+    class _FailedRequest:
+        def execute(self):
+            raise TimeoutError("canonical Gmail profile lookup timed out")
+
+    class _Users:
+        def getProfile(self, **_kwargs):
+            return _FailedRequest()
+
+        def messages(self):
+            captured["messages_calls"] += 1
+            raise AssertionError("messages resource must not be accessed")
+
+    class _Service:
+        def users(self):
+            return _Users()
+
+    profiles = {
+        "alias-a": gs.GmailProfile(
+            profile_id="alias-a",
+            token_path="/tmp/fake-a.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: _Service())
+
+    result = gs.send_message(
+        profile_id="alias-a",
+        to="recipient@example.test",
+        subject="Preflight failure",
+        body_text="This must not be sent.",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id="turn-preflight-failure-1",
+            profile_resource_concept_id="#V#gmail_profile_alias_a",
+        ),
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "gmail_canonical_mailbox_preflight_failed"
+    assert result["effect_status"] == "not_started"
+    assert result["provider_dispatch_attempted"] is False
+    assert "delivery_fingerprint" not in result
+    assert captured["messages_calls"] == 0
+    assert quota_collection.count_documents({}) == 0
+    assert delivery_collection.count_documents({}) == 0
+
+
+def test_send_message_reports_completed_send_with_failed_readback_as_indeterminate(
+    monkeypatch,
+):
+    quota_collection, delivery_collection = _outbound_test_collections()
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    class _Request:
+        def __init__(self, payload=None, error=None):
+            self.payload = payload
+            self.error = error
+
+        def execute(self):
+            if self.error is not None:
+                raise self.error
+            return self.payload
+
+    class _Messages:
+        def send(self, **_kwargs):
+            return _Request({"id": "sent-1"})
+
+        def get(self, **_kwargs):
+            return _Request(error=TimeoutError("read-back timed out"))
+
+    class _Users:
+        def messages(self):
+            return _Messages()
+
+        def getProfile(self, **_kwargs):
+            return _Request({"emailAddress": "zhan@example.test"})
+
+    class _Service:
+        def users(self):
+            return _Users()
+
+    profiles = {
+        "zhan-gmail": gs.GmailProfile(
+            profile_id="zhan-gmail",
+            token_path="/tmp/fake-token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: _Service())
+
+    result = gs.send_message(
+        profile_id="zhan-gmail",
+        to="recipient@example.test",
+        subject="Agent message",
+        body_text="Private research summary.",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id="turn-indeterminate-1",
+        ),
+    )
+
+    assert result["changed"] is True
+    assert result["success"] is False
+    assert result["status"] == "indeterminate"
+    assert result["gmail_send_state_verified"] is False
+    assert result["effect_status"] == "indeterminate"
+    assert result["mutation_outcome"] == "unknown"
+    assert result["outcome_finality"] == "canonical_readback_indeterminate"
+    assert result["delivery_ledger_status"] == "indeterminate"
+    assert result["canonical_readback"] == {
+        "status": "unavailable",
+        "verified": False,
+        "body_included": False,
+        "message_id": "sent-1",
+        "error_code": "gmail_sent_message_readback_unavailable",
+        "exception_type": "TimeoutError",
+    }
+
+
+def test_send_message_reconciles_lost_provider_response_without_redispatch(
+    monkeypatch,
+):
+    quota_collection, delivery_collection = _outbound_test_collections()
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    request_id = "turn-provider-response-lost-1"
+    expected_fingerprint = gs._outbound_delivery_identity(
+        canonical_mailbox_key=derive_canonical_gmail_mailbox_key(
+            "zhan@example.test"
+        ),
+        request_id=request_id,
+        to=["recipient@example.test"],
+        cc=[],
+        bcc=[],
+        reply_to=[],
+        subject="Reconciled agent message",
+        body_text="Private research summary.",
+        body_html=None,
+    )[0]
+    canonical_message = EmailMessage()
+    canonical_message["From"] = "Von AI Agent <zhan@example.test>"
+    canonical_message["To"] = "recipient@example.test"
+    canonical_message["Subject"] = "Reconciled agent message"
+    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    canonical_message[gs.DELIVERY_FINGERPRINT_HEADER] = expected_fingerprint
+    canonical_message["Message-ID"] = (
+        "<provider-rewritten-message-id@example.test>"
+    )
+    canonical_message.set_content(
+        "Private research summary.\n\n" + gs.AI_AGENT_DISCLOSURE_TEXT
+    )
+    canonical_raw = base64.urlsafe_b64encode(
+        canonical_message.as_bytes()
+    ).decode("ascii")
+    captured = {"send_count": 0, "list_count": 0, "metadata_get_count": 0}
+
+    class _Request:
+        def __init__(self, payload=None, error=None):
+            self.payload = payload
+            self.error = error
+
+        def execute(self):
+            if self.error is not None:
+                raise self.error
+            return self.payload
+
+    class _Messages:
+        def send(self, **_kwargs):
+            captured["send_count"] += 1
+            return _Request(error=TimeoutError("provider response lost"))
+
+        def list(self, **kwargs):
+            captured["list_count"] += 1
+            captured["list_kwargs"] = kwargs
+            return _Request({"messages": [{"id": "sent-1"}]})
+
+        def get(self, **kwargs):
+            if kwargs.get("format") == "metadata":
+                captured["metadata_get_count"] += 1
+                return _Request(
+                    {
+                        "id": "sent-1",
+                        "threadId": "thread-1",
+                        "labelIds": ["SENT"],
+                        "payload": {
+                            "headers": [
+                                {
+                                    "name": gs.DELIVERY_FINGERPRINT_HEADER,
+                                    "value": expected_fingerprint,
+                                }
+                            ]
+                        },
+                    }
+                )
+            return _Request(
+                {
+                    "id": "sent-1",
+                    "threadId": "thread-1",
+                    "labelIds": ["SENT"],
+                    "raw": canonical_raw,
+                }
+            )
+
+    class _Users:
+        def messages(self):
+            return _Messages()
+
+        def getProfile(self, **_kwargs):
+            return _Request({"emailAddress": "zhan@example.test"})
+
+    class _Service:
+        def users(self):
+            return _Users()
+
+    profiles = {
+        "zhan-gmail": gs.GmailProfile(
+            profile_id="zhan-gmail",
+            token_path="/tmp/fake-token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: _Service())
+
+    send_kwargs = _outbound_send_kwargs(
+        quota_collection=quota_collection,
+        delivery_collection=delivery_collection,
+        request_id=request_id,
+    )
+    result = gs.send_message(
+        profile_id="zhan-gmail",
+        to="recipient@example.test",
+        subject="Reconciled agent message",
+        body_text="Private research summary.",
+        allow_send=True,
+        profiles=profiles,
+        **send_kwargs,
+    )
+    replay = gs.send_message(
+        profile_id="zhan-gmail",
+        to="recipient@example.test",
+        subject="Reconciled agent message",
+        body_text="Private research summary.",
+        allow_send=True,
+        profiles=profiles,
+        **send_kwargs,
+    )
+
+    assert captured["send_count"] == 1
+    assert captured["list_count"] == 1
+    assert captured["metadata_get_count"] == 1
+    assert "rfc822msgid:" not in captured["list_kwargs"]["q"]
+    assert "subject:\"Reconciled agent message\"" in (
+        captured["list_kwargs"]["q"]
+    )
+    assert "to:recipient@example.test" in captured["list_kwargs"]["q"]
+    assert result["effect_status"] == "succeeded"
+    assert result["outcome_finality"] == (
+        "gmail_sent_reconciled_after_provider_error"
+    )
+    assert result["delivery_ledger_status"] == "succeeded"
+    assert result["delivery_reconciliation"]["verified"] is True
+    assert replay["idempotent_replay"] is True
+    assert replay["changed"] is False
 
 
 def test_modify_labels_guard(monkeypatch):

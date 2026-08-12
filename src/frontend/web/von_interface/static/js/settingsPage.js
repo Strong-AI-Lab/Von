@@ -112,6 +112,15 @@ const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500;
 const INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MIN = 1;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20;
+const GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION = 'gmail_outbound_rate_limits.v1';
+const GMAIL_OUTBOUND_RATE_LIMIT_DEFAULTS = Object.freeze({
+  schema_version: GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION,
+  enabled: false,
+  max_messages_per_10_minutes: 5,
+  max_messages_per_day: 25,
+  max_recipients_per_message: 10,
+  max_recipient_deliveries_per_day: 50,
+});
 const OPENAI_MODEL_COST_SUMMARY_SCHEMA_VERSION = 'llm_model_turn_cost_summary.v1';
 const OPENAI_MODEL_COST_SUMMARY_ENDPOINT = '/api/settings/llm/cost_summary';
 
@@ -151,6 +160,7 @@ let currentActorOrganisationRole = '';
 
 let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
+let __canPersistGmailOutboundRateLimits = false;
 let availableGmailProfiles = [];
 let gmailProfileAuthorisedEmailByProfile = {};
 
@@ -1514,6 +1524,10 @@ function applySettingsActorRole(role) {
   if (conservatismContainer) {
     conservatismContainer.classList.toggle('hidden', !__vonIsAdminOrOwner);
   }
+  if (!__vonIsAdminOrOwner) {
+    __canPersistGmailOutboundRateLimits = false;
+  }
+  syncGmailOutboundRateLimitWriteAccess();
   applySharedRuntimeModelWriteAccess(__vonIsAdminOrOwner);
   setOllamaHostManagementWritable(__vonIsAdminOrOwner);
   syncModelPoolTargetScopeControls();
@@ -2994,6 +3008,90 @@ function clampNumber(value, minValue, maxValue, fallbackValue) {
   return Math.min(Math.max(num, minValue), maxValue);
 }
 
+
+function normaliseGmailOutboundRateLimitSettings(settings = {}) {
+  const source = settings?.gmail_outbound_rate_limits || settings || {};
+  const integer = (field, minimum, maximum) => Math.trunc(clampNumber(
+    source[field],
+    minimum,
+    maximum,
+    GMAIL_OUTBOUND_RATE_LIMIT_DEFAULTS[field],
+  ));
+  const maxRecipientDeliveries = integer('max_recipient_deliveries_per_day', 1, 5000);
+  return {
+    schema_version: GMAIL_OUTBOUND_RATE_LIMITS_SCHEMA_VERSION,
+    enabled: Object.prototype.hasOwnProperty.call(source, 'enabled')
+      ? !!source.enabled
+      : GMAIL_OUTBOUND_RATE_LIMIT_DEFAULTS.enabled,
+    max_messages_per_10_minutes: integer('max_messages_per_10_minutes', 1, 100),
+    max_messages_per_day: integer('max_messages_per_day', 1, 1000),
+    max_recipients_per_message: Math.min(
+      integer('max_recipients_per_message', 1, 100),
+      maxRecipientDeliveries,
+    ),
+    max_recipient_deliveries_per_day: maxRecipientDeliveries,
+  };
+}
+
+function readGmailOutboundRateLimitSettingsFromForm() {
+  return normaliseGmailOutboundRateLimitSettings({
+    enabled: !!document.getElementById('gmailOutboundEnabled')?.checked,
+    max_messages_per_10_minutes: document.getElementById('gmailOutboundMaxMessagesPer10Minutes')?.value,
+    max_messages_per_day: document.getElementById('gmailOutboundMaxMessagesPerDay')?.value,
+    max_recipients_per_message: document.getElementById('gmailOutboundMaxRecipientsPerMessage')?.value,
+    max_recipient_deliveries_per_day: document.getElementById('gmailOutboundMaxRecipientDeliveriesPerDay')?.value,
+  });
+}
+
+function populateGmailOutboundRateLimitInputs(settings = {}) {
+  const policy = normaliseGmailOutboundRateLimitSettings(settings);
+  const enabled = document.getElementById('gmailOutboundEnabled');
+  const maxTenMinutes = document.getElementById('gmailOutboundMaxMessagesPer10Minutes');
+  const maxDay = document.getElementById('gmailOutboundMaxMessagesPerDay');
+  const maxRecipients = document.getElementById('gmailOutboundMaxRecipientsPerMessage');
+  const maxRecipientDeliveries = document.getElementById('gmailOutboundMaxRecipientDeliveriesPerDay');
+  if (enabled) enabled.checked = policy.enabled;
+  if (maxTenMinutes) maxTenMinutes.value = String(policy.max_messages_per_10_minutes);
+  if (maxDay) maxDay.value = String(policy.max_messages_per_day);
+  if (maxRecipients) maxRecipients.value = String(policy.max_recipients_per_message);
+  if (maxRecipientDeliveries) maxRecipientDeliveries.value = String(policy.max_recipient_deliveries_per_day);
+  const status = document.getElementById('gmailOutboundRateLimitStatus');
+  if (status) {
+    status.textContent = policy.enabled
+      ? `Outbound email enabled: ${policy.max_messages_per_10_minutes}/10 min, ${policy.max_messages_per_day}/day.`
+      : 'Outbound email is disabled.';
+  }
+  return policy;
+}
+
+function syncGmailOutboundRateLimitWriteAccess() {
+  const container = document.getElementById('gmailOutboundRateLimitContainer');
+  if (container) {
+    container.classList.toggle('hidden', !__vonIsAdminOrOwner);
+  }
+  [
+    'gmailOutboundEnabled',
+    'gmailOutboundMaxMessagesPer10Minutes',
+    'gmailOutboundMaxMessagesPerDay',
+    'gmailOutboundMaxRecipientsPerMessage',
+    'gmailOutboundMaxRecipientDeliveriesPerDay',
+    'saveGmailOutboundRateLimitsButton',
+  ].forEach((id) => {
+    const element = document.getElementById(id);
+    if (element) element.disabled = !__canPersistGmailOutboundRateLimits;
+  });
+}
+
+async function persistGmailOutboundRateLimitSettings() {
+  if (!__canPersistGmailOutboundRateLimits) {
+    throw new Error('Admin or owner privileges are required to update outbound email limits.');
+  }
+  populateGmailOutboundRateLimitInputs(readGmailOutboundRateLimitSettingsFromForm());
+  const saved = await saveAllSettings({ includeGmailOutboundRateLimits: true });
+  if (!saved) throw new Error('Settings save did not complete.');
+  showStatusMessage('gmailOutboundRateLimitStatus', 'Outbound email limits saved.', false);
+}
+
 function normaliseInternalMcpCapSettings(settings = {}) {
   const maxInvocationsRaw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_max_tool_invocations')
     ? settings.internal_mcp_max_tool_invocations
@@ -4034,6 +4132,18 @@ export function __testOnly_setupInternalMcpCapAutoSave(options = {}) {
   return setupInternalMcpCapAutoSave(options);
 }
 
+export function __testOnly_normaliseGmailOutboundRateLimitSettings(settings = {}) {
+  return normaliseGmailOutboundRateLimitSettings(settings);
+}
+
+export function __testOnly_readGmailOutboundRateLimitSettingsFromForm() {
+  return readGmailOutboundRateLimitSettingsFromForm();
+}
+
+export function __testOnly_populateGmailOutboundRateLimitInputs(settings = {}) {
+  return populateGmailOutboundRateLimitInputs(settings);
+}
+
 function isSettingsRuntimePanelVisible() {
   try {
     if (document.hidden) return false;
@@ -4806,6 +4916,20 @@ if (autoProceedMinimalImpositionToggle) {
   });
 }
 
+const saveGmailOutboundRateLimitsButton = document.getElementById('saveGmailOutboundRateLimitsButton');
+if (saveGmailOutboundRateLimitsButton) {
+  saveGmailOutboundRateLimitsButton.addEventListener('click', () => {
+    Promise.resolve(persistGmailOutboundRateLimitSettings()).catch((error) => {
+      console.warn('Failed to save Gmail outbound rate limits', error);
+      showStatusMessage(
+        'gmailOutboundRateLimitStatus',
+        error?.message || 'Failed to save outbound email limits.',
+        true,
+      );
+    });
+  });
+}
+
 const buttonifyPromptLink = document.getElementById('buttonifyPromptLink');
 if (buttonifyPromptLink) {
   buttonifyPromptLink.addEventListener('click', (event) => {
@@ -4970,9 +5094,14 @@ async function loadAndDisplaySettings() {
       applySettingsActorRole(role);
       __canPersistWriteConservatism = __vonIsAdminOrOwner
         && Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism');
+      __canPersistGmailOutboundRateLimits = __vonIsAdminOrOwner
+        && Object.prototype.hasOwnProperty.call(settings, 'gmail_outbound_rate_limits');
+      syncGmailOutboundRateLimitWriteAccess();
     } catch {
       applySettingsActorRole('');
       __canPersistWriteConservatism = false;
+      __canPersistGmailOutboundRateLimits = false;
+      syncGmailOutboundRateLimitWriteAccess();
     }
 
     // The selector should reflect the resolved active model for the provider in scope,
@@ -5202,6 +5331,16 @@ async function loadAndDisplaySettings() {
       }
     } catch (error) {
       console.warn('Failed to render Gmail profiles', error);
+    }
+
+    // Populate admin-only outbound Gmail dispatch limits.
+    try {
+      if (Object.prototype.hasOwnProperty.call(settings, 'gmail_outbound_rate_limits')) {
+        populateGmailOutboundRateLimitInputs(settings);
+      }
+      syncGmailOutboundRateLimitWriteAccess();
+    } catch (error) {
+      console.warn('Failed to render Gmail outbound rate limits', error);
     }
 
     // Populate fetch_counts_on_load toggle
@@ -5466,8 +5605,14 @@ async function loadAndDisplayDbInfo() {
   }
 }
 
-async function saveAllSettings({ includeChatModels = false, includeRuntimeModels = false } = {}) {
-  const concernSpecificSave = includeChatModels || includeRuntimeModels;
+async function saveAllSettings({
+  includeChatModels = false,
+  includeRuntimeModels = false,
+  includeGmailOutboundRateLimits = false,
+} = {}) {
+  const concernSpecificSave = includeChatModels
+    || includeRuntimeModels
+    || includeGmailOutboundRateLimits;
   // Actor-scoped and shared-runtime Save buttons deliberately send only their
   // own concern. General auto-saves continue to use the ordinary settings payload.
   const settings = concernSpecificSave
@@ -5482,6 +5627,13 @@ async function saveAllSettings({ includeChatModels = false, includeRuntimeModels
       buttonify_model_enabled: !!document.getElementById('buttonifyModelEnabledToggle')?.checked,
       auto_proceed_minimal_imposition_enabled: !!document.getElementById('autoProceedMinimalImpositionToggle')?.checked,
     };
+
+  if (
+    __canPersistGmailOutboundRateLimits
+    && (!concernSpecificSave || includeGmailOutboundRateLimits)
+  ) {
+    settings.gmail_outbound_rate_limits = readGmailOutboundRateLimitSettingsFromForm();
+  }
 
   if (!concernSpecificSave && __canPersistWriteConservatism) {
     const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');

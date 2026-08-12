@@ -3076,6 +3076,10 @@ async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextCont
     body_text_value = (
         body_text if isinstance(body_text, str) and body_text.strip() else None
     )
+    request_id = arguments.get("request_id")
+    request_id_value = (
+        request_id if isinstance(request_id, str) and request_id.strip() else None
+    )
     allow_send = bool(arguments.get("allow_send"))
     missing = [
         field
@@ -3084,6 +3088,7 @@ async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextCont
             ("to", to_value),
             ("subject", subject_text),
             ("body_text", body_text_value),
+            ("request_id", request_id_value),
         )
         if value in (None, "")
     ]
@@ -3093,7 +3098,7 @@ async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextCont
                 "Missing required parameters for Gmail send",
                 error_code="missing_parameter",
                 suggestions=[
-                    "Provide profile, to, subject, body_text, and allow_send=true",
+                    "Provide profile, to, subject, body_text, request_id, and allow_send=true",
                 ],
             )
         ]
@@ -3101,6 +3106,7 @@ async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextCont
     assert to_value is not None
     assert subject_text is not None
     assert body_text_value is not None
+    assert request_id_value is not None
     if not allow_send:
         return [
             _json_error(
@@ -3112,17 +3118,11 @@ async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextCont
             )
         ]
     try:
-        result = gmail_service.send_message(
-            profile_id=profile_text,
-            to=cast(str | list[str], to_value),
-            subject=subject_text,
-            body_text=body_text_value,
-            cc=arguments.get("cc"),
-            bcc=arguments.get("bcc"),
-            reply_to=arguments.get("reply_to"),
-            body_html=arguments.get("body_html"),
-            allow_send=allow_send,
-            audit_context=_gmail_audit_context("gmail_send_message"),
+        # Reuse the canonical catalogue handler so the trusted-local operator
+        # path receives the same represented-identity, quota, idempotency and
+        # finality controls as ordinary Von conversations.
+        result = internal_mcp_catalogue_module._gmail_send_message(
+            **arguments,
         )
         return [_json_text(result)]
     except Exception as exc:

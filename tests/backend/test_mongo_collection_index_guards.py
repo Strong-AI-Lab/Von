@@ -193,6 +193,45 @@ def test_application_settings_index_is_ensured_once_per_database(monkeypatch):
     assert coll_first.create_index_calls[0]["kwargs"] == {"unique": True}
 
 
+def test_gmail_outbound_operational_indexes_are_ensured_once(monkeypatch):
+    _reset_collection_index_state(monkeypatch)
+    db = _FakeDb("test_von_db", client=object())
+    monkeypatch.setattr(mc, "get_db", lambda: db)
+
+    quota_first = cast(_FakeCollection, mc.get_gmail_outbound_quota_collection())
+    quota_second = cast(_FakeCollection, mc.get_gmail_outbound_quota_collection())
+    deliveries_first = cast(
+        _FakeCollection,
+        mc.get_gmail_outbound_deliveries_collection(),
+    )
+    deliveries_second = cast(
+        _FakeCollection,
+        mc.get_gmail_outbound_deliveries_collection(),
+    )
+
+    assert quota_first is quota_second
+    assert deliveries_first is deliveries_second
+    assert quota_first.create_index_calls == [
+        {
+            "keys": [("expires_at", mc.ASCENDING)],
+            "kwargs": {"name": "expires_at_ttl", "expireAfterSeconds": 0},
+        }
+    ]
+    assert deliveries_first.create_index_calls == [
+        {
+            "keys": [("delivery_fingerprint", mc.ASCENDING)],
+            "kwargs": {
+                "name": "delivery_fingerprint_1_unique",
+                "unique": True,
+            },
+        },
+        {
+            "keys": [("status", mc.ASCENDING), ("updated_at", mc.DESCENDING)],
+            "kwargs": {"name": "status_1_updated_at_-1"},
+        },
+    ]
+
+
 def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
     _reset_collection_index_state(monkeypatch)
     shared_client = object()

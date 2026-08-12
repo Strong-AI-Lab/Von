@@ -81,12 +81,14 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
     user_concept_id = "#V#michael_witbrock"
     _create_user(user_concept_id)
     _create_user("#V#zhan_vonwitbrock")
+    _create_user("#V#von_system")
 
     report = service.materialise_gmail_profile_resources_for_user(
         user_concept_id=user_concept_id,
         profile_ids=["vonwitbrock-gmail", "zhan-gmail"],
         default_profile_id="vonwitbrock-gmail",
         profile_identity_concept_ids={
+            "vonwitbrock-gmail": "#V#von_system",
             "zhan-gmail": "#V#zhan_vonwitbrock",
         },
     )
@@ -116,6 +118,18 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
         service.MAIL_PROFILE_REPRESENTS_IDENTITY_PREDICATE_ID,
     )
     assert identity_targets == {"#V#zhan_vonwitbrock"}
+    assert service.mail_profile_resource_represents_identity(
+        profile_resource_concept_id=von_profile,
+        identity_concept_id="#V#von_system",
+    )
+    assert not service.mail_profile_resource_represents_identity(
+        profile_resource_concept_id=von_profile,
+        identity_concept_id="#V#zhan_vonwitbrock",
+    )
+    assert not service.mail_profile_resource_represents_identity(
+        profile_resource_concept_id="#V#gmail_profile_missing",
+        identity_concept_id="#V#von_system",
+    )
 
     alias_targets = _targets(
         von_profile,
@@ -146,7 +160,7 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
                 "profile_id": "vonwitbrock-gmail",
                 "profile_resource_concept_id": von_profile,
                 "is_default": True,
-                "represented_identity_concept_ids": [],
+                "represented_identity_concept_ids": ["#V#von_system"],
             },
             {
                 "profile_id": "zhan-gmail",

@@ -39,6 +39,8 @@ from src.backend.services.adaptive_turn_service import (
     _CONVERSATION_SITUATION_MAX_CHARS,
     _bound_tool_results_for_model,
     _bounded_conversation_observation_projection,
+    _canonical_effect_readback_receipt,
+    _canonically_verified_material_effect_ids,
     _capability_catalogue,
     _compact_context_after_limit,
     _compact_evidence_envelope,
@@ -49,6 +51,7 @@ from src.backend.services.adaptive_turn_service import (
     _extract_conversation_situation_sidecar,
     _final_synthesis_context,
     _json_bytes,
+    _ordinary_effect_argument_denial,
     _scope_message,
     _trusted_tool_payload,
     execute_adaptive_turn,
@@ -117,6 +120,62 @@ def test_effect_receipt_targets_require_explicit_generic_target_fields() -> None
         "#V#created_b",
         "#V#nested_result",
     ]
+
+
+def test_embedded_gmail_readback_is_canonical_without_private_fields() -> None:
+    receipt = _canonical_effect_readback_receipt(
+        {
+            "canonical_readback": {
+                "status": "verified",
+                "verified": True,
+                "message_id": "gmail-message-1",
+                "thread_id": "gmail-thread-1",
+                "sender": "Von AI Agent <agent@example.test>",
+                "to": ["recipient@example.test"],
+                "subject": "Private subject",
+                "body_included": False,
+                "disclosure_verified": True,
+                "delivery_fingerprint_verified": True,
+            }
+        }
+    )
+
+    assert receipt == {
+        "status": "verified",
+        "verified": True,
+        "body_included": False,
+        "message_id": "gmail-message-1",
+        "thread_id": "gmail-thread-1",
+        "disclosure_verified": True,
+        "delivery_fingerprint_verified": True,
+    }
+    assert _effect_result_target_ids(
+        {
+            "message_id": "gmail-message-1",
+            "thread_id": "gmail-thread-1",
+            "delivery_fingerprint": "delivery-1",
+        }
+    ) == ["gmail-message-1", "gmail-thread-1", "delivery-1"]
+
+    material, verified = _canonically_verified_material_effect_ids(
+        [
+            {
+                "effect_id": "effect-1",
+                "status": "ok",
+                "result_target_ids": ["gmail-message-1"],
+            }
+        ],
+        {
+            "effect-1": {
+                "effect_status": "succeeded",
+                "changed": True,
+                "turn_finality_required": True,
+                "canonical_readback": receipt,
+            }
+        },
+    )
+    assert material == {"effect-1"}
+    assert verified == {"effect-1"}
 
 
 def _gateway(handler: Any) -> InternalMCPGateway:
@@ -322,6 +381,57 @@ def _gmail_choice_gateway(handler: Any) -> InternalMCPGateway:
     return InternalMCPGateway(
         catalogue=catalogue,
         transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+
+def _gmail_send_gateway(handler: Any) -> InternalMCPGateway:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="gmail_send_message",
+            handler=handler,
+            input_schema=Schema(
+                required={
+                    "profile": str,
+                    "to": (str, list),
+                    "subject": str,
+                    "body_text": str,
+                    "allow_send": bool,
+                },
+                optional={
+                    "namespace": (str, type(None)),
+                    "acting_user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "request_id": (str, type(None)),
+                },
+                aliases={
+                    "profile_id": "profile",
+                    "identity": "profile",
+                    "allow_mutation": "allow_send",
+                },
+                allow_unknown=False,
+                description="Send Gmail after verified explicit request evidence.",
+            ),
+            category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "request_id": "turn_id",
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_trusted_argument_choice_bindings={
+                "profile": "gmail_profile",
+            },
+            ordinary_turn_fixed_arguments={"allow_send": True},
+            write_guardrail={"ordinary_turn_explicit_request": True},
+            description="Send Gmail after verified explicit request evidence.",
+        )
+    )
+    return InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(write_timeout_sec=1.0),
         enabled=True,
     )
 
@@ -3724,6 +3834,107 @@ def test_ordinary_relationship_effect_cannot_widen_visibility(
     assert "visibility_effect_not_delegated" in (
         result.tool_invocations[0]["evidence"]["preview"]
     )
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "#V#has_authorised_mail_profile",
+        "#V#has_default_mail_profile",
+        "#V#has_runtime_profile_alias",
+        "#V#has_oauth_scope",
+        "#V#mail_profile_represents_identity",
+    ],
+)
+def test_ordinary_relationship_effect_reserves_mail_profile_control_predicates(
+    predicate: str,
+) -> None:
+    denial = _ordinary_effect_argument_denial(
+        "add_relationship",
+        {
+            "source_id": "#V#person",
+            "predicate_ref": {"concept_id": predicate},
+            "target": "#V#gmail_profile_vonwitbrock_gmail",
+        },
+    )
+
+    assert denial is not None
+    assert denial["error_code"] == "mail_profile_authority_effect_not_delegated"
+
+
+def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs() -> None:
+    invoked: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append((name, dict(arguments)))
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="self-grant-mail-profile",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#person",
+                            "predicate": "#V#has_authorised_mail_profile",
+                            "target": "#V#gmail_profile_vonwitbrock_gmail",
+                        },
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="safe-research-interest",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#person",
+                            "predicate": "#V#hasResearchInterest",
+                            "target": "#V#knowledge_representation",
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response="The safe relationship was recorded."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Authorise that Gmail profile and record my research interest.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="mail-profile-self-grant",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == [
+        (
+            "add_relationship",
+            {
+                "source_id": "#V#person",
+                "predicate": "#V#hasResearchInterest",
+                "target": "#V#knowledge_representation",
+            },
+        )
+    ]
+    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert "mail_profile_authority_effect_not_delegated" in (
+        result.tool_invocations[0]["evidence"]["preview"]
+    )
+    assert result.tool_invocations[1]["effect_status"] == "succeeded"
 
 
 def test_capability_query_ranks_without_eliminating_the_delegated_set(
@@ -7158,6 +7369,307 @@ def test_trusted_gmail_profile_overrides_model_profile_and_aliases() -> None:
     assert invocation["effective_arguments"] == seen_arguments
 
 
+def test_explicit_request_guard_allows_actor_bound_gmail_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import write_tool_request_evidence_vontology_service
+
+    inferred: dict[str, Any] = {}
+    seen_arguments: dict[str, Any] = {}
+
+    def infer_request_evidence(**kwargs: Any):
+        inferred.update(kwargs)
+        return (
+            {
+                "gmail_send_message": {
+                    "schema_version": "write_tool_request_evidence.v1",
+                    "tool_name": "gmail_send_message",
+                    "request_state": "explicit_request",
+                    "confirmation_state": "low_confidence",
+                    "denial_state": "low_confidence",
+                    "rationale": "The current prompt explicitly asks Von to send email.",
+                }
+            },
+            {
+                "schema_version": "write_tool_request_evidence.v1",
+                "status": "ok",
+                "parse_mode": "json",
+            },
+        )
+
+    monkeypatch.setattr(
+        write_tool_request_evidence_vontology_service,
+        "infer_write_tool_request_evidence",
+        infer_request_evidence,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.write_tool_policy."
+        "resolve_runtime_profile_write_tool_risk_class",
+        lambda *_args, **_kwargs: "external_non_vontology",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "resolve_tool_projection_contract",
+        lambda _tool_name: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service."
+        "get_user_mutation_authority_level",
+        lambda _user_id: "external_system_guarded",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service."
+        "get_global_mutation_authority_level",
+        lambda: "external_system_guarded",
+    )
+
+    def handler(**kwargs: Any) -> dict[str, Any]:
+        seen_arguments.update(kwargs)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "message_id": "gmail-message-1",
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="send-gmail",
+                    payload={
+                        "name": "gmail_send_message",
+                        "arguments": {
+                            "profile": "#V#gmail_profile_zhan",
+                            "profile_id": "foreign-runtime",
+                            "to": "recipient@example.test",
+                            "subject": "Requested note",
+                            "body_text": "The requested body.",
+                            "allow_send": False,
+                            "allow_mutation": False,
+                            "namespace": "#V#spoof@other",
+                            "acting_user_concept_id": "#V#spoof",
+                            "organisation_concept_id": "#V#other",
+                            "request_id": "spoofed-request",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The requested email was submitted."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gmail_send_gateway(handler),
+        prompt="Send this email now.",
+        context=[
+            {"role": "user", "content": "Draft a short note first."},
+            {"role": "assistant", "content": "Here is a draft."},
+        ],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        trusted_argument_values={
+            "gmail_profile": _gmail_profile_choices(
+                default="#V#gmail_profile_zhan"
+            ),
+        },
+        turn_id="turn-send-gmail",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert seen_arguments == {
+        "profile": "zhan-runtime",
+        "to": ["recipient@example.test"],
+        "subject": "Requested note",
+        "body_text": "The requested body.",
+        "allow_send": True,
+        "namespace": "#V#person@org",
+        "acting_user_concept_id": "#V#person",
+        "organisation_concept_id": "#V#org",
+        "request_id": "turn-send-gmail",
+    }
+    assert inferred["prompt"] == "Send this email now."
+    assert inferred["recent_user_prompts"] == ["Draft a short note first."]
+    assert inferred["requested_tools"] == ["gmail_send_message"]
+    payload_summary = inferred["requested_tool_payloads"]["gmail_send_message"]
+    assert set(payload_summary) == {"provided_fields"}
+    assert "The requested body." not in json.dumps(payload_summary)
+    invocation = result.tool_invocations[0]
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["effective_arguments"] == {
+        **seen_arguments,
+        "to": "recipient@example.test",
+    }
+    guardrail_event = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "ordinary_turn_effect_request_guardrail"
+    )
+    assert guardrail_event["status"] == "allowed"
+    assert guardrail_event["request_state"] == "explicit_request"
+
+
+def test_gmail_send_fails_closed_before_dispatch_when_request_evidence_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import (
+        turn_execution_record_service,
+        write_tool_request_evidence_vontology_service,
+    )
+
+    dispatches: list[dict[str, Any]] = []
+    handler_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "record_effect_observation_phase",
+        lambda **kwargs: dispatches.append(dict(kwargs)) or {"updated": True},
+    )
+    monkeypatch.setattr(
+        write_tool_request_evidence_vontology_service,
+        "infer_write_tool_request_evidence",
+        lambda **_kwargs: (
+            {},
+            {
+                "schema_version": "write_tool_request_evidence.v1",
+                "status": "llm_unavailable",
+            },
+        ),
+    )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="blocked-gmail-send",
+                    payload={
+                        "name": "gmail_send_message",
+                        "arguments": {
+                            "to": "recipient@example.test",
+                            "subject": "Not dispatched",
+                            "body_text": "No message must be sent.",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="I could not verify permission to send."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gmail_send_gateway(
+            lambda **kwargs: handler_calls.append(dict(kwargs))
+            or {"success": True}
+        ),
+        prompt="Please send this email.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        trusted_argument_values={
+            "gmail_profile": _gmail_profile_choices(
+                default="#V#gmail_profile_zhan"
+            ),
+        },
+        turn_id="turn-blocked-gmail-send",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert handler_calls == []
+    assert dispatches == []
+    invocation = result.tool_invocations[0]
+    assert invocation["effect_status"] == "not_started"
+    denial = json.loads(invocation["evidence"]["preview"])
+    assert denial["error_code"] == "ordinary_turn_request_evidence_unavailable"
+    assert denial["changed"] is False
+    guardrail_event = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "ordinary_turn_effect_request_guardrail"
+    )
+    assert guardrail_event["status"] == "blocked"
+    assert guardrail_event["reason"] == "request_evidence_unavailable"
+
+
+def test_explicit_gmail_request_does_not_override_actor_mutation_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import (
+        adaptive_turn_service,
+        write_tool_request_evidence_vontology_service,
+    )
+
+    monkeypatch.setattr(
+        write_tool_request_evidence_vontology_service,
+        "infer_write_tool_request_evidence",
+        lambda **_kwargs: (
+            {
+                "gmail_send_message": {
+                    "schema_version": "write_tool_request_evidence.v1",
+                    "tool_name": "gmail_send_message",
+                    "request_state": "explicit_request",
+                    "confirmation_state": "low_confidence",
+                    "denial_state": "low_confidence",
+                    "rationale": "The current prompt asks to send email.",
+                }
+            },
+            {"schema_version": "write_tool_request_evidence.v1", "status": "ok"},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service."
+        "get_user_mutation_authority_level",
+        lambda _user_id: "read_only",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service."
+        "get_global_mutation_authority_level",
+        lambda: "external_system_guarded",
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.write_tool_policy."
+        "resolve_runtime_profile_write_tool_risk_class",
+        lambda *_args, **_kwargs: "external_non_vontology",
+    )
+
+    denial, event = adaptive_turn_service._ordinary_turn_effect_request_guardrail(
+        definition=SimpleNamespace(
+            write_guardrail={"ordinary_turn_explicit_request": True}
+        ),
+        capability_name="gmail_send_message",
+        arguments={
+            "profile": "zhan-runtime",
+            "to": "recipient@example.test",
+            "subject": "Requested note",
+            "body_text": "Requested body",
+            "allow_send": True,
+        },
+        prompt="Send this email now.",
+        context=[],
+        llm_client=object(),
+        model="test-model",
+        user_concept_id="#V#person",
+    )
+
+    assert denial is not None
+    assert denial["error_code"] == "ordinary_turn_write_policy_blocked"
+    assert denial["status"] == "not_started"
+    assert denial["changed"] is False
+    assert event is not None
+    assert event["status"] == "blocked"
+    assert event["effective_mutation_authority"] == "read_only"
+
+
 def test_model_cannot_select_gmail_profile_without_a_trusted_binding() -> None:
     seen_arguments: dict[str, Any] = {}
 
@@ -7203,6 +7715,98 @@ def test_model_cannot_select_gmail_profile_without_a_trusted_binding() -> None:
         result.tool_invocations[0]["effective_payload"]["error_code"]
         == "capability_not_delegated"
     )
+
+
+def test_current_conversation_history_read_cannot_be_redirected_by_model() -> None:
+    seen_arguments: dict[str, Any] = {}
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="chat_history_get_segments",
+            handler=lambda **kwargs: seen_arguments.update(kwargs)
+            or {"success": True, "segments": []},
+            input_schema=Schema(
+                optional={
+                    "conversation_ref": (dict, type(None)),
+                    "session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "include_debug": bool,
+                    "segment_size": int,
+                },
+                allow_unknown=False,
+            ),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "session_id": "conversation_id",
+                "namespace": "turn_namespace",
+                "user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "conversation_ref": None,
+                "include_debug": False,
+            },
+            description="Read only the active conversation carrier.",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-current-carrier",
+                    payload={
+                        "name": "chat_history_get_segments",
+                        "arguments": {
+                            "conversation_ref": {
+                                "session_id": "foreign-conversation"
+                            },
+                            "session_id": "foreign-conversation",
+                            "namespace": "#V#foreign@foreign_org",
+                            "user_concept_id": "#V#foreign",
+                            "organisation_concept_id": "#V#foreign_org",
+                            "include_debug": True,
+                            "segment_size": 10,
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The active conversation carrier was read."),
+    )
+
+    execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Recover the exact table from this conversation.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-read-current-carrier",
+        conversation_id="current-conversation",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert seen_arguments == {
+        "conversation_ref": None,
+        "session_id": "current-conversation",
+        "namespace": "#V#person@org",
+        "user_concept_id": "#V#person",
+        "organisation_concept_id": "#V#org",
+        "include_debug": False,
+        "segment_size": 10,
+    }
 
 
 def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(

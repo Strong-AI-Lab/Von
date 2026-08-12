@@ -701,6 +701,40 @@
             <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
             <div id="gmailProfilesStatus" class="settings-note">Gmail profiles: unknown</div>
 
+            <div id="gmailOutboundRateLimitContainer" class="hidden mt-2">
+                <h4>Agent outbound email limits</h4>
+                <p class="settings-note">Admin-only, mailbox-wide limits enforced by the backend immediately before
+                    Gmail dispatch. Quota persistence fails closed.</p>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="gmailOutboundEnabled" />
+                    <label for="gmailOutboundEnabled" class="ml-1 mr-2">Enable agent outbound email</label>
+
+                    <label for="gmailOutboundMaxMessagesPer10Minutes" class="mr-1">Messages / 10 min:</label>
+                    <input type="number" id="gmailOutboundMaxMessagesPer10Minutes" min="1" max="100" step="1"
+                        value="5" class="mr-2" />
+
+                    <label for="gmailOutboundMaxMessagesPerDay" class="mr-1">Messages / day:</label>
+                    <input type="number" id="gmailOutboundMaxMessagesPerDay" min="1" max="1000" step="1"
+                        value="25" />
+                </div>
+                <div class="inline-form inline-form-tight mt-1">
+                    <label for="gmailOutboundMaxRecipientsPerMessage" class="mr-1">Recipients / message:</label>
+                    <input type="number" id="gmailOutboundMaxRecipientsPerMessage" min="1" max="100" step="1"
+                        value="10" class="mr-2" />
+
+                    <label for="gmailOutboundMaxRecipientDeliveriesPerDay" class="mr-1">Recipient deliveries /
+                        day:</label>
+                    <input type="number" id="gmailOutboundMaxRecipientDeliveriesPerDay" min="1" max="5000"
+                        step="1" value="50" class="mr-2" />
+
+                    <button type="button" id="saveGmailOutboundRateLimitsButton" class="btn-secondary">Save outbound
+                        limits</button>
+                </div>
+                <small class="settings-note">To, Cc and Bcc all count. Ten-minute limits use fixed UTC buckets; daily
+                    limits reset at 00:00 UTC.</small>
+                <div id="gmailOutboundRateLimitStatus" class="settings-note">Outbound email limits: not loaded</div>
+            </div>
+
             <h3 class="mt-3">Tool Execution Caps</h3>
             <p class="settings-note">Controls internal MCP tool chaining. Changes apply immediately for new chat turns.
                 Larger values can increase latency and tool load.</p>

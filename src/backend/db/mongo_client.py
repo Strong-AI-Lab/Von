@@ -737,6 +737,11 @@ RELATIONSHIP_EXTENT_INDEX_COLLECTION_NAME = "relationship_extent_index"
 # Agent Gmail OAuth token storage (JVNAUTOSCI-801)
 AGENT_GMAIL_TOKENS_COLLECTION_NAME = "agent_gmail_tokens"
 
+# Atomic, mailbox-wide outbound Gmail operational state.  These collections do
+# not own Vontology-governed identity or authority.
+GMAIL_OUTBOUND_QUOTA_COLLECTION_NAME = "gmail_outbound_quota"
+GMAIL_OUTBOUND_DELIVERIES_COLLECTION_NAME = "gmail_outbound_deliveries"
+
 # Room device identity (JVNAUTOSCI-884)
 ROOM_DEVICES_COLLECTION_NAME = "room_devices"
 
@@ -1781,6 +1786,31 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
+def _ensure_gmail_outbound_quota_indexes(coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "expires_at_ttl" not in existing_indexes:
+        coll.create_index(
+            [("expires_at", ASCENDING)],
+            name="expires_at_ttl",
+            expireAfterSeconds=0,
+        )
+
+
+def _ensure_gmail_outbound_delivery_indexes(coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "delivery_fingerprint_1_unique" not in existing_indexes:
+        coll.create_index(
+            [("delivery_fingerprint", ASCENDING)],
+            name="delivery_fingerprint_1_unique",
+            unique=True,
+        )
+    if "status_1_updated_at_-1" not in existing_indexes:
+        coll.create_index(
+            [("status", ASCENDING), ("updated_at", DESCENDING)],
+            name="status_1_updated_at_-1",
+        )
+
+
 # --- Collection Access ---
 def get_people_collection() -> Collection | None:
     """DEPRECATED: Returns the 'people' collection instance. Will be replaced by get_entities_collection.
@@ -2026,6 +2056,32 @@ def get_chat_prompt_queue_collection() -> Collection | None:
             db,
             CHAT_PROMPT_QUEUE_COLLECTION_NAME,
             _ensure_chat_prompt_queue_indexes,
+        )
+    return None
+
+
+def get_gmail_outbound_quota_collection() -> Collection | None:
+    """Return atomic outbound Gmail counters with bounded TTL retention."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            GMAIL_OUTBOUND_QUOTA_COLLECTION_NAME,
+            _ensure_gmail_outbound_quota_indexes,
+        )
+    return None
+
+
+def get_gmail_outbound_deliveries_collection() -> Collection | None:
+    """Return the durable, delivery-fingerprint-unique Gmail effect ledger."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            GMAIL_OUTBOUND_DELIVERIES_COLLECTION_NAME,
+            _ensure_gmail_outbound_delivery_indexes,
         )
     return None
 
