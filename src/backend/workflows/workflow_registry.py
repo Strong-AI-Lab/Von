@@ -66,7 +66,21 @@ class WorkflowRegistry:
         # Lazy registrations indexed by workflow_id.
         self._lazy: Dict[str, LazyWorkflowRegistration] = {}
         self._definition_loader = definition_loader
-        self._lazy_resolve_lock = Lock()
+        # Resolution must be serial only for callers requesting the same
+        # workflow. A single registry-wide lock lets background prewarming of
+        # one slow definition block unrelated interactive lookups.
+        self._lazy_resolve_locks: Dict[str, Lock] = {}
+        self._lazy_resolve_locks_lock = Lock()
+
+    def _lazy_resolve_lock_for(self, workflow_id: str) -> Lock:
+        """Return the stable lock that coordinates one workflow definition."""
+
+        with self._lazy_resolve_locks_lock:
+            lock = self._lazy_resolve_locks.get(workflow_id)
+            if lock is None:
+                lock = Lock()
+                self._lazy_resolve_locks[workflow_id] = lock
+            return lock
 
     # ------------------------------------------------------------------
     # Definition loader configuration
@@ -146,7 +160,7 @@ class WorkflowRegistry:
         if self._definition_loader is None:
             return None
 
-        with self._lazy_resolve_lock:
+        with self._lazy_resolve_lock_for(workflow_id):
             # Double-check after acquiring lock.
             if lazy._resolved is not None:
                 return lazy._resolved

@@ -11,25 +11,14 @@ from ..services.relationship_extent_index_service import (
     defer_relationship_extent_index_sync,
 )
 from .action_registry import (
-    ActionRegistry,
-    WORKFLOW_ACTION_OUTCOME_SUCCESS,
     WORKFLOW_ACTION_OUTCOME_FAILURE,
+    WORKFLOW_ACTION_OUTCOME_SUCCESS,
     WORKFLOW_ACTION_OUTCOME_UNKNOWN,
+    ActionRegistry,
     WorkflowActionResult,
     WorkflowEnvironment,
     WorkflowExecutionScope,
     normalise_action_outcome,
-)
-from .metadata_validation import (
-    METADATA_VALIDATION_MODE_OFF,
-    apply_metadata_validation_mode,
-    append_metadata_validation_event,
-    format_metadata_validation_error,
-    get_metadata_validation_mode,
-    metadata_validation_failures_are_enforced,
-    skipped_metadata_validation,
-    validate_state_metadata_post_action,
-    validate_state_metadata_pre_action,
 )
 from .context_paths import measure_cardinality, resolve_context_path
 from .execution_contracts import (
@@ -49,6 +38,17 @@ from .execution_contracts import (
     snapshot_workflow_mapping,
     stamp_control_signal_context,
     workflow_final_state_is_failure_like,
+)
+from .metadata_validation import (
+    METADATA_VALIDATION_MODE_OFF,
+    append_metadata_validation_event,
+    apply_metadata_validation_mode,
+    format_metadata_validation_error,
+    get_metadata_validation_mode,
+    metadata_validation_failures_are_enforced,
+    skipped_metadata_validation,
+    validate_state_metadata_post_action,
+    validate_state_metadata_pre_action,
 )
 from .plan_state_runtime import (
     apply_workflow_step_checkpoint,
@@ -510,8 +510,8 @@ def execute_workflow_step_invocation(
     trace: WorkflowExecutionTrace | None = None,
 ) -> WorkflowActionResult:
     if action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM:
-        from .llm_step_executor import execute_llm_step
         from .action_registry import WorkflowActionRequest
+        from .llm_step_executor import execute_llm_step
 
         request = WorkflowActionRequest(
             action_id=action.target_id,
@@ -1979,7 +1979,15 @@ class WorkflowExecutor:
                 duration_ms=result.duration_ms,
             )
 
-        action_outcome = normalise_action_outcome(result.status)
+        action_outcome = (
+            _apply_action_result_context(
+                context=context,
+                action_id=action_id,
+                result=result,
+            )
+            if action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+            else normalise_action_outcome(result.status)
+        )
         action_output_snapshot: dict[str, Any] = {}
         if isinstance(result.outputs, Mapping):
             action_output_snapshot = snapshot_workflow_mapping(result.outputs)

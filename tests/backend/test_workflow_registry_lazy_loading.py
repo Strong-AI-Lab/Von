@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import threading
 
-
 from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
 from src.backend.workflows.workflow_registry import (
     LazyWorkflowRegistration,
     WorkflowRegistration,
     WorkflowRegistry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -281,6 +279,57 @@ class TestEagerEvictsLazy:
 
 
 class TestThreadSafety:
+    def test_unrelated_lazy_resolutions_do_not_block_each_other(self):
+        """A slow background load must not head-of-line block another ID."""
+
+        slow_started = threading.Event()
+        allow_slow_finish = threading.Event()
+        fast_started = threading.Event()
+
+        def loader(workflow_id: str) -> WorkflowDefinition | None:
+            if workflow_id == "wf_slow_prewarm":
+                slow_started.set()
+                if not allow_slow_finish.wait(timeout=3.0):
+                    raise TimeoutError("test did not release slow workflow loader")
+            elif workflow_id == "wf_interactive":
+                fast_started.set()
+            return _make_definition(workflow_id)
+
+        registry = WorkflowRegistry(definition_loader=loader)
+        for workflow_id in ("wf_slow_prewarm", "wf_interactive"):
+            registry.register_lazy(
+                LazyWorkflowRegistration(
+                    workflow_id=workflow_id,
+                    source="vontology",
+                )
+            )
+
+        results: dict[str, WorkflowDefinition | None] = {}
+        slow_thread = threading.Thread(
+            target=lambda: results.setdefault("slow", registry.get("wf_slow_prewarm"))
+        )
+        fast_thread = threading.Thread(
+            target=lambda: results.setdefault("fast", registry.get("wf_interactive"))
+        )
+        slow_thread.start()
+        assert slow_started.wait(timeout=1.0)
+        fast_thread.start()
+        try:
+            assert fast_started.wait(timeout=1.0), (
+                "unrelated lazy lookup waited behind the slow workflow load"
+            )
+        finally:
+            allow_slow_finish.set()
+            slow_thread.join(timeout=3.0)
+            fast_thread.join(timeout=3.0)
+
+        assert not slow_thread.is_alive()
+        assert not fast_thread.is_alive()
+        assert results["slow"] is not None
+        assert results["fast"] is not None
+        assert results["slow"].workflow_id == "wf_slow_prewarm"
+        assert results["fast"].workflow_id == "wf_interactive"
+
     def test_concurrent_lazy_resolution(self):
         """Multiple threads resolving the same lazy entry get consistent results."""
         defn = _make_definition("wf_concurrent")

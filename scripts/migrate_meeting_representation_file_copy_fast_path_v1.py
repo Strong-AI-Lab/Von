@@ -15,6 +15,7 @@ import argparse
 import copy
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -77,6 +78,24 @@ ROUTE_SOURCE_STATE_ID = "#V#workflow_step_meeting_representation_workflow_route_
 READ_FILE_COPY_STATE_ID = (
     "#V#workflow_step_meeting_representation_workflow_read_file_copy"
 )
+VERIFY_EVIDENCE_STATE_KEY = "verify_file_copy_evidence"
+VERIFY_EVIDENCE_STATE_ID = (
+    "#V#workflow_step_meeting_representation_workflow_verify_file_copy_evidence"
+)
+CORRELATE_EVIDENCE_STATE_KEY = "correlate_file_copy_evidence_effect"
+CORRELATE_EVIDENCE_STATE_ID = "#V#workflow_step_meeting_representation_workflow_correlate_file_copy_evidence_effect"
+COMPLETED_STATE_KEY = "completed"
+FAILED_STATE_KEY = "failed"
+DOCUMENTARY_EVIDENCE_PREDICATE_ID = "#V#documentary_evidence_for"
+EVIDENCE_READBACK_TOTAL_HITS_KEY = "meeting_evidence_readback_total_hits"
+EVIDENCE_READBACK_HITS_KEY = "meeting_evidence_readback_hits"
+EVIDENCE_READBACK_CONCEPT_ID_KEY = "meeting_evidence_readback_concept_id"
+EVIDENCE_READBACK_TOTAL_HITS_LOWER_BOUND_KEY = (
+    "meeting_evidence_readback_total_hits_is_lower_bound"
+)
+EVIDENCE_EFFECT_VERIFIED_KEY = "meeting_evidence_effect_readback_verified"
+EVIDENCE_EFFECT_TARGET_KEY = "meeting_evidence_effect_target_concept_id"
+EVIDENCE_EFFECT_RELATIONSHIP_KEY = "meeting_evidence_effect_verified_relationship"
 
 MEETING_REPRESENTATION_PROMPT = f"""[Versioned migration: {MIGRATION_ID}]
 
@@ -121,11 +140,11 @@ Representation:
   ``upsert_singleton_text_relation`` for an update path as appropriate. A run
   need not call ``create_concepts`` when it updates an existing meeting.
 - When ``file_copy_concept_id`` is present, assert the exact file-copy-to-meeting
-  relationship using ``#V#documentary_evidence_for``. Then read back that exact
-  assertion with ``find_relations_with_argument`` anchored on the file copy,
-  subject-side only, filtered to ``#V#documentary_evidence_for``, and confirm
-  that it targets the represented meeting. Do not claim the file was linked
-  from an ``add_relationship`` response alone.
+  relationship using ``#V#documentary_evidence_for``. A deterministic workflow
+  successor will perform the canonical subject-side read-back after this LLM
+  step and will fail the workflow when no such assertion exists. Do not spend a
+  tool call on an earlier substitute read or claim that the successor has run.
+  The relationship you write must target the represented meeting.
 - Mutations are additive and provenance-bearing. Do not delete or rename
   existing concepts.
 
@@ -145,7 +164,7 @@ MEETING_REQUIRED_EFFECTS_CONTRACT: dict[str, Any] = {
     "required_effects": [
         {
             "effect_id": "meeting_representation_mutation",
-            "effect_type": "meeting_representation",
+            "effect_type": "representation_meeting",
             "postcondition_strategy": "",
             "description": (
                 "The workflow must create or update a concrete meeting and "
@@ -176,6 +195,55 @@ MEETING_REQUIRED_EFFECTS_CONTRACT: dict[str, Any] = {
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip() if isinstance(value, str) else ""
+
+
+def _mapping_slug(value: str) -> str:
+    raw = _clean_text(value).lower()
+    if raw.startswith("#v#"):
+        raw = raw[3:]
+    return re.sub(r"_+", "_", re.sub(r"[^0-9a-z]+", "_", raw)).strip("_")
+
+
+def _context_input_mapping(
+    *,
+    state_key: str,
+    tool_param: str,
+    context_key: str,
+    required: bool,
+) -> dict[str, Any]:
+    mapping_concept_id = (
+        "#V#workflow_mapping_"
+        f"{_mapping_slug(WORKFLOW_ID)}_"
+        f"{_mapping_slug(state_key)}_"
+        f"{_mapping_slug(context_key)}_"
+        f"to_{_mapping_slug(tool_param)}_parameter"
+    )
+    return {
+        "tool_param": tool_param,
+        "context_key": context_key,
+        "mapping_concept_id": mapping_concept_id,
+        "required": required,
+    }
+
+
+def _tool_output_mapping(
+    *,
+    state_key: str,
+    tool_output_field: str,
+    context_key: str,
+) -> dict[str, Any]:
+    mapping_concept_id = (
+        "#V#workflow_mapping_tool_field_"
+        f"{_mapping_slug(WORKFLOW_ID)}_"
+        f"{_mapping_slug(state_key)}_"
+        f"{_mapping_slug(tool_output_field)}_"
+        f"to_{_mapping_slug(context_key)}"
+    )
+    return {
+        "mapping_concept_id": mapping_concept_id,
+        "tool_output_field": tool_output_field,
+        "context_key": context_key,
+    }
 
 
 def _definition_identity(definition: Any) -> dict[str, Any]:
@@ -260,6 +328,378 @@ def _remove_partial_source_acquisition_graph(
     ]
     spec["initial_state_key"] = llm_state_id
     return len(managed_kinds)
+
+
+def _file_copy_present_after_success_condition() -> dict[str, Any]:
+    return {
+        "kind": "all",
+        "conditions": [
+            {
+                "kind": "context_exists",
+                "key": "file_copy_concept_id",
+                "expected": True,
+            },
+            {
+                "kind": "context_is_null",
+                "key": "file_copy_concept_id",
+                "expected": False,
+            },
+            {
+                "kind": "not",
+                "condition": {
+                    "kind": "context_value_equals",
+                    "key": "file_copy_concept_id",
+                    "value": "",
+                },
+            },
+            {
+                "kind": "context_flag",
+                "key": "last_action_succeeded",
+                "expected": True,
+            },
+        ],
+    }
+
+
+def _resolve_terminal_state_key(
+    steps: list[Any],
+    *,
+    preferred_state_key: Any,
+    semantic_suffix: str,
+) -> str:
+    terminal_state_keys = {
+        _clean_text(step.get("state_id") or step.get("state_key"))
+        for step in steps
+        if isinstance(step, Mapping) and bool(step.get("terminal"))
+    }
+    preferred = _clean_text(preferred_state_key)
+    if preferred in terminal_state_keys:
+        return preferred
+    suffix = f"_{semantic_suffix}"
+    matches = sorted(
+        state_key
+        for state_key in terminal_state_keys
+        if state_key == semantic_suffix or state_key.lower().endswith(suffix)
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"meeting_{semantic_suffix}_terminal_state_match_count:{len(matches)}"
+        )
+    return matches[0]
+
+
+def _set_post_write_evidence_readback(
+    spec: dict[str, Any], llm_step: dict[str, Any]
+) -> None:
+    """Require a file-scoped canonical relation read after the LLM mutation."""
+
+    steps = spec.get("steps")
+    if not isinstance(steps, list):
+        raise TypeError("workflow_authoring_spec_missing_steps")
+    completed_state_key = _resolve_terminal_state_key(
+        steps,
+        preferred_state_key=llm_step.get("next_state_key")
+        or llm_step.get("next_state"),
+        semantic_suffix=COMPLETED_STATE_KEY,
+    )
+    failed_state_key = _resolve_terminal_state_key(
+        steps,
+        preferred_state_key=llm_step.get("on_failure_state_key"),
+        semantic_suffix=FAILED_STATE_KEY,
+    )
+
+    matching_readback_indexes = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, Mapping)
+        and {
+            _clean_text(step.get("state_id") or step.get("state_key")),
+            _clean_text(step.get("concept_id")),
+        }.intersection({VERIFY_EVIDENCE_STATE_KEY, VERIFY_EVIDENCE_STATE_ID})
+    ]
+    if len(matching_readback_indexes) > 1:
+        raise ValueError("meeting_evidence_readback_state_ambiguous")
+    existing_readback_step = (
+        steps[matching_readback_indexes[0]] if matching_readback_indexes else None
+    )
+    readback_state_key = (
+        _clean_text(
+            existing_readback_step.get("state_id")
+            or existing_readback_step.get("state_key")
+        )
+        if isinstance(existing_readback_step, Mapping)
+        else ""
+    ) or VERIFY_EVIDENCE_STATE_KEY
+
+    matching_correlate_steps = [
+        step
+        for step in steps
+        if isinstance(step, Mapping)
+        and {
+            _clean_text(step.get("state_id") or step.get("state_key")),
+            _clean_text(step.get("concept_id")),
+        }.intersection({CORRELATE_EVIDENCE_STATE_KEY, CORRELATE_EVIDENCE_STATE_ID})
+    ]
+    if len(matching_correlate_steps) > 1:
+        raise ValueError("meeting_evidence_correlation_state_ambiguous")
+    existing_correlate_step = (
+        matching_correlate_steps[0] if matching_correlate_steps else None
+    )
+    correlate_state_key = (
+        _clean_text(
+            existing_correlate_step.get("state_id")
+            or existing_correlate_step.get("state_key")
+        )
+        if isinstance(existing_correlate_step, Mapping)
+        else ""
+    ) or CORRELATE_EVIDENCE_STATE_KEY
+
+    llm_step["conditional_transitions"] = [
+        {
+            "to_state": readback_state_key,
+            "reason": "uploaded_file_requires_canonical_evidence_readback",
+            "condition_spec": _file_copy_present_after_success_condition(),
+        }
+    ]
+    llm_step["next_state_key"] = completed_state_key
+    llm_step.pop("next_state", None)
+    llm_step["on_failure_state_key"] = failed_state_key
+    llm_step["on_unknown_state_key"] = failed_state_key
+
+    readback_step = {
+        "state_id": readback_state_key,
+        "terminal": False,
+        "action_id": "workflow_mcp.invoke_tool",
+        "execution_mode": "deterministic",
+        "static_input_bindings": [
+            {
+                "tool_param": "tool_name",
+                "value": "find_relations_with_argument",
+            },
+            {"tool_param": "argument_index", "value": "subject"},
+            {
+                "tool_param": "predicate_filter",
+                "value": [DOCUMENTARY_EVIDENCE_PREDICATE_ID],
+            },
+            {"tool_param": "relation_kind", "value": "binary"},
+            {"tool_param": "include_concept_preview", "value": False},
+            {"tool_param": "include_text_snippets", "value": False},
+            {"tool_param": "include_uncertain", "value": False},
+            {"tool_param": "uncertainty_mode", "value": "asserted_only"},
+            {"tool_param": "limit", "value": 80},
+            {"tool_param": "offset", "value": 0},
+        ],
+        "context_input_mappings": [
+            _context_input_mapping(
+                state_key=VERIFY_EVIDENCE_STATE_KEY,
+                tool_param="concept_id",
+                context_key="file_copy_concept_id",
+                required=True,
+            )
+        ],
+        "tool_output_context_mappings": [
+            _tool_output_mapping(
+                state_key=VERIFY_EVIDENCE_STATE_KEY,
+                tool_output_field="result.concept_id",
+                context_key=EVIDENCE_READBACK_CONCEPT_ID_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=VERIFY_EVIDENCE_STATE_KEY,
+                tool_output_field="result.total_hits",
+                context_key=EVIDENCE_READBACK_TOTAL_HITS_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=VERIFY_EVIDENCE_STATE_KEY,
+                tool_output_field="result.hits",
+                context_key=EVIDENCE_READBACK_HITS_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=VERIFY_EVIDENCE_STATE_KEY,
+                tool_output_field="result.total_hits_is_lower_bound",
+                context_key=EVIDENCE_READBACK_TOTAL_HITS_LOWER_BOUND_KEY,
+            ),
+        ],
+        "writes_context_keys": [
+            EVIDENCE_READBACK_CONCEPT_ID_KEY,
+            EVIDENCE_READBACK_TOTAL_HITS_KEY,
+            EVIDENCE_READBACK_HITS_KEY,
+        ],
+        "conditional_transitions": [
+            {
+                "to_state": correlate_state_key,
+                "reason": "file_copy_evidence_canonical_readback_available",
+                "condition_spec": {
+                    "kind": "all",
+                    "conditions": [
+                        {
+                            "kind": "context_flag",
+                            "key": "last_action_succeeded",
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_exists",
+                            "key": EVIDENCE_READBACK_CONCEPT_ID_KEY,
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_exists",
+                            "key": EVIDENCE_READBACK_TOTAL_HITS_KEY,
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_exists",
+                            "key": EVIDENCE_READBACK_HITS_KEY,
+                            "expected": True,
+                        },
+                    ],
+                },
+            }
+        ],
+        "on_unknown_state_key": failed_state_key,
+        "on_failure_state_key": failed_state_key,
+        "next_state_key": failed_state_key,
+    }
+    if readback_state_key != VERIFY_EVIDENCE_STATE_ID or _clean_text(
+        existing_readback_step.get("concept_id")
+        if isinstance(existing_readback_step, Mapping)
+        else None
+    ):
+        readback_step["concept_id"] = VERIFY_EVIDENCE_STATE_ID
+    if matching_readback_indexes:
+        steps[matching_readback_indexes[0]] = readback_step
+    else:
+        llm_index = next(index for index, step in enumerate(steps) if step is llm_step)
+        steps.insert(llm_index + 1, readback_step)
+
+    correlate_step = {
+        "state_id": correlate_state_key,
+        "terminal": False,
+        "action_id": "workflow_control.relationship_effect_readback",
+        "execution_mode": "deterministic",
+        "static_input_bindings": [
+            {"tool_param": "mutation_tool_name", "value": "add_relationship"},
+            {
+                "tool_param": "expected_predicate_id",
+                "value": DOCUMENTARY_EVIDENCE_PREDICATE_ID,
+            },
+            {"tool_param": "expected_relation_kind", "value": "binary"},
+        ],
+        "context_input_mappings": [
+            _context_input_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_param="expected_source_id",
+                context_key="file_copy_concept_id",
+                required=True,
+            ),
+            _context_input_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_param="tool_invocations",
+                context_key="tool_invocations",
+                required=True,
+            ),
+            _context_input_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_param="readback_concept_id",
+                context_key=EVIDENCE_READBACK_CONCEPT_ID_KEY,
+                required=True,
+            ),
+            _context_input_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_param="readback_total_hits",
+                context_key=EVIDENCE_READBACK_TOTAL_HITS_KEY,
+                required=True,
+            ),
+            _context_input_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_param="readback_hits",
+                context_key=EVIDENCE_READBACK_HITS_KEY,
+                required=True,
+            ),
+            _context_input_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_param="readback_total_hits_is_lower_bound",
+                context_key=EVIDENCE_READBACK_TOTAL_HITS_LOWER_BOUND_KEY,
+                required=False,
+            ),
+        ],
+        "tool_output_context_mappings": [
+            _tool_output_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_output_field="relationship_effect_readback_verified",
+                context_key=EVIDENCE_EFFECT_VERIFIED_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_output_field="represented_target_concept_id",
+                context_key=EVIDENCE_EFFECT_TARGET_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=CORRELATE_EVIDENCE_STATE_KEY,
+                tool_output_field="verified_relationship",
+                context_key=EVIDENCE_EFFECT_RELATIONSHIP_KEY,
+            ),
+        ],
+        "writes_context_keys": [
+            EVIDENCE_EFFECT_VERIFIED_KEY,
+            EVIDENCE_EFFECT_TARGET_KEY,
+            EVIDENCE_EFFECT_RELATIONSHIP_KEY,
+        ],
+        "conditional_transitions": [
+            {
+                "to_state": completed_state_key,
+                "reason": "exact_file_copy_evidence_effect_verified",
+                "condition_spec": {
+                    "kind": "all",
+                    "conditions": [
+                        {
+                            "kind": "context_flag",
+                            "key": "last_action_succeeded",
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_flag",
+                            "key": EVIDENCE_EFFECT_VERIFIED_KEY,
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_exists",
+                            "key": EVIDENCE_EFFECT_TARGET_KEY,
+                            "expected": True,
+                        },
+                    ],
+                },
+            }
+        ],
+        "on_unknown_state_key": failed_state_key,
+        "on_failure_state_key": failed_state_key,
+        "next_state_key": failed_state_key,
+    }
+    if correlate_state_key != CORRELATE_EVIDENCE_STATE_ID or _clean_text(
+        existing_correlate_step.get("concept_id")
+        if isinstance(existing_correlate_step, Mapping)
+        else None
+    ):
+        correlate_step["concept_id"] = CORRELATE_EVIDENCE_STATE_ID
+    matching_correlate_indexes = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, Mapping)
+        and {
+            _clean_text(step.get("state_id") or step.get("state_key")),
+            _clean_text(step.get("concept_id")),
+        }.intersection({CORRELATE_EVIDENCE_STATE_KEY, CORRELATE_EVIDENCE_STATE_ID})
+    ]
+    if matching_correlate_indexes:
+        steps[matching_correlate_indexes[0]] = correlate_step
+        return
+    readback_index = next(
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, Mapping)
+        and _clean_text(step.get("state_id") or step.get("state_key"))
+        == readback_state_key
+    )
+    steps.insert(readback_index + 1, correlate_step)
 
 
 def _set_optional_file_copy_launch_input(spec: dict[str, Any]) -> None:
@@ -430,6 +870,7 @@ def rewrite_meeting_representation_workflow(
     llm_step = _meeting_llm_step(spec)
     _rewrite_llm_policy(llm_step)
     _remove_partial_source_acquisition_graph(spec, llm_step)
+    _set_post_write_evidence_readback(spec, llm_step)
 
     metadata = spec.get("workflow_metadata")
     if not isinstance(metadata, dict):

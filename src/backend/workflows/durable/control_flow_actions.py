@@ -8,34 +8,44 @@ JVNAUTOSCI-1311:
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Mapping, Sequence
 
+from ...services.kr_materialisation_guard_service import (
+    validate_kr_materialisation_guard,
+)
+from ...services.kr_relationship_readback_service import (
+    verify_kr_relationship_readback,
+    verify_relationship_effect_readback,
+)
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
     WorkflowActionRequest,
     WorkflowActionResult,
 )
-from ..engine import WorkflowDefinition, WorkflowExecutor
 from ..context_paths import resolve_context_path
+from ..engine import WorkflowDefinition, WorkflowExecutor
 from ..execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
-    WORKFLOW_CONTROL_ACTION_CONTINUE_ID,
+    WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
-    WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID,
-    WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
-    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
-    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
+    WORKFLOW_CONTROL_ACTION_CONTINUE_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
+    WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
+    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
+    WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
     WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
+    WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
     WORKFLOW_CONTROL_SIGNAL_BREAK,
     WORKFLOW_CONTROL_SIGNAL_CONTINUE,
     WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
@@ -46,8 +56,6 @@ from ..execution_contracts import (
     WORKFLOW_FORK_FAILURE_POLICY_COLLECT_ERRORS,
     WORKFLOW_FORK_FAILURE_POLICY_FAIL_FAST,
     WORKFLOW_FORK_MERGE_POLICY_LAST_WRITER_WINS,
-    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
-    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
     append_runtime_event,
     increment_runtime_metric,
@@ -62,13 +70,6 @@ from .nested_workflow_authority import (
     NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
     resolve_nested_workflow_definition,
 )
-from ...services.kr_materialisation_guard_service import (
-    validate_kr_materialisation_guard,
-)
-from ...services.kr_relationship_readback_service import (
-    verify_kr_relationship_readback,
-)
-
 
 _DEFAULT_FORK_BRANCH_LIMIT = 8
 _MAX_FORK_BRANCH_LIMIT = 32
@@ -1394,6 +1395,35 @@ def _handle_kr_relationship_readback(
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _handle_relationship_effect_readback(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    """Match one successful relationship write to exact canonical read-back.
+
+    The workflow supplies the domain-specific source and predicate. This
+    reusable mechanism binds the successful mutation target from the current
+    LLM tool history to a later canonical relation hit, so an earlier query or
+    a pre-existing edge to a different target cannot satisfy completion.
+    """
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+    outputs = verify_relationship_effect_readback(
+        mutation_tool_name=inputs.get("mutation_tool_name"),
+        expected_source_id=inputs.get("expected_source_id"),
+        expected_predicate_id=inputs.get("expected_predicate_id"),
+        expected_relation_kind=inputs.get("expected_relation_kind"),
+        tool_invocations=inputs.get("tool_invocations"),
+        readback_concept_id=inputs.get("readback_concept_id"),
+        readback_total_hits=inputs.get("readback_total_hits"),
+        readback_hits=inputs.get("readback_hits"),
+        readback_total_hits_is_lower_bound=inputs.get(
+            "readback_total_hits_is_lower_bound",
+            False,
+        ),
+    )
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def _normalise_field_name(value: Any) -> str:
     return str(value or "").strip()
 
@@ -1880,6 +1910,63 @@ def register_control_flow_actions(
                 "Verify that canonical endpoint read-back contains the exact "
                 "KR relationship tuple requested by the workflow."
             ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
+            handler=_handle_relationship_effect_readback,
+            description=(
+                "Bind one successful relationship mutation target from the "
+                "current workflow's tool history to an exact canonical "
+                "relation read-back hit."
+            ),
+            input_schema={
+                "type": "object",
+                "required": [
+                    "mutation_tool_name",
+                    "expected_source_id",
+                    "expected_predicate_id",
+                    "expected_relation_kind",
+                    "tool_invocations",
+                    "readback_concept_id",
+                    "readback_total_hits",
+                    "readback_hits",
+                ],
+                "properties": {
+                    "mutation_tool_name": {"type": "string"},
+                    "expected_source_id": {"type": "string"},
+                    "expected_predicate_id": {"type": "string"},
+                    "expected_relation_kind": {"type": "string"},
+                    "tool_invocations": {"type": "array"},
+                    "readback_concept_id": {"type": "string"},
+                    "readback_total_hits": {"type": "integer"},
+                    "readback_total_hits_is_lower_bound": {"type": "boolean"},
+                    "readback_hits": {"type": "array"},
+                },
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": [
+                    "relationship_effect_readback_verified",
+                    "relationship_effect_readback_failure_code",
+                    "relationship_effect_mutation_targets",
+                    "represented_target_concept_id",
+                    "verified_relationship",
+                ],
+                "properties": {
+                    "relationship_effect_readback_verified": {"type": "boolean"},
+                    "relationship_effect_readback_failure_code": {
+                        "type": ["string", "null"]
+                    },
+                    "relationship_effect_mutation_targets": {"type": "array"},
+                    "represented_target_concept_id": {"type": ["string", "null"]},
+                    "verified_relationship": {"type": ["object", "null"]},
+                },
+            },
+            side_effects="none",
+            postconditions=("exact_relationship_effect_readback_correlated",),
         )
     )
     registry.register_if_absent(

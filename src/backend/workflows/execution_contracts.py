@@ -10,7 +10,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, Mapping, MutableMapping
 
-
 WORKFLOW_CONTROL_SIGNAL_NONE = "none"
 WORKFLOW_CONTROL_SIGNAL_BREAK = "break"
 WORKFLOW_CONTROL_SIGNAL_CONTINUE = "continue"
@@ -41,6 +40,9 @@ WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID = (
 )
 WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID = (
     "workflow_control.kr_relationship_readback"
+)
+WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID = (
+    "workflow_control.relationship_effect_readback"
 )
 WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID = (
     "workflow_control.pause_at_checkpoint"
