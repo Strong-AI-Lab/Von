@@ -791,6 +791,23 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "to a represented concept before relation lookup."
         ),
     },
+    "resolve_concept_by_text_relation": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Resolved: {text}",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "read",
+        "evidence_role": "search",
+        "required_tool_operation_class": "search_or_resolution_read",
+        "planner_hint": (
+            "Use when an exact represented text predicate and value, such as an "
+            "email identifier, should identify a concept. Treat ambiguous or "
+            "incomplete results as unresolved; never choose a candidate "
+            "arbitrarily."
+        ),
+    },
     "vontology_concept_search": {
         "salience": "medium",
         "category": "vontology",

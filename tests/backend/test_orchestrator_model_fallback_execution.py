@@ -12,6 +12,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     CancellationRequested,
     InternalMCPChatOrchestrator,
     _ModelCandidate,
+    _PromptRequirementEvaluation,
     _WorkflowModelPolicyState,
 )
 from src.backend.languagemodels.structured_tool_calling.types import (
@@ -4155,7 +4156,7 @@ def test_tool_calling_backfill_names_cap_when_follow_up_contract_is_blocked(
     assert result.outputs["final_response"].startswith(
         "Tool-use limit reached: this turn reached "
         "`internal_mcp_max_tool_invocations=2` after 2 tool call(s). "
-        "1 pending follow-up tool call(s) were blocked by that setting."
+        "1 pending required or follow-up tool call(s) were blocked by that setting."
     )
     assert "Partial answer from completed results." in result.outputs["final_response"]
     assert len(prompts) == 1
@@ -4165,6 +4166,588 @@ def test_tool_calling_backfill_names_cap_when_follow_up_contract_is_blocked(
         and event.get("settings_key") == "internal_mcp_max_tool_invocations"
         and event.get("pending_follow_up_tool_call_count") == 1
         for event in progress_events
+    )
+
+
+def test_tool_calling_backfill_finalises_when_required_tool_is_missing_at_cap(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_follow_up_llm_context",
+        lambda context, max_chars=40_000: list(context),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_expected_outcome_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_synthesiser_context_prep_stage_messages",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_tool_follow_up_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_selected_workflow_policy_memory_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_stage_llm_context",
+        lambda **kwargs: (
+            list(kwargs.get("base_context") or []),
+            {"stage": "summariser"},
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_attach_memory_context_lineage",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: _PromptRequirementEvaluation(
+            required_tools=("create_concepts",),
+            missing_tools=("create_concepts",),
+            missing_retry_reason="Required tool create_concepts was not invoked.",
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_augment_prompt_requirements_with_turn_contract",
+        lambda **kwargs: kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_merge_prompt_requirements_with_existing_tool_policy",
+        lambda **kwargs: kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_infer_missing_tool_call_retry_tool_calls",
+        lambda *_args, **_kwargs: [
+            {
+                "action": "call_tool",
+                "tool": "create_concepts",
+                "payload": {"concepts": []},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_agent_test_local_relation_backfill_result",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_convert_mcp_tools_to_structured_definitions",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
+    )
+
+    continuation_calls: list[Mapping[str, Any]] = []
+
+    def _run_llm_with_tools_fallbacks(
+        **kwargs: Any,
+    ) -> tuple[LLMResponse, str, Mapping[str, Any]]:
+        continuation_calls.append(dict(kwargs))
+        return (
+            LLMResponse(
+                text_response=(
+                    "Partial answer from completed reads; the required write was not run."
+                )
+            ),
+            "gpt-test",
+            {},
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_tools_fallbacks",
+        _run_llm_with_tools_fallbacks,
+    )
+
+    progress_events: list[Mapping[str, Any]] = []
+    request = SimpleNamespace(
+        data={
+            "augmented_context": [
+                {"role": "user", "content": "Represent the supplied meeting."},
+                {"role": "tool", "content": '{"tool":"fetch_concept","status":"ok"}'},
+            ],
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [{"tool": "fetch_concept", "status": "ok"}],
+            "method_catalogue": {
+                "create_concepts": {"category": "write"},
+            },
+            "prompt": "Represent the supplied meeting.",
+            "prompt_for_requirements": "Represent the supplied meeting.",
+            "structured_tool_continuation": {
+                "provider": "openai",
+                "api_surface": "responses",
+                "model": "gpt-test",
+                "output_items": [
+                    {
+                        "type": "function_call",
+                        "name": "fetch_concept",
+                        "call_id": "call-fetch",
+                    }
+                ],
+                "transport_decision": {
+                    "accepted_tool_call_ids": ["call-fetch"],
+                },
+            },
+            "tool_messages": [
+                {
+                    "role": "tool",
+                    "name": "fetch_concept",
+                    "tool_call_id": "call-fetch",
+                    "content": '{"success":true}',
+                }
+            ],
+            "emit_progress": progress_events.append,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gpt-test",
+            max_tool_invocations=1,
+        ),
+        trace=None,
+        workflow_id="#V#meeting_representation_workflow",
+        workflow_state_id="#V#represent_meeting",
+        action_id="llm.action",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["more_tool_calls"] is False
+    assert result.outputs["tool_calls_present"] is False
+    assert result.outputs["tool_limit_reached"] is True
+    assert result.outputs["pending_follow_up_tool_call_count"] == 1
+    assert result.outputs["structured_tool_continuation"] is None
+    assert result.outputs["missing_tool_call_retry_suppressed"] is True
+    assert (
+        result.outputs["missing_tool_call_retry_stop_reason"]
+        == "tool_invocation_budget_exhausted"
+    )
+    assert (
+        result.outputs["missing_tool_call_recovery_outcome"]
+        == "tool_invocation_budget_exhausted"
+    )
+    assert result.outputs["final_response"].startswith(
+        "Tool-use limit reached: this turn reached "
+        "`internal_mcp_max_tool_invocations=1` after 1 tool call(s)."
+    )
+    assert len(continuation_calls) == 1
+    assert continuation_calls[0]["tool_choice_override"] == "none"
+    assert [result.call_id for result in continuation_calls[0]["tool_results"]] == [
+        "call-fetch"
+    ]
+    assert any(
+        event.get("status") == "tool_limit_reached"
+        and event.get("pending_follow_up_tool_call_count") == 1
+        for event in progress_events
+    )
+    assert not any(
+        event.get("type") == "missing_tool_call_retry"
+        for event in request.data["aux_llm_calls"]
+    )
+    assert (
+        sum(
+            event.get("type") == "tool_limit_finalisation"
+            for event in request.data["aux_llm_calls"]
+        )
+        == 1
+    )
+
+
+def _install_parent_forced_required_tool_backfill_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    orchestrator: InternalMCPChatOrchestrator,
+) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "_agent_test_local_relation_backfill_result",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_follow_up_llm_context",
+        lambda context, max_chars=40_000: list(context),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_expected_outcome_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_synthesiser_context_prep_stage_messages",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_tool_follow_up_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_selected_workflow_policy_memory_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_stage_llm_context",
+        lambda **kwargs: (
+            list(kwargs.get("base_context") or []),
+            {"stage": "summariser"},
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_attach_memory_context_lineage",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: _PromptRequirementEvaluation(
+            required_tools=("create_concepts",),
+            missing_tools=("create_concepts",),
+            missing_retry_reason="Required tool create_concepts was not invoked.",
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_augment_prompt_requirements_with_turn_contract",
+        lambda **kwargs: kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_merge_prompt_requirements_with_existing_tool_policy",
+        lambda **kwargs: kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_infer_missing_tool_call_retry_tool_calls",
+        lambda *_args, **_kwargs: [
+            {
+                "action": "call_tool",
+                "tool": "create_concepts",
+                "payload": {"concepts": []},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_launchability_probe_inputs",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_method_catalogue_for_workflow_data",
+        lambda _data: {"create_concepts": {"category": "write"}},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_selected_gmail_profile_for_workflow_data",
+        lambda _data, _env: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_convert_mcp_tools_to_structured_definitions",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
+    )
+
+
+def test_tool_calling_respond_terminates_after_single_exhausted_cap_cycle(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    _install_parent_forced_required_tool_backfill_stubs(monkeypatch, orchestrator)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_action_tool_calling_plan",
+        lambda _request: WorkflowActionResult(
+            outputs={
+                "tool_calls_present": True,
+                "direct_response": False,
+                "result": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_action_tool_calling_validate",
+        lambda _request: WorkflowActionResult(
+            outputs={
+                "tool_call_repair_required": False,
+                "tool_calls_validated": True,
+                "result": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_synthesiser_context_prep_stage",
+        lambda _request: WorkflowActionResult(outputs={"result": True}),
+    )
+
+    real_execute = orchestrator._action_tool_calling_execute
+    execute_iterations: list[int] = []
+
+    def _execute_once(request: Any) -> WorkflowActionResult:
+        execute_iterations.append(int(request.data["iteration_count"]))
+        if len(execute_iterations) > 1:
+            pytest.fail("exhausted-cap composite entered a second execute cycle")
+        return real_execute(request)
+
+    monkeypatch.setattr(orchestrator, "_action_tool_calling_execute", _execute_once)
+
+    continuation_calls: list[Mapping[str, Any]] = []
+
+    def _run_llm_with_tools_fallbacks(
+        **kwargs: Any,
+    ) -> tuple[LLMResponse, str, Mapping[str, Any]]:
+        continuation_calls.append(dict(kwargs))
+        return (
+            LLMResponse(text_response="Partial answer from the completed reads."),
+            "gpt-test",
+            {},
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_tools_fallbacks",
+        _run_llm_with_tools_fallbacks,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_fallbacks",
+        lambda **_kwargs: pytest.fail("legacy model path must not run"),
+    )
+
+    pending_call = {
+        "action": "call_tool",
+        "tool": "create_concepts",
+        "payload": {"concepts": []},
+        "_call_id": "call-create",
+    }
+    initial_context = [
+        {"role": "user", "content": "Represent the supplied meeting."},
+        {"role": "tool", "content": '{"tool":"fetch_concept","status":"ok"}'},
+    ]
+    request = SimpleNamespace(
+        data={
+            "prompt": "Represent the supplied meeting.",
+            "prompt_for_requirements": "Represent the supplied meeting.",
+            "augmented_context": list(initial_context),
+            "tool_calls": [pending_call],
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [{"tool": "fetch_concept", "status": "ok"}],
+            "method_catalogue": {
+                "create_concepts": {"category": "write"},
+            },
+            "tool_categories": {"create_concepts": "write"},
+            "tool_messages": [
+                {
+                    "role": "tool",
+                    "name": "fetch_concept",
+                    "tool_call_id": "call-fetch",
+                    "content": '{"success":true}',
+                }
+            ],
+            "structured_tool_continuation": {
+                "provider": "openai",
+                "api_surface": "responses",
+                "model": "gpt-test",
+                "output_items": [
+                    {
+                        "type": "function_call",
+                        "name": "fetch_concept",
+                        "call_id": "call-fetch",
+                    }
+                ],
+                "transport_decision": {
+                    "accepted_tool_call_ids": ["call-fetch"],
+                },
+            },
+            "allowed_write_tools": set(),
+            "recent_user_prompts": [],
+            "emit_progress": None,
+            "check_cancellation": None,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gpt-test",
+            max_tool_invocations=1,
+            user_namespace="#V#test_user",
+            default_gmail_profile=None,
+        ),
+        trace=None,
+        workflow_id="#V#meeting_representation_workflow",
+        workflow_state_id="#V#represent_meeting",
+        workflow_state_metadata={},
+        action_id="tool_calling.respond",
+    )
+
+    result = orchestrator._action_tool_calling_respond(request)
+
+    assert result.ok
+    assert execute_iterations == [1]
+    assert request.data["iteration_count"] == 1
+    assert request.data["more_tool_calls"] is False
+    assert request.data["tool_limit_reached"] is True
+    assert len(request.data["augmented_context"]) == len(initial_context) + 1
+    assert len(request.data["tool_messages"]) == 2
+    cap_receipts = [
+        json.loads(message["content"])
+        for message in request.data["tool_messages"]
+        if isinstance(message, Mapping)
+        and isinstance(message.get("content"), str)
+        and "tool_limit_reached" in message["content"]
+    ]
+    assert cap_receipts == [
+        {
+            "status": "not_executed",
+            "error_code": "tool_limit_reached",
+            "settings_key": "internal_mcp_max_tool_invocations",
+            "tool_calls_cap": 1,
+        }
+    ]
+    assert len(continuation_calls) == 1
+    assert continuation_calls[0]["tool_choice_override"] == "none"
+    assert result.outputs["final_response"].startswith(
+        "Tool-use limit reached: this turn reached "
+        "`internal_mcp_max_tool_invocations=1` after 1 tool call(s)."
+    )
+
+
+def test_tool_calling_backfill_parent_forced_retry_remains_available_below_cap(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    _install_parent_forced_required_tool_backfill_stubs(monkeypatch, orchestrator)
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_tools_fallbacks",
+        lambda **_kwargs: pytest.fail("structured continuation must not run below cap"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_fallbacks",
+        lambda **_kwargs: pytest.fail("legacy model path must not run below cap"),
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": "Represent the supplied meeting.",
+            "prompt_for_requirements": "Represent the supplied meeting.",
+            "augmented_context": [
+                {"role": "user", "content": "Represent the supplied meeting."},
+            ],
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [{"tool": "fetch_concept", "status": "ok"}],
+            "method_catalogue": {
+                "create_concepts": {"category": "write"},
+            },
+            "tool_messages": [],
+            "structured_tool_continuation": {
+                "provider": "openai",
+                "api_surface": "responses",
+                "model": "gpt-test",
+            },
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gpt-test",
+            max_tool_invocations=2,
+            user_namespace="#V#test_user",
+            default_gmail_profile=None,
+        ),
+        trace=None,
+        workflow_id="#V#meeting_representation_workflow",
+        workflow_state_id="#V#represent_meeting",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.ok
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "create_concepts",
+            "payload": {"concepts": []},
+        }
+    ]
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert (
+        sum(
+            event.get("type") == "missing_tool_call_retry"
+            for event in request.data["aux_llm_calls"]
+        )
+        == 1
     )
 
 

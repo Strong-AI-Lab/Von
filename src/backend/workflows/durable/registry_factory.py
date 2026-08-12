@@ -1988,6 +1988,9 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .jira_task_incremental_import_workflow import (
         register_jira_task_incremental_import_actions,
     )
+    from .meeting_representation_workflow import (
+        register_meeting_representation_actions,
+    )
     from .model_selection_workflow import register_model_selection_actions
     from .mongo_query_diagnostics_maintenance_workflow import (
         register_mongo_query_diagnostics_maintenance_actions,
@@ -2039,6 +2042,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_entity_representation_actions(registry)
     register_jira_task_incremental_import_actions(registry)
     register_jira_task_full_reconciliation_actions(registry)
+    register_meeting_representation_actions(registry)
     register_model_selection_actions(registry)
     register_mongo_query_diagnostics_maintenance_actions(registry)
     register_multilingual_concept_enrichment_actions(registry)

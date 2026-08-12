@@ -8,8 +8,17 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows.durable.control_flow_actions import register_control_flow_actions
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
+from src.backend.workflows.engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+)
 from src.backend.workflows.execution_contracts import (
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
@@ -20,13 +29,7 @@ from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID,
     WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
     WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
-    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
-    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
-)
-from src.backend.workflows.engine import (
-    WorkflowActionInvocation,
-    WorkflowDefinition,
-    WorkflowStateSpec,
+    WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
 )
 
 
@@ -964,6 +967,237 @@ def test_context_project_preserves_empty_collections_only_when_requested() -> No
     assert projection["selected_fields"] == ["candidates"]
     assert projection["missing_fields"] == []
     assert projection["include_empty_fields"] is True
+
+
+def _relationship_effect_invocation(
+    *,
+    target: str = "#V#meeting_1",
+    success: bool = True,
+    source: str = "#V#file_copy_1",
+    predicate: str = "#V#documentary_evidence_for",
+    added: bool = True,
+    changed: bool = True,
+) -> dict[str, object]:
+    return {
+        "tool": "add_relationship",
+        "status": "ok" if success else "failed",
+        "payload": {
+            "source_id": source,
+            "predicate": predicate,
+            "target": target,
+        },
+        "effective_arguments": {
+            "source_id": source,
+            "predicate": predicate,
+            "target": target,
+        },
+        "effective_payload": {
+            "success": success,
+            "effect_status": "succeeded" if success else "failed",
+            "relationship_type": "concept_relation",
+            "source_id": source,
+            "predicate": predicate,
+            "predicate_input": predicate,
+            "target": target,
+            "added": added,
+            "changed": changed,
+        },
+    }
+
+
+def _relationship_effect_hit(
+    *,
+    target: str = "#V#meeting_1",
+    source: str = "#V#file_copy_1",
+    predicate: str = "#V#documentary_evidence_for",
+) -> dict[str, object]:
+    return {
+        "access_granted": True,
+        "is_asserted": True,
+        "relation_state": "asserted",
+        "source_concept_id": source,
+        "predicate_concept_id": predicate,
+        "target_value": target,
+        "relation_kind": "binary",
+        "argument_indexes": [1],
+        "canonical_publication": True,
+        "relation_metadata": {
+            "canonical_publication": True,
+            "relation_id": "struct::exact",
+        },
+    }
+
+
+def _relationship_effect_readback_result(
+    *,
+    invocations: list[dict[str, object]] | None,
+    hits: list[dict[str, object]],
+    relationship_effect_receipt: dict[str, object] | None = None,
+    readback_concept_id: str = "#V#file_copy_1",
+    readback_total_hits: int | None = None,
+    readback_total_hits_is_lower_bound: bool = False,
+    allow_multiple_targets: bool | None = None,
+    minimum_unique_targets: int | None = None,
+):
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+    inputs = {
+        "mutation_tool_name": "add_relationship",
+        "expected_source_id": "#V#file_copy_1",
+        "expected_predicate_id": "#V#documentary_evidence_for",
+        "expected_relation_kind": "binary",
+        "tool_invocations": invocations,
+        "relationship_effect_receipt": relationship_effect_receipt,
+        "readback_concept_id": readback_concept_id,
+        "readback_total_hits": (
+            len(hits) if readback_total_hits is None else readback_total_hits
+        ),
+        "readback_total_hits_is_lower_bound": readback_total_hits_is_lower_bound,
+        "readback_hits": hits,
+    }
+    if allow_multiple_targets is not None:
+        inputs["allow_multiple_targets"] = allow_multiple_targets
+    if minimum_unique_targets is not None:
+        inputs["minimum_unique_targets"] = minimum_unique_targets
+    return registry.execute(
+        WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
+        inputs=inputs,
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+
+def test_relationship_effect_readback_binds_successful_write_to_exact_hit() -> None:
+    result = _relationship_effect_readback_result(
+        invocations=[
+            _relationship_effect_invocation(success=False),
+            _relationship_effect_invocation(),
+        ],
+        hits=[
+            _relationship_effect_hit(target="#V#different_meeting"),
+            _relationship_effect_hit(),
+        ],
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is True
+    assert result.outputs["relationship_effect_readback_failure_code"] is None
+    assert result.outputs["represented_target_concept_id"] == "#V#meeting_1"
+    assert result.outputs["verified_relationship"] == {
+        "source_id": "#V#file_copy_1",
+        "predicate_id": "#V#documentary_evidence_for",
+        "target_id": "#V#meeting_1",
+        "relation_kind": "binary",
+        "relation_id": "struct::exact",
+    }
+    assert result.outputs["verified_relationships"] == [
+        result.outputs["verified_relationship"]
+    ]
+
+
+def test_relationship_effect_readback_action_accepts_deterministic_receipt() -> None:
+    result = _relationship_effect_readback_result(
+        invocations=None,
+        relationship_effect_receipt=_relationship_effect_invocation(),
+        hits=[_relationship_effect_hit()],
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is True
+    assert result.outputs["represented_target_concept_id"] == "#V#meeting_1"
+
+
+def test_relationship_effect_readback_rejects_wrong_target_only() -> None:
+    result = _relationship_effect_readback_result(
+        invocations=[_relationship_effect_invocation()],
+        hits=[_relationship_effect_hit(target="#V#different_meeting")],
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is False
+    assert (
+        result.outputs["relationship_effect_readback_failure_code"]
+        == "relationship_effect_exact_readback_missing"
+    )
+
+
+def test_relationship_effect_readback_rejects_ambiguous_successful_targets() -> None:
+    result = _relationship_effect_readback_result(
+        invocations=[
+            _relationship_effect_invocation(target="#V#meeting_1"),
+            _relationship_effect_invocation(target="#V#meeting_2"),
+        ],
+        hits=[
+            _relationship_effect_hit(target="#V#meeting_1"),
+            _relationship_effect_hit(target="#V#meeting_2"),
+        ],
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is False
+    assert (
+        result.outputs["relationship_effect_readback_failure_code"]
+        == "relationship_effect_successful_mutation_ambiguous"
+    )
+
+
+def test_relationship_effect_readback_action_supports_explicit_multi_target_mode() -> (
+    None
+):
+    result = _relationship_effect_readback_result(
+        invocations=[
+            _relationship_effect_invocation(target="#V#person_1"),
+            _relationship_effect_invocation(target="#V#person_2"),
+        ],
+        hits=[
+            _relationship_effect_hit(target="#V#person_2"),
+            _relationship_effect_hit(target="#V#person_1"),
+        ],
+        allow_multiple_targets=True,
+        minimum_unique_targets=2,
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is True
+    assert result.outputs["represented_target_concept_id"] is None
+    assert result.outputs["verified_relationship"] is None
+    assert [row["target_id"] for row in result.outputs["verified_relationships"]] == [
+        "#V#person_1",
+        "#V#person_2",
+    ]
+
+
+def test_relationship_effect_readback_accepts_idempotent_existing_edge_receipt() -> (
+    None
+):
+    fresh_write = _relationship_effect_readback_result(
+        invocations=[_relationship_effect_invocation()],
+        hits=[_relationship_effect_hit()],
+    )
+    idempotent_rerun = _relationship_effect_readback_result(
+        invocations=[
+            _relationship_effect_invocation(added=False, changed=False),
+        ],
+        hits=[_relationship_effect_hit()],
+    )
+
+    assert fresh_write.outputs["relationship_effect_readback_verified"] is True
+    assert idempotent_rerun.outputs == fresh_write.outputs
+
+
+def test_relationship_effect_readback_does_not_treat_empty_query_as_effect() -> None:
+    result = _relationship_effect_readback_result(
+        invocations=[_relationship_effect_invocation()],
+        hits=[],
+    )
+
+    assert result.status == "success"
+    assert result.outputs["relationship_effect_readback_verified"] is False
+    assert (
+        result.outputs["relationship_effect_readback_failure_code"]
+        == "relationship_effect_exact_readback_missing"
+    )
+    assert result.outputs["represented_target_concept_id"] == "#V#meeting_1"
 
 
 def test_context_template_renders_context_request_and_json_values() -> None:

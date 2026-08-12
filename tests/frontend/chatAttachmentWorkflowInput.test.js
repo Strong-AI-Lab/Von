@@ -253,6 +253,104 @@ describe('chat attachment workflow input binding', () => {
         expect(confirmationCount).toBe(1);
     }, 15000);
 
+    test('send stays blocked until a slow upload can bind its file-copy id', async () => {
+        const {
+            __testOnly_uploadFilesToVon,
+            sendMessage
+        } = require(chatTabModulePath);
+        const fileCopyConceptId = '#V#uploaded_file_copy_slow_send_test';
+        const generateBodies = [];
+        let resolveUpload;
+        const uploadResponse = new Promise((resolve) => {
+            resolveUpload = resolve;
+        });
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                return uploadResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateBodies.push(JSON.parse(options.body || '{}'));
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Meeting workflow started.',
+                        llm_debug: { model: 'test-model' }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const uploadedFile = new File(
+            ['BEGIN:VCALENDAR\nEND:VCALENDAR\n'],
+            'slow-meeting.ics',
+            { type: 'text/calendar' }
+        );
+        const promptInput = document.getElementById('promptInput');
+        const sendButton = document.getElementById('sendButton');
+        promptInput.value = 'Represent this meeting.';
+
+        const upload = __testOnly_uploadFilesToVon([uploadedFile]);
+        await Promise.resolve();
+
+        expect(sendButton.disabled).toBe(true);
+        expect(sendButton.title).toBe(
+            'Wait for the attachment upload to finish before sending.'
+        );
+
+        // `sendMessage` is the same central handler used by both the button and
+        // the unshifted Enter shortcut. It must not construct an unbound turn.
+        await sendMessage();
+
+        expect(generateBodies).toHaveLength(0);
+        expect(promptInput.value).toBe('Represent this meeting.');
+        expect(document.body.textContent).toContain(
+            'Wait for the attachment upload to finish before sending.'
+        );
+
+        resolveUpload({
+            ok: true,
+            json: async () => ({
+                success: true,
+                uploaded: {
+                    concept_id: fileCopyConceptId,
+                    type_concept_id: '#V#computer_file_copy'
+                },
+                storage: {
+                    backend: 'test',
+                    key: 'uploads/test/slow-meeting.ics'
+                },
+                chat_history_recorded: true
+            })
+        });
+        await upload;
+        await Promise.resolve();
+
+        expect(sendButton.disabled).toBe(false);
+        expect(sendButton.hasAttribute('title')).toBe(false);
+
+        await sendMessage();
+
+        expect(generateBodies).toHaveLength(1);
+        expect(generateBodies[0].workflow_inputs).toEqual({
+            file_copy_concept_id: fileCopyConceptId
+        });
+    }, 15000);
+
     test('uploads independently in two conversations without discarding either file', async () => {
         const {
             __testOnly_setActiveChatSession,

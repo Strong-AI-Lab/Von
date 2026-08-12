@@ -2115,8 +2115,8 @@ class InternalMCPChatOrchestrator:
             and pending_follow_up_tool_call_count > 0
         ):
             pending_fragment = (
-                f" {pending_follow_up_tool_call_count} pending follow-up tool call(s) "
-                "were blocked by that setting."
+                f" {pending_follow_up_tool_call_count} pending required or follow-up "
+                "tool call(s) were blocked by that setting."
             )
         notice = (
             "Tool-use limit reached: this turn reached "
@@ -9005,7 +9005,10 @@ class InternalMCPChatOrchestrator:
                 if len(public_parent_forced_tool_calls) == 1
                 else json.dumps(public_parent_forced_tool_calls)
             )
-            if isinstance(aux_llm_calls, list):
+            if (
+                isinstance(aux_llm_calls, list)
+                and iteration_count < max_tool_invocations
+            ):
                 try:
                     aux_llm_calls.append(
                         annotate_python_decision_event(
@@ -9062,7 +9065,21 @@ class InternalMCPChatOrchestrator:
             reason_code="structured_tool_call_replayed_before_summariser",
         )
         if pre_summariser_forced_result is not None:
-            return pre_summariser_forced_result
+            if iteration_count < max_tool_invocations:
+                return pre_summariser_forced_result
+            missing_tool_call_retry_suppressed = True
+            missing_tool_call_retry_stop_reason = "tool_invocation_budget_exhausted"
+            missing_tool_call_recovery_outcome = "tool_invocation_budget_exhausted"
+            forced_calls = pre_summariser_forced_result.outputs.get("tool_calls")
+            if isinstance(forced_calls, Sequence) and not isinstance(
+                forced_calls, (str, bytes, bytearray)
+            ):
+                for forced_call in forced_calls:
+                    if (
+                        isinstance(forced_call, Mapping)
+                        and forced_call not in blocked_follow_up_tool_calls
+                    ):
+                        blocked_follow_up_tool_calls.append(dict(forced_call))
 
         follow_up_stage_messages = [
             *self._build_synthesiser_context_prep_stage_messages(data),
@@ -9237,6 +9254,98 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
                 source_stage="tool_calling.structured_backfill",
             )
+            if blocked_follow_up_tool_calls:
+                if callable(emit_progress_cb):
+                    emit_progress_cb(
+                        {
+                            "status": "tool_limit_reached",
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(max_tool_invocations),
+                            "tool_calls_remaining": 0,
+                            "pending_follow_up_tool_call_count": len(
+                                blocked_follow_up_tool_calls
+                            ),
+                            "settings_key": "internal_mcp_max_tool_invocations",
+                        }
+                    )
+                safe_continuation_response = self._ensure_tool_limit_notice(
+                    safe_continuation_response,
+                    tool_calls_done=int(iteration_count),
+                    tool_calls_cap=int(max_tool_invocations),
+                    pending_follow_up_tool_call_count=len(blocked_follow_up_tool_calls),
+                )
+                if isinstance(aux_llm_calls, list):
+                    try:
+                        aux_llm_calls.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "tool_limit_finalisation",
+                                    "stage": "backfill",
+                                    "tool_calls_done": int(iteration_count),
+                                    "tool_calls_cap": int(max_tool_invocations),
+                                    "pending_follow_up_tool_call_count": len(
+                                        blocked_follow_up_tool_calls
+                                    ),
+                                    "settings_key": (
+                                        "internal_mcp_max_tool_invocations"
+                                    ),
+                                    "response_preview": (
+                                        safe_continuation_response[:800]
+                                    ),
+                                },
+                                stage="tool_limit_finalisation",
+                                component="internal_mcp_orchestrator",
+                                function="_action_tool_calling_backfill",
+                                decision_class=("tool_budget_exhausted_finalisation"),
+                                decision_source="completed_tool_context",
+                                changed_outcome=True,
+                                reason_code=(
+                                    "tool_invocation_budget_exhausted_with_"
+                                    "pending_follow_up"
+                                ),
+                                possible_inappropriate_python_code_use=False,
+                            )
+                        )
+                    except Exception:
+                        pass
+                return WorkflowActionResult(
+                    outputs={
+                        "more_tool_calls": False,
+                        "tool_calls_present": False,
+                        "final_response": safe_continuation_response,
+                        "current_response": safe_continuation_response,
+                        "structured_tool_continuation": None,
+                        "tool_call_model": continuation_model,
+                        "tool_limit_reached": True,
+                        "tool_limit_settings_key": (
+                            "internal_mcp_max_tool_invocations"
+                        ),
+                        "pending_follow_up_tool_call_count": len(
+                            blocked_follow_up_tool_calls
+                        ),
+                        "missing_tool_call_retry_attempts": (
+                            missing_tool_call_retry_attempts
+                        ),
+                        "missing_tool_call_retry_budget": (
+                            missing_tool_call_retry_budget
+                        ),
+                        "missing_tool_call_retry_remaining": max(
+                            0,
+                            missing_tool_call_retry_budget
+                            - missing_tool_call_retry_attempts,
+                        ),
+                        "missing_tool_call_retry_suppressed": (
+                            missing_tool_call_retry_suppressed
+                        ),
+                        "missing_tool_call_retry_stop_reason": (
+                            missing_tool_call_retry_stop_reason
+                        ),
+                        "missing_tool_call_recovery_outcome": (
+                            missing_tool_call_recovery_outcome
+                        ),
+                        "result": False,
+                    }
+                )
             return WorkflowActionResult(
                 outputs={
                     "more_tool_calls": False,
@@ -9266,7 +9375,7 @@ class InternalMCPChatOrchestrator:
                 )
             limit_finaliser_prompt = (
                 "The configured tool invocation limit stopped this turn before "
-                "all tool-declared follow-up calls could run. Produce the best "
+                "all pending required or follow-up tool calls could run. Produce the best "
                 "final answer using only the completed tool results already "
                 "available in the conversation context. Do not call another tool. "
                 f"Explicitly tell the user that the cause was reaching "

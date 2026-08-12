@@ -309,6 +309,7 @@ def test_apply_workflow_authoring_spec_updates_existing_workflow_without_root_cr
     monkeypatch,
 ) -> None:
     publication_calls: list[dict[str, object]] = []
+    metadata_sync_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(
         mod,
@@ -327,12 +328,29 @@ def test_apply_workflow_authoring_spec_updates_existing_workflow_without_root_cr
     monkeypatch.setattr(
         mod,
         "build_workflow_definition_from_authoring_spec",
-        lambda spec: SimpleNamespace(workflow_id=spec["workflow_id"]),
+        lambda spec: SimpleNamespace(
+            workflow_id=spec["workflow_id"],
+            metadata=spec.get("workflow_metadata", {}),
+        ),
     )
+    successful_publication = {
+        "counts": {"errors": 0},
+        "published_workflow_ids": ["#V#alpha_workflow"],
+    }
     monkeypatch.setattr(
         mod,
         "publish_workflow_definition_from_definition",
-        lambda **kwargs: publication_calls.append(dict(kwargs)) or {"ok": True},
+        lambda **kwargs: publication_calls.append(dict(kwargs))
+        or successful_publication,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_apply_workflow_policy_metadata",
+        lambda **kwargs: metadata_sync_calls.append(dict(kwargs))
+        or {
+            "launch_input_contract": {"input_mappings": []},
+            "required_effects_contract": {"required_effects": []},
+        },
     )
 
     result = mod.apply_workflow_authoring_spec(
@@ -340,14 +358,170 @@ def test_apply_workflow_authoring_spec_updates_existing_workflow_without_root_cr
         authoring_spec={
             "workflow_id": "#V#alpha_workflow",
             "description": "Updated description",
+            "workflow_metadata": {
+                "launch_input_contract": {
+                    "schema_version": "workflow_launch_input_contract.v1",
+                    "input_mappings": [],
+                },
+                "required_effects_contract": {
+                    "schema_version": "workflow_required_effects_contract.v1",
+                    "required_effects": [],
+                },
+            },
             "steps": [{"state_id": "start"}],
         },
     )
 
-    assert result["publication"] == {"ok": True}
+    assert result["publication"] == successful_publication
     assert publication_calls[0]["create_missing"] is False
     assert publication_calls[0]["create_missing_child_concepts"] is True
     assert publication_calls[0]["purpose"] == "Updated description"
+    assert metadata_sync_calls == [
+        {
+            "workflow_id": "#V#alpha_workflow",
+            "workflow_metadata": {
+                "launch_input_contract": {
+                    "schema_version": "workflow_launch_input_contract.v1",
+                    "input_mappings": [],
+                },
+                "required_effects_contract": {
+                    "schema_version": "workflow_required_effects_contract.v1",
+                    "required_effects": [],
+                },
+            },
+            "policy_keys": (
+                "launch_input_contract",
+                "required_effects_contract",
+            ),
+        }
+    ]
+    assert result["metadata_sync"]["launch_input_contract"] == {
+        "input_mappings": []
+    }
+
+
+def test_apply_workflow_policy_metadata_persists_launch_and_required_effects(
+    monkeypatch,
+) -> None:
+    policy_writes: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        mod,
+        "upsert_workflow_json_policy_text",
+        lambda **kwargs: policy_writes.append(dict(kwargs)) or dict(kwargs["payload"]),
+    )
+
+    result = mod._apply_workflow_policy_metadata(
+        workflow_id="#V#meeting_representation_workflow",
+        workflow_metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "input_mappings": [
+                    {
+                        "target_context_key": "file_copy_concept_id",
+                        "source_expression": "inputs.file_copy_concept_id",
+                        "required": False,
+                    }
+                ],
+            },
+            "required_effects_contract": {
+                "schema_version": "workflow_required_effects_contract.v1",
+                "contract_id": "meeting_representation_materialisation",
+                "required_effects": [
+                    {
+                        "effect_id": "meeting_representation_mutation",
+                        "effect_type": "meeting_representation",
+                        "required_tools": [
+                            "add_relationship",
+                            "upsert_text_relation",
+                        ],
+                        "required_tools_match": "any",
+                        "activation_required_tools": [],
+                    }
+                ],
+            },
+        },
+    )
+
+    assert [write["predicate"] for write in policy_writes] == [
+        mod.WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
+        mod.WORKFLOW_REQUIRED_EFFECTS_CONTRACT_TEXT_PREDICATE,
+    ]
+    assert result["launch_input_contract"]["input_mappings"][0][
+        "target_context_key"
+    ] == "file_copy_concept_id"
+    required_effect = result["required_effects_contract"]["required_effects"][0]
+    assert required_effect["required_tools_match"] == "any"
+    assert required_effect["activation_required_tools"] == []
+
+
+def test_apply_workflow_authoring_spec_skips_metadata_when_graph_publish_fails(
+    monkeypatch,
+) -> None:
+    metadata_sync_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        mod,
+        "preview_workflow_authoring_spec",
+        lambda workflow_id, **_kwargs: {
+            "workflow_id": workflow_id,
+            "preview": {"contract_validation": {"valid": True}},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_authoring_runtime_definition",
+        lambda workflow_id: (
+            SimpleNamespace(workflow_id=workflow_id),
+            "vontology",
+            object(),
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_definition_from_authoring_spec",
+        lambda spec: SimpleNamespace(
+            workflow_id=spec["workflow_id"],
+            metadata=spec.get("workflow_metadata", {}),
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "publish_workflow_definition_from_definition",
+        lambda **_kwargs: {
+            "counts": {"errors": 1},
+            "published_workflow_ids": [],
+            "errors_by_workflow_id": {
+                "#V#alpha_workflow": "publication_validation_failed"
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_apply_workflow_policy_metadata",
+        lambda **kwargs: metadata_sync_calls.append(dict(kwargs)),
+    )
+
+    result = mod.apply_workflow_authoring_spec(
+        "#V#alpha_workflow",
+        authoring_spec={
+            "workflow_id": "#V#alpha_workflow",
+            "workflow_metadata": {
+                "launch_input_contract": {
+                    "schema_version": "workflow_launch_input_contract.v1",
+                    "input_mappings": [
+                        {
+                            "target_context_key": "prompt",
+                            "source_expression": "inputs.prompt",
+                            "required": True,
+                        }
+                    ],
+                }
+            },
+            "steps": [{"state_id": "start"}],
+        },
+    )
+
+    assert result["metadata_sync"] is None
+    assert metadata_sync_calls == []
 
 
 def test_authoring_preflight_rejects_child_visibility_narrower_than_workflow(

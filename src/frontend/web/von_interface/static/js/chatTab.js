@@ -5428,8 +5428,14 @@ function updateSendButtonForCurrentChatState() {
     if (!sendButton) {
         return;
     }
-    sendButton.disabled = false;
+    const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
+    sendButton.disabled = uploadInFlight;
     sendButton.textContent = hasAnyLiveChatRequest() ? 'Queue Prompt' : 'Send Prompt';
+    if (uploadInFlight) {
+        sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
+    } else {
+        sendButton.removeAttribute('title');
+    }
 }
 
 function syncActiveChatSessionThinkingState() {
@@ -19852,9 +19858,18 @@ let uploadUiState = {
 };
 
 const PENDING_FILE_COPY_SESSION_FALLBACK_KEY = '__pending_chat_session__';
+const ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE = (
+    'Wait for the attachment upload to finish before sending.'
+);
 const pendingFileCopyConceptIdsBySession = new Map();
 const pendingFileCopyDisplayNamesBySession = new Map();
 const uploadStatesBySession = new Map();
+
+function getInFlightUploadStateForSession(sessionId = activeChatSessionId) {
+    const sessionKey = getPendingFileCopySessionKey(sessionId);
+    const uploadState = uploadStatesBySession.get(sessionKey) || null;
+    return uploadState?.inFlight === true ? uploadState : null;
+}
 
 function normaliseTrustedUploadedFileCopyConceptId(value) {
     if (typeof value !== 'string') return null;
@@ -20036,6 +20051,7 @@ function renderActiveUploadUi() {
         activeUploadState?.tone || 'info'
     );
     setUploadButtonBusy(activeUploadState?.inFlight === true);
+    updateSendButtonForCurrentChatState();
 }
 
 function setUploadStatusForState(uploadState, message, tone = 'info') {
@@ -31400,8 +31416,7 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
     }
 
     if (sendButton) {
-        sendButton.disabled = false;
-        sendButton.textContent = hasAnyLiveChatRequest() ? 'Queue Prompt' : 'Send Prompt';
+        updateSendButtonForCurrentChatState();
     }
 
     if (toggleButton) {
@@ -32966,6 +32981,20 @@ async function handleSendPrompt(options = {}) {
         : (selectedQueueEntry ? null : (typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null));
     const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
     const promptText = promptForSend.trim();
+    const directComposerSubmission = (
+        !fromQueue
+        && !hasPromptOverride
+        && !selectedQueueEntry
+    );
+
+    if (
+        directComposerSubmission
+        && getInFlightUploadStateForSession(targetSessionId)
+    ) {
+        showToast(ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE, 'info');
+        updateSendButtonForCurrentChatState();
+        return;
+    }
 
     if (hasAnyLiveChatRequest()) {
         if (fromQueue) {

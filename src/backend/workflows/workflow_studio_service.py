@@ -57,6 +57,12 @@ from .durable.registry_factory import (
 )
 from .durable.models import WorkflowInstanceStatus, WorkflowSchedule
 from .durable.startup import get_instance_manager
+from .required_effects_contracts import (
+    normalise_workflow_required_effects_contract,
+)
+from .workflow_launch_input_contracts import (
+    normalise_workflow_launch_input_contract,
+)
 from .trace_store import list_recent_workflow_execution_traces
 from .vontology_loader import (
     build_workflow_process_graph,
@@ -80,6 +86,7 @@ from .workflow_concept_authority_service import (
     WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE,
     WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE,
     WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
+    WORKFLOW_REQUIRED_EFFECTS_CONTRACT_TEXT_PREDICATE,
     WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE,
 )
 from .workflow_definition_identity_service import (
@@ -1136,11 +1143,6 @@ def _normalise_background_launch_policy(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _normalise_launch_input_contract(value: Any) -> dict[str, Any] | None:
-    raw = _as_mapping(value)
-    return raw or None
-
-
 def _normalise_event_binding_specs(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -1245,21 +1247,35 @@ def _apply_workflow_policy_metadata(
     user_id: str | None = None,
     org_id: str | None = None,
     namespace: str | None = None,
+    policy_keys: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     metadata = _as_mapping(workflow_metadata)
-    manager = get_instance_manager()
+    selected_policy_keys = (
+        {_clean_text(item) for item in policy_keys if _clean_text(item)}
+        if policy_keys is not None
+        else None
+    )
+
+    def _selected(key: str) -> bool:
+        return selected_policy_keys is None or key in selected_policy_keys
+
     applied: dict[str, Any] = {
         "routing_profile": None,
         "discovery_exemplars": None,
         "background_launch_policy": None,
         "launch_input_contract": None,
+        "required_effects_contract": None,
         "event_binding_ids": [],
         "schedule_ids": [],
         "disabled_binding_ids": [],
         "disabled_schedule_ids": [],
     }
 
-    routing_profile = _normalise_routing_profile(metadata.get("routing_profile"))
+    routing_profile = (
+        _normalise_routing_profile(metadata.get("routing_profile"))
+        if _selected("routing_profile")
+        else None
+    )
     if routing_profile is not None:
         applied["routing_profile"] = upsert_workflow_json_policy_text(
             workflow_id=workflow_id,
@@ -1268,8 +1284,10 @@ def _apply_workflow_policy_metadata(
             context={"source": "workflow_studio_service"},
         )
 
-    discovery_exemplars = _normalise_discovery_exemplars(
-        metadata.get("discovery_exemplars")
+    discovery_exemplars = (
+        _normalise_discovery_exemplars(metadata.get("discovery_exemplars"))
+        if _selected("discovery_exemplars")
+        else None
     )
     if discovery_exemplars is not None:
         applied["discovery_exemplars"] = upsert_workflow_json_policy_text(
@@ -1279,8 +1297,10 @@ def _apply_workflow_policy_metadata(
             context={"source": "workflow_studio_service"},
         )
 
-    background_launch_policy = _normalise_background_launch_policy(
-        metadata.get("background_launch_policy")
+    background_launch_policy = (
+        _normalise_background_launch_policy(metadata.get("background_launch_policy"))
+        if _selected("background_launch_policy")
+        else None
     )
     if background_launch_policy is not None:
         applied["background_launch_policy"] = upsert_workflow_json_policy_text(
@@ -1290,9 +1310,20 @@ def _apply_workflow_policy_metadata(
             context={"source": "workflow_studio_service"},
         )
 
-    launch_input_contract = _normalise_launch_input_contract(
-        metadata.get("launch_input_contract")
+    launch_input_contract, launch_input_contract_error = (
+        normalise_workflow_launch_input_contract(metadata.get("launch_input_contract"))
+        if _selected("launch_input_contract")
+        else (None, None)
     )
+    if (
+        _selected("launch_input_contract")
+        and metadata.get("launch_input_contract") is not None
+        and launch_input_contract is None
+    ):
+        raise ValueError(
+            "workflow_launch_input_contract_invalid:"
+            f"{launch_input_contract_error or 'invalid_contract'}"
+        )
     if launch_input_contract is not None:
         applied["launch_input_contract"] = upsert_workflow_json_policy_text(
             workflow_id=workflow_id,
@@ -1301,7 +1332,30 @@ def _apply_workflow_policy_metadata(
             context={"source": "workflow_studio_service"},
         )
 
-    if "event_bindings" in metadata:
+    required_effects_contract = (
+        normalise_workflow_required_effects_contract(
+            metadata.get("required_effects_contract")
+        )
+        if _selected("required_effects_contract")
+        else None
+    )
+    if required_effects_contract is not None:
+        applied["required_effects_contract"] = upsert_workflow_json_policy_text(
+            workflow_id=workflow_id,
+            predicate=WORKFLOW_REQUIRED_EFFECTS_CONTRACT_TEXT_PREDICATE,
+            payload=required_effects_contract,
+            context={"source": "workflow_studio_service"},
+        )
+
+    manager = (
+        get_instance_manager()
+        if (_selected("event_bindings") and "event_bindings" in metadata)
+        or (_selected("schedule_specs") and "schedule_specs" in metadata)
+        else None
+    )
+
+    if _selected("event_bindings") and "event_bindings" in metadata:
+        assert manager is not None
         desired_bindings = _normalise_event_binding_specs(metadata.get("event_bindings"))
         existing_bindings = [
             binding
@@ -1331,7 +1385,8 @@ def _apply_workflow_policy_metadata(
             if binding_id:
                 applied["event_binding_ids"].append(binding_id)
 
-    if "schedule_specs" in metadata:
+    if _selected("schedule_specs") and "schedule_specs" in metadata:
+        assert manager is not None
         desired_schedules = _normalise_schedule_specs(metadata.get("schedule_specs"))
         existing_schedules = [
             schedule
@@ -2218,10 +2273,27 @@ def apply_workflow_authoring_spec(
         create_missing_child_concepts=True,
         purpose=purpose or None,
     )
+    published_workflow_ids = publication.get("published_workflow_ids")
+    if not (
+        isinstance(published_workflow_ids, list)
+        and _clean_text(workflow_id) in published_workflow_ids
+    ):
+        return {
+            "workflow_id": _clean_text(workflow_id),
+            "publication": publication,
+            "preview": _as_mapping(preview.get("preview")),
+            "metadata_sync": None,
+        }
+    metadata_sync = _apply_workflow_policy_metadata(
+        workflow_id=_clean_text(workflow_id),
+        workflow_metadata=_as_mapping(getattr(definition, "metadata", None)),
+        policy_keys=("launch_input_contract", "required_effects_contract"),
+    )
     return {
         "workflow_id": _clean_text(workflow_id),
         "publication": publication,
         "preview": _as_mapping(preview.get("preview")),
+        "metadata_sync": metadata_sync,
     }
 
 
@@ -2554,12 +2626,34 @@ def review_workflow_authoring_proposal(
         or None,
     )
     definition = build_workflow_definition_from_authoring_spec(authoring_spec)
-    metadata_sync = _apply_workflow_policy_metadata(
+    metadata_sync = _as_mapping(apply_result.get("metadata_sync"))
+    additional_metadata_sync = _apply_workflow_policy_metadata(
         workflow_id=workflow_id_clean,
         workflow_metadata=_as_mapping(getattr(definition, "metadata", None)),
         user_id=user_id,
         org_id=org_id,
         namespace=namespace,
+        policy_keys=(
+            "routing_profile",
+            "discovery_exemplars",
+            "background_launch_policy",
+            "event_bindings",
+            "schedule_specs",
+        ),
+    )
+    metadata_sync.update(
+        {
+            key: additional_metadata_sync.get(key)
+            for key in (
+                "routing_profile",
+                "discovery_exemplars",
+                "background_launch_policy",
+                "event_binding_ids",
+                "schedule_ids",
+                "disabled_binding_ids",
+                "disabled_schedule_ids",
+            )
+        }
     )
     proposal_payload["status"] = _WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED
     proposal_payload["reviewed_at_utc"] = _utc_now_iso()
@@ -2654,13 +2748,37 @@ def rollback_workflow_authoring_promotion(
         authoring_spec=previous_authoring_spec,
         base_definition_hash=_clean_text(current_identity.get("definition_hash")) or None,
     )
-    definition = build_workflow_definition_from_authoring_spec(previous_authoring_spec)
-    metadata_sync = _apply_workflow_policy_metadata(
+    definition = build_workflow_definition_from_authoring_spec(
+        previous_authoring_spec
+    )
+    metadata_sync = _as_mapping(apply_result.get("metadata_sync"))
+    additional_metadata_sync = _apply_workflow_policy_metadata(
         workflow_id=workflow_id_clean,
         workflow_metadata=_as_mapping(getattr(definition, "metadata", None)),
         user_id=user_id,
         org_id=org_id,
         namespace=namespace,
+        policy_keys=(
+            "routing_profile",
+            "discovery_exemplars",
+            "background_launch_policy",
+            "event_bindings",
+            "schedule_specs",
+        ),
+    )
+    metadata_sync.update(
+        {
+            key: additional_metadata_sync.get(key)
+            for key in (
+                "routing_profile",
+                "discovery_exemplars",
+                "background_launch_policy",
+                "event_binding_ids",
+                "schedule_ids",
+                "disabled_binding_ids",
+                "disabled_schedule_ids",
+            )
+        }
     )
     proposal_payload["status"] = _WORKFLOW_AUTHORING_PROPOSAL_STATUS_ROLLED_BACK
     proposal_payload["reviewed_at_utc"] = _utc_now_iso()

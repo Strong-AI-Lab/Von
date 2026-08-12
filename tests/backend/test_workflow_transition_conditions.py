@@ -124,6 +124,129 @@ def test_executor_routes_failure_and_unknown_via_condition_spec(
     assert result.data.get(context_key) is True
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_outcome", "expected_state", "error"),
+    [
+        ("success", "success", "routed_success", None),
+        ("failed", "failure", "routed_failure_outcome", "llm_failed"),
+        ("unknown", "unknown", "routed_unknown", "llm_unknown"),
+    ],
+)
+def test_executor_stamps_and_routes_llm_action_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    expected_outcome: str,
+    expected_state: str,
+    error: str | None,
+) -> None:
+    from src.backend.workflows import llm_step_executor
+
+    success_spec, success_fn = build_transition_condition(
+        {
+            "kind": "context_flag",
+            "key": "last_action_succeeded",
+            "expected": True,
+        }
+    )
+    failure_spec, failure_fn = build_transition_condition(
+        {
+            "kind": "context_flag",
+            "key": "last_action_failed",
+            "expected": True,
+        }
+    )
+    unknown_spec, unknown_fn = build_transition_condition(
+        {
+            "kind": "context_flag",
+            "key": "last_action_unknown",
+            "expected": True,
+        }
+    )
+
+    captured_requests: list[WorkflowActionRequest] = []
+
+    def _execute_llm_step(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        captured_requests.append(request)
+        return WorkflowActionResult(
+            status=status,
+            error=error,
+            outputs={"llm_probe_status": status},
+        )
+
+    monkeypatch.setattr(llm_step_executor, "execute_llm_step", _execute_llm_step)
+
+    definition = WorkflowDefinition(
+        workflow_id="#V#llm_action_outcome_routing_workflow",
+        initial_state="llm_probe",
+        states={
+            "llm_probe": WorkflowStateSpec(
+                state_id="llm_probe",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        execution_mode="llm",
+                    ),
+                ),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="routed_success",
+                        reason="on_success",
+                        condition=success_fn,
+                        condition_spec=success_spec,
+                    ),
+                    WorkflowTransitionSpec(
+                        to_state="routed_failure_outcome",
+                        reason="on_failure",
+                        condition=failure_fn,
+                        condition_spec=failure_spec,
+                    ),
+                    WorkflowTransitionSpec(
+                        to_state="routed_unknown",
+                        reason="on_unknown",
+                        condition=unknown_fn,
+                        condition_spec=unknown_spec,
+                    ),
+                ),
+            ),
+            "routed_success": WorkflowStateSpec(
+                state_id="routed_success",
+                terminal=True,
+            ),
+            "routed_failure_outcome": WorkflowStateSpec(
+                state_id="routed_failure_outcome",
+                terminal=True,
+            ),
+            "routed_unknown": WorkflowStateSpec(
+                state_id="routed_unknown",
+                terminal=True,
+            ),
+        },
+    )
+
+    result = WorkflowExecutor(registry=ActionRegistry(), max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.final_state == expected_state
+    assert len(captured_requests) == 1
+    assert captured_requests[0].action_id == "llm.action"
+    assert captured_requests[0].execution_mode == "llm"
+    assert result.data["last_action_id"] == "llm.action"
+    assert result.data["last_action_status"] == status
+    assert result.data["last_action_outcome"] == expected_outcome
+    assert result.data["last_action_succeeded"] is (status == "success")
+    assert result.data["last_action_failed"] is (status == "failed")
+    assert result.data["last_action_unknown"] is (status == "unknown")
+    assert result.data["last_step_ok"] is (status == "success")
+    assert result.data["last_action_error"] == error
+    assert result.data["last_action_outputs"] == {"llm_probe_status": status}
+
+
 def test_executor_defers_extent_index_sync_until_run_finishes(monkeypatch) -> None:
     from src.backend.services import relationship_extent_index_service as extent_service
 
