@@ -240,6 +240,9 @@ WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE = "#V#hasWorkflowRoutingProfileJson"
 WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE = "#V#hasWorkflowDiscoveryExemplarsJson"
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE = "#V#hasBackgroundLaunchPolicyJson"
 WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE = "#V#hasWorkflowLaunchInputContractJson"
+WORKFLOW_REQUIRED_EFFECTS_CONTRACT_TEXT_PREDICATE = (
+    "#V#hasWorkflowRequiredEffectsContractJson"
+)
 
 
 def upsert_workflow_json_policy_text(
