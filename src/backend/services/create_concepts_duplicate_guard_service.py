@@ -36,7 +36,9 @@ _SAFE_CREATE_DUPLICATE_RESOLUTION_STAGES = {
     "casefold_exact",
     "diacritic_insensitive",
     "token_exact",
+    "person_comma_order_exact",
 }
+_PERSON_TYPE_ID = "#V#person"
 _DUPLICATE_GUARD_PROJECTION = {
     "concept_id": 1,
     "kind": 1,
@@ -483,6 +485,13 @@ def find_existing_concept_for_create_concepts(
     try:
         from .concept_resolution_service import resolve_concept_by_name
 
+        canonical_parent_id = canonicalise_vontology_concept_id(parent_id_for_concept)
+        resolver_instance_of = (
+            _PERSON_TYPE_ID
+            if normalised_kind == "instance" and canonical_parent_id == _PERSON_TYPE_ID
+            else None
+        )
+
         resolution = resolve_concept_by_name(
             name=str(concept_name or "").strip(),
             preferred_languages=(
@@ -490,13 +499,53 @@ def find_existing_concept_for_create_concepts(
                 if isinstance(preferred_language, str) and preferred_language.strip()
                 else None
             ),
+            instance_of=resolver_instance_of,
             match_code_strings=True,
             max_results=5,
         )
     except Exception:
         return None
 
-    if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
+    if not isinstance(resolution, dict):
+        return None
+
+    if (
+        resolution.get("status") == "ambiguous"
+        and resolver_instance_of == _PERSON_TYPE_ID
+    ):
+        candidates = resolution.get("candidates")
+        comma_order_candidate_ids = (
+            tuple(
+                sorted(
+                    {
+                        str(candidate.get("concept_id")).strip()
+                        for candidate in candidates
+                        if isinstance(candidate, dict)
+                        and candidate.get("stage") == "person_comma_order_exact"
+                        and isinstance(candidate.get("concept_id"), str)
+                        and str(candidate.get("concept_id")).strip()
+                    }
+                )
+            )
+            if isinstance(candidates, list)
+            else ()
+        )
+        if comma_order_candidate_ids:
+            return CreateConceptDuplicateGuardBlock(
+                error_code="ambiguous_person_name_order_match",
+                message=(
+                    "More than one visible person has the exact natural-order "
+                    "equivalent of the supplied comma-form name. No concept was "
+                    "selected or created."
+                ),
+                match_source="person_comma_order_name_resolution",
+                guard_scope=scope,
+                candidate_concept_ids=comma_order_candidate_ids,
+                resolution_source="person_comma_order_exact",
+                retryable=True,
+            )
+
+    if resolution.get("status") != "resolved":
         return None
 
     # JVNAUTOSCI-1211:
@@ -510,6 +559,11 @@ def find_existing_concept_for_create_concepts(
         else ""
     )
     if match_stage not in _SAFE_CREATE_DUPLICATE_RESOLUTION_STAGES:
+        return None
+    if (
+        match_stage == "person_comma_order_exact"
+        and resolver_instance_of != _PERSON_TYPE_ID
+    ):
         return None
 
     resolved_id = resolution.get("resolved_concept_id")
@@ -643,6 +697,14 @@ def build_duplicate_guard_block_create_concepts_result(
         "retryable": block.retryable,
         "suggestion": (
             (
+                "Inspect the candidate people using grounded distinguishing "
+                "evidence, then explicitly reuse the identified person. Do not "
+                "create another person while the exact name-order match is "
+                "ambiguous."
+            )
+            if block.error_code == "ambiguous_person_name_order_match"
+            else
+            (
                 "Inspect every returned candidate. If grounded evidence "
                 "establishes one as this entity, retry with that ID in "
                 "identity_candidate_concept_ids. If none matches, retry with "
@@ -654,12 +716,14 @@ def build_duplicate_guard_block_create_concepts_result(
                 and block.resolution_source == "legacy_text_reference"
             )
             else (
-                "Inspect the candidate concepts. If grounded evidence "
-                "establishes one candidate as this entity, retry with that ID "
-                "in identity_candidate_concept_ids; otherwise retain the "
-                "ambiguity."
+                (
+                    "Inspect the candidate concepts. If grounded evidence "
+                    "establishes one candidate as this entity, retry with that ID "
+                    "in identity_candidate_concept_ids; otherwise retain the "
+                    "ambiguity."
+                )
+                if block.candidate_concept_ids
+                else "Retry after the external identity lookup is available."
             )
-            if block.candidate_concept_ids
-            else "Retry after the external identity lookup is available."
         ),
     }

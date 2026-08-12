@@ -409,6 +409,180 @@ def test_secondary_name_match_reuses_recognised_workflow_instance_parent(
     assert create_calls == []
 
 
+def test_create_person_blocks_comma_order_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    person_id = "#V#person"
+    existing_concept_id = "#V#person_agnieszka_mensfelt"
+    resolver_calls: list[dict[str, Any]] = []
+    create_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        lambda requested_parent_id: ParentResolutionResult(
+            requested_parent_id=requested_parent_id,
+            canonical_parent_id=person_id,
+            resolved_parent_id=person_id,
+            fallback_used=False,
+            fallback_candidates_checked=(),
+            fallback_selected_parent_id=None,
+            resolved_parent_kind="type",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service."
+        "resolve_event_actor_context",
+        lambda **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda query, _projection=None: (
+            {
+                "concept_id": existing_concept_id,
+                "relationships": {"is_an_instance_of": [person_id]},
+            }
+            if query.get("concept_id") == existing_concept_id
+            else None
+        ),
+    )
+
+    def _resolve(**kwargs: Any) -> dict[str, Any]:
+        resolver_calls.append(dict(kwargs))
+        return {
+            "success": True,
+            "status": "resolved",
+            "resolved_concept_id": existing_concept_id,
+            "match": {"stage": "person_comma_order_exact", "score": 370},
+            "candidates": [],
+            "audit": [],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        _resolve,
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        lambda **kwargs: create_calls.append(kwargs),
+    )
+
+    result = _create_concepts(
+        parent_id=person_id,
+        concepts=[{"name": "Mensfelt, Agnieszka", "kind": "instance"}],
+    )
+
+    item = result["results"][0]
+    assert result["already_existed"] == 1
+    assert item["error_code"] == "already_exists"
+    assert item["existing_concept_id"] == existing_concept_id
+    assert item["duplicate_match_source"] == "name_resolution"
+    assert resolver_calls[0]["instance_of"] == person_id
+    assert create_calls == []
+
+
+def test_create_person_comma_order_ambiguity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    person_id = "#V#person"
+    create_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        lambda requested_parent_id: ParentResolutionResult(
+            requested_parent_id=requested_parent_id,
+            canonical_parent_id=person_id,
+            resolved_parent_id=person_id,
+            fallback_used=False,
+            fallback_candidates_checked=(),
+            fallback_selected_parent_id=None,
+            resolved_parent_kind="type",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service."
+        "resolve_event_actor_context",
+        lambda **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **_kwargs: {
+            "success": True,
+            "status": "ambiguous",
+            "resolved_concept_id": None,
+            "candidates": [
+                {
+                    "concept_id": "#V#agnieszka_a",
+                    "stage": "person_comma_order_exact",
+                    "score": 370,
+                },
+                {
+                    "concept_id": "#V#agnieszka_b",
+                    "stage": "person_comma_order_exact",
+                    "score": 370,
+                },
+            ],
+            "audit": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        lambda **kwargs: create_calls.append(kwargs),
+    )
+
+    result = _create_concepts(
+        parent_id=person_id,
+        concepts=[{"name": "Mensfelt, Agnieszka", "kind": "instance"}],
+    )
+
+    item = result["results"][0]
+    assert result["effect_status"] == "failed"
+    assert item["error_code"] == "ambiguous_person_name_order_match"
+    assert item["candidate_concept_ids"] == ["#V#agnieszka_a", "#V#agnieszka_b"]
+    assert item["changed"] is False
+    assert create_calls == []
+
+
+def test_create_non_person_does_not_accept_person_comma_order_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common_preflights(monkeypatch)
+    create_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **_kwargs: {
+            "success": True,
+            "status": "resolved",
+            "resolved_concept_id": "#V#given_family",
+            "match": {"stage": "person_comma_order_exact", "score": 370},
+            "candidates": [],
+            "audit": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        lambda **kwargs: create_calls.append(kwargs) or _created_payload(**kwargs),
+    )
+
+    result = _create_concepts(
+        parent_id=_PARENT_ID,
+        concepts=[{"name": "Family, Given", "kind": "instance"}],
+    )
+
+    assert result["successful"] == 1
+    assert len(create_calls) == 1
+
+
 def test_create_concepts_disables_suffixing_unless_explicitly_allowed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

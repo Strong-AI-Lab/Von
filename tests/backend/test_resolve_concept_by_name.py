@@ -108,6 +108,181 @@ def test_resolve_concept_by_name_returns_ambiguous_on_tie():
     assert {c["concept_id"] for c in result["candidates"]} == {concept_a, concept_b}
 
 
+def test_resolve_person_comma_name_matches_natural_order_with_multitoken_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concept_id = "#V#francisco_ferreira_ruiz"
+    natural_name = "Francisco Ferreira Ruiz"
+    search_calls: list[tuple[str, dict[str, object]]] = []
+
+    def _search(query_text: str, **kwargs):
+        search_calls.append((query_text, dict(kwargs)))
+        if kwargs.get("exact") and query_text == natural_name:
+            return {concept_id}
+        return set()
+
+    monkeypatch.setattr(concept_resolution_service, "_search_text_relations", _search)
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda ids: set(ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_vontology_node_and_descendant_ids",
+        lambda _concept_id: ["#V#person"],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": concept_id,
+                "relationships": {"is_an_instance_of": ["#V#person"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {
+            candidate_id: [
+                {
+                    "text": natural_name,
+                    "lang": "en-NZ",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+            for candidate_id in concept_ids
+        },
+    )
+
+    result = resolve_concept_by_name(
+        name="Ferreira Ruiz, Francisco",
+        instance_of="#V#person",
+        match_code_strings=False,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["resolved_concept_id"] == concept_id
+    assert result["match"]["stage"] == "person_comma_order_exact"
+    assert search_calls == [
+        (
+            "Ferreira Ruiz, Francisco",
+            {
+                "exact": True,
+                "result_limit": 5,
+                "allow_fallback_scan": False,
+            },
+        ),
+        (
+            natural_name,
+            {
+                "exact": True,
+                "result_limit": 5,
+                "allow_fallback_scan": False,
+            },
+        ),
+    ]
+
+
+def test_resolve_person_comma_name_keeps_exact_ties_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_ids = {"#V#agnieszka_a", "#V#agnieszka_b"}
+    natural_name = "Agnieszka Mensfelt"
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda query_text, **kwargs: (
+            candidate_ids
+            if kwargs.get("exact") and query_text == natural_name
+            else set()
+        ),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda ids: set(ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_vontology_node_and_descendant_ids",
+        lambda _concept_id: ["#V#person"],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": concept_id,
+                "relationships": {"is_an_instance_of": ["#V#person"]},
+            }
+            for concept_id in sorted(candidate_ids)
+        ],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {
+            concept_id: [{"text": natural_name, "lang": "en-NZ", "context": {}}]
+            for concept_id in concept_ids
+        },
+    )
+
+    result = resolve_concept_by_name(
+        name="Mensfelt, Agnieszka",
+        instance_of="#V#person",
+        match_code_strings=False,
+    )
+
+    assert result["status"] == "ambiguous"
+    assert result["resolved_concept_id"] is None
+    assert {item["concept_id"] for item in result["candidates"]} == candidate_ids
+    assert {item["stage"] for item in result["candidates"]} == {
+        "person_comma_order_exact"
+    }
+
+
+def test_resolve_non_person_does_not_apply_comma_name_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concept_id = "#V#non_person_label"
+    natural_order = "Given Family"
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda *_args, **_kwargs: {concept_id},
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda ids: set(ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [{"concept_id": concept_id, "relationships": {}}],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {
+            candidate_id: [{"text": natural_order, "lang": "en-NZ", "context": {}}]
+            for candidate_id in concept_ids
+        },
+    )
+
+    result = resolve_concept_by_name(
+        name="Family, Given",
+        match_code_strings=False,
+    )
+
+    assert result["status"] == "not_found"
+
+
 def test_resolve_concept_by_name_hydrates_candidate_names_in_one_batch(
     monkeypatch,
 ) -> None:

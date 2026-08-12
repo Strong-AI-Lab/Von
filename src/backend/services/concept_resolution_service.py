@@ -18,8 +18,8 @@ from ..security.access_control import filter_accessible_concept_ids
 from ..vontology.code_concepts_registry import is_code_concept_id
 from ..vontology.utils_vontology import get_vontology_node_and_descendant_ids
 
-
 _CODE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+_PERSON_TYPE_ID = "#V#person"
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -45,6 +45,32 @@ def _person_signature(tokens: Sequence[str]) -> Optional[Tuple[str, str, str]]:
     last = tokens[-1]
     middle_initials = "".join(t[0] for t in tokens[1:-1] if t)
     return (first, last, middle_initials)
+
+
+def _person_comma_order_variant(text: str) -> Optional[str]:
+    """Return the exact natural-order lookup form of ``family, given ...``.
+
+    The transformation is intentionally narrow: it accepts exactly one comma
+    with non-empty text on both sides.  It is used only when resolution is
+    explicitly restricted to ``#V#person``; the supplied source name remains
+    unchanged.
+    """
+
+    if text.count(",") != 1:
+        return None
+    family, given = (_collapse_whitespace(part) for part in text.split(",", 1))
+    if not family or not given:
+        return None
+    if not _alnum_tokens(family) or not _alnum_tokens(given):
+        return None
+    return f"{given} {family}"
+
+
+def _uses_person_name_ordering(instance_of: Optional[str]) -> bool:
+    return (
+        isinstance(instance_of, str)
+        and instance_of.strip().casefold() == _PERSON_TYPE_ID.casefold()
+    )
 
 
 def _accessible_candidate_ids(candidate_ids: Sequence[str] | set[str]) -> set[str]:
@@ -136,10 +162,20 @@ def resolve_concept_by_name(
                     "audit": audit,
                 }
 
+    person_order_variant = (
+        _person_comma_order_variant(raw)
+        if _uses_person_name_ordering(instance_of)
+        else None
+    )
     query_variants: list[tuple[str, str]] = [(raw, "raw")]
-    stripped = _strip_diacritics(raw)
-    if stripped != raw:
-        query_variants.append((stripped, "diacritics_stripped"))
+    if person_order_variant and person_order_variant != raw:
+        query_variants.append((person_order_variant, "person_comma_order"))
+    for query_text, variant in list(query_variants):
+        stripped = _strip_diacritics(query_text)
+        if stripped != query_text and all(
+            existing_text != stripped for existing_text, _ in query_variants
+        ):
+            query_variants.append((stripped, f"{variant}_diacritics_stripped"))
 
     candidate_ids: set[str] = set()
 
@@ -392,6 +428,12 @@ def resolve_concept_by_name(
     query_casefold_stripped = _strip_diacritics(query_casefold)
     query_tokens = [t.casefold() for t in _alnum_tokens(raw)]
     query_signature = _person_signature(query_tokens)
+    person_order_casefold = (
+        person_order_variant.casefold() if person_order_variant else None
+    )
+    person_order_casefold_stripped = (
+        _strip_diacritics(person_order_casefold) if person_order_casefold else None
+    )
 
     preferred_rank: dict[str, int] = {
         lang: (len(preferred) - idx) for idx, lang in enumerate(preferred)
@@ -448,6 +490,12 @@ def resolve_concept_by_name(
             elif candidate_cf_stripped == query_casefold_stripped:
                 stage = "diacritic_insensitive"
                 score = 380
+            elif person_order_casefold and (
+                candidate_cf == person_order_casefold
+                or candidate_cf_stripped == person_order_casefold_stripped
+            ):
+                stage = "person_comma_order_exact"
+                score = 370
             else:
                 candidate_tokens = [t.casefold() for t in _alnum_tokens(candidate_norm)]
                 if candidate_tokens == query_tokens and candidate_tokens:
