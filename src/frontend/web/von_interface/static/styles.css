@@ -6055,6 +6055,23 @@ footer {
     box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.4);
 }
 
+.conversation-runtime-cost-button--runtime {
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+}
+
+.conversation-runtime-cost-button--runtime:hover,
+.conversation-runtime-cost-button--runtime:active {
+    background: transparent;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    transform: none;
+}
+
 .conversation-runtime-cost-mobile {
     display: none;
 }
@@ -6078,6 +6095,11 @@ footer {
     color: #334155;
     font-size: 0.75rem;
     line-height: 1.45;
+}
+
+.server-runtime-cost-segment .conversation-runtime-cost-details {
+    right: 0;
+    left: auto;
 }
 
 .footer-separator:has(+ .conversation-runtime-cost-segment[hidden]),
@@ -10919,6 +10941,10 @@ button.prompt-vontology-cartouche {
     background: #f3f4f6;
     border-radius: 12px;
     border: 1px solid #e5e7eb;
+}
+
+#serverUptimeFooter {
+    white-space: nowrap;
 }
 
 .pid-indicator.pid-error {

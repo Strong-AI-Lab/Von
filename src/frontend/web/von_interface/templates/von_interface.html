@@ -163,6 +163,18 @@
     <p id="languageIndicator" class="language-indicator">🌐 en-NZ</p>
     <p id="serverUptimeFooter" class="pid-indicator" title="Process uptime">
       <span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">-</span>
+      <span id="serverRuntimeCostInfo" class="conversation-runtime-cost-segment server-runtime-cost-segment" hidden>
+        <span class="footer-separator">|</span>
+        <button id="serverRuntimeCostButton"
+          class="conversation-runtime-cost-button conversation-runtime-cost-button--runtime" type="button"
+          data-cost-scope="runtime" aria-live="polite" aria-expanded="false"
+          aria-controls="serverRuntimeCostDetails">
+          <span class="conversation-runtime-cost-desktop"></span>
+          <span class="conversation-runtime-cost-mobile" aria-hidden="true"></span>
+        </button>
+        <span id="serverRuntimeCostDetails" class="conversation-runtime-cost-details" role="region"
+          aria-label="Cost estimate since server restart details" hidden></span>
+      </span>
       <span id="serverBuildInfo" class="server-build-info" hidden><span class="footer-separator">|</span>
         <span class="footer-label">Build:</span> <span id="serverBuildValue">-</span></span>
     </p>

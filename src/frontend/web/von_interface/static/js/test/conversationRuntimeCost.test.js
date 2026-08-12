@@ -35,9 +35,26 @@ describe('conversation runtime cost footer presentation', () => {
 
     expect(result.visible).toBe(true);
     expect(result.desktopText).toContain('Est. cost: Chat US$0.013472');
-    expect(result.desktopText).toContain('Since restart US$0.0428');
+    expect(result.desktopText).not.toContain('Since restart');
+    expect(result.runtimeText).toBe('Est. US$0.04');
     expect(result.mobileText).toContain('Chat US$0.013472');
-    expect(result.mobileText).toContain('Run US$0.0428');
+    expect(result.mobileText).not.toContain('Run');
+  });
+
+  test('keeps sub-cent precision through two cents, then rounds to the nearest cent', () => {
+    const atThreshold = formatConversationRuntimeCostFooter(snapshot({
+      conversation: summary('estimated', 0.019876),
+      sinceRestart: summary('estimated', 0.02),
+    }));
+    const aboveThreshold = formatConversationRuntimeCostFooter(snapshot({
+      conversation: summary('estimated', 0.020001),
+      sinceRestart: summary('estimated', 0.025),
+    }));
+
+    expect(atThreshold.desktopText).toContain('US$0.019876');
+    expect(atThreshold.runtimeText).toBe('Est. US$0.02');
+    expect(aboveThreshold.desktopText).toContain('US$0.02');
+    expect(aboveThreshold.runtimeText).toBe('Est. US$0.03');
   });
 
   test('keeps a priced baseline as a partial known subtotal when the active summary is unavailable', () => {
@@ -48,7 +65,7 @@ describe('conversation runtime cost footer presentation', () => {
     }));
 
     expect(result.desktopText).toContain('Chat known US$0.01 (partial)');
-    expect(result.desktopText).toContain('Since restart known US$0.02 (partial)');
+    expect(result.runtimeText).toContain('Est. known US$0.02 (partial)');
     expect(result.desktopText).not.toContain('US$0.0000');
   });
 
@@ -60,7 +77,7 @@ describe('conversation runtime cost footer presentation', () => {
     }));
 
     expect(result.desktopText).toContain('Chat known US$0.01 (partial)');
-    expect(result.desktopText).toContain('Since restart known US$0.02 (partial)');
+    expect(result.runtimeText).toContain('Est. known US$0.02 (partial)');
     expect(result.details).toContain('Latest refresh unavailable; showing retained evidence as a known subtotal.');
   });
 
@@ -72,7 +89,7 @@ describe('conversation runtime cost footer presentation', () => {
     }));
 
     expect(result.desktopText).toContain('Chat estimate unavailable');
-    expect(result.desktopText).toContain('Since restart estimate unavailable');
+    expect(result.runtimeText).toContain('Est. unavailable');
   });
 
   test('treats a live-only priced result as a partial subtotal until the baseline arrives', () => {
@@ -82,7 +99,7 @@ describe('conversation runtime cost footer presentation', () => {
     }));
 
     expect(result.desktopText).toContain('Chat known US$0.0030 (partial)');
-    expect(result.desktopText).toContain('Since restart known US$0.0030 (partial)');
+    expect(result.runtimeText).toContain('Est. known US$0.0030 (partial)');
     expect(result.desktopText).not.toContain('Chat US$0.0030 ·');
   });
 
@@ -107,7 +124,7 @@ describe('conversation runtime cost footer presentation', () => {
     }));
 
     expect(result.desktopText).toContain('Chat No billable model calls');
-    expect(result.desktopText).toContain('Since restart No billable model calls');
+    expect(result.runtimeText).toContain('Est. no billable calls');
     expect(result.desktopText).not.toContain('US$0');
   });
 });

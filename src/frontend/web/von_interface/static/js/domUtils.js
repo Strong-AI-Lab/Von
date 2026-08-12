@@ -388,28 +388,54 @@ function getConversationRuntimeCostSnapshot() {
 function applyConversationRuntimeCostFooterSnapshot(button, snapshot = getConversationRuntimeCostSnapshot()) {
   if (!button) return;
   const presentation = formatConversationRuntimeCostFooter(snapshot);
+  const isRuntimeCost = button.dataset.costScope === 'runtime';
+  const visible = isRuntimeCost ? presentation.runtimeVisible : presentation.visible;
+  const state = isRuntimeCost ? presentation.runtimeState : presentation.state;
+  const desktopText = isRuntimeCost ? presentation.runtimeText : presentation.desktopText;
+  const mobileText = isRuntimeCost ? presentation.runtimeText : presentation.mobileText;
+  const detailLines = isRuntimeCost ? presentation.runtimeDetails : presentation.details;
+  const ariaLabel = isRuntimeCost ? presentation.runtimeAriaLabel : presentation.ariaLabel;
+  const title = isRuntimeCost ? presentation.runtimeTitle : presentation.title;
   const segment = button.closest('.conversation-runtime-cost-segment');
-  if (segment) segment.hidden = presentation.visible !== true;
+  if (segment) segment.hidden = visible !== true;
   const desktop = button.querySelector('.conversation-runtime-cost-desktop');
   const mobile = button.querySelector('.conversation-runtime-cost-mobile');
   const details = button.parentElement?.querySelector('.conversation-runtime-cost-details');
-  if (desktop) desktop.textContent = presentation.desktopText;
-  if (mobile) mobile.textContent = presentation.mobileText;
+  if (desktop) desktop.textContent = desktopText;
+  if (mobile) mobile.textContent = mobileText;
   if (details) {
-    details.replaceChildren(...presentation.details.map((detail) => {
+    details.replaceChildren(...detailLines.map((detail) => {
       const line = document.createElement('div');
       line.textContent = detail;
       return line;
     }));
   }
-  button.setAttribute('aria-label', presentation.ariaLabel);
-  setKeptNativeTitle(button, presentation.title);
-  button.dataset.costState = presentation.state;
-  button.dataset.costDetails = presentation.details.join('\n');
-  if (presentation.visible !== true) {
+  button.setAttribute('aria-label', ariaLabel);
+  setKeptNativeTitle(button, title);
+  button.dataset.costState = state;
+  button.dataset.costDetails = detailLines.join('\n');
+  if (visible !== true) {
     button.setAttribute('aria-expanded', 'false');
     if (details) details.hidden = true;
   }
+}
+
+function closeConversationRuntimeCostDetails() {
+  document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
+    panel.hidden = true;
+    const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
+    if (control) control.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function toggleConversationRuntimeCostDetails(button) {
+  const segment = button?.closest?.('.conversation-runtime-cost-segment');
+  const details = button?.parentElement?.querySelector('.conversation-runtime-cost-details');
+  if (!button || !details || segment?.hidden) return;
+  const nextOpen = details.hidden;
+  closeConversationRuntimeCostDetails();
+  details.hidden = !nextOpen;
+  button.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
 }
 
 function makeConversationRuntimeCostFooterSegment() {
@@ -418,6 +444,7 @@ function makeConversationRuntimeCostFooterSegment() {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'conversation-runtime-cost-button';
+  button.dataset.costScope = 'conversation';
   button.setAttribute('aria-live', 'polite');
   button.setAttribute('aria-expanded', 'false');
   const desktop = document.createElement('span');
@@ -433,18 +460,6 @@ function makeConversationRuntimeCostFooterSegment() {
   details.setAttribute('aria-label', 'Conversation cost estimate details');
   details.hidden = true;
   button.setAttribute('aria-controls', details.id);
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    if (segment.hidden) return;
-    const nextOpen = details.hidden;
-    document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
-      panel.hidden = true;
-      const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
-      if (control) control.setAttribute('aria-expanded', 'false');
-    });
-    details.hidden = !nextOpen;
-    button.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
-  });
   segment.append(button, details);
   applyConversationRuntimeCostFooterSnapshot(button);
   return segment;
@@ -466,20 +481,17 @@ if (typeof document !== 'undefined' && !document.__vonConversationRuntimeCostFoo
     refreshConversationRuntimeCostFooter(event?.detail || null);
   });
   document.addEventListener('click', (event) => {
+    const costButton = event.target?.closest?.('.conversation-runtime-cost-button');
+    if (costButton) {
+      toggleConversationRuntimeCostDetails(costButton);
+      return;
+    }
     if (event.target?.closest?.('.conversation-runtime-cost-segment')) return;
-    document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
-      panel.hidden = true;
-      const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
-      if (control) control.setAttribute('aria-expanded', 'false');
-    });
+    closeConversationRuntimeCostDetails();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
-      panel.hidden = true;
-      const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
-      if (control) control.setAttribute('aria-expanded', 'false');
-    });
+    closeConversationRuntimeCostDetails();
   });
 }
 const FOOTER_WORKFLOW_CAPABILITY_RETRY_MS = 60000;
@@ -1650,6 +1662,7 @@ export async function setModelInfoFooterText() {
       footer.appendChild(sep);
     }
   });
+  refreshConversationRuntimeCostFooter();
 
   // If authenticated, highlight the User button (visual cue) BEFORE any long-latency calls (DB info) so tests see it.
   try {
@@ -1726,7 +1739,7 @@ export async function setModelInfoFooterText() {
   footer.style.cursor = 'pointer';
   setKeptNativeTitle(footer, 'Click empty area to open settings');
   footer.addEventListener('click', (ev) => {
-    if (ev.target.closest('.concept-footer-button')) { return; }
+    if (ev.target.closest('.concept-footer-button, .conversation-runtime-cost-button')) { return; }
     const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
     if (settingsTabButton) { settingsTabButton.click(); }
   });
