@@ -199,12 +199,22 @@ Representation:
   use ``resolve_concept_by_name`` with
   ``instance_of="#V#person"`` and ``match_code_strings=false`` for a supplied
   name, then inspect that candidate's ``#V#has_email`` text relations with
-  ``get_text_relations`` when an address is available. Prefer an exact
-  email-backed match over a name-only duplicate. A unique exact full-name person
-  with no stored email contradiction may be reused and given the invitation
-  email as a source-backed ``#V#has_email`` assertion; an ambiguous name or a
-  conflicting stored email must not be silently linked. If no adequate person
-  exists, create a scoped ``#V#person`` using the exact supplied name and persist
+  ``get_text_relations`` when an address is available. Treat an iCalendar
+  ``CN`` as a display form, not a canonical given-name/family-name ordering. If
+  a raw lookup of a conventional ``family, given [middle]`` display name does
+  not resolve, use your judgement to form the likely ``given [middle] family``
+  lookup variant and call ``resolve_concept_by_name`` once more before creating
+  a person. The variant is for identity lookup only: preserve the invitation's
+  exact display name as source evidence, and do not mechanically invert an
+  unclear comma-containing name. If the variant yields a complete unique
+  ``#V#person`` candidate, inspect its ``#V#has_email`` relations and reuse it
+  when no stored address conflicts; add the invitation email to that person
+  instead of creating a reordered duplicate. Prefer an exact email-backed
+  match over a name-only duplicate. A unique exact full-name person with no
+  stored email contradiction may be reused and given the invitation email as a
+  source-backed ``#V#has_email`` assertion; an ambiguous name or a conflicting
+  stored email must not be silently linked. If no adequate person exists,
+  create a scoped ``#V#person`` using the exact supplied name and persist
   ``#V#has_email``. Apply the same exact candidate-inspection and nested
   ``concepts[i].identity_candidate_concept_ids`` repair discipline to person
   creation; never respond to a duplicate candidate by repeating an unchanged

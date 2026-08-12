@@ -699,6 +699,10 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
     assert "deterministic predecessor" in policy["prompt_text"]
     assert migration.MEETING_PARTICIPANT_PREDICATE_ID in policy["prompt_text"]
     assert "resolve_concept_by_text_relation" in policy["prompt_text"]
+    assert "family, given [middle]" in policy["prompt_text"]
+    assert "given [middle] family" in policy["prompt_text"]
+    assert "The variant is for identity lookup only" in policy["prompt_text"]
+    assert "instead of creating a reordered duplicate" in policy["prompt_text"]
 
     effect = candidate["workflow_metadata"]["required_effects_contract"][
         "required_effects"
