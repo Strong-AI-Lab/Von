@@ -15,12 +15,19 @@ const styles = fs.readFileSync(
 );
 
 describe('footer build information', () => {
-    test('places compact build information immediately after uptime', () => {
+    test('places the restart estimate between uptime and compact build information', () => {
         const uptimeFooter = template.match(/<p id="serverUptimeFooter"[\s\S]*?<\/p>/)?.[0] || '';
 
         expect(uptimeFooter.indexOf('id="serverUptimeValue"')).toBeGreaterThanOrEqual(0);
-        expect(uptimeFooter.indexOf('id="serverBuildInfo"'))
+        expect(uptimeFooter.indexOf('id="serverRuntimeCostInfo"'))
             .toBeGreaterThan(uptimeFooter.indexOf('id="serverUptimeValue"'));
+        expect(uptimeFooter.indexOf('id="serverBuildInfo"'))
+            .toBeGreaterThan(uptimeFooter.indexOf('id="serverRuntimeCostInfo"'));
+        expect(uptimeFooter).toContain('data-cost-scope="runtime"');
+        expect(uptimeFooter).not.toContain('Since restart');
+        expect(styles).toMatch(
+            /\.conversation-runtime-cost-button--runtime:hover,[\s\S]*?background:\s*transparent;[\s\S]*?transform:\s*none;/
+        );
         expect(mainSource).toContain('versionDetails.git_short_commit');
         expect(mainSource).toContain('versionDetails.git_commit_timestamp');
         expect(mainSource).toContain("shortCommit.slice(0, 8)");
@@ -49,5 +56,6 @@ describe('footer build information', () => {
         expect(styles).not.toMatch(
             /@media \(max-width:\s*760px\)[\s\S]*?#serverUptimeFooter\s*\{\s*display:\s*none;/
         );
+        expect(styles).toMatch(/#serverUptimeFooter\s*\{\s*white-space:\s*nowrap;/);
     });
 });

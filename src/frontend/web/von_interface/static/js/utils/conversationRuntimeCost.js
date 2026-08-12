@@ -55,15 +55,17 @@ function mergeCost(base, overlay) {
 
 function formatAmount(amount, currency) {
   if (amount === null) return '';
+  const roundToCents = amount > 0.02;
   try {
     return new Intl.NumberFormat('en-NZ', {
       style: 'currency',
       currency,
-      minimumFractionDigits: amount > 0 && amount < 0.01 ? 4 : 2,
-      maximumFractionDigits: 6,
+      minimumFractionDigits: roundToCents ? 2 : (amount > 0 && amount < 0.01 ? 4 : 2),
+      maximumFractionDigits: roundToCents ? 2 : 6,
     }).format(amount);
   } catch (_) {
-    return `${currency === 'USD' ? 'US$' : `${currency} `}${amount.toFixed(6)}`;
+    const fractionDigits = roundToCents ? 2 : 6;
+    return `${currency === 'USD' ? 'US$' : `${currency} `}${amount.toFixed(fractionDigits)}`;
   }
 }
 
@@ -153,56 +155,86 @@ export function formatConversationRuntimeCostFooter(snapshot) {
   if (!context?.conversation_session_id) {
     return {
       visible: false,
+      runtimeVisible: false,
       state: 'unavailable',
+      runtimeState: 'unavailable',
       desktopText: '',
       mobileText: '',
+      runtimeText: '',
       ariaLabel: '',
+      runtimeAriaLabel: '',
       title: '',
+      runtimeTitle: '',
       details: [],
+      runtimeDetails: [],
     };
   }
 
   if (!baseline && !isLoading && !live && !source.error) {
     return {
       visible: false,
+      runtimeVisible: false,
       state: 'unavailable',
+      runtimeState: 'unavailable',
       desktopText: '',
       mobileText: '',
+      runtimeText: '',
       ariaLabel: '',
+      runtimeAriaLabel: '',
       title: '',
+      runtimeTitle: '',
       details: [],
+      runtimeDetails: [],
     };
   }
 
   if (!baseline && (isLoading || liveCalculating)) {
     return {
       visible: true,
+      runtimeVisible: true,
       state: 'calculating',
+      runtimeState: 'calculating',
       desktopText: 'Est. cost: calculating…',
       mobileText: 'Cost calculating…',
+      runtimeText: 'Est. calculating…',
       ariaLabel: 'Estimated conversation cost is calculating.',
+      runtimeAriaLabel: 'Estimated cost since server restart is calculating.',
       title: 'Estimated cost is calculating from provider-reported usage. It is not a provider invoice.',
+      runtimeTitle: 'Estimated cost since server restart is calculating from provider-reported usage. It is not a provider invoice.',
       details: [],
+      runtimeDetails: [],
     };
   }
 
-  const desktopText = `Est. cost: Chat ${describeCost(chatCost)} · Since restart ${describeCost(restartCost)}`;
-  const mobileText = `Chat ${describeCost(chatCost, { compact: true })} · Run ${describeCost(restartCost, { compact: true })}`;
+  const desktopText = `Est. cost: Chat ${describeCost(chatCost)}`;
+  const mobileText = `Chat ${describeCost(chatCost, { compact: true })}`;
+  const runtimeText = `Est. ${describeCost(restartCost, { compact: true })}`;
+  const sharedDetails = [];
+  if (live?.request_id) sharedDetails.push(`Current request: ${live.request_id}`);
+  if (source.error) sharedDetails.push('Latest refresh unavailable; showing retained evidence as a known subtotal.');
+  sharedDetails.push('Estimate from provider-reported usage; not a provider invoice.');
   const details = [
     ...summaryDetailLines('Chat', conversationBase, chatCost),
-    ...summaryDetailLines('Since restart', restartBase, restartCost),
+    ...sharedDetails,
   ];
-  if (live?.request_id) details.push(`Current request: ${live.request_id}`);
-  if (source.runtime?.started_at_utc) details.push(`Runtime started: ${source.runtime.started_at_utc}`);
-  if (source.error) details.push('Latest refresh unavailable; showing retained evidence as a known subtotal.');
-  details.push('Estimate from provider-reported usage; not a provider invoice.');
+  const runtimeDetails = [
+    ...summaryDetailLines('Since restart', restartBase, restartCost),
+    ...(source.runtime?.started_at_utc ? [`Runtime started: ${source.runtime.started_at_utc}`] : []),
+    ...sharedDetails,
+  ];
   return {
     visible: true,
+    runtimeVisible: true,
     state: chatCost.state === 'estimated' && restartCost.state === 'estimated' ? 'estimated' : chatCost.state,
+    runtimeState: restartCost.state,
     desktopText,
     mobileText,
+    runtimeText,
     ariaLabel: `${desktopText}. ${details.join('. ')}`,
+    runtimeAriaLabel: `Estimated cost since server restart: ${describeCost(restartCost)}. ${runtimeDetails.join('. ')}`,
     title: details.join('\n'),
+    runtimeTitle: runtimeDetails.join('\n'),
     details,
+    runtimeDetails,
   };
 }
