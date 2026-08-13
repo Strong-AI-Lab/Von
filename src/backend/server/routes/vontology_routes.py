@@ -59,7 +59,14 @@ from ...services.relationship_extent_index_service import (
 from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
-from ...security.access_control import cache_scope_key, bypass_access_control
+from ...security.access_control import (
+    bypass_access_control,
+    cache_scope_key,
+    force_access_control_enforcement,
+    get_effective_organisation_concept_id,
+    get_effective_user_concept_id,
+    override_current_actor,
+)
 from ...security.visibility_predicates import VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL
 from ...services.window_session_context_service import get_effective_context
 from ...utilities.salient_recompute import recompute_salient_predicates
@@ -129,10 +136,13 @@ _TREE_CACHE_LOCK = threading.Lock()
 """
 Simple progress cache for asynchronous tree builds.
 
-Structure: {job_id: {total: int, processed: int, result: dict | None, error: str | None}}
+Each job is bound to the exact user/organisation visibility scope captured at
+creation. Completed results remain available briefly for polling and are then
+pruned; active jobs are never expired by result cleanup.
 """
 _TREE_BUILD_PROGRESS: dict[str, dict] = {}
 _TREE_BUILD_PROGRESS_LOCK = threading.Lock()
+_TREE_BUILD_RESULT_TTL_SECONDS = 10 * 60
 
 _RELATIONSHIP_ALIAS_TO_CANONICAL = {
     "has_subtypes": "has_subtype",
@@ -699,45 +709,107 @@ def ensure_thing_route():
         return jsonify({"success": False, "message": f"Internal error: {str(e)}"}), 500
 
 
-def _build_tree_job(job_id: str) -> None:
-    """Background worker that constructs the Vontology tree whilst tracking progress."""
+def _current_tree_job_actor_scope() -> tuple[str | None, str | None]:
+    """Return the trusted read scope for an asynchronous tree job.
+
+    Organisation context is meaningful only when it is attached to an
+    effective user. Discarding an otherwise residual organisation value keeps
+    anonymous tree reads global-only.
+    """
+
+    user_concept_id = get_effective_user_concept_id()
+    organisation_concept_id = (
+        get_effective_organisation_concept_id() if user_concept_id else None
+    )
+    return user_concept_id, organisation_concept_id
+
+
+def _tree_build_job_is_terminal(job: Mapping[str, Any]) -> bool:
+    return job.get("result") is not None or job.get("error") is not None
+
+
+def _prune_tree_build_progress(*, now_epoch: float | None = None) -> None:
+    """Remove expired terminal results without abandoning active builds."""
+
+    cutoff = (
+        time.time() if now_epoch is None else float(now_epoch)
+    ) - _TREE_BUILD_RESULT_TTL_SECONDS
+    with _TREE_BUILD_PROGRESS_LOCK:
+        stale_job_ids = [
+            job_id
+            for job_id, job in _TREE_BUILD_PROGRESS.items()
+            if _tree_build_job_is_terminal(job)
+            and isinstance(job.get("completed_at_epoch"), (int, float))
+            and float(job["completed_at_epoch"]) <= cutoff
+        ]
+        for job_id in stale_job_ids:
+            _TREE_BUILD_PROGRESS.pop(job_id, None)
+
+
+def _build_tree_job(
+    job_id: str,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+) -> None:
+    """Construct one Vontology tree under its captured actor visibility scope."""
+
+    stop_event = threading.Event()
+    ticker_thread: threading.Thread | None = None
+    ticker_started = False
     try:
         t0 = time.time()
-        docs = list(ConceptsRepository.find({}, {"concept_id": 1}))
-        total = len(docs)
-        with _TREE_BUILD_PROGRESS_LOCK:
-            job = _TREE_BUILD_PROGRESS.get(job_id)
-            if job is not None:
+        with (
+            force_access_control_enforcement(),
+            override_current_actor(
+                user_concept_id,
+                organisation_concept_id,
+            ),
+        ):
+            docs = list(ConceptsRepository.find({}, {"concept_id": 1}))
+            total = len(docs)
+            with _TREE_BUILD_PROGRESS_LOCK:
+                job = _TREE_BUILD_PROGRESS.get(job_id)
+                if job is None:
+                    return
                 job["total"] = total
                 job["processed"] = 0
 
-        stop_event = threading.Event()
+            def ticker():
+                """Increment progress periodically so the client sees activity."""
+                while not stop_event.wait(0.5):
+                    with _TREE_BUILD_PROGRESS_LOCK:
+                        current_job = _TREE_BUILD_PROGRESS.get(job_id)
+                        if not current_job or _tree_build_job_is_terminal(current_job):
+                            break
+                        current = current_job.get("processed", 0)
+                        current_job["processed"] = min(
+                            total,
+                            current + max(1, total // 20),
+                        )
 
-        def ticker():
-            """Increment progress periodically so the client sees activity."""
-            while not stop_event.is_set():
-                time.sleep(0.5)
-                with _TREE_BUILD_PROGRESS_LOCK:
-                    j = _TREE_BUILD_PROGRESS.get(job_id)
-                    if not j or j.get("result") or j.get("error"):
-                        break
-                    current = j.get("processed", 0)
-                    j["processed"] = min(total, current + max(1, total // 20))
+            ticker_thread = threading.Thread(target=ticker, daemon=True)
+            ticker_thread.start()
+            ticker_started = True
 
-        t = threading.Thread(target=ticker, daemon=True)
-        t.start()
+            tree_data = get_vontology_tree("Thing")
 
-        tree_data = get_vontology_tree("Thing")
-        stop_event.set()
-        t.join(timeout=0.1)
+        returned_error = None
+        if isinstance(tree_data, Mapping) and tree_data.get("error") is not None:
+            returned_error = str(tree_data["error"]).strip() or "Tree build failed."
 
         with _TREE_BUILD_PROGRESS_LOCK:
             job = _TREE_BUILD_PROGRESS.get(job_id)
             if job is not None:
                 job["processed"] = total
-                job["result"] = tree_data
+                if returned_error is not None:
+                    job["error"] = returned_error
+                else:
+                    job["result"] = tree_data
+                job["completed_at_epoch"] = time.time()
 
         try:
+            if returned_error is not None:
+                return
             if os.getenv("VON_TREE_PHASE_LOG") in ("1", "true", "TRUE", "True"):
                 logger = None
                 try:
@@ -772,30 +844,66 @@ def _build_tree_job(job_id: str) -> None:
                 )
         except Exception:
             pass
-    except Exception as e:  # pragma: no cover
+    except Exception as exc:
         with _TREE_BUILD_PROGRESS_LOCK:
             job = _TREE_BUILD_PROGRESS.get(job_id)
             if job is not None:
-                job["error"] = str(e)
+                job["error"] = str(exc).strip() or exc.__class__.__name__
+                job["completed_at_epoch"] = time.time()
+    finally:
+        stop_event.set()
+        if ticker_thread is not None and ticker_started:
+            ticker_thread.join(timeout=0.5)
 
 
 @vontology_bp.route("/tree_async", methods=["POST"])
 def build_tree_async_route():
     """Initialise an asynchronous Vontology tree build."""
+    _prune_tree_build_progress()
     job_id = uuid.uuid4().hex
+    user_concept_id, organisation_concept_id = _current_tree_job_actor_scope()
     with _TREE_BUILD_PROGRESS_LOCK:
-        _TREE_BUILD_PROGRESS[job_id] = {"total": 0, "processed": 0, "result": None}
-    thread = threading.Thread(target=_build_tree_job, args=(job_id,), daemon=True)
-    thread.start()
+        _TREE_BUILD_PROGRESS[job_id] = {
+            "total": 0,
+            "processed": 0,
+            "result": None,
+            "error": None,
+            "owner_user_concept_id": user_concept_id,
+            "owner_organisation_concept_id": organisation_concept_id,
+            "completed_at_epoch": None,
+        }
+    try:
+        thread = threading.Thread(
+            target=_build_tree_job,
+            args=(job_id, user_concept_id, organisation_concept_id),
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        with _TREE_BUILD_PROGRESS_LOCK:
+            _TREE_BUILD_PROGRESS.pop(job_id, None)
+        current_app.logger.exception(
+            "Failed to start asynchronous Vontology tree build"
+        )
+        return jsonify({"error": "tree build could not be started"}), 500
     return jsonify({"job_id": job_id}), 202
 
 
 @vontology_bp.route("/tree_progress/<job_id>", methods=["GET"])
 def tree_build_progress(job_id: str):
     """Return progress for a previously initialised tree build."""
+    _prune_tree_build_progress()
+    user_concept_id, organisation_concept_id = _current_tree_job_actor_scope()
     with _TREE_BUILD_PROGRESS_LOCK:
         status = _TREE_BUILD_PROGRESS.get(job_id)
-    if not status:
+        if status is not None and (
+            status.get("owner_user_concept_id") != user_concept_id
+            or status.get("owner_organisation_concept_id") != organisation_concept_id
+        ):
+            status = None
+        elif status is not None:
+            status = dict(status)
+    if status is None:
         return jsonify({"error": "unknown job"}), 404
     total = status.get("total", 0)
     processed = status.get("processed", 0)
@@ -803,7 +911,7 @@ def tree_build_progress(job_id: str):
     response = {
         "job_id": job_id,
         "progress": progress,
-        "done": bool(status.get("result") or status.get("error")),
+        "done": _tree_build_job_is_terminal(status),
     }
     if status.get("result") is not None:
         response["result"] = status["result"]
