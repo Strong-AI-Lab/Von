@@ -18,15 +18,15 @@ BLOCKED_CANDIDATURE_SOURCE_IDS = (
     "#V#andrew_probert",
     "#V#andrey_borro",
     "#V#bin_zhang",
-    "#V#gael_gendron",
+    "#V#person_gael_gendron_3705b277",
     "#V#gibran_zazueta_cruz",
-    "#V#i_chieh_wei",
+    "#V#ichieh_wei",
     "#V#jian_cheng",
     "#V#junchen_liu",
     "#V#kobe_knowles",
     "#V#minjung_kim",
     "#V#nathan_young",
-    "#V#neset_tan",
+    "#V#neet_zkan_tan",
     "#V#rebecca_allcock",
     "#V#shaoxin_zhong",
     "#V#stefan_fuchs",
@@ -34,10 +34,18 @@ BLOCKED_CANDIDATURE_SOURCE_IDS = (
     "#V#timothy_pistotti",
     "#V#xianda_zheng",
     "#V#yaotian_shi",
-    "#V#yonghua_zhu",
+    "#V#zhu_yonghua",
     "#V#yuchen_su",
     "#V#yueying_zhou",
     "#V#ziqin_zhu",
+)
+
+PREVIOUSLY_APPLIED_CANDIDATURE_SOURCE_IDS = (
+    "#V#aaron_keesing",
+    "#V#beryl_qi",
+    "#V#lilin_zhang",
+    "#V#qiyi_zhang",
+    "#V#zhenyun_deng",
 )
 
 BLOCKED_CANDIDATURE_TUPLES = tuple(
@@ -114,6 +122,12 @@ def _intent(
 def test_motivating_candidature_fixture_is_complete_and_exact() -> None:
     assert len(BLOCKED_CANDIDATURE_TUPLES) == 23
     assert len(set(BLOCKED_CANDIDATURE_SOURCE_IDS)) == 23
+    assert len(PREVIOUSLY_APPLIED_CANDIDATURE_SOURCE_IDS) == 5
+    assert not set(BLOCKED_CANDIDATURE_SOURCE_IDS).intersection(
+        PREVIOUSLY_APPLIED_CANDIDATURE_SOURCE_IDS
+    )
+    assert "#V#minjung_kim" in BLOCKED_CANDIDATURE_SOURCE_IDS
+    assert "#V#lilin_zhang" in PREVIOUSLY_APPLIED_CANDIDATURE_SOURCE_IDS
     assert all(
         predicate == "#V#is_an_instance_of" and target == "#V#student"
         for _source, predicate, target in BLOCKED_CANDIDATURE_TUPLES

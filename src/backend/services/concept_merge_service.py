@@ -33,6 +33,7 @@ from .ontology_publication_authority_service import (
     RESERVED_GENERIC_MUTATION_PREDICATES,
     current_authorised_ontology_intent,
 )
+from .relationship_write_service import is_structural_predicate
 from .text_value_service import upsert_text_for_concept
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ _TARGET_IDENTITY_FIELDS = frozenset(
         "concept_id",
         "guid",
         "created_at",
+        "created_timestamp",
         "updated_at",
         "embedding_status",
         "relationships",
@@ -59,6 +61,25 @@ _TARGET_IDENTITY_FIELDS = frozenset(
         "attributes",
         "system_tags",
         "user_tags",
+    }
+)
+# These fields describe a stored concept document's derived index/cache state,
+# not the represented meaning being consolidated.  The surviving document owns
+# any existing values and the applicable index/cache workers may recompute them;
+# source values must neither overwrite it nor create a semantic metadata
+# conflict.  Keep this list explicit so unfamiliar metadata still fails closed.
+_TARGET_OWNED_DERIVED_FIELDS = frozenset(
+    {
+        "embedding_updated_at",
+        "embedding_error",
+        "last_db_update_timestamp",
+    }
+)
+_RECOMPUTED_DERIVED_FIELDS = frozenset(
+    {
+        "inherited_salient_binary_predicates",
+        "inherited_salient_computed_at",
+        "inherited_salient_error",
     }
 )
 
@@ -226,6 +247,67 @@ def _merge_relationship_maps(
     return merged
 
 
+def _relationship_value_mentions(value: Any, concept_id: str) -> bool:
+    if isinstance(value, str):
+        return value == concept_id
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return any(_relationship_value_mentions(item, concept_id) for item in value)
+    if isinstance(value, Mapping):
+        return any(
+            _relationship_value_mentions(item, concept_id) for item in value.values()
+        )
+    return False
+
+
+def _without_relationship_target(value: Any, concept_id: str) -> Any:
+    if isinstance(value, str):
+        return [] if value == concept_id else value
+    if isinstance(value, list):
+        return [
+            item for item in value if not (isinstance(item, str) and item == concept_id)
+        ]
+    return value
+
+
+def _remove_new_identity_collapse_self_edges(
+    merged_relationships: Mapping[str, Any],
+    *,
+    source_relationships: Mapping[str, Any],
+    target_relationships: Mapping[str, Any],
+    source_id: str,
+    target_id: str,
+) -> dict[str, Any]:
+    """Remove only structural self-edges introduced by identity collapse.
+
+    A target's already-stored self-edge is left alone.  Otherwise, an edge can
+    become target-to-target when the target pointed to the source or when a
+    source edge to either identity is transferred to the target.
+    """
+
+    cleaned = deepcopy(dict(merged_relationships))
+    for predicate, merged_targets in merged_relationships.items():
+        if not is_structural_predicate(str(predicate)):
+            continue
+        target_before = target_relationships.get(predicate)
+        if _relationship_value_mentions(target_before, target_id):
+            continue
+        source_before = source_relationships.get(predicate)
+        collapse_created = (
+            _relationship_value_mentions(target_before, source_id)
+            or _relationship_value_mentions(source_before, source_id)
+            or _relationship_value_mentions(source_before, target_id)
+        )
+        if collapse_created:
+            cleaned[str(predicate)] = _without_relationship_target(
+                merged_targets,
+                target_id,
+            )
+    return cleaned
+
+
 def _merge_legacy_names(
     target_doc: Mapping[str, Any],
     source_doc: Mapping[str, Any],
@@ -298,7 +380,17 @@ def _merge_target_document(
     merged["user_tags"] = _ordered_unique(
         [*(target_doc.get("user_tags") or []), *(source_doc.get("user_tags") or [])]
     )
-    merged["embedding_status"] = "pending"
+    # This is an existing concept whose searchable content has changed.  The
+    # text service uses the same status when a required source CODE alias is
+    # materialised later in the exact plan, so the planned document remains an
+    # exact postcondition whether or not that alias already existed.
+    merged["embedding_status"] = "stale"
+    # Inherited salience is a cache of the type graph that this merge changes.
+    # Removing it forces the normal calculated path until the recompute worker
+    # materialises a new value; retaining either identity's old cache would be
+    # a plausible-looking but incorrect postcondition.
+    for field_name in _RECOMPUTED_DERIVED_FIELDS:
+        merged.pop(field_name, None)
 
     legacy_description = str(source_doc.get("description") or "").strip()
     if legacy_description:
@@ -311,7 +403,12 @@ def _merge_target_document(
         )
 
     for key, value in source_doc.items():
-        if key in _TARGET_IDENTITY_FIELDS or key == "description":
+        if (
+            key in _TARGET_IDENTITY_FIELDS
+            or key in _TARGET_OWNED_DERIVED_FIELDS
+            or key in _RECOMPUTED_DERIVED_FIELDS
+            or key == "description"
+        ):
             continue
         if key not in merged:
             merged[key] = deepcopy(value)
@@ -495,6 +592,21 @@ def build_concept_merge_plan(source_id: str, target_id: str) -> dict[str, Any]:
     merged_relationships = _merge_relationship_maps(
         target_replaced_relationships,
         source_relationships,
+    )
+    merged_relationships = _remove_new_identity_collapse_self_edges(
+        merged_relationships,
+        source_relationships=(
+            source_doc.get("relationships")
+            if isinstance(source_doc.get("relationships"), Mapping)
+            else {}
+        ),
+        target_relationships=(
+            target_doc.get("relationships")
+            if isinstance(target_doc.get("relationships"), Mapping)
+            else {}
+        ),
+        source_id=source,
+        target_id=target,
     )
     target_after = _merge_target_document(
         source_doc=source_doc,
@@ -755,9 +867,13 @@ def _conditional_update_document(step: Mapping[str, Any]) -> bool:
     update_fields = {
         key: deepcopy(value) for key, value in after.items() if key != "_id"
     }
+    unset_fields = {key: "" for key in before if key != "_id" and key not in after}
+    update: dict[str, Any] = {"$set": update_fields}
+    if unset_fields:
+        update["$unset"] = unset_fields
     result = ConceptsRepository.update_one(
         deepcopy(dict(before)),
-        {"$set": update_fields},
+        update,
     )
     if int(getattr(result, "modified_count", 0) or 0) != 1:
         refreshed = _raw_concept(concept_id)
@@ -859,9 +975,7 @@ def _target_has_code_alias(target_id: str, alias: str) -> bool:
         context = relation.get("context")
         if not isinstance(context, Mapping) or context.get("name_type") != "CODE":
             continue
-        text_value = TextValuesRepository.find_one(
-            {"_id": relation.get("object_text_id")}
-        )
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if (
             isinstance(text_value, Mapping)
             and str(text_value.get("text") or "") == alias
@@ -1168,8 +1282,8 @@ def merge_concepts(
 
 
 __all__ = [
-    "ConceptMergePlanError",
     "MERGE_PLAN_SCHEMA_VERSION",
+    "ConceptMergePlanError",
     "build_concept_merge_plan",
     "merge_concepts",
     "read_concept_merge_postcondition",

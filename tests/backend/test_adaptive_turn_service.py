@@ -40,11 +40,14 @@ from src.backend.services.adaptive_turn_service import (
     _bound_tool_results_for_model,
     _bounded_conversation_observation_projection,
     _canonical_effect_readback_receipt,
+    _canonical_relation_readback_matches_invocation,
     _canonically_verified_material_effect_ids,
     _capability_catalogue,
+    _cited_ontology_mutation_claim_conflicts,
     _compact_context_after_limit,
     _compact_evidence_envelope,
     _compact_evidence_index,
+    _effect_id,
     _effect_result_target_ids,
     _effect_subject_authorised,
     _effect_subject_authority_denial,
@@ -176,6 +179,94 @@ def test_embedded_gmail_readback_is_canonical_without_private_fields() -> None:
     )
     assert material == {"effect-1"}
     assert verified == {"effect-1"}
+
+
+def test_embedded_ontology_relation_readback_verifies_the_exact_effect() -> None:
+    readback = _canonical_effect_readback_receipt(
+        {
+            "canonical_read_back": {
+                "source_id": "#V#student_a",
+                "source_exists": True,
+                "predicate": "is_an_instance_of",
+                "target": "#V#student",
+                "relationship_present": True,
+                "inverse_predicate": "has_instance",
+                "inverse_relationship_present": True,
+                "publication_context": {"kind": "global", "concept_id": None},
+            }
+        }
+    )
+
+    invocation = {
+        "effect_id": "effect-ontology-1",
+        "status": "ok",
+        "execution_method": "add_relationship",
+        "effective_arguments": {
+            "source_id": "#V#student_a",
+            "predicate": "#V#is_an_instance_of",
+            "target": "#V#student",
+        },
+    }
+    material, verified = _canonically_verified_material_effect_ids(
+        [invocation],
+        {
+            "effect-ontology-1": {
+                "effect_status": "succeeded",
+                "changed": True,
+                "turn_finality_required": True,
+                "canonical_readback": readback,
+            }
+        },
+    )
+
+    assert readback is not None
+    assert readback["relationship_present"] is True
+    assert readback["inverse_relationship_present"] is True
+    assert material == {"effect-ontology-1"}
+    assert verified == {"effect-ontology-1"}
+    missing_source_readback = dict(readback)
+    missing_source_readback.pop("source_exists")
+    assert not _canonical_relation_readback_matches_invocation(
+        invocation,
+        missing_source_readback,
+    )
+    wrong_case_readback = dict(readback)
+    wrong_case_readback["source_id"] = "#V#Student_A"
+    assert not _canonical_relation_readback_matches_invocation(
+        invocation,
+        wrong_case_readback,
+    )
+
+
+def test_cited_ontology_conflict_matches_live_evidence_identifier() -> None:
+    conflicts = _cited_ontology_mutation_claim_conflicts(
+        "| Gael Gendron | Added and verified | ev_live_failed_effect |",
+        tool_invocations=[
+            {
+                "effect_id": "effect-live-failed",
+                "execution_method": "add_relationship",
+                "effective_arguments": {
+                    "source_id": "#V#gael_gendron",
+                    "predicate": "#V#is_an_instance_of",
+                    "target": "#V#student",
+                },
+                "evidence": {"evidence_id": "ev_live_failed_effect"},
+                "error_code": "ontology_mutation_target_not_accessible",
+            }
+        ],
+        effect_snapshot={
+            "effect-live-failed": {
+                "effect_status": "not_started",
+                "changed": False,
+            }
+        },
+        canonically_verified_effect_ids=set(),
+    )
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["effect_id"] == "effect-live-failed"
+    assert conflicts[0]["evidence_id"] == "ev_live_failed_effect"
+    assert conflicts[0]["reason"] == "effect_not_succeeded"
 
 
 def _gateway(handler: Any) -> InternalMCPGateway:
@@ -2803,6 +2894,224 @@ def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
     )
     assert result.tool_invocations[1]["status"] == "ok"
     assert result.tool_invocations[1]["effect_status"] == "succeeded"
+
+
+def test_cited_non_succeeded_ontology_effect_replaces_false_success_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_id = "cited-failed-ontology-effect"
+    good_call_id = "add-student-a"
+    failed_call_id = "add-gael-gendron"
+    good_effect_id = _effect_id(
+        turn_id=turn_id,
+        call_id=good_call_id,
+        capability_name="add_relationship",
+    )
+    failed_effect_id = _effect_id(
+        turn_id=turn_id,
+        call_id=failed_call_id,
+        capability_name="add_relationship",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        lambda **_kwargs: {"delegation_id": "delegation-test"},
+    )
+
+    def handler(_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        source_id = str(arguments["source_id"])
+        if source_id == "#V#gael_gendron":
+            return {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "error_code": "ontology_mutation_target_not_accessible",
+            }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "source_id": source_id,
+            "predicate": "is_an_instance_of",
+            "target": "#V#student",
+            "canonical_read_back": {
+                "source_id": source_id,
+                "source_exists": True,
+                "predicate": "is_an_instance_of",
+                "target": "#V#student",
+                "relationship_present": True,
+                "inverse_predicate": "has_instance",
+                "inverse_relationship_present": True,
+            },
+        }
+
+    drafted_claim = (
+        "| #V#student_a | Added; forward and inverse verified | "
+        f"{good_effect_id} |\n"
+        "| #V#gael_gendron | Added; forward and inverse verified | "
+        f"{failed_effect_id} |"
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=good_call_id,
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#student_a",
+                            "predicate": "is_an_instance_of",
+                            "target": "#V#student",
+                        },
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=failed_call_id,
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#gael_gendron",
+                            "predicate": "is_an_instance_of",
+                            "target": "#V#student",
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response=drafted_claim),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Add and canonically verify both student relations.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=turn_id,
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is True
+    assert drafted_claim not in result.response_text
+    assert "#V#gael_gendron --is_an_instance_of--> #V#student" in result.response_text
+    assert "effect status `not_started` and changed `false`" in result.response_text
+    rejection = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_cited_ontology_mutation_claim_rejected"
+    )
+    assert len(rejection["conflicts"]) == 1
+    conflict = rejection["conflicts"][0]
+    assert conflict["effect_id"] == failed_effect_id
+    assert conflict["method"] == "add_relationship"
+    assert conflict["effect_status"] == "not_started"
+    assert conflict["changed"] is False
+    assert conflict["reason"] == "effect_not_succeeded"
+    assert conflict["error_code"] == "ontology_mutation_target_not_accessible"
+    assert conflict["source_id"] == "#V#gael_gendron"
+    assert conflict["predicate"] == "is_an_instance_of"
+    assert conflict["target"] == "#V#student"
+    assert conflict["canonical_relationship_present"] is None
+
+
+def test_cited_ontology_success_without_relation_readback_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_id = "cited-unverified-ontology-effect"
+    call_id = "add-unverified-student"
+    effect_id = _effect_id(
+        turn_id=turn_id,
+        call_id=call_id,
+        capability_name="add_relationship",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        lambda **_kwargs: {"delegation_id": "delegation-test"},
+    )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=call_id,
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#unverified_student",
+                            "predicate": "is_an_instance_of",
+                            "target": "#V#student",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "| #V#unverified_student | Added and canonically verified | "
+                f"{effect_id} |"
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            lambda _name, arguments: {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "source_id": arguments["source_id"],
+                "predicate": "is_an_instance_of",
+                "target": "#V#student",
+                "canonical_read_back": {
+                    "source_id": arguments["source_id"],
+                    "source_exists": True,
+                    "predicate": "is_an_instance_of",
+                    "target": "#V#student",
+                    "relationship_present": False,
+                    "inverse_predicate": "has_instance",
+                    "inverse_relationship_present": False,
+                },
+            }
+        ),
+        prompt="Add and canonically verify the student relation.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=turn_id,
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is True
+    assert "Added and canonically verified" not in result.response_text
+    assert "handler status `succeeded`" in result.response_text
+    assert "canonical relation read-back is absent or negative" in (
+        result.response_text
+    )
+    rejection = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_cited_ontology_mutation_claim_rejected"
+    )
+    assert rejection["conflicts"][0]["effect_id"] == effect_id
+    assert rejection["conflicts"][0]["reason"] == "canonical_relation_not_verified"
+    assert rejection["conflicts"][0]["canonical_relationship_present"] is False
 
 
 def test_indeterminate_effect_stops_later_effect_but_allows_readback(

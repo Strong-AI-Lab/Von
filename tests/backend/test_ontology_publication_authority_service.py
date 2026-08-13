@@ -7,6 +7,16 @@ import mongomock
 import pytest
 
 
+def test_json_safe_treats_naive_pymongo_datetimes_as_utc() -> None:
+    from src.backend.services import ontology_publication_authority_service as service
+
+    stored = datetime(2026, 8, 13, 17, 5, 57, 150000, tzinfo=UTC).replace(
+        tzinfo=None
+    )
+
+    assert service._json_safe(stored) == "2026-08-13T17:05:57.150000+00:00"
+
+
 @pytest.fixture
 def authority_stores(monkeypatch):
     from src.backend.services import ontology_publication_authority_service as service

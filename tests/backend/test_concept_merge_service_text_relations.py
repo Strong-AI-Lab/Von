@@ -17,8 +17,7 @@ def merge_store(monkeypatch: pytest.MonkeyPatch):
     text_relations = database["text_relations"]
     text_values = database["text_values"]
 
-    from src.backend.db.repositories import concepts_repository
-    from src.backend.db.repositories import text_value_repository
+    from src.backend.db.repositories import concepts_repository, text_value_repository
 
     monkeypatch.setattr(
         concepts_repository,
@@ -252,6 +251,220 @@ def test_exact_authorised_merge_moves_graph_and_text_and_deletes_source(
     assert text_relations.count_documents({"subject_concept_id": target_id}) == 3
     read_back = merge_service.read_concept_merge_postcondition(plan)
     assert read_back["matches_exact_plan"] is True
+
+
+def test_actual_shaped_derived_metadata_is_target_owned_and_plan_is_exact(
+    merge_store,
+) -> None:
+    concepts, _text_relations, _text_values = merge_store
+    source_id = "#V#ph_d_student"
+    target_id = "#V#phd_student"
+    source_updated_at = datetime(2025, 9, 6, tzinfo=UTC)
+    target_updated_at = datetime(2026, 2, 28, tzinfo=UTC)
+    # Mongo stores these live timestamps as UTC BSON datetimes without a
+    # timezone object on read-back.
+    target_embedding_updated_at = datetime(2026, 4, 22, tzinfo=UTC).replace(tzinfo=None)
+    target_last_db_update = datetime(2026, 2, 28, tzinfo=UTC).replace(tzinfo=None)
+    source = {
+        "concept_id": source_id,
+        "created_timestamp": datetime(2025, 8, 23, tzinfo=UTC),
+        "updated_at": source_updated_at,
+        "embedding_status": "indexed",
+        "embedding_updated_at": datetime(2026, 1, 31, tzinfo=UTC),
+        "embedding_error": "source index error",
+        "hypothesized_relations": {},
+        "inherited_salient_binary_predicates": ["#V#has_phd_supervisor"],
+        "inherited_salient_computed_at": 1_760_129_114,
+        "inherited_salient_error": False,
+        "last_db_update_timestamp": datetime(2025, 8, 23, tzinfo=UTC),
+        "relationships": {
+            "is_a_type_of": ["#V#graduate_student", target_id],
+            "has_subtype": ["#V#university_of_canterbury_phd_student"],
+            "has_instance": ["#V#bin_zhang"],
+            "related_to": [],
+            "is_an_instance_of": [],
+            "#V#salient_binary_predicate_for_type": ["#V#has_phd_supervisor"],
+        },
+        "salient_predicate_scopes": {
+            "instance_level": [],
+            "type_level": ["#V#has_phd_supervisor"],
+            "unclassified": [],
+        },
+        "source_concept": "manual_creation by Michael Witbrock",
+    }
+    target = {
+        "concept_id": target_id,
+        "guid": "9bdcdbce-1989-46cc-84ae-accadc8120bc",
+        "created_at": datetime(2026, 1, 20, tzinfo=UTC),
+        "updated_at": target_updated_at,
+        "embedding_status": "indexed",
+        "embedding_updated_at": target_embedding_updated_at,
+        "embedding_error": "target index error",
+        "last_db_update_timestamp": target_last_db_update,
+        "inherited_salient_binary_predicates": ["#V#target_stale_cache"],
+        "inherited_salient_computed_at": 1_770_000_000,
+        "inherited_salient_error": True,
+        "attributes": {},
+        "system_tags": [],
+        "user_tags": [],
+        "relationships": {
+            "is_a_type_of": ["#V#thing"],
+            "is_an_instance_of": [
+                "#V#mentioned_in_von_code",
+                "#V#mentioned_in_von_test",
+            ],
+            "linked_to": [],
+            "has_instance": ["#V#yaotian_shi", "#V#yaotian_shi_phd_student_role"],
+            "has_subtype": [source_id],
+        },
+    }
+    concepts.insert_many(
+        [
+            source,
+            target,
+            _concept("#V#graduate_student"),
+            _concept(
+                "#V#university_of_canterbury_phd_student",
+                relationships={"is_a_type_of": [source_id]},
+            ),
+            _concept(
+                "#V#bin_zhang",
+                relationships={"is_an_instance_of": [source_id]},
+            ),
+        ]
+    )
+
+    plan = merge_service.build_concept_merge_plan(source_id, target_id)
+    repeated_plan = merge_service.build_concept_merge_plan(source_id, target_id)
+
+    assert repeated_plan == plan
+    target_step = next(
+        step for step in plan["concept_steps"] if step["concept_id"] == target_id
+    )
+    target_after = target_step["after_document"]
+    assert target_after["embedding_status"] == "stale"
+    assert target_after["embedding_updated_at"] == target_embedding_updated_at
+    assert target_after["embedding_error"] == "target index error"
+    assert target_after["last_db_update_timestamp"] == target_last_db_update
+    assert "inherited_salient_binary_predicates" not in target_after
+    assert "inherited_salient_computed_at" not in target_after
+    assert "inherited_salient_error" not in target_after
+    assert "created_timestamp" not in target_after
+    assert target_after["source_concept"] == source["source_concept"]
+    assert target_after["hypothesized_relations"] == {}
+    assert (
+        target_after["salient_predicate_scopes"] == source["salient_predicate_scopes"]
+    )
+    assert target_after["relationships"]["is_a_type_of"] == [
+        "#V#thing",
+        "#V#graduate_student",
+    ]
+    assert target_after["relationships"]["has_subtype"] == [
+        "#V#university_of_canterbury_phd_student"
+    ]
+    assert target_after["relationships"]["has_instance"] == [
+        "#V#yaotian_shi",
+        "#V#yaotian_shi_phd_student_role",
+        "#V#bin_zhang",
+    ]
+    assert all(
+        target_id not in (targets if isinstance(targets, list) else [targets])
+        for predicate, targets in target_after["relationships"].items()
+        if merge_service.is_structural_predicate(predicate)
+    )
+
+    intent = authority.OntologyMutationIntent(
+        operation="concept.merge",
+        publication_context=authority.PublicationContext.global_context(),
+        target_concept_ids=tuple(plan["affected_concept_ids"]),
+        tool_name="merge_concepts",
+        delta={"merge_plan_sha256": plan["plan_sha256"]},
+    )
+    with authority.bind_authorised_ontology_mutation(
+        _allowed_decision(intent),
+        intent,
+    ):
+        result = merge_service.merge_concepts(
+            source_id,
+            target_id,
+            simulate=False,
+            exact_plan=plan,
+        )
+
+    assert result["success"] is True, (
+        result.get("error_code"),
+        result.get("error"),
+        result.get("mutation_outcome"),
+    )
+    assert (
+        merge_service.read_concept_merge_postcondition(plan)["matches_exact_plan"]
+        is True
+    )
+    merged_target = concepts.find_one({"concept_id": target_id})
+    assert merged_target["embedding_updated_at"] == target_embedding_updated_at
+    assert merged_target["embedding_error"] == "target index error"
+    assert merged_target["last_db_update_timestamp"] == target_last_db_update
+    assert "inherited_salient_binary_predicates" not in merged_target
+    assert "inherited_salient_computed_at" not in merged_target
+    assert "inherited_salient_error" not in merged_target
+    assert "created_timestamp" not in merged_target
+    assert merged_target["source_concept"] == source["source_concept"]
+    assert concepts.find_one({"concept_id": "#V#university_of_canterbury_phd_student"})[
+        "relationships"
+    ]["is_a_type_of"] == [target_id]
+    assert concepts.find_one({"concept_id": "#V#bin_zhang"})["relationships"][
+        "is_an_instance_of"
+    ] == [target_id]
+
+
+def test_merge_plan_preserves_preexisting_target_structural_self_edge(
+    merge_store,
+) -> None:
+    concepts, _text_relations, _text_values = merge_store
+    source_id = "#V#duplicate"
+    target_id = "#V#canonical"
+    concepts.insert_many(
+        [
+            _concept(source_id, relationships={"related_to": [target_id]}),
+            _concept(
+                target_id,
+                relationships={
+                    "related_to": [target_id, source_id],
+                    "has_subtype": [source_id],
+                },
+            ),
+        ]
+    )
+
+    plan = merge_service.build_concept_merge_plan(source_id, target_id)
+    target_after = next(
+        step["after_document"]
+        for step in plan["concept_steps"]
+        if step["concept_id"] == target_id
+    )
+
+    assert target_after["relationships"]["related_to"] == [target_id]
+    assert target_after["relationships"]["has_subtype"] == []
+
+
+def test_merge_plan_still_fails_closed_on_canonical_metadata_conflict(
+    merge_store,
+) -> None:
+    concepts, _text_relations, _text_values = merge_store
+    source = _concept("#V#duplicate")
+    source["source_concept"] = "legacy import"
+    target = _concept("#V#canonical")
+    target["source_concept"] = "curated source"
+    concepts.insert_many([source, target])
+
+    result = merge_service.merge_concepts(
+        source["concept_id"],
+        target["concept_id"],
+        simulate=True,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "identity_consolidation_metadata_conflict"
 
 
 def test_merge_plan_rejects_authority_role_transfer(merge_store) -> None:
