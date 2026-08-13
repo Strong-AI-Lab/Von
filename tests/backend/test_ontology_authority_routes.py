@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
 from flask import Flask
 
+from src.backend.security import access_control
 from src.backend.server.routes import ontology_authority_routes as routes
 from src.backend.services.ontology_publication_authority_service import (
     OntologyMutationIntent,
@@ -16,10 +18,26 @@ def _app() -> Flask:
     return app
 
 
+def _authenticated_client(actor_concept_id: str = "#V#server"):
+    client = _app().test_client()
+    with client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = actor_concept_id
+    return client
+
+
+def _accept_legacy_identity_header_for_regression(monkeypatch) -> None:
+    """Make the legacy resolver accept the spoof so route isolation is tested."""
+
+    monkeypatch.setattr(
+        access_control,
+        "_validate_person_concept",
+        lambda actor_concept_id: actor_concept_id,
+    )
+
+
 def test_authority_summary_uses_server_actor_and_states_operator_separation(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#server")
     monkeypatch.setattr(
         routes,
         "list_actor_semantic_authority",
@@ -32,7 +50,7 @@ def test_authority_summary_uses_server_actor_and_states_operator_separation(
         },
     )
 
-    response = _app().test_client().get("/api/ontology-authority/me")
+    response = _authenticated_client().get("/api/ontology-authority/me")
 
     assert response.status_code == 200
     assert response.get_json()["actor_concept_id"] == "#V#server"
@@ -47,7 +65,6 @@ def test_authority_summary_uses_server_actor_and_states_operator_separation(
 def test_delegation_ignores_payload_grantor_and_requires_exact_effect(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#server")
     monkeypatch.setattr(
         routes, "get_effective_organisation_concept_id", lambda: "#V#org"
     )
@@ -66,8 +83,7 @@ def test_delegation_ignores_payload_grantor_and_requires_exact_effect(
 
     monkeypatch.setattr(routes, "issue_agent_delegation", issue)
     response = (
-        _app()
-        .test_client()
+        _authenticated_client()
         .post(
             "/api/ontology-authority/delegations",
             json={
@@ -85,6 +101,47 @@ def test_delegation_ignores_payload_grantor_and_requires_exact_effect(
     assert captured["grantor_actor_concept_id"] == "#V#server"
     assert captured["effect_id"] == "effect-1"
     assert captured["tool_name"] == "upsert_text_relation"
+
+
+@pytest.mark.parametrize(
+    "header_name", ["X-User-Concept-ID", "X-User-Client-ID"]
+)
+def test_delegation_rejects_spoofed_legacy_identity_headers(
+    monkeypatch,
+    header_name: str,
+) -> None:
+    _accept_legacy_identity_header_for_regression(monkeypatch)
+    intent = OntologyMutationIntent(
+        operation="text.upsert",
+        publication_context=PublicationContext.global_context(),
+        target_concept_ids=("#V#concept",),
+        tool_name="upsert_text_relation",
+    )
+    monkeypatch.setattr(routes, "build_ontology_mutation_intent", lambda **_: intent)
+    issued = []
+    monkeypatch.setattr(
+        routes,
+        "issue_agent_delegation",
+        lambda **kwargs: issued.append(kwargs) or {"delegation_id": "spoofed"},
+    )
+
+    response = _app().test_client().post(
+        "/api/ontology-authority/delegations",
+        headers={header_name: "#V#spoofed_semantic_admin"},
+        json={
+            "method_name": "upsert_text_relation",
+            "arguments": {"concept_id": "#V#concept"},
+            "delegate_concept_id": "#V#agent",
+            "audience": "adaptive_turn",
+            "effect_id": "effect-spoofed",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {
+        "error": "authenticated_actor_context_required"
+    }
+    assert issued == []
 
 
 def test_bootstrap_needs_explicit_opt_in_and_token(monkeypatch) -> None:
@@ -121,10 +178,11 @@ def test_bootstrap_needs_explicit_opt_in_and_token(monkeypatch) -> None:
 
 
 def test_receipt_read_does_not_disclose_another_actors_receipt(monkeypatch) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#server")
     monkeypatch.setattr(routes, "get_mutation_receipt_for_actor", lambda **_: None)
 
-    response = _app().test_client().get("/api/ontology-authority/receipts/secret")
+    response = _authenticated_client().get(
+        "/api/ontology-authority/receipts/secret"
+    )
 
     assert response.status_code == 404
     assert response.get_json() == {"error": "ontology_mutation_receipt_not_found"}
@@ -133,7 +191,6 @@ def test_receipt_read_does_not_disclose_another_actors_receipt(monkeypatch) -> N
 def test_role_route_uses_only_server_identity_not_forged_payload_identity(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#member")
     captured = {}
 
     def grant(**kwargs):
@@ -142,8 +199,7 @@ def test_role_route_uses_only_server_identity_not_forged_payload_identity(
 
     monkeypatch.setattr(routes, "grant_ontology_authority_role", grant)
     response = (
-        _app()
-        .test_client()
+        _authenticated_client("#V#member")
         .post(
             "/api/ontology-authority/roles",
             json={
@@ -171,10 +227,102 @@ def test_role_route_uses_only_server_identity_not_forged_payload_identity(
     }
 
 
+@pytest.mark.parametrize(
+    ("path", "service_name"),
+    [
+        ("/api/ontology-authority/roles", "grant_ontology_authority_role"),
+        (
+            "/api/ontology-authority/roles/revoke",
+            "revoke_ontology_authority_role",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "header_name", ["X-User-Concept-ID", "X-User-Client-ID"]
+)
+def test_role_writes_reject_spoofed_legacy_identity_headers(
+    monkeypatch,
+    path: str,
+    service_name: str,
+    header_name: str,
+) -> None:
+    _accept_legacy_identity_header_for_regression(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        routes,
+        service_name,
+        lambda **kwargs: calls.append(kwargs) or {"success": True},
+    )
+
+    response = _app().test_client().post(
+        path,
+        headers={header_name: "#V#spoofed_semantic_admin"},
+        json={
+            "subject_concept_id": "#V#target",
+            "role": "global_ontology_administrator",
+            "request_id": "spoofed-role-write",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {
+        "error": "authenticated_actor_context_required"
+    }
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("path", "service_name", "expected_status"),
+    [
+        (
+            "/api/ontology-authority/roles",
+            "grant_ontology_authority_role",
+            201,
+        ),
+        (
+            "/api/ontology-authority/roles/revoke",
+            "revoke_ontology_authority_role",
+            200,
+        ),
+    ],
+)
+def test_role_writes_accept_authenticated_session(
+    monkeypatch,
+    path: str,
+    service_name: str,
+    expected_status: int,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        routes,
+        service_name,
+        lambda **kwargs: calls.append(kwargs) or {"success": True},
+    )
+
+    response = _authenticated_client("#V#semantic_admin").post(
+        path,
+        json={
+            "subject_concept_id": "#V#target",
+            "role": "global_ontology_administrator",
+            "request_id": "authenticated-role-write",
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert calls == [
+        {
+            "subject_concept_id": "#V#target",
+            "role": "global_ontology_administrator",
+            "organisation_concept_id": None,
+            "request_id": "authenticated-role-write",
+            "reason": None,
+        }
+    ]
+
+
 def test_scope_read_returns_not_found_without_disclosing_inaccessible_concept(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#member")
     monkeypatch.setattr(routes, "can_access_concept", lambda _concept_id: False)
     monkeypatch.setattr(
         routes,
@@ -183,8 +331,7 @@ def test_scope_read_returns_not_found_without_disclosing_inaccessible_concept(
     )
 
     response = (
-        _app()
-        .test_client()
+        _authenticated_client("#V#member")
         .get("/api/ontology-authority/concepts/%23V%23historical-secret/scope")
     )
 
@@ -193,7 +340,6 @@ def test_scope_read_returns_not_found_without_disclosing_inaccessible_concept(
 
 
 def test_scope_preview_and_execute_are_distinct_effects(monkeypatch) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#admin")
     calls = []
 
     def change(**kwargs):
@@ -205,7 +351,7 @@ def test_scope_preview_and_execute_are_distinct_effects(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(routes, "change_concept_publication_scope", change)
-    client = _app().test_client()
+    client = _authenticated_client("#V#admin")
     preview = client.post(
         "/api/ontology-authority/concepts/%23V%23legacy/scope",
         json={
@@ -237,8 +383,42 @@ def test_scope_preview_and_execute_are_distinct_effects(monkeypatch) -> None:
     )
 
 
+@pytest.mark.parametrize("preview", [True, False])
+@pytest.mark.parametrize(
+    "header_name", ["X-User-Concept-ID", "X-User-Client-ID"]
+)
+def test_scope_changes_reject_spoofed_legacy_identity_headers(
+    monkeypatch,
+    header_name: str,
+    preview: bool,
+) -> None:
+    _accept_legacy_identity_header_for_regression(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        routes,
+        "change_concept_publication_scope",
+        lambda **kwargs: calls.append(kwargs) or {"success": True},
+    )
+
+    response = _app().test_client().post(
+        "/api/ontology-authority/concepts/%23V%23legacy/scope",
+        headers={header_name: "#V#spoofed_semantic_admin"},
+        json={
+            "destination_kind": "global",
+            "expected_scope_fingerprint": "before",
+            "request_id": f"spoofed-scope-{preview}",
+            "preview": preview,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {
+        "error": "authenticated_actor_context_required"
+    }
+    assert calls == []
+
+
 def test_scope_route_drops_forged_legacy_authority_payload(monkeypatch) -> None:
-    monkeypatch.setattr(routes, "get_effective_user_concept_id", lambda: "#V#member")
     captured = {}
 
     def change(**kwargs):
@@ -250,8 +430,7 @@ def test_scope_route_drops_forged_legacy_authority_payload(monkeypatch) -> None:
 
     monkeypatch.setattr(routes, "change_concept_publication_scope", change)
     response = (
-        _app()
-        .test_client()
+        _authenticated_client("#V#member")
         .post(
             "/api/ontology-authority/concepts/%23V%23legacy/scope",
             json={
@@ -305,11 +484,6 @@ def test_role_migration_apply_is_fixed_to_michael_and_inventory_fingerprint(
 ) -> None:
     monkeypatch.setenv("VON_ALLOW_ONTOLOGY_AUTHORITY_BOOTSTRAP", "true")
     monkeypatch.setenv("VON_ADMIN_TOKEN", "operator-secret")
-    monkeypatch.setattr(
-        routes,
-        "get_effective_user_concept_id",
-        lambda: routes.ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET,
-    )
     captured = {}
     invalidated: list[str] = []
 
@@ -366,9 +540,6 @@ def test_role_migration_apply_rejects_non_target_actor_before_service(
     monkeypatch.setenv("VON_ALLOW_ONTOLOGY_AUTHORITY_BOOTSTRAP", "true")
     monkeypatch.setenv("VON_ADMIN_TOKEN", "operator-secret")
     monkeypatch.setattr(
-        routes, "get_effective_user_concept_id", lambda: "#V#other_person"
-    )
-    monkeypatch.setattr(
         routes,
         "apply_ontology_authority_role_migration",
         lambda **_kwargs: (_ for _ in ()).throw(
@@ -396,11 +567,6 @@ def test_role_migration_apply_does_not_accept_legacy_identity_header(
 ) -> None:
     monkeypatch.setenv("VON_ALLOW_ONTOLOGY_AUTHORITY_BOOTSTRAP", "true")
     monkeypatch.setenv("VON_ADMIN_TOKEN", "operator-secret")
-    monkeypatch.setattr(
-        routes,
-        "get_effective_user_concept_id",
-        lambda: routes.ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET,
-    )
     monkeypatch.setattr(
         routes,
         "apply_ontology_authority_role_migration",

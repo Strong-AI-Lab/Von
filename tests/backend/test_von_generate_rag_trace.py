@@ -34,6 +34,7 @@ def app(monkeypatch):
         "available_selectors": ["json_pointer", "query", "offset"],
     }
     adaptive_state = {
+        "adaptive_kwargs": None,
         "extra_messages": [
             {
                 "role": "tool",
@@ -68,6 +69,7 @@ def app(monkeypatch):
     }
 
     def _execute_adaptive_turn(**_kwargs):
+        adaptive_state["adaptive_kwargs"] = dict(_kwargs)
         return AdaptiveTurnResult(
             response_text="ok",
             extra_messages=tuple(adaptive_state["extra_messages"]),
@@ -128,6 +130,10 @@ def app(monkeypatch):
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        "src.backend.security.access_control._validate_person_concept",
+        lambda concept_id: concept_id,
+    )
 
     flask_app = Flask(__name__)
     flask_app.secret_key = "test-secret"
@@ -141,6 +147,32 @@ def app(monkeypatch):
     flask_app.config["INTERNAL_MCP_GATEWAY"] = _StubGateway()
 
     return flask_app
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    ("X-User-Concept-ID", "X-User-Client-ID"),
+)
+def test_generate_legacy_header_cannot_seed_session_or_adaptive_authority(
+    app,
+    header_name,
+):
+    client = app.test_client()
+
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "Please change the shared ontology."},
+        headers={header_name: "#V#claimed_semantic_admin"},
+    )
+
+    assert response.status_code == 200
+    adaptive_kwargs = app.config["_ADAPTIVE_STATE"]["adaptive_kwargs"]
+    assert adaptive_kwargs["user_concept_id"] is None
+    assert adaptive_kwargs["org_concept_id"] is None
+    assert adaptive_kwargs["user_namespace"] is None
+    with client.session_transaction() as sess:
+        assert "user_concept_id" not in sess
+        assert "user_id" not in sess
 
 
 def test_generate_includes_rag_trace_when_authenticated(app):

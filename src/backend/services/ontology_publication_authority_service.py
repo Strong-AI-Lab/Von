@@ -41,10 +41,11 @@ from ..db.repositories.text_value_repository import (
     TextValuesRepository,
 )
 from ..security.access_control import (
+    LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
     bypass_access_control,
     can_access_concept,
     get_effective_organisation_concept_id,
-    get_effective_user_concept_id,
+    get_effective_user_concept_id_with_source,
     override_current_actor,
 )
 from ..security.visibility_predicates import (
@@ -1353,7 +1354,7 @@ def authorise_ontology_mutation(
     """Resolve direct or delegated semantic authority from trusted context."""
 
     invocation = current_ontology_invocation()
-    actor_id = get_effective_user_concept_id()
+    actor_id, actor_identity_source = get_effective_user_concept_id_with_source()
     organisation_id = get_effective_organisation_concept_id()
     trust_source = _gateway_actor_trust_source()
 
@@ -1418,6 +1419,18 @@ def authorise_ontology_mutation(
             organisation_concept_id=organisation_id,
             invocation=invocation,
             trust_source=trust_source,
+        )
+
+    if actor_identity_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+        return _decision(
+            allowed=False,
+            reason_code="client_supplied_identity_is_not_authority",
+            message="Client-supplied identity cannot authorise ontology publication.",
+            intent=intent,
+            actor_concept_id=None,
+            organisation_concept_id=None,
+            invocation=invocation,
+            trust_source=actor_identity_source,
         )
 
     return _direct_authority_decision(

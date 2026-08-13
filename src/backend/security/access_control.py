@@ -35,6 +35,11 @@ _EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
 
 _REMOVE = object()
 
+TRUSTED_IN_PROCESS_ACTOR_SOURCE = "trusted_in_process_actor"
+AUTHENTICATED_SESSION_ACTOR_SOURCE = "authenticated_session"
+AUTHENTICATED_SESSION_DERIVED_ACTOR_SOURCE = "authenticated_session_derived"
+LEGACY_IDENTITY_HEADER_ACTOR_SOURCE = "legacy_identity_header"
+
 
 def _normalise_concept_id(value: Any) -> Optional[str]:
     """Return a normalised concept id if the value resembles one."""
@@ -345,18 +350,25 @@ def _validate_person_concept(concept_id: Optional[str]) -> Optional[str]:
     return None
 
 
-def get_effective_user_concept_id() -> Optional[str]:
+def get_effective_user_concept_id_with_source() -> tuple[str | None, str | None]:
+    """Resolve the effective actor and identify how that identity was obtained.
+
+    Legacy identity headers remain a compatibility input for actor-scoped reads.
+    Callers that authorise effects must inspect the source instead of treating a
+    validated person concept as proof of authentication.
+    """
+
     manual = _MANUAL_USER.get()
     if manual is not None:
-        return manual
+        return manual, TRUSTED_IN_PROCESS_ACTOR_SOURCE
     if not has_request_context():
-        return None
+        return None, None
 
     # Primary authority is the server-side session which is populated during the
     # authenticated login flow.
     session_user = _normalise_concept_id(session.get("user_concept_id"))
     if session_user:
-        return session_user
+        return session_user, AUTHENTICATED_SESSION_ACTOR_SOURCE
 
     # Fallback: derive a candidate concept id from session user_id/email when
     # user_concept_id is missing (e.g. older login flow or partial session).
@@ -370,11 +382,11 @@ def get_effective_user_concept_id() -> Optional[str]:
         if candidate:
             validated = _validate_person_concept(candidate)
             if validated:
-                return validated
+                return validated, AUTHENTICATED_SESSION_DERIVED_ACTOR_SOURCE
 
     cached_header = getattr(g, "_von_access_header_user", None)
     if cached_header:
-        return cached_header
+        return cached_header, LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
 
     # Allow a guarded per-request override via headers for trusted automation
     # clients (legacy behaviour relied on this pathway). We validate that the
@@ -387,8 +399,15 @@ def get_effective_user_concept_id() -> Optional[str]:
         validated = _validate_person_concept(header_user)
         if validated:
             g._von_access_header_user = validated
-            return validated
-    return None
+            return validated, LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
+    return None, None
+
+
+def get_effective_user_concept_id() -> Optional[str]:
+    """Return the effective actor, retaining legacy header support for reads."""
+
+    actor_id, _source = get_effective_user_concept_id_with_source()
+    return actor_id
 
 
 def get_effective_organisation_concept_id() -> Optional[str]:

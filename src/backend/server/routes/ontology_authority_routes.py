@@ -12,7 +12,6 @@ from flask import Blueprint, jsonify, request, session
 from ...security.access_control import (
     can_access_concept,
     get_effective_organisation_concept_id,
-    get_effective_user_concept_id,
 )
 from ...services.ontology_authority_role_migration_service import (
     ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET,
@@ -68,7 +67,9 @@ def _payload() -> Mapping[str, Any]:
 
 
 def _authenticated_actor() -> str | None:
-    return get_effective_user_concept_id()
+    """Return the session-authenticated actor for semantic-authority routes."""
+
+    return _authenticated_session_actor()
 
 
 def _authenticated_session_actor() -> str | None:

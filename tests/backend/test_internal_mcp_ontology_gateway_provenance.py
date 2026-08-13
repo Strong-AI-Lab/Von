@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from flask import Flask
+
 from src.backend.integrations.internal_mcp.gateway import (
     InternalMCPGateway,
     MethodCatalogue,
@@ -171,3 +173,90 @@ def test_prebound_direct_human_invocation_is_preserved() -> None:
         "agent": None,
         "delegation_id": None,
     }
+
+
+def test_legacy_header_is_untrusted_gateway_provenance_and_cannot_authorise_write(
+    monkeypatch,
+) -> None:
+    from src.backend.integrations.internal_mcp.gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
+    from src.backend.services.ontology_publication_authority_service import (
+        OntologyMutationIntent,
+        PublicationContext,
+        authorise_ontology_mutation,
+    )
+    import src.backend.security.access_control as access_control
+
+    monkeypatch.setattr(
+        access_control,
+        "_validate_person_concept",
+        lambda concept_id: concept_id,
+    )
+    observed = {}
+
+    def handler(**_kwargs):
+        observed["source"] = get_internal_mcp_actor_context_source()
+        observed["preexisting"] = get_internal_mcp_preexisting_actor_context()
+        decision = authorise_ontology_mutation(
+            OntologyMutationIntent(
+                operation="relationship.add",
+                publication_context=PublicationContext.global_context(),
+                target_concept_ids=("#V#source", "#V#target"),
+                tool_name="add_relationship",
+                predicate="#V#is_a",
+                delta={"target_concept_id": "#V#target"},
+            )
+        )
+        return {
+            "success": False,
+            "error_code": decision.reason_code,
+            "trust_source": decision.trust_source,
+        }
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/internal-mcp",
+        headers={"X-User-Concept-ID": "#V#claimed_semantic_admin"},
+    ):
+        result = _gateway(handler).invoke("add_relationship", {}).payload
+
+    assert observed == {
+        "source": "tool_payload_fallback",
+        "preexisting": None,
+    }
+    assert result["error_code"] == "ontology_agent_delegation_required"
+    assert result["trust_source"] == "tool_payload_fallback"
+
+
+def test_legacy_header_cannot_execute_a_supplied_ontology_delegation(
+    monkeypatch,
+) -> None:
+    import src.backend.security.access_control as access_control
+
+    monkeypatch.setattr(
+        access_control,
+        "_validate_person_concept",
+        lambda concept_id: concept_id,
+    )
+    dispatched = []
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/internal-mcp",
+        headers={"X-User-Client-ID": "#V#claimed_semantic_admin"},
+    ):
+        result = (
+            _gateway(lambda **kwargs: dispatched.append(kwargs) or {"success": True})
+            .invoke(
+                "add_relationship",
+                {
+                    "ontology_delegation_id": "oag_claimed",
+                    "ontology_effect_id": "effect-claimed",
+                },
+            )
+            .payload
+        )
+
+    assert result["error_code"] == "ontology_sessionless_delegation_not_supported"
+    assert dispatched == []
