@@ -91,6 +91,7 @@ ICS_PARTICIPANT_COUNT_KEY = "ics_participant_count"
 ICS_PARTICIPANTS_KEY = "ics_participants"
 ICS_MEETING_CONCEPT_ID_KEY = "meeting_concept_id"
 ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY = "relationship_effect_receipt"
+ICS_TEMPORAL_EFFECT_RECEIPTS_KEY = "temporal_effect_receipts"
 VERIFY_EVIDENCE_STATE_KEY = "verify_file_copy_evidence"
 VERIFY_EVIDENCE_STATE_ID = (
     "#V#workflow_step_meeting_representation_workflow_verify_file_copy_evidence"
@@ -129,6 +130,20 @@ PARTICIPANT_EFFECT_VERIFIED_KEY = "meeting_participant_effects_readback_verified
 PARTICIPANT_EFFECT_RELATIONSHIPS_KEY = (
     "meeting_participant_effects_verified_relationships"
 )
+VERIFY_TEMPORAL_STATE_KEY = "verify_meeting_temporal_effects"
+VERIFY_TEMPORAL_STATE_ID = (
+    "#V#workflow_step_meeting_representation_workflow_verify_meeting_temporal_effects"
+)
+TEMPORAL_EFFECT_VERIFIED_KEY = "meeting_temporal_effects_readback_verified"
+TEMPORAL_EFFECT_CONCEPT_ID_KEY = "meeting_temporal_effects_concept_id"
+TEMPORAL_EFFECTS_KEY = "meeting_temporal_effects_verified"
+MEETING_DATE_PREDICATE_ID = "#V#date_of_event"
+MEETING_START_TIME_PREDICATE_ID = "#V#has_start_time"
+MEETING_END_TIME_PREDICATE_ID = "#V#has_end_time"
+REQUIRED_MEETING_TEMPORAL_PREDICATES = [
+    MEETING_DATE_PREDICATE_ID,
+    MEETING_START_TIME_PREDICATE_ID,
+]
 
 MEETING_REPRESENTATION_PROMPT = f"""[Versioned migration: {MIGRATION_ID}]
 
@@ -187,6 +202,18 @@ Representation:
   include UID, SUMMARY, DTSTART, DTEND, ORGANIZER, ATTENDEE, LOCATION,
   DESCRIPTION, URL, and STATUS. Preserve supplied names, addresses, titles,
   identifiers, URLs, and quoted text exactly unless normalisation is requested.
+- Represent a concrete meeting's schedule as canonical singleton text
+  relations, not as prose or ``#V#hasNote``: ``#V#date_of_event`` must contain
+  the ISO date, ``#V#has_start_time`` the ISO date/time (including its offset),
+  and ``#V#has_end_time`` the ISO date/time when the source supplies an end.
+  Preserve the IANA time-zone name in relation context when it is known. On the
+  ordinary semantic path, call ``upsert_singleton_text_relation`` idempotently
+  for date and start, plus end when supplied. A parsed-iCalendar predecessor
+  has already made those exact writes and provides their receipts, so do not
+  repeat them. A deterministic successor correlates either source of current-
+  run receipts with actor-effective canonical read-back. If the evidence cannot
+  support at least a date and start, report the representation as incomplete
+  rather than copying an ambiguous schedule into prose or inventing one.
 - An organiser or attendee is not represented by copying a display string into
   a meeting note. Treat each distinct ORGANIZER or ATTENDEE calendar address as
   evidence about a person. Deduplicate the same person appearing in both roles
@@ -248,6 +275,12 @@ Representation:
   and verifies that every distinct participant mutation from this run is
   present. A note-only participant list, a smaller number of distinct edges,
   or the wrong predicate will fail the workflow.
+- A final deterministic successor verifies the current run's exact
+  ``#V#date_of_event`` and ``#V#has_start_time`` writes, plus any receipted
+  ``#V#has_end_time`` write,
+  against actor-effective canonical text relations. A prose-only schedule,
+  missing temporal mutation receipt, or mismatched canonical value fails the
+  workflow.
 - Mutations are additive and provenance-bearing. Do not delete or rename
   existing concepts.
 
@@ -284,6 +317,7 @@ MEETING_REQUIRED_EFFECTS_CONTRACT: dict[str, Any] = {
             ),
             "required_tools": [
                 "workflow_control.relationship_effect_readback",
+                "workflow_control.text_effect_readback",
                 "add_relationship",
                 "upsert_text_relation",
                 "upsert_singleton_text_relation",
@@ -1243,6 +1277,180 @@ def _set_post_write_participant_readback(spec: dict[str, Any]) -> None:
     _upsert_managed_step(correlate_step, existing_correlate, readback_state_key)
 
 
+def _set_post_write_temporal_readback(spec: dict[str, Any]) -> None:
+    """Require canonical date/start text effects before meeting completion."""
+
+    steps = spec.get("steps")
+    if not isinstance(steps, list):
+        raise TypeError("workflow_authoring_spec_missing_steps")
+    completed_state_key = _resolve_terminal_state_key(
+        steps,
+        preferred_state_key=COMPLETED_STATE_KEY,
+        semantic_suffix=COMPLETED_STATE_KEY,
+    )
+    failed_state_key = _resolve_terminal_state_key(
+        steps,
+        preferred_state_key=FAILED_STATE_KEY,
+        semantic_suffix=FAILED_STATE_KEY,
+    )
+    existing_temporal, temporal_state_key = _managed_step(
+        steps,
+        logical_state_key=VERIFY_TEMPORAL_STATE_KEY,
+        concept_id=VERIFY_TEMPORAL_STATE_ID,
+        ambiguity_code="meeting_temporal_readback_state_ambiguous",
+    )
+
+    llm_step = _meeting_llm_step(spec)
+    if _clean_text(llm_step.get("next_state_key")) == completed_state_key:
+        llm_step["next_state_key"] = temporal_state_key
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        state_identity = {
+            _clean_text(step.get("state_id") or step.get("state_key")),
+            _clean_text(step.get("concept_id")),
+        }
+        if not state_identity.intersection(
+            {
+                CORRELATE_EVIDENCE_STATE_KEY,
+                CORRELATE_EVIDENCE_STATE_ID,
+                CORRELATE_PARTICIPANTS_STATE_KEY,
+                CORRELATE_PARTICIPANTS_STATE_ID,
+            }
+        ):
+            continue
+        transitions = step.get("conditional_transitions")
+        if isinstance(transitions, list):
+            for transition in transitions:
+                if (
+                    isinstance(transition, dict)
+                    and _clean_text(transition.get("to_state"))
+                    == completed_state_key
+                ):
+                    transition["to_state"] = temporal_state_key
+                    transition["reason"] = (
+                        "meeting_core_effects_require_temporal_readback"
+                    )
+
+    temporal_step: dict[str, Any] = {
+        "state_id": temporal_state_key,
+        "terminal": False,
+        "action_id": "workflow_control.text_effect_readback",
+        "execution_mode": "deterministic",
+        "static_input_bindings": [
+            {
+                "tool_param": "required_predicates",
+                "value": list(REQUIRED_MEETING_TEMPORAL_PREDICATES),
+            },
+            {
+                "tool_param": "optional_predicates",
+                "value": [MEETING_END_TIME_PREDICATE_ID],
+            },
+        ],
+        "context_input_mappings": [
+            _context_input_mapping(
+                state_key=VERIFY_TEMPORAL_STATE_KEY,
+                tool_param="tool_invocations",
+                context_key="tool_invocations",
+                required=False,
+            ),
+            _context_input_mapping(
+                state_key=VERIFY_TEMPORAL_STATE_KEY,
+                tool_param="text_effect_receipts",
+                context_key=ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
+                required=False,
+            ),
+            _context_input_mapping(
+                state_key=VERIFY_TEMPORAL_STATE_KEY,
+                tool_param="expected_concept_id",
+                context_key=EVIDENCE_EFFECT_TARGET_KEY,
+                required=False,
+            ),
+        ],
+        "tool_output_context_mappings": [
+            _tool_output_mapping(
+                state_key=VERIFY_TEMPORAL_STATE_KEY,
+                tool_output_field="text_effect_readback_verified",
+                context_key=TEMPORAL_EFFECT_VERIFIED_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=VERIFY_TEMPORAL_STATE_KEY,
+                tool_output_field="represented_concept_id",
+                context_key=TEMPORAL_EFFECT_CONCEPT_ID_KEY,
+            ),
+            _tool_output_mapping(
+                state_key=VERIFY_TEMPORAL_STATE_KEY,
+                tool_output_field="verified_text_effects",
+                context_key=TEMPORAL_EFFECTS_KEY,
+            ),
+        ],
+        "writes_context_keys": [
+            TEMPORAL_EFFECT_VERIFIED_KEY,
+            TEMPORAL_EFFECT_CONCEPT_ID_KEY,
+            TEMPORAL_EFFECTS_KEY,
+        ],
+        "conditional_transitions": [
+            {
+                "to_state": completed_state_key,
+                "reason": "canonical_meeting_temporal_effects_verified",
+                "condition_spec": {
+                    "kind": "all",
+                    "conditions": [
+                        {
+                            "kind": "context_flag",
+                            "key": "last_action_succeeded",
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_flag",
+                            "key": TEMPORAL_EFFECT_VERIFIED_KEY,
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_exists",
+                            "key": TEMPORAL_EFFECT_CONCEPT_ID_KEY,
+                            "expected": True,
+                        },
+                        {
+                            "kind": "context_cardinality",
+                            "key": TEMPORAL_EFFECTS_KEY,
+                            "operator": "gte",
+                            "value": len(REQUIRED_MEETING_TEMPORAL_PREDICATES),
+                        },
+                    ],
+                },
+            }
+        ],
+        "on_unknown_state_key": failed_state_key,
+        "on_failure_state_key": failed_state_key,
+        "next_state_key": failed_state_key,
+    }
+    if temporal_state_key != VERIFY_TEMPORAL_STATE_ID or _clean_text(
+        existing_temporal.get("concept_id") if existing_temporal else None
+    ):
+        temporal_step["concept_id"] = VERIFY_TEMPORAL_STATE_ID
+    if existing_temporal and isinstance(existing_temporal.get("metadata"), Mapping):
+        temporal_step["metadata"] = copy.deepcopy(dict(existing_temporal["metadata"]))
+
+    if existing_temporal is not None:
+        index = next(
+            index
+            for index, item in enumerate(steps)
+            if item is not None and item == existing_temporal
+        )
+        steps[index] = temporal_step
+    else:
+        completed_index = next(
+            index
+            for index, item in enumerate(steps)
+            if isinstance(item, Mapping)
+            and _clean_text(item.get("state_id") or item.get("state_key"))
+            == completed_state_key
+        )
+        steps.insert(completed_index, temporal_step)
+
+
 def _set_ics_file_copy_fast_path(
     spec: dict[str, Any], llm_step: dict[str, Any]
 ) -> None:
@@ -1300,6 +1508,10 @@ def _set_ics_file_copy_fast_path(
             (
                 ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY,
                 ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY,
+            ),
+            (
+                ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
+                ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
             ),
             ("response_text", "response_text"),
         )
@@ -1433,6 +1645,10 @@ def _set_context_fields(policy: dict[str, Any]) -> None:
         (ICS_PARTICIPANT_COUNT_KEY, "Distinct organiser and attendee count"),
         (ICS_PARTICIPANTS_KEY, "Structured organiser and attendee evidence"),
         (ICS_MEETING_CONCEPT_ID_KEY, "UID-resolved meeting concept ID"),
+        (
+            ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
+            "Exact canonical temporal mutation receipts from structured ingestion",
+        ),
     )
     for context_key, label in authored_fields:
         matching_indexes = [
@@ -1552,6 +1768,7 @@ def rewrite_meeting_representation_workflow(
     _set_post_write_evidence_readback(spec, llm_step)
     _set_ics_file_copy_fast_path(spec, llm_step)
     _set_post_write_participant_readback(spec)
+    _set_post_write_temporal_readback(spec)
 
     metadata = spec.get("workflow_metadata")
     if not isinstance(metadata, dict):

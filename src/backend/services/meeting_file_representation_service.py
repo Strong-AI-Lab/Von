@@ -27,12 +27,15 @@ from .file_copy_entity_representation_vontology_service import (
     normalise_file_copy_meeting_candidate,
 )
 from .relationship_write_service import add_relationship
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 
 ICS_UID_IDENTIFIER_TYPE = "icalendar.uid"
 ICS_MEETING_CONCEPT_ID_PREFIX = "meeting_ics"
 MEETING_TYPE_ID = "#V#meeting"
 DOCUMENTARY_EVIDENCE_PREDICATE_ID = "#V#documentary_evidence_for"
+MEETING_DATE_PREDICATE_ID = "#V#date_of_event"
+MEETING_START_TIME_PREDICATE_ID = "#V#has_start_time"
+MEETING_END_TIME_PREDICATE_ID = "#V#has_end_time"
 
 
 class IcsMeetingMaterialisationError(RuntimeError):
@@ -314,14 +317,8 @@ def _persist_ics_uid_identity_marker(
     return dict(persistence)
 
 
-def _temporal_note(
-    property_name: str, temporal: Any
-) -> tuple[str, str, dict[str, Any]] | None:
-    iso_value = _clean_text(_object_value(temporal, "iso_value"))
-    if not iso_value:
-        return None
+def _temporal_context(property_name: str, temporal: Any) -> dict[str, Any]:
     context: dict[str, Any] = {
-        "note_type": f"ics_{property_name.lower()}",
         "icalendar_property": property_name,
         "source": "ics_meeting_representation",
     }
@@ -329,18 +326,56 @@ def _temporal_note(
         value = _object_value(temporal, key)
         if value is not None and value != "":
             context[key] = value
-    return "#V#hasNote", f"{property_name}: {iso_value}", context
+    tzid = _clean_text(_object_value(temporal, "tzid"))
+    if tzid:
+        context["time_zone"] = tzid
+    elif _object_value(temporal, "is_utc") is True:
+        context["time_zone"] = "UTC"
+    if (
+        property_name == "DTEND"
+        and _clean_text(_object_value(temporal, "value_type")).upper() == "DATE"
+    ):
+        context["end_semantics"] = "exclusive"
+    return context
 
 
-def _ics_fact_relation_specs(meeting: Any) -> list[tuple[str, str, dict[str, Any]]]:
+def _ics_temporal_relation_specs(
+    meeting: Any,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Project parsed RFC 5545 time fields to canonical meeting predicates."""
+
     specs: list[tuple[str, str, dict[str, Any]]] = []
-    for property_name, field_name in (("DTSTART", "dtstart"), ("DTEND", "dtend")):
-        temporal_spec = _temporal_note(
-            property_name, _object_value(meeting, field_name)
+    dtstart = _object_value(meeting, "dtstart")
+    start_iso = _clean_text(_object_value(dtstart, "iso_value"))
+    if start_iso:
+        start_context = _temporal_context("DTSTART", dtstart)
+        date_value = start_iso.split("T", 1)[0]
+        specs.extend(
+            (
+                (MEETING_DATE_PREDICATE_ID, date_value, dict(start_context)),
+                (MEETING_START_TIME_PREDICATE_ID, start_iso, dict(start_context)),
+            )
         )
-        if temporal_spec is not None:
-            specs.append(temporal_spec)
 
+    dtend = _object_value(meeting, "dtend")
+    end_iso = _clean_text(_object_value(dtend, "iso_value"))
+    if end_iso:
+        specs.append(
+            (
+                MEETING_END_TIME_PREDICATE_ID,
+                end_iso,
+                _temporal_context("DTEND", dtend),
+            )
+        )
+    return specs
+
+
+def _ics_note_relation_specs(
+    meeting: Any,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Return source-backed non-temporal ICS facts retained as notes."""
+
+    specs: list[tuple[str, str, dict[str, Any]]] = []
     for property_name, field_name in (
         ("LOCATION", "location"),
         ("DESCRIPTION", "description"),
@@ -360,6 +395,12 @@ def _ics_fact_relation_specs(meeting: Any) -> list[tuple[str, str, dict[str, Any
                     },
                 )
             )
+    return specs
+
+
+def _deduplicate_relation_specs(
+    specs: Sequence[tuple[str, str, dict[str, Any]]],
+) -> list[tuple[str, str, dict[str, Any]]]:
     deduplicated: list[tuple[str, str, dict[str, Any]]] = []
     seen: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
     for predicate, text, context in specs:
@@ -373,6 +414,35 @@ def _ics_fact_relation_specs(meeting: Any) -> list[tuple[str, str, dict[str, Any
         seen.add(fingerprint)
         deduplicated.append((predicate, text, context))
     return deduplicated
+
+
+def _text_effect_receipt(
+    *,
+    concept_id: str,
+    predicate: str,
+    text: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "tool": "upsert_singleton_text_relation",
+        "status": "ok",
+        "effective_arguments": {
+            "concept_id": concept_id,
+            "predicate": predicate,
+            "text": text,
+        },
+        "effective_payload": {
+            **dict(result),
+            "success": True,
+            "effect_status": "succeeded",
+            "concept_id": concept_id,
+            "predicate": predicate,
+        },
+    }
+
+
+def _ics_fact_relation_specs(meeting: Any) -> list[tuple[str, str, dict[str, Any]]]:
+    return _deduplicate_relation_specs(_ics_note_relation_specs(meeting))
 
 
 def _relationship_effect_receipt(
@@ -474,6 +544,63 @@ def materialise_ics_meeting_representation_for_file_copy(
         *_ics_fact_relation_specs(meeting),
     ]
     persisted_text_relations: list[dict[str, Any]] = []
+    temporal_effect_receipts: list[dict[str, Any]] = []
+    for predicate, text, raw_context in _deduplicate_relation_specs(
+        _ics_temporal_relation_specs(meeting)
+    ):
+        context = {
+            **dict(raw_context),
+            "source_file_copy_concept_id": source_id,
+        }
+        try:
+            temporal_result = upsert_singleton_text_relation(
+                subject_concept_id=meeting_concept_id,
+                predicate=predicate,
+                text=text,
+                context=context,
+            )
+        except Exception as exc:
+            raise IcsMeetingMaterialisationError(
+                "ics_meeting_temporal_fact_persist_failed",
+                details={
+                    "meeting_concept_id": meeting_concept_id,
+                    "predicate": predicate,
+                    "exception_type": type(exc).__name__,
+                    "created_meeting_concept": created,
+                    "persisted_text_relation_count": len(persisted_text_relations),
+                },
+            ) from exc
+        if not isinstance(temporal_result, Mapping) or temporal_result.get(
+            "success"
+        ) is not True:
+            raise IcsMeetingMaterialisationError(
+                "ics_meeting_temporal_fact_persist_failed",
+                details={
+                    "meeting_concept_id": meeting_concept_id,
+                    "predicate": predicate,
+                    "created_meeting_concept": created,
+                    "temporal_result": (
+                        dict(temporal_result)
+                        if isinstance(temporal_result, Mapping)
+                        else {"response_type": type(temporal_result).__name__}
+                    ),
+                },
+            )
+        persisted_text_relations.append(
+            {
+                "predicate": predicate,
+                "relation_id": temporal_result.get("kept_relation_id"),
+                "text": text,
+            }
+        )
+        temporal_effect_receipts.append(
+            _text_effect_receipt(
+                concept_id=meeting_concept_id,
+                predicate=predicate,
+                text=text,
+                result=temporal_result,
+            )
+        )
     for predicate, text, raw_context in relation_specs:
         context = {
             **dict(raw_context),
@@ -570,6 +697,7 @@ def materialise_ics_meeting_representation_for_file_copy(
             }
         ],
         "relationship_effect_receipt": effect_receipt,
+        "temporal_effect_receipts": temporal_effect_receipts,
         "response_text": (
             f"{operation.title()} meeting '{summary}' as {meeting_concept_id} "
             "from the supplied iCalendar invitation, including its iCalendar "

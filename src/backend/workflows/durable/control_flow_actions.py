@@ -21,6 +21,7 @@ from ...services.kr_relationship_readback_service import (
     verify_kr_relationship_readback,
     verify_relationship_effect_readback,
 )
+from ...services.text_effect_readback_service import verify_text_effect_readback
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -46,6 +47,7 @@ from ..execution_contracts import (
     WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_RESOLUTION_ID,
     WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
     WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID,
+    WORKFLOW_CONTROL_ACTION_TEXT_EFFECT_READBACK_ID,
     WORKFLOW_CONTROL_SIGNAL_BREAK,
     WORKFLOW_CONTROL_SIGNAL_CONTINUE,
     WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
@@ -1427,6 +1429,22 @@ def _handle_relationship_effect_readback(
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _handle_text_effect_readback(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    """Correlate current-run text writes with canonical text read-back."""
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+    outputs = verify_text_effect_readback(
+        required_predicates=inputs.get("required_predicates"),
+        optional_predicates=inputs.get("optional_predicates"),
+        tool_invocations=inputs.get("tool_invocations"),
+        text_effect_receipts=inputs.get("text_effect_receipts"),
+        expected_concept_id=inputs.get("expected_concept_id"),
+    )
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def _normalise_field_name(value: Any) -> str:
     return str(value or "").strip()
 
@@ -1982,6 +2000,60 @@ def register_control_flow_actions(
             },
             side_effects="none",
             postconditions=("exact_relationship_effect_readback_correlated",),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_TEXT_EFFECT_READBACK_ID,
+            handler=_handle_text_effect_readback,
+            description=(
+                "Bind successful text mutations from the current workflow to "
+                "exact actor-effective canonical text-relation read-back. The "
+                "workflow supplies the required predicates."
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["required_predicates"],
+                "properties": {
+                    "required_predicates": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {"type": "string"},
+                    },
+                    "optional_predicates": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {"type": "string"},
+                    },
+                    "tool_invocations": {"type": "array"},
+                    "text_effect_receipts": {"type": "array"},
+                    "expected_concept_id": {"type": ["string", "null"]},
+                },
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": [
+                    "text_effect_readback_verified",
+                    "text_effect_readback_failure_code",
+                    "represented_concept_id",
+                    "verified_text_effects",
+                ],
+                "properties": {
+                    "text_effect_readback_verified": {"type": "boolean"},
+                    "text_effect_readback_failure_code": {
+                        "type": ["string", "null"]
+                    },
+                    "represented_concept_id": {"type": ["string", "null"]},
+                    "verified_text_effects": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
+                },
+            },
+            side_effects="none",
+            postconditions=("exact_text_effect_readback_correlated",),
         )
     )
     registry.register_if_absent(

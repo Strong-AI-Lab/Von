@@ -27,6 +27,64 @@ from src.backend.workflows.workflow_definition_identity_service import (
 )
 
 
+def _temporal_receipts(meeting_id: str) -> list[dict]:
+    values = (
+        (migration.MEETING_DATE_PREDICATE_ID, "2026-08-13"),
+        (
+            migration.MEETING_START_TIME_PREDICATE_ID,
+            "2026-08-13T13:05:00+01:00",
+        ),
+        (
+            migration.MEETING_END_TIME_PREDICATE_ID,
+            "2026-08-13T13:30:00+01:00",
+        ),
+    )
+    return [
+        {
+            "tool": "upsert_singleton_text_relation",
+            "status": "ok",
+            "effective_arguments": {
+                "concept_id": meeting_id,
+                "predicate": predicate,
+                "text": text,
+            },
+            "effective_payload": {
+                "success": True,
+                "effect_status": "succeeded",
+                "concept_id": meeting_id,
+                "predicate": predicate,
+                "kept_relation_id": f"temporal::{index}",
+            },
+        }
+        for index, (predicate, text) in enumerate(values, start=1)
+    ]
+
+
+def _patch_temporal_canonical_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    meeting_id: str,
+) -> None:
+    from src.backend.services import text_effect_readback_service
+
+    rows = {
+        receipt["effective_arguments"]["predicate"]: [
+            {
+                "relation_id": receipt["effective_payload"]["kept_relation_id"],
+                "text": receipt["effective_arguments"]["text"],
+            }
+        ]
+        for receipt in _temporal_receipts(meeting_id)
+    }
+
+    def _read(*, subject_concept_id, predicate, limit, context_view):
+        assert subject_concept_id == meeting_id
+        assert limit == 20
+        assert context_view == "actor_effective"
+        return rows.get(predicate, [])
+
+    monkeypatch.setattr(text_effect_readback_service, "get_texts_for_concept", _read)
+
+
 def _sample_authoring_spec() -> dict:
     current_prompt = "Legacy meeting representation prompt."
     current_policy = {
@@ -239,10 +297,11 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
         migration.CORRELATE_EVIDENCE_STATE_KEY,
         migration.VERIFY_PARTICIPANTS_STATE_KEY,
         migration.CORRELATE_PARTICIPANTS_STATE_KEY,
+        migration.VERIFY_TEMPORAL_STATE_KEY,
         migration.COMPLETED_STATE_KEY,
         migration.FAILED_STATE_KEY,
     }
-    assert len(candidate["steps"]) == 8
+    assert len(candidate["steps"]) == 9
     fast_path = _step_with_action(candidate, migration.ICS_FAST_PATH_ACTION_ID)
     assert fast_path["state_id"] == migration.ICS_FAST_PATH_STATE_KEY
     assert fast_path["concept_id"] == migration.ICS_FAST_PATH_STATE_ID
@@ -282,6 +341,10 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
                 migration.ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY,
                 migration.ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY,
             ),
+            (
+                migration.ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
+                migration.ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
+            ),
             ("response_text", "response_text"),
         )
     ]
@@ -313,7 +376,7 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
             "condition_spec": (migration._file_copy_present_after_success_condition()),
         },
     ]
-    assert step["next_state_key"] == migration.COMPLETED_STATE_KEY
+    assert step["next_state_key"] == migration.VERIFY_TEMPORAL_STATE_KEY
     assert step["on_failure_state_key"] == migration.FAILED_STATE_KEY
     assert step["on_unknown_state_key"] == migration.FAILED_STATE_KEY
 
@@ -502,8 +565,8 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
             },
         },
         {
-            "to_state": migration.COMPLETED_STATE_KEY,
-            "reason": "exact_file_copy_evidence_effect_verified_without_ics_participants",
+            "to_state": migration.VERIFY_TEMPORAL_STATE_KEY,
+            "reason": "meeting_core_effects_require_temporal_readback",
             "condition_spec": {
                 "kind": "all",
                 "conditions": [
@@ -637,9 +700,43 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
         migration.PARTICIPANT_EFFECT_RELATIONSHIPS_KEY,
     ]
     assert participant_correlate["conditional_transitions"][0]["to_state"] == (
-        migration.COMPLETED_STATE_KEY
+        migration.VERIFY_TEMPORAL_STATE_KEY
     )
     assert participant_correlate["next_state_key"] == migration.FAILED_STATE_KEY
+
+    temporal = _step_with_state(candidate, migration.VERIFY_TEMPORAL_STATE_KEY)
+    assert temporal["concept_id"] == migration.VERIFY_TEMPORAL_STATE_ID
+    assert temporal["action_id"] == "workflow_control.text_effect_readback"
+    assert temporal["static_input_bindings"] == [
+        {
+            "tool_param": "required_predicates",
+            "value": list(migration.REQUIRED_MEETING_TEMPORAL_PREDICATES),
+        },
+        {
+            "tool_param": "optional_predicates",
+            "value": [migration.MEETING_END_TIME_PREDICATE_ID],
+        },
+    ]
+    assert temporal["context_input_mappings"] == [
+        migration._context_input_mapping(
+            state_key=migration.VERIFY_TEMPORAL_STATE_KEY,
+            tool_param=tool_param,
+            context_key=context_key,
+            required=False,
+        )
+        for tool_param, context_key in (
+            ("tool_invocations", "tool_invocations"),
+            (
+                "text_effect_receipts",
+                migration.ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
+            ),
+            ("expected_concept_id", migration.EVIDENCE_EFFECT_TARGET_KEY),
+        )
+    ]
+    assert temporal["conditional_transitions"][0]["to_state"] == (
+        migration.COMPLETED_STATE_KEY
+    )
+    assert temporal["next_state_key"] == migration.FAILED_STATE_KEY
 
     policy = step["llm_policy"]
     assert "read_file_copy" in policy["allowed_tools"]
@@ -676,6 +773,7 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
         migration.ICS_PARTICIPANT_COUNT_KEY,
         migration.ICS_PARTICIPANTS_KEY,
         migration.ICS_MEETING_CONCEPT_ID_KEY,
+        migration.ICS_TEMPORAL_EFFECT_RECEIPTS_KEY,
     }.issubset(context_keys)
     assert "meeting_source_text" not in context_keys
     assert "meeting_source_filename" not in context_keys
@@ -711,6 +809,7 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
     assert effect["required_tools_match"] == "any"
     assert effect["required_tools"] == [
         "workflow_control.relationship_effect_readback",
+        "workflow_control.text_effect_readback",
         "add_relationship",
         "upsert_text_relation",
         "upsert_singleton_text_relation",
@@ -917,7 +1016,7 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
     }
     assert [transition.to_state for transition in correlate_state.transitions] == [
         migration.VERIFY_PARTICIPANTS_STATE_KEY,
-        migration.COMPLETED_STATE_KEY,
+        migration.VERIFY_TEMPORAL_STATE_KEY,
         migration.FAILED_STATE_KEY,
         migration.FAILED_STATE_KEY,
         migration.FAILED_STATE_KEY,
@@ -996,6 +1095,22 @@ def test_rewrite_adds_bounded_optional_file_copy_path_and_is_idempotent() -> Non
     assert [
         transition.to_state for transition in participant_correlate_state.transitions
     ] == [
+        migration.VERIFY_TEMPORAL_STATE_KEY,
+        migration.FAILED_STATE_KEY,
+        migration.FAILED_STATE_KEY,
+        migration.FAILED_STATE_KEY,
+    ]
+
+    temporal_state = definition.states[migration.VERIFY_TEMPORAL_STATE_KEY]
+    temporal_action = temporal_state.actions[0]
+    assert temporal_action.action_id == "workflow_control.text_effect_readback"
+    assert temporal_action.inputs["required_predicates"] == list(
+        migration.REQUIRED_MEETING_TEMPORAL_PREDICATES
+    )
+    assert temporal_action.inputs["optional_predicates"] == [
+        migration.MEETING_END_TIME_PREDICATE_ID
+    ]
+    assert [transition.to_state for transition in temporal_state.transitions] == [
         migration.COMPLETED_STATE_KEY,
         migration.FAILED_STATE_KEY,
         migration.FAILED_STATE_KEY,
@@ -1238,6 +1353,8 @@ def test_migrated_workflow_correlates_llm_relationship_with_exact_readback(
 
     file_copy_id = "#V#uploaded_meeting_file_copy"
     represented_meeting_id = "#V#represented_meeting"
+    temporal_receipts = _temporal_receipts(represented_meeting_id)
+    _patch_temporal_canonical_readback(monkeypatch, represented_meeting_id)
     relation_id = "struct::uploaded-meeting-documentary-evidence"
     invocation = {
         "tool": "add_relationship",
@@ -1283,7 +1400,7 @@ def test_migrated_workflow_correlates_llm_relationship_with_exact_readback(
         assert request.data["file_copy_concept_id"] == file_copy_id
         return WorkflowActionResult(
             status="success",
-            outputs={"tool_invocations": [invocation]},
+            outputs={"tool_invocations": [invocation, *temporal_receipts]},
         )
 
     mcp_requests: list[WorkflowActionRequest] = []
@@ -1420,6 +1537,8 @@ def test_migrated_workflow_materialised_ics_enters_llm_and_verifies_participants
 
     file_copy_id = "#V#uploaded_ics_file_copy"
     meeting_id = "#V#materialised_ics_meeting"
+    temporal_receipts = _temporal_receipts(meeting_id)
+    _patch_temporal_canonical_readback(monkeypatch, meeting_id)
     participant_ids = ["#V#participant_one", "#V#participant_two"]
     participants = [
         {
@@ -1540,6 +1659,7 @@ def test_migrated_workflow_materialised_ics_enters_llm_and_verifies_participants
                 migration.ICS_PARTICIPANTS_KEY: participants,
                 migration.ICS_MEETING_CONCEPT_ID_KEY: meeting_id,
                 migration.ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY: documentary_invocation,
+                migration.ICS_TEMPORAL_EFFECT_RECEIPTS_KEY: temporal_receipts,
                 "response_text": "Prepared structured iCalendar evidence.",
             },
         )
@@ -1628,6 +1748,9 @@ def test_migrated_workflow_materialised_ics_enters_llm_and_verifies_participants
     assert result.data[migration.ICS_RELATIONSHIP_EFFECT_RECEIPT_KEY] == (
         documentary_invocation
     )
+    assert result.data[migration.ICS_TEMPORAL_EFFECT_RECEIPTS_KEY] == (
+        temporal_receipts
+    )
     assert result.data[migration.EVIDENCE_EFFECT_VERIFIED_KEY] is True
     assert result.data[migration.EVIDENCE_EFFECT_TARGET_KEY] == meeting_id
     assert result.data[migration.EVIDENCE_EFFECT_RELATIONSHIP_KEY] == {
@@ -1653,6 +1776,8 @@ def test_migrated_workflow_materialised_ics_enters_llm_and_verifies_participants
                 migration.PARTICIPANT_EFFECT_RELATIONSHIPS_KEY
             ]
         ] == participant_ids
+        assert result.data[migration.TEMPORAL_EFFECT_VERIFIED_KEY] is True
+        assert result.data[migration.TEMPORAL_EFFECT_CONCEPT_ID_KEY] == meeting_id
     else:
         assert result.data[migration.PARTICIPANT_EFFECT_RELATIONSHIPS_KEY] == [
             {
@@ -1674,6 +1799,9 @@ def test_migrated_workflow_without_file_copy_falls_back_to_llm(
     from src.backend.workflows import llm_step_executor
 
     calls: list[str] = []
+    meeting_id = "#V#meeting_from_notes"
+    temporal_receipts = _temporal_receipts(meeting_id)
+    _patch_temporal_canonical_readback(monkeypatch, meeting_id)
 
     def _materialise_ics(request: WorkflowActionRequest) -> WorkflowActionResult:
         calls.append("ics")
@@ -1694,7 +1822,10 @@ def test_migrated_workflow_without_file_copy_falls_back_to_llm(
         calls.append("llm")
         return WorkflowActionResult(
             status="success",
-            outputs={"response_text": "Represented the supplied meeting notes."},
+            outputs={
+                "response_text": "Represented the supplied meeting notes.",
+                "tool_invocations": temporal_receipts,
+            },
         )
 
     monkeypatch.setattr(llm_step_executor, "execute_llm_step", _execute_llm_step)
@@ -1703,6 +1834,7 @@ def test_migrated_workflow_without_file_copy_falls_back_to_llm(
     )
     definition = build_workflow_definition_from_authoring_spec(candidate)
     registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
     registry.register(
         ActionSpec(
             action_id=migration.ICS_FAST_PATH_ACTION_ID,
@@ -1710,7 +1842,7 @@ def test_migrated_workflow_without_file_copy_falls_back_to_llm(
         )
     )
 
-    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+    result = WorkflowExecutor(registry=registry, max_transitions=6).run(
         definition,
         environment=WorkflowEnvironment(llm_client=None),
         data={"prompt": "Represent these meeting notes."},
@@ -1719,6 +1851,8 @@ def test_migrated_workflow_without_file_copy_falls_back_to_llm(
     assert result.completed is True, result.data
     assert result.final_state == migration.COMPLETED_STATE_KEY
     assert calls == ["ics", "llm"]
+    assert result.data[migration.TEMPORAL_EFFECT_VERIFIED_KEY] is True
+    assert result.data[migration.TEMPORAL_EFFECT_CONCEPT_ID_KEY] == meeting_id
     assert result.data["response_text"] == "Represented the supplied meeting notes."
 
 
