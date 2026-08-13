@@ -6150,6 +6150,13 @@ def execute_adaptive_turn(
 
             assert gateway is not None
             definition = gateway.get_method_definition(execution_method_name)
+            from src.backend.services.ontology_mutation_command_service import (
+                is_ontology_mutation_method,
+            )
+
+            governed_ontology_method = bool(
+                is_effect and is_ontology_mutation_method(execution_method_name)
+            )
             subject_argument = (
                 definition.ordinary_turn_mutation_subject_argument
                 if definition is not None and is_effect
@@ -6162,7 +6169,7 @@ def execute_adaptive_turn(
             )
             if effect_denial is not None:
                 return index, contained(effect_denial)
-            if subject_argument:
+            if subject_argument and not governed_ontology_method:
                 if not _effect_subject_authorised(
                     arguments.get(subject_argument),
                     scope,
@@ -6244,6 +6251,7 @@ def execute_adaptive_turn(
                 if is_effect
                 else None
             )
+            ontology_delegation: Mapping[str, Any] | None = None
             if effect_identifier is not None:
                 dispatch_outcome = persist_effect_observation_phase(
                     effect_id=effect_identifier,
@@ -6314,6 +6322,40 @@ def execute_adaptive_turn(
                             }
                         )
                     return index, contained(denial_payload)
+            if governed_ontology_method and effect_identifier is not None:
+                from src.backend.services.ontology_mutation_command_service import (
+                    issue_same_turn_method_delegation,
+                )
+
+                with override_current_actor(
+                    scope.user_concept_id,
+                    scope.organisation_concept_id,
+                ):
+                    delegation_result = issue_same_turn_method_delegation(
+                        method_name=execution_method_name,
+                        arguments=arguments,
+                        actor_concept_id=scope.user_concept_id or "",
+                        organisation_concept_id=scope.organisation_concept_id,
+                        delegate_concept_id="#V#von_system",
+                        audience="adaptive_turn",
+                        effect_id=effect_identifier,
+                        turn_id=turn_id,
+                    )
+                if not isinstance(delegation_result.get("delegation_id"), str):
+                    persist_effect_observation_phase(
+                        effect_id=effect_identifier,
+                        phase="turn_terminal",
+                        observation={
+                            "call_id": call.call_id,
+                            "capability_name": canonical_name,
+                            "effect_status": "failed",
+                            "changed": False,
+                            "transport": {},
+                            "receipt": dict(delegation_result),
+                        },
+                    )
+                    return index, contained(delegation_result)
+                ontology_delegation = delegation_result
             try:
                 semantic_operation = build_semantic_operation_projection(
                     operation_id=call.call_id,
@@ -6353,11 +6395,9 @@ def execute_adaptive_turn(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
                 ):
-                    transport_result = gateway.invoke(
-                        execution_method_name,
-                        arguments,
-                        deadline_monotonic=deadline_monotonic,
-                        late_completion_observer=(
+                    invoke_kwargs = {
+                        "deadline_monotonic": deadline_monotonic,
+                        "late_completion_observer": (
                             late_effect_observer(
                                 effect_id=effect_identifier,
                                 call_id=call.call_id,
@@ -6368,8 +6408,34 @@ def execute_adaptive_turn(
                             if effect_identifier is not None
                             else None
                         ),
-                        require_effect_admission_window=is_effect,
-                    )
+                        "require_effect_admission_window": is_effect,
+                    }
+                    if ontology_delegation is not None:
+                        from src.backend.services.ontology_publication_authority_service import (
+                            bind_ontology_invocation,
+                        )
+
+                        with bind_ontology_invocation(
+                            surface="ordinary_turn",
+                            executing_agent_concept_id="#V#von_system",
+                            audience="adaptive_turn",
+                            delegation_id=str(
+                                ontology_delegation.get("delegation_id") or ""
+                            ),
+                            effect_id=effect_identifier,
+                            turn_id=turn_id,
+                        ):
+                            transport_result = gateway.invoke(
+                                execution_method_name,
+                                arguments,
+                                **invoke_kwargs,
+                            )
+                    else:
+                        transport_result = gateway.invoke(
+                            execution_method_name,
+                            arguments,
+                            **invoke_kwargs,
+                        )
                 raw_payload = transport_result.payload
             except SchemaValidationError as exc:
                 output_invalid = exc.stage == "output_schema"

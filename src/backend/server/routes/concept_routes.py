@@ -18,7 +18,10 @@ from ...services.text_value_service import (
     RelationPredicate,
     update_text_relation_text,
     delete_text_relation,
-    delete_text_relation_by_predicate_and_text,
+)
+from ...services.text_relation_predicate_validation_service import (
+    TextRelationPredicateResolutionError,
+    resolve_text_relation_predicate_for_write,
 )
 from ...services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
@@ -40,6 +43,88 @@ from ...vontology.utils_vontology import (
 from ...db.mongo_client import get_db
 
 concept_bp = Blueprint("concepts", __name__)  # Define blueprint
+
+
+def _governed_mutation_response(
+    result: dict[str, Any], *, success_status: int = 200
+) -> ResponseReturnValue:
+    """Render a shared governed-command outcome without recreating policy here."""
+
+    if result.get("success") is not False and not result.get("error_code"):
+        return jsonify(result), success_status
+
+    error_code = str(result.get("error_code") or "")
+    authority_denials = {
+        "authenticated_actor_context_required",
+        "client_supplied_identity_is_not_authority",
+        "von_operator_is_not_semantic_ontology_authority",
+        "global_ontology_admin_authority_required",
+        "organisation_ontology_admin_authority_required",
+        "ontology_publication_authority_required",
+        "private_scope_canonical_publication_not_delegated",
+        "dedicated_ontology_governance_operation_required",
+        "explicit_scope_adoption_required",
+        "ontology_mutation_target_not_accessible",
+    }
+    authority_decision = result.get("authority_decision")
+    decision_denied = isinstance(authority_decision, dict) and (
+        authority_decision.get("allowed") is False
+    )
+    if error_code in authority_denials or decision_denied:
+        return jsonify(result), 403
+    if error_code.endswith("not_found"):
+        return jsonify(result), 404
+    if error_code in {
+        "ontology_authority_store_unavailable",
+        "ontology_mutation_receipt_store_unavailable",
+        "ontology_mutation_store_unavailable",
+        "ontology_mutation_receipt_finalisation_failed",
+        "ontology_mutation_postcondition_failed",
+        "canonical_read_back_failed",
+        "ontology_mutation_replay_projection_unavailable",
+    }:
+        return jsonify(result), 503
+    return jsonify(result), 400
+
+
+def _execute_governed_http_mutation(
+    *,
+    method_name: str,
+    arguments: dict[str, Any],
+    mutate: Any,
+    preview: bool = False,
+) -> dict[str, Any]:
+    """Use the canonical command boundary with Flask's trusted actor context."""
+
+    from ...services.ontology_mutation_command_service import (
+        execute_governed_ontology_method,
+    )
+
+    try:
+        return execute_governed_ontology_method(
+            method_name=method_name,
+            arguments=arguments,
+            mutate=mutate,
+            preview=preview,
+        )
+    except LookupError:
+        return {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": "ontology_mutation_target_not_found",
+            "error": "The requested ontology target was not found.",
+        }
+    except (ConnectionError, TimeoutError):
+        return {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": "ontology_mutation_store_unavailable",
+            "error": "The ontology mutation store is temporarily unavailable.",
+        }
 
 
 def _get_request_namespace() -> str | None:
@@ -309,26 +394,87 @@ def create_concept_route():
     system_tags = data.get("system_tags")
     user_tags = data.get("user_tags")
     linked_concepts = data.get("linked_concepts")
+    parent_concept_ids = data.get("parent_concept_ids")
 
     if not name:
         return jsonify(error="concept name is required"), 400
     if not concept_id and not vontology_path:
         return jsonify(error="Either concept_id or vontology_path is required"), 400
+    if parent_concept_ids is not None and not isinstance(parent_concept_ids, list):
+        return jsonify(error="parent_concept_ids must be a list"), 400
 
     try:
-        new_concept = concept_service.create_concept(
-            name=name,
-            concept_id=concept_id,
-            vontology_path=vontology_path,
-            description=description,
-            notes=notes,
-            attributes=attributes,
-            system_tags=system_tags,
-            user_tags=user_tags,
-            linked_concepts=linked_concepts,
+        trusted_actor = _get_current_user_concept_id()
+        trusted_org = _get_current_org_concept_id()
+        scope_mode = data.get("visibility_scope_mode") or data.get("scope_mode")
+        from ...services.ontology_mutation_command_service import (
+            resolve_governed_ontology_arguments,
         )
-        # Service layer should return id as string
-        return jsonify(new_concept), 201
+
+        create_arguments = resolve_governed_ontology_arguments(
+            "create_concepts",
+            {
+                "concepts": [
+                    {
+                        "concept_id": concept_id,
+                        "name": name,
+                        "description": description,
+                        "notes": notes,
+                        "attributes": attributes,
+                        "system_tags": system_tags,
+                        "user_tags": user_tags,
+                        "linked_concepts": linked_concepts,
+                        "create_as_instance": data.get("create_as_instance", True),
+                        "instance_of_type": data.get("instance_of_type"),
+                        "vontology_path": vontology_path,
+                    }
+                ],
+                "scope_mode": scope_mode,
+                "parent_id": (
+                    (parent_concept_ids or [None])[0]
+                    if isinstance(parent_concept_ids, list)
+                    else None
+                ),
+                "parent_concept_ids": parent_concept_ids,
+                "instance_of_type": data.get("instance_of_type"),
+                "linked_concepts": linked_concepts,
+                "attributes": attributes,
+                "system_tags": system_tags,
+                "user_tags": user_tags,
+                "create_as_instance": data.get("create_as_instance", True),
+                "vontology_path": vontology_path,
+                "description": description,
+                "notes": notes,
+                "request_id": data.get("request_id"),
+            },
+        )
+        resolved_concept = create_arguments["concepts"][0]
+        resolved_parent_ids = create_arguments.get("parent_concept_ids")
+        result = _execute_governed_http_mutation(
+            method_name="create_concepts",
+            arguments=create_arguments,
+            mutate=lambda: concept_service.create_concept(
+                name=resolved_concept.get("name"),
+                concept_id=resolved_concept.get("concept_id"),
+                vontology_path=resolved_concept.get("vontology_path"),
+                description=resolved_concept.get("description"),
+                notes=resolved_concept.get("notes"),
+                attributes=resolved_concept.get("attributes"),
+                system_tags=resolved_concept.get("system_tags"),
+                user_tags=resolved_concept.get("user_tags"),
+                linked_concepts=resolved_concept.get("linked_concepts"),
+                parent_concept_ids=resolved_parent_ids,
+                create_as_instance=resolved_concept.get("create_as_instance", True),
+                instance_of_type=resolved_concept.get("instance_of_type"),
+                created_by_concept_id=trusted_actor,
+                organisation_concept_id=trusted_org,
+                event_namespace=_get_request_namespace(),
+                visibility_scope_mode=create_arguments.get("scope_mode"),
+                maintain_relationship_inverses=False,
+                resolve_visibility_from_event_namespace=False,
+            ),
+        )
+        return _governed_mutation_response(result, success_status=201)
     except InvalidConceptDataError as e:
         current_app.logger.warning(f"Invalid data for creating concept: {e}")
         return jsonify(error=str(e)), 400
@@ -439,9 +585,24 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
             # Check if this is a notes-only or description-only update and handle it properly
             if "notes" in data and len(data) == 1:
                 # This is a notes-only update, use the proper notes update function
-                success = concept_service.update_concept_notes(
-                    concept_id, data["notes"]
+                governed = _execute_governed_http_mutation(
+                    method_name="upsert_singleton_text_relation",
+                    arguments={
+                        "concept_id": concept_id,
+                        "predicate": "hasNote",
+                        "text": data["notes"],
+                    },
+                    mutate=lambda: {
+                        "success": bool(
+                            concept_service.update_concept_notes(
+                                concept_id, data["notes"]
+                            )
+                        )
+                    },
                 )
+                if governed.get("success") is False:
+                    return _governed_mutation_response(governed)
+                success = True
                 if success:
                     # Return the updated concept with proper notes access
                     if concept_id.startswith("#V#"):
@@ -458,9 +619,24 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
                 else:
                     return jsonify(error="Failed to update notes"), 500
             elif "description" in data and len(data) == 1:
-                success = concept_service.update_concept_description(
-                    concept_id, data["description"]
+                governed = _execute_governed_http_mutation(
+                    method_name="upsert_singleton_text_relation",
+                    arguments={
+                        "concept_id": concept_id,
+                        "predicate": "hasDescription",
+                        "text": data["description"],
+                    },
+                    mutate=lambda: {
+                        "success": bool(
+                            concept_service.update_concept_description(
+                                concept_id, data["description"]
+                            )
+                        )
+                    },
                 )
+                if governed.get("success") is False:
+                    return _governed_mutation_response(governed)
+                success = True
                 if success:
                     if concept_id.startswith("#V#"):
                         updated_concept = concept_service.get_concept_by_concept_id(
@@ -477,7 +653,19 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
                     return jsonify(error="Failed to update description"), 500
             else:
                 # For other updates, use the generic function but fix notes field after
-                updated_concept = concept_service.update_concept(concept_id, data)
+                governed = _execute_governed_http_mutation(
+                    method_name="update_concept",
+                    arguments={"concept_id": concept_id, "update_data": data},
+                    mutate=lambda: {
+                        "success": True,
+                        "updated_concept": concept_service.update_concept(
+                            concept_id, data
+                        ),
+                    },
+                )
+                if governed.get("success") is False:
+                    return _governed_mutation_response(governed)
+                updated_concept = governed.get("updated_concept")
                 # Ensure notes field uses proper getter function for consistency
                 if updated_concept and "notes" in updated_concept:
                     updated_concept["notes"] = get_concept_notes(updated_concept)
@@ -505,7 +693,16 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
 
     elif request.method == "DELETE":
         try:
-            success = concept_service.delete_concept(concept_id)
+            governed = _execute_governed_http_mutation(
+                method_name="delete_concept",
+                arguments={"concept_id": concept_id, "simulate": False},
+                mutate=lambda: {
+                    "success": bool(concept_service.delete_concept(concept_id))
+                },
+            )
+            if governed.get("success") is False:
+                return _governed_mutation_response(governed)
+            success = True
             if success:
                 return (
                     jsonify(message="concept deleted successfully"),
@@ -641,6 +838,20 @@ def import_concepts_route():
       - validate_concepts: 'true' | 'false' (default: 'true')
       - dry_run: 'true' | 'false' (default: 'false')
     """
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Concept imports require a governed ontology import command.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     try:
         if "file" not in request.files:
             return jsonify(error="Missing 'file' in multipart form-data"), 400
@@ -872,7 +1083,22 @@ def update_concept_notes_route(concept_id: str):
         )
     try:
         # Use the specific notes update function instead of generic update_concept
-        success = concept_service.update_concept_notes(concept_id, data["notes"])
+        governed = _execute_governed_http_mutation(
+            method_name="upsert_singleton_text_relation",
+            arguments={
+                "concept_id": concept_id,
+                "predicate": "hasNote",
+                "text": data["notes"],
+            },
+            mutate=lambda: {
+                "success": bool(
+                    concept_service.update_concept_notes(concept_id, data["notes"])
+                )
+            },
+        )
+        if governed.get("success") is False:
+            return _governed_mutation_response(governed)
+        success = True
         if success:
             # Return the updated concept with proper notes access
             if concept_id.startswith("#V#"):
@@ -924,9 +1150,24 @@ def update_concept_description_route(concept_id: str):
             400,
         )
     try:
-        success = concept_service.update_concept_description(
-            concept_id, data["description"]
+        governed = _execute_governed_http_mutation(
+            method_name="upsert_singleton_text_relation",
+            arguments={
+                "concept_id": concept_id,
+                "predicate": "hasDescription",
+                "text": data["description"],
+            },
+            mutate=lambda: {
+                "success": bool(
+                    concept_service.update_concept_description(
+                        concept_id, data["description"]
+                    )
+                )
+            },
         )
+        if governed.get("success") is False:
+            return _governed_mutation_response(governed)
+        success = True
         if success:
             if concept_id.startswith("#V#"):
                 updated_concept = concept_service.get_concept_by_concept_id(concept_id)
@@ -979,16 +1220,6 @@ def rename_concept_route(concept_id: str):
     """
     from ...services.concept_rename_service import rename_concept
 
-    if not _can_rename_concept_id():
-        return (
-            jsonify(
-                error=(
-                    "Forbidden: concept ID rename requires an admin or owner session"
-                )
-            ),
-            403,
-        )
-
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify(error="JSON object body required"), 400
@@ -1004,13 +1235,28 @@ def rename_concept_route(concept_id: str):
     skip_inaccessible = _coerce_json_bool(data.get("skip_inaccessible"), default=False)
 
     try:
-        result = rename_concept(
-            old_id=concept_id,
-            new_id=new_id,
-            simulate=simulate,
-            preserve_alias=preserve_alias,
-            skip_inaccessible=skip_inaccessible,
+        result = _execute_governed_http_mutation(
+            method_name="rename_concept",
+            arguments={
+                "concept_id": concept_id,
+                "new_id": new_id,
+                "simulate": simulate,
+                "request_id": data.get("request_id"),
+            },
+            mutate=lambda: rename_concept(
+                old_id=concept_id,
+                new_id=new_id,
+                simulate=simulate,
+                preserve_alias=preserve_alias,
+                skip_inaccessible=skip_inaccessible,
+            ),
+            preview=simulate,
         )
+
+        if result.get("success") is False and (
+            result.get("authority_decision") or result.get("error_code")
+        ):
+            return _governed_mutation_response(result)
 
         if not result.get("success"):
             errors = result.get("errors", [])
@@ -1311,9 +1557,16 @@ def upsert_concept_text_route(concept_id: str):
         return jsonify(error="text (string) is required"), 400
     if not isinstance(lang, str) or not lang.strip():
         return jsonify(error="lang must be a non-empty string if provided"), 400
+    if not isinstance(provenance, dict):
+        return jsonify(error="provenance must be an object if provided"), 400
+    if not isinstance(context, dict):
+        return jsonify(error="context must be an object if provided"), 400
 
     predicate = predicate.strip()
+    text = text.strip()
     lang = lang.strip()
+    provenance = dict(provenance)
+    context = dict(context)
 
     allowed_predicates = {
         RelationPredicate.HAS_NAME,
@@ -1325,9 +1578,7 @@ def upsert_concept_text_route(concept_id: str):
     if predicate not in allowed_predicates and not predicate.startswith("#V#"):
         return jsonify(error=f"Unsupported predicate '{predicate}'"), 400
 
-    if predicate == RelationPredicate.HAS_NAME:
-        if not isinstance(context, dict):
-            context = {}
+    if predicate in {RelationPredicate.HAS_NAME, "#V#hasName"}:
         name_type = context.get("name_type")
         if name_type is None:
             context["name_type"] = "NL"
@@ -1339,24 +1590,37 @@ def upsert_concept_text_route(concept_id: str):
                     400,
                 )
             context["name_type"] = name_type_normalised
-    elif not isinstance(context, dict):
-        # Non-name predicates can omit context, normalise to empty dict for downstream consumers
-        context = {}
-
     try:
-        result = upsert_text_for_concept(
-            subject_concept_id=concept_id,
-            predicate=predicate,
-            text=text,
-            lang=lang,
-            provenance=provenance,
-            context=context,
+        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
+        canonical_predicate = predicate_resolution.storage_predicate
+        result = _execute_governed_http_mutation(
+            method_name="upsert_text_relation",
+            arguments={
+                "concept_id": concept_id,
+                "predicate": canonical_predicate,
+                "text": text,
+                "language": lang,
+                "provenance": provenance,
+                "context": context,
+                "request_id": payload.get("request_id"),
+            },
+            mutate=lambda: upsert_text_for_concept(
+                subject_concept_id=concept_id,
+                predicate=canonical_predicate,
+                text=text,
+                lang=lang,
+                provenance=provenance,
+                context=context,
+            ),
         )
+
+        if result.get("success") is False:
+            return _governed_mutation_response(result)
 
         maybe_sync_concept_text_relations_to_rag(
             namespace=_get_request_namespace(),
             concept_id=concept_id,
-            predicate=predicate,
+            predicate=canonical_predicate,
         )
         status = 201 if result.get("relation_created") else 200
         if result.get("context_updated"):
@@ -1367,6 +1631,8 @@ def upsert_concept_text_route(concept_id: str):
             else ("context-updated" if result.get("context_updated") else "exists")
         )
         return jsonify(result), status
+    except TextRelationPredicateResolutionError as exc:
+        return jsonify(error_code=exc.error_code, error=str(exc)), 400
     except PermissionError as pe:
         return jsonify(error=str(pe)), 403
     except Exception as e:
@@ -1384,14 +1650,33 @@ def update_concept_text_relation_route(concept_id: str, relation_id: str):
     lang = payload.get("lang") or "en"
     if not isinstance(new_text, str) or not new_text.strip():
         return jsonify(error="text (string) is required"), 400
+    if not isinstance(lang, str) or not lang.strip():
+        return jsonify(error="lang must be a non-empty string if provided"), 400
+    new_text = new_text.strip()
+    lang = lang.strip()
+    provenance = {"source": "update_text_relation"}
     try:
-        result = update_text_relation_text(
-            subject_concept_id=concept_id,
-            relation_id=relation_id,
-            new_text=new_text,
-            lang=lang,
-            provenance={"source": "update_text_relation"},
+        result = _execute_governed_http_mutation(
+            method_name="update_text_relation",
+            arguments={
+                "concept_id": concept_id,
+                "relation_id": relation_id,
+                "new_text": new_text,
+                "language": lang,
+                "provenance": provenance,
+                "request_id": payload.get("request_id"),
+            },
+            mutate=lambda: update_text_relation_text(
+                subject_concept_id=concept_id,
+                relation_id=relation_id,
+                new_text=new_text,
+                lang=lang,
+                provenance=provenance,
+            ),
         )
+
+        if result.get("success") is False:
+            return _governed_mutation_response(result)
 
         maybe_sync_concept_text_relations_to_rag(
             namespace=_get_request_namespace(),
@@ -1410,56 +1695,54 @@ def update_concept_text_relation_route(concept_id: str, relation_id: str):
 
 @concept_bp.route("/<string:concept_id>/texts", methods=["DELETE"])
 def delete_concept_text_by_predicate_route(concept_id: str):
-    """Delete a text relation by predicate and text value.
+    """Fail closed: predicate/text is not an exact mutation selector."""
 
-    Body JSON:
-      - predicate: string (required)
-      - text: string (required)
-    """
-    payload = request.get_json(silent=True) or {}
-    predicate = payload.get("predicate")
-    text = payload.get("text")
-    lang = payload.get("lang")
-    context = (
-        payload.get("context") if isinstance(payload.get("context"), dict) else None
+    return (
+        jsonify(
+            success=False,
+            effect_status="not_started",
+            mutation_outcome="not_started",
+            changed=False,
+            error_code="exact_text_relation_id_required",
+            error=(
+                "Predicate and text do not identify one immutable relation. "
+                "List the concept's text relations, then delete the selected "
+                "relation by its exact relation ID."
+            ),
+            concept_id=concept_id,
+            recovery_affordances=[
+                {
+                    "action_type": "list_text_relations",
+                    "method": "GET",
+                    "path": f"/api/concepts/{concept_id}/texts",
+                },
+                {
+                    "action_type": "delete_exact_text_relation",
+                    "method": "DELETE",
+                    "path_template": f"/api/concepts/{concept_id}/texts/<relation_id>",
+                },
+            ],
+        ),
+        410,
     )
-
-    if not isinstance(predicate, str) or not predicate.strip():
-        return jsonify(error="predicate (string) is required"), 400
-    if not isinstance(text, str) or not text.strip():
-        return jsonify(error="text (string) is required"), 400
-
-    predicate = predicate.strip()
-
-    try:
-        result = delete_text_relation_by_predicate_and_text(
-            concept_id,
-            predicate,
-            text,
-            lang=lang,
-            context=context,
-        )
-
-        maybe_delete_text_relation_doc_from_rag(
-            namespace=_get_request_namespace(),
-            relation_id=result.get("relation_id"),
-        )
-        return jsonify(result), 200
-    except ValueError as ve:
-        return jsonify(error=str(ve)), 404
-    except Exception as e:
-        current_app.logger.error(
-            f"Error deleting text relation by predicate {predicate} and text '{text}' for concept {concept_id}: {e}",
-            exc_info=True,
-        )
-        return jsonify(error="Failed to delete text relation"), 500
 
 
 @concept_bp.route("/<string:concept_id>/texts/<string:relation_id>", methods=["DELETE"])
 def delete_concept_text_relation_route(concept_id: str, relation_id: str):
     """Delete a specific text relation (e.g., remove a note)."""
     try:
-        result = delete_text_relation(concept_id, relation_id)
+        result = _execute_governed_http_mutation(
+            method_name="delete_text_relation",
+            arguments={
+                "concept_id": concept_id,
+                "relation_id": relation_id,
+                "request_id": (request.get_json(silent=True) or {}).get("request_id"),
+            },
+            mutate=lambda: delete_text_relation(concept_id, relation_id),
+        )
+
+        if result.get("success") is False:
+            return _governed_mutation_response(result)
 
         maybe_delete_text_relation_doc_from_rag(
             namespace=_get_request_namespace(),

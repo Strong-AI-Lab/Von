@@ -120,10 +120,15 @@ def app(monkeypatch):
         created.append(kwargs)
         concept_id = kwargs.get("concept_id")
         if concept_id:
+            relationships = {}
+            if kwargs.get("visibility_scope_mode") == "user_only_default":
+                relationships[CANONICAL_SPECIFIC_TO_USER_PREDICATE] = [
+                    kwargs["created_by_concept_id"]
+                ]
             concept_docs[concept_id] = {
                 "concept_id": concept_id,
                 "name": kwargs.get("name") or kwargs.get("concept_id"),
-                "relationships": {},
+                "relationships": relationships,
             }
         return {"success": True, "concept": {"concept_id": kwargs.get("concept_id")}}
 
@@ -240,6 +245,25 @@ def test_upload_requires_user_session(app):
     body = resp.get_json()
     assert body["success"] is False
     assert body["error"] == "missing_user_context"
+
+
+def test_upload_does_not_bootstrap_missing_global_file_copy_type(app):
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["session_id"] = "test-session"
+    app.config["TEST_CONCEPT_DOCS"].pop("#V#computer_file_copy")
+
+    response = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(b"hello"), "hello.txt")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "file_copy_type_not_provisioned"
+    assert app.config["TEST_FAKE_STORE"].last_put is None
+    assert app.config["TEST_CREATED"] == []
 
 
 def test_upload_stores_bytes_and_registers_concept(app):

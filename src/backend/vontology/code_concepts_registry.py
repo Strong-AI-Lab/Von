@@ -262,7 +262,44 @@ _OTHER_PREDICATE_IDS = [
     "#V#member_of_organisation",
     "#V#has_birthplace",
     "#V#has_occupation",
+    "#V#has_ontology_authority_role",
+    "#V#has_von_operational_administrator",
 ]
+
+_ONTOLOGY_AUTHORITY_ROLE_CONCEPTS = {
+    "#V#organisation_ontology_administrator": CodeConcept(
+        concept_id="#V#organisation_ontology_administrator",
+        display_name="organisation ontology administrator",
+        kind="authority_role",
+        md_content=(
+            "# Organisation ontology administrator\n\n"
+            "A represented semantic role that permits canonical publication only "
+            "within its exact organisation context. It is not an operational "
+            "Von administrator role.\n"
+        ),
+    ),
+    "#V#global_ontology_administrator": CodeConcept(
+        concept_id="#V#global_ontology_administrator",
+        display_name="global ontology administrator",
+        kind="authority_role",
+        md_content=(
+            "# Global ontology administrator\n\n"
+            "A represented semantic role that permits canonical global ontology "
+            "publication. It is not conferred by #V#von_administrator.\n"
+        ),
+    ),
+    "#V#von_operational_administrator": CodeConcept(
+        concept_id="#V#von_operational_administrator",
+        display_name="Von operational administrator",
+        kind="authority_role",
+        md_content=(
+            "# Von operational administrator\n\n"
+            "A represented operational role for bounded Von control-plane "
+            "surfaces. It does not grant semantic ontology authority or "
+            "private concept visibility."
+        ),
+    ),
+}
 
 # Task management predicates (JVNAUTOSCI-1040)
 _TASK_PREDICATE_IDS = [
@@ -339,10 +376,14 @@ _CODE_PREDICATE_CONCEPTS: Dict[str, CodeConcept] = {
     )
     for concept_id in _CODE_PREDICATE_IDS
 }
+_CODE_CONCEPTS: Dict[str, CodeConcept] = {
+    **_CODE_PREDICATE_CONCEPTS,
+    **_ONTOLOGY_AUTHORITY_ROLE_CONCEPTS,
+}
 
 
 def iter_code_concepts() -> Iterable[CodeConcept]:
-    return _CODE_PREDICATE_CONCEPTS.values()
+    return _CODE_CONCEPTS.values()
 
 
 def list_code_predicate_ids() -> list[str]:
@@ -350,11 +391,11 @@ def list_code_predicate_ids() -> list[str]:
 
 
 def is_code_concept_id(concept_id: str) -> bool:
-    return concept_id in _CODE_PREDICATE_CONCEPTS
+    return concept_id in _CODE_CONCEPTS
 
 
 def get_code_concept(concept_id: str) -> Optional[CodeConcept]:
-    return _CODE_PREDICATE_CONCEPTS.get(concept_id)
+    return _CODE_CONCEPTS.get(concept_id)
 
 
 def build_virtual_concept_doc(concept_id: str) -> Optional[dict]:

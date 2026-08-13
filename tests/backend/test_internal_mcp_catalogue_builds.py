@@ -341,7 +341,9 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }.isdisjoint(actor_mail_reads)
     assert delegated_effects == {
         "create_concepts",
+        "change_concept_publication_scope",
         "record_source_processing_marker",
+        "preview_concept_publication_scope_change",
         "retract_scoped_assertion",
         "upsert_scoped_assertion",
         "upsert_text_relation",
@@ -413,7 +415,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     assert create_definition.ordinary_turn_fixed_arguments == {
         "organisation_concept_id": None,
         "org_id": None,
-        "scope_mode": "user_org_default",
+        "scope_mode": "user_only_default",
         "visibility_scope_mode": None,
     }
     marker_definition = catalogue.get("record_source_processing_marker")

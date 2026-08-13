@@ -13,6 +13,14 @@
                     "names": {
                         "type": "array",
                         "items": {}
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -55,11 +63,13 @@
                         ],
                         "additionalProperties": true
                     },
-                    "namespace": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -827,12 +837,6 @@
                             null
                         ]
                     },
-                    "namespace": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    },
                     "scope_mode": {
                         "type": [
                             "string",
@@ -845,17 +849,13 @@
                             "null"
                         ]
                     },
-                    "created_by_concept_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
                     },
-                    "organisation_concept_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -929,6 +929,14 @@
                     },
                     "simulate": {
                         "type": "boolean"
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -973,6 +981,14 @@
                     },
                     "garbage_collect": {
                         "type": "boolean"
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -3805,6 +3821,14 @@
                     },
                     "simulate": {
                         "type": "boolean"
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -4223,12 +4247,6 @@
                             "null"
                         ]
                     },
-                    "operator_override": {
-                        "type": [
-                            "boolean",
-                            "null"
-                        ]
-                    },
                     "reason": {
                         "type": [
                             "string",
@@ -4240,6 +4258,14 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [],
@@ -4298,12 +4324,6 @@
                             "null"
                         ]
                     },
-                    "operator_override": {
-                        "type": [
-                            "boolean",
-                            "null"
-                        ]
-                    },
                     "reason": {
                         "type": [
                             "string",
@@ -4321,6 +4341,14 @@
                             "boolean",
                             "null"
                         ]
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [],
@@ -6157,6 +6185,14 @@
                     "update_data": {
                         "type": "object",
                         "additionalProperties": true
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -6215,6 +6251,14 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -6323,6 +6367,14 @@
                             "null"
                         ],
                         "additionalProperties": true
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [
@@ -6349,12 +6401,6 @@
                     "text": {
                         "type": "string"
                     },
-                    "namespace": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    },
                     "language": {
                         "type": "string"
                     },
@@ -6364,6 +6410,14 @@
                             "null"
                         ],
                         "additionalProperties": true
+                    },
+                    "ontology_delegation_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
+                    },
+                    "ontology_effect_id": {
+                        "type": "string",
+                        "description": "Opaque server-issued effect identifier bound to the delegation. It is used for exact authorisation and idempotent receipts."
                     }
                 },
                 "required": [

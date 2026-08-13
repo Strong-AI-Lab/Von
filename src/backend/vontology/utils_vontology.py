@@ -3734,6 +3734,7 @@ def create_vontology_concept(
     create_as_instance: bool = False,
     notes: Optional[str] = None,
     description: Optional[str] = None,
+    vontology_path: Optional[str] = None,
     instance_of_type: Optional[str] = None,
     created_by_concept_id: Optional[str] = None,
     organisation_concept_id: Optional[str] = None,
@@ -3741,6 +3742,8 @@ def create_vontology_concept(
     visibility_scope_mode: Optional[str] = None,
     allow_duplicate_instance_suffix: bool = True,
     canonical_concept_id_override: Optional[str] = None,
+    maintain_relationship_inverses: bool = True,
+    resolve_visibility_from_event_namespace: bool = True,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3758,8 +3761,14 @@ def create_vontology_concept(
             selected by an authoritative mechanical identity rule. When set,
             instance suffix allocation is disabled so the concept ID uniqueness
             constraint provides atomic race handling.
+        maintain_relationship_inverses: Whether creation may also update parent
+            concepts with reverse structural edges. Governed external creation
+            disables this because its authority is confined to the new child.
+        resolve_visibility_from_event_namespace: Whether legacy trusted event
+            context may fill missing visibility principals.
         notes: Optional notes for the new concept
         description: Optional description for the new concept
+        vontology_path: Optional legacy path metadata bound into the create effect.
         instance_of_type: Optional concept_id to create an is_an_instance_of relationship.
                          When provided, the concept will be BOTH a subtype of parent_id
                          AND an instance of instance_of_type. This is useful for predicates
@@ -3857,6 +3866,7 @@ def create_vontology_concept(
             created_concept = create_concept(
                 name=new_concept_name,
                 concept_id=candidate_concept_id,
+                vontology_path=vontology_path,
                 parent_concept_ids=parent_concept_ids,
                 create_as_instance=create_as_instance,
                 description=description,
@@ -3866,6 +3876,10 @@ def create_vontology_concept(
                 organisation_concept_id=organisation_concept_id,
                 event_namespace=event_namespace,
                 visibility_scope_mode=visibility_scope_mode,
+                maintain_relationship_inverses=maintain_relationship_inverses,
+                resolve_visibility_from_event_namespace=(
+                    resolve_visibility_from_event_namespace
+                ),
             )
         except InvalidConceptDataError as exc:
             if "duplicate key" not in str(exc).lower():

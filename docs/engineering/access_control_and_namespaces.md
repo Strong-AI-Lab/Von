@@ -155,6 +155,17 @@ must not be treated as a general authoring role.
 
 ## 3) Roles and permissions (RBAC)
 
+### Visibility is not semantic publication authority
+
+Concept visibility answers whether a caller may discover or read a concept. It
+does not authorise canonical publication, retraction, identity consolidation,
+or a change to its user/organisation/global publication scope. Those effects
+need a separate semantic-authority decision against the relevant publication
+context; `#V#von_administrator` is operational administration, not global
+semantic authority. The candidate boundary and its delegation/receipt
+requirements are recorded in
+[Ontology publication authority](ontology_publication_authority.md).
+
 ### Current status
 
 RBAC is present but **not a complete system** yet.

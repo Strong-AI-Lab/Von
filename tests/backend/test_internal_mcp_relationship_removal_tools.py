@@ -43,7 +43,9 @@ class _FakeCollection:
         self.rows.append(dict(payload))
         return {"inserted_id": len(self.rows)}
 
-    def find(self, filter_doc: dict[str, Any], projection: dict[str, Any] | None = None):
+    def find(
+        self, filter_doc: dict[str, Any], projection: dict[str, Any] | None = None
+    ):
         undo_token = filter_doc.get("undo_token")
         matches = []
         for row in self.rows:
@@ -178,35 +180,9 @@ def test_relationship_removal_methods_registered() -> None:
     assert "undo_relationship_removal" in methods
 
 
-def test_remove_relationship_gateway_creates_audit_records(monkeypatch):
-    from src.backend.services.relationship_removal_service import (
-        build_relationship_relation_id,
-    )
-
+def test_sessionless_remove_relationship_gateway_fails_before_audit(monkeypatch):
     gateway = _build_gateway()
     fake_db = _install_fake_db(monkeypatch)
-    _state, _mutate_calls = _install_relationship_state(monkeypatch)
-
-    payload = gateway.invoke(
-        "remove_relationship",
-        {"source_id": "#V#source", "predicate": "typeOf", "target": "#V#target"},
-    ).payload
-
-    assert payload.get("success") is True
-    assert payload.get("removed") is True
-    assert payload.get("relation_id") == build_relationship_relation_id(
-        "#V#source", "is_a_type_of", "#V#target"
-    )
-    assert isinstance(payload.get("audit_record_id"), str)
-    phases = [row.get("phase") for row in fake_db.audit.rows]
-    assert "attempt" in phases
-    assert "result" in phases
-    _assert_schema_conformance(gateway, "remove_relationship", payload)
-
-
-def test_remove_relationship_gateway_fails_closed_when_audit_insert_fails(monkeypatch):
-    gateway = _build_gateway()
-    _fake_db = _install_fake_db(monkeypatch, fail_audit_insert=True)
     _state, mutate_calls = _install_relationship_state(monkeypatch)
 
     payload = gateway.invoke(
@@ -215,7 +191,31 @@ def test_remove_relationship_gateway_fails_closed_when_audit_insert_fails(monkey
     ).payload
 
     assert payload.get("success") is False
-    assert payload.get("error_code") == "audit_persistence_failed"
+    assert payload.get("error_code") == "ontology_agent_delegation_required"
+    assert payload.get("effect_status") == "not_started"
+    assert payload.get("mutation_outcome") == "not_started"
+    assert payload.get("changed") is False
+    assert fake_db.audit.rows == []
+    assert mutate_calls == []
+    _assert_schema_conformance(gateway, "remove_relationship", payload)
+
+
+def test_sessionless_remove_relationship_does_not_reach_audit_failure(monkeypatch):
+    gateway = _build_gateway()
+    fake_db = _install_fake_db(monkeypatch, fail_audit_insert=True)
+    _state, mutate_calls = _install_relationship_state(monkeypatch)
+
+    payload = gateway.invoke(
+        "remove_relationship",
+        {"source_id": "#V#source", "predicate": "typeOf", "target": "#V#target"},
+    ).payload
+
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "ontology_agent_delegation_required"
+    assert payload.get("effect_status") == "not_started"
+    assert payload.get("mutation_outcome") == "not_started"
+    assert payload.get("changed") is False
+    assert fake_db.audit.rows == []
     assert mutate_calls == []
     _assert_schema_conformance(gateway, "remove_relationship", payload)
 
@@ -237,14 +237,14 @@ def test_preview_remove_relationship_gateway_has_no_mutation_side_effects(monkey
     _assert_schema_conformance(gateway, "preview_remove_relationship", payload)
 
 
-def test_bulk_remove_gateway_reports_partial_failures(monkeypatch):
+def test_bulk_remove_gateway_rejects_invalid_batch_before_any_effect(monkeypatch):
     from src.backend.services.relationship_removal_service import (
         build_relationship_relation_id,
     )
 
     gateway = _build_gateway()
-    _install_fake_db(monkeypatch)
-    _state, _mutate_calls = _install_relationship_state(monkeypatch)
+    fake_db = _install_fake_db(monkeypatch)
+    _state, mutate_calls = _install_relationship_state(monkeypatch)
 
     valid_relation_id = build_relationship_relation_id(
         "#V#source", "is_a_type_of", "#V#target"
@@ -257,32 +257,32 @@ def test_bulk_remove_gateway_reports_partial_failures(monkeypatch):
         },
     ).payload
 
-    assert payload.get("success") is True
-    assert payload.get("status") == "partial"
-    summary = payload.get("summary", {})
-    assert summary.get("removed_count") == 1
-    assert summary.get("error_count") >= 1
-    assert isinstance(payload.get("undo_token"), str)
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "invalid_relationship_relation_id"
+    assert payload.get("effect_status") == "not_started"
+    assert payload.get("mutation_outcome") == "not_started"
+    assert payload.get("changed") is False
+    assert payload.get("undo_token") is None
+    assert fake_db.audit.rows == []
+    assert mutate_calls == []
     _assert_schema_conformance(gateway, "remove_relationships_bulk", payload)
 
 
-def test_undo_relationship_removal_gateway_restores_soft_deleted_edges(monkeypatch):
+def test_sessionless_remove_cannot_obtain_an_undo_token(monkeypatch):
     gateway = _build_gateway()
-    _install_fake_db(monkeypatch)
-    _state, _mutate_calls = _install_relationship_state(monkeypatch)
+    fake_db = _install_fake_db(monkeypatch)
+    _state, mutate_calls = _install_relationship_state(monkeypatch)
 
     remove_payload = gateway.invoke(
         "remove_relationship",
         {"source_id": "#V#source", "predicate": "typeOf", "target": "#V#target"},
     ).payload
-    undo_token = remove_payload.get("undo_token")
-    assert isinstance(undo_token, str) and undo_token
-
-    undo_payload = gateway.invoke(
-        "undo_relationship_removal",
-        {"undo_token": undo_token, "confirmed": True},
-    ).payload
-
-    assert undo_payload.get("success") is True
-    assert undo_payload.get("restored_count") == 1
-    _assert_schema_conformance(gateway, "undo_relationship_removal", undo_payload)
+    assert remove_payload.get("success") is False
+    assert remove_payload.get("error_code") == "ontology_agent_delegation_required"
+    assert remove_payload.get("effect_status") == "not_started"
+    assert remove_payload.get("mutation_outcome") == "not_started"
+    assert remove_payload.get("changed") is False
+    assert remove_payload.get("undo_token") is None
+    assert fake_db.audit.rows == []
+    assert mutate_calls == []
+    _assert_schema_conformance(gateway, "remove_relationship", remove_payload)

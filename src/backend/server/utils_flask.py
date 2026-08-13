@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from .routes.speech_routes import speech_bp
     from .routes.task_routes import task_bp
     from .routes.message_routes import message_bp
+    from .routes.ontology_authority_routes import ontology_authority_bp
     from ..db.connection_manager import ensure_monitor_started, get_db
     from ..services.annotation_extraction_service import (
         PROMPT_CONCEPT_ID,
@@ -118,6 +119,10 @@ _bind_imports(
 _bind_imports("src.backend.server.routes.speech_routes", ["speech_bp"])
 _bind_imports("src.backend.server.routes.task_routes", ["task_bp"])
 _bind_imports("src.backend.server.routes.message_routes", ["message_bp"])
+_bind_imports(
+    "src.backend.server.routes.ontology_authority_routes",
+    ["ontology_authority_bp"],
+)
 _bind_imports(
     "src.backend.db.connection_manager",
     ["ensure_monitor_started", "get_db"],
@@ -2429,6 +2434,7 @@ def _register_default_blueprints(app: Flask) -> None:
     app.register_blueprint(admin_bp, url_prefix="/admin")
     app.register_blueprint(task_bp, url_prefix="/api/tasks")
     app.register_blueprint(message_bp, url_prefix="/api/messages")
+    app.register_blueprint(ontology_authority_bp)
     app.register_blueprint(auth_bp, url_prefix="/von")
     app.register_blueprint(agent_gmail_oauth_bp, url_prefix="/von")
 

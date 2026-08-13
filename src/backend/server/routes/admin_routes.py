@@ -2,7 +2,7 @@ from __future__ import annotations
 import hmac
 import os
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, session
 from ...db import connection_manager as conn_mgr
 from ...services.mongo_startup_config import run_mongo_startup_probe
 from ...services.workflow_materialisation_diagnostics_service import (
@@ -24,6 +24,30 @@ def _trusted_operator_token_authorised() -> bool:
         "X-Admin-Token"
     )
     return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+def _represented_operational_administrator_authorised() -> bool:
+    """Resolve only the logged-in human's dedicated operational role."""
+
+    actor_id = str(session.get("user_concept_id") or "").strip()
+    if not actor_id:
+        return False
+    if not actor_id.startswith("#"):
+        actor_id = f"#V#{actor_id}"
+    from ...services.von_operational_administrator_service import (
+        is_live_von_operational_administrator,
+    )
+
+    return is_live_von_operational_administrator(actor_id)
+
+
+def _trusted_operator_authorised() -> bool:
+    """Accept the existing token or a live represented operational role."""
+
+    return (
+        _trusted_operator_token_authorised()
+        or _represented_operational_administrator_authorised()
+    )
 
 
 @admin_bp.route("/db/health", methods=["GET"])
@@ -64,7 +88,7 @@ def _collect_required_concept_ids_from_query() -> list[str]:
 
 @admin_bp.route("/workflow_materialisation_diagnostics", methods=["GET"])
 def workflow_materialisation_diagnostics():
-    if not _trusted_operator_token_authorised():
+    if not _trusted_operator_authorised():
         return jsonify({"error": "trusted_operator_authority_required"}), 403
     include_present_raw = (
         (request.args.get("include_present_concepts") or "").strip().lower()

@@ -34,7 +34,8 @@ def test_add_relationship_treats_prefixed_hascontent_as_text_relation(monkeypatc
         _fake_upsert_text_for_concept,
     )
 
-    result = catalogue._add_relationship(
+    # Exercise handler semantics below the separately tested authority wrapper.
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="#V#hasContent", target="Hello"
     )
 
@@ -70,7 +71,7 @@ def test_add_relationship_treats_plain_hasdescription_as_text_relation(monkeypat
         _fake_upsert_text_for_concept,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="hasDescription", target="Desc"
     )
 

@@ -929,9 +929,17 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
         )
         if blocked_result is not None:
             return blocked_result
-        with override_current_actor(
-            getattr(environment, "user_concept_id", None),
-            getattr(environment, "org_concept_id", None),
+        from ..workflow_mcp_tool_actions import _ontology_invocation_context
+
+        with (
+            override_current_actor(
+                getattr(environment, "user_concept_id", None),
+                getattr(environment, "org_concept_id", None),
+            ),
+            _ontology_invocation_context(
+                request=request,
+                resolved_tool_name=resolved_tool_name,
+            ),
         ):
             result = gateway.invoke(resolved_tool_name, payload)
         try:

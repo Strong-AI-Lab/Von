@@ -7,11 +7,15 @@ user concepts and organisation concepts, including role associations.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional, Set
+from functools import wraps
+from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import bypass_access_control, can_access_concept
 from ..services.text_value_service import upsert_text_for_concept
+from .ontology_authority_membership_coordination_service import (
+    ontology_authority_membership_mutation_barrier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +23,18 @@ logger = logging.getLogger(__name__)
 MEMBERSHIP_RELATIONSHIP_KIND = "memberOf"
 ALT_MEMBERSHIP_RELATIONSHIP = "#V#member_of_organisation"
 ROLE_PREDICATE = "#V#hasRole"
+_ROLE_STORAGE_SEPARATOR = "::"
+
+
+def _coordinated_membership_mutation(function):
+    """Keep all membership lifecycle writes inside the shared authority barrier."""
+
+    @wraps(function)
+    def coordinated(*args, **kwargs):
+        with ontology_authority_membership_mutation_barrier():
+            return function(*args, **kwargs)
+
+    return coordinated
 
 
 def _normalise_concept_id(value: Any) -> str | None:
@@ -30,10 +46,59 @@ def _normalise_concept_id(value: Any) -> str | None:
     return text if text.startswith("#") else f"#V#{text}"
 
 
+def organisation_role_storage_text(
+    role: str,
+    organisation_concept_id: str,
+) -> str:
+    """Return a scope-distinct token for one organisation membership role.
+
+    Text relation uniqueness is subject/predicate/object rather than context.
+    Including the organisation in the value prevents equal roles in two
+    organisations from overwriting one another's relation context.
+    """
+
+    role_value = str(role or "").strip()
+    organisation_id = _normalise_concept_id(organisation_concept_id)
+    if not role_value:
+        raise ValueError("role must be a non-empty string")
+    if not organisation_id:
+        raise ValueError("organisation_concept_id must be a non-empty string")
+    if _ROLE_STORAGE_SEPARATOR in role_value:
+        raise ValueError("role may not contain the organisation-role separator")
+    return f"{role_value}{_ROLE_STORAGE_SEPARATOR}{organisation_id}"
+
+
+def parse_organisation_role_storage_text(
+    stored_text: object,
+    relation_context: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Decode scope-distinct roles while retaining legacy plain-role reads."""
+
+    raw_text = str(stored_text or "").strip()
+    if not raw_text:
+        return None, None
+    context = relation_context if isinstance(relation_context, dict) else {}
+    context_org = _normalise_concept_id(
+        context.get("organisation_concept_id") or context.get("organisation_id")
+    )
+    if _ROLE_STORAGE_SEPARATOR not in raw_text:
+        return (raw_text, context_org) if context_org else (None, None)
+    role, raw_organisation_id = raw_text.rsplit(_ROLE_STORAGE_SEPARATOR, 1)
+    role = role.strip()
+    stored_org = _normalise_concept_id(raw_organisation_id)
+    if not role or not stored_org:
+        return None, None
+    if context_org and context_org != stored_org:
+        # Context disagreement is malformed and must not be interpreted as a
+        # role for either organisation.
+        return None, None
+    return role, stored_org
+
+
 def resolve_user_organisation_membership(
     user_concept_id: str,
     organisation_concept_id: str,
-) -> Dict[str, Any] | None:
+) -> dict[str, Any] | None:
     """Return the represented membership record for an exact user/org pair."""
 
     user_id = _normalise_concept_id(user_concept_id)
@@ -71,9 +136,10 @@ def is_user_member_of_organisation(
     )
 
 
+@_coordinated_membership_mutation
 def create_organisation_membership(
     user_concept_id: str, organisation_concept_id: str, role: str = "member"
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a memberOf relationship between a user and an organisation.
 
     Stores the relationship in the Vontology as a concept edge, with the role
@@ -145,7 +211,7 @@ def create_organisation_membership(
     role_result = upsert_text_for_concept(
         subject_concept_id=user_concept_id,
         predicate=ROLE_PREDICATE,
-        text=role,
+        text=organisation_role_storage_text(role, organisation_concept_id),
         lang="en",
         context={"organisation_id": organisation_concept_id},
     )
@@ -161,7 +227,7 @@ def create_organisation_membership(
     }
 
 
-def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
+def get_user_memberships(user_concept_id: str) -> dict[str, Any]:
     """Retrieve all organisations a user is a member of and their roles.
 
     Args:
@@ -199,7 +265,7 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
         alt_org_ids = []
 
     merged_org_ids = []
-    seen_orgs: Set[str] = set()
+    seen_orgs: set[str] = set()
     for value in [*org_ids, *alt_org_ids]:
         if not isinstance(value, str):
             continue
@@ -233,7 +299,13 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
 
                 tv = TextValuesRepository.find_one({"_id": text_value_id})
                 if tv:
-                    org_role_map[org_id] = tv.get("text", "member")
+                    role, stored_org = parse_organisation_role_storage_text(
+                        tv.get("text"),
+                        context,
+                    )
+                    normalised_org_id = _normalise_concept_id(org_id)
+                    if role and stored_org == normalised_org_id:
+                        org_role_map[normalised_org_id] = role
 
     # Build result
     memberships = []
@@ -251,8 +323,8 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
 
 
 def get_organisation_members(
-    organisation_concept_id: str, role_filter: Optional[str] = None
-) -> Dict[str, Any]:
+    organisation_concept_id: str, role_filter: str | None = None
+) -> dict[str, Any]:
     """Retrieve all members of an organisation, optionally filtered by role.
 
     Args:
@@ -287,8 +359,8 @@ def get_organisation_members(
         }
     )
 
-    user_role_map: Dict[str, str] = {}
-    user_ids: Set[str] = set()
+    user_role_map: dict[str, str] = {}
+    user_ids: set[str] = set()
 
     for rel in role_relations:
         user_id = rel.get("subject_concept_id")
@@ -300,9 +372,16 @@ def get_organisation_members(
 
                 tv = TextValuesRepository.find_one({"_id": text_value_id})
                 if tv:
-                    user_role_map[user_id] = tv.get("text", "member")
-                else:
-                    user_role_map[user_id] = "member"
+                    role, stored_org = parse_organisation_role_storage_text(
+                        tv.get("text"),
+                        rel.get("context")
+                        if isinstance(rel.get("context"), dict)
+                        else {},
+                    )
+                    if role and stored_org == _normalise_concept_id(
+                        organisation_concept_id
+                    ):
+                        user_role_map[user_id] = role
 
     # Fallback: include concepts with membership edges even if no role text relation.
     org_id_variants = {organisation_concept_id}
@@ -349,9 +428,10 @@ def get_organisation_members(
     }
 
 
+@_coordinated_membership_mutation
 def update_user_role(
     user_concept_id: str, organisation_concept_id: str, new_role: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Update a user's role in an organisation.
 
     Args:
@@ -423,7 +503,7 @@ def update_user_role(
     upsert_text_for_concept(
         subject_concept_id=user_concept_id,
         predicate=ROLE_PREDICATE,
-        text=new_role,
+        text=organisation_role_storage_text(new_role, organisation_concept_id),
         lang="en",
         context={"organisation_id": organisation_concept_id},
     )
@@ -442,9 +522,13 @@ def update_user_role(
     }
 
 
+@_coordinated_membership_mutation
 def remove_organisation_membership(
-    user_concept_id: str, organisation_concept_id: str
-) -> Dict[str, Any]:
+    user_concept_id: str,
+    organisation_concept_id: str,
+    *,
+    semantic_authority_revoked: bool = False,
+) -> dict[str, Any]:
     """Remove a user from an organisation.
 
     Args:
@@ -468,6 +552,27 @@ def remove_organisation_membership(
         raise PermissionError(
             f"Cannot access organisation concept '{organisation_concept_id}'"
         )
+
+    # Membership and semantic publication authority are separate represented
+    # assertions, but leaving an organisation must not silently leave the
+    # stronger authority behind. The caller must revoke the semantic role via
+    # its governed lifecycle first, then attest that exact result here.
+    from .ontology_authority_role_service import authority_role_read_back
+    from .ontology_publication_authority_service import (
+        ORGANISATION_ONTOLOGY_ADMINISTRATOR_ROLE,
+    )
+
+    authority_read_back = authority_role_read_back(
+        subject_concept_id=user_concept_id,
+        role=ORGANISATION_ONTOLOGY_ADMINISTRATOR_ROLE,
+        organisation_concept_id=organisation_concept_id,
+    )
+    if authority_read_back.get("active") is True:
+        raise PermissionError(
+            "organisation_ontology_authority_must_be_revoked_before_membership"
+        )
+    if semantic_authority_revoked and authority_read_back.get("active") is not False:
+        raise RuntimeError("organisation_ontology_authority_revocation_not_verified")
 
     # Remove the memberOf relationship
     ConceptsRepository.mutate_relationship_edge(
@@ -518,8 +623,12 @@ def _check_relationship_exists(
 
 __all__ = [
     "create_organisation_membership",
-    "get_user_memberships",
     "get_organisation_members",
-    "update_user_role",
+    "get_user_memberships",
+    "is_user_member_of_organisation",
+    "organisation_role_storage_text",
+    "parse_organisation_role_storage_text",
     "remove_organisation_membership",
+    "resolve_user_organisation_membership",
+    "update_user_role",
 ]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.backend.integrations.internal_mcp.catalogue import _create_concepts
+from src.backend.integrations.internal_mcp.catalogue import (
+    _create_concepts as _governed_create_concepts,
+)
 from src.backend.services import (
     create_concepts_duplicate_guard_service,
     create_concepts_parent_resolution_service,
@@ -13,6 +15,8 @@ from src.backend.services.create_concepts_parent_resolution_service import (
     ParentResolutionResult,
 )
 from src.backend.vontology import utils_vontology
+
+_create_concepts = _governed_create_concepts.__wrapped__
 
 
 def test_create_concepts_coalesces_relationship_extent_sync_for_the_batch(

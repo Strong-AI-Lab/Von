@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 1 August 2026
+- **Last reviewed:** 13 August 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -85,7 +85,7 @@ live.
 | Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
 | Retrieval, memory, RAG, KB growth, or long-horizon state | [agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) |
-| Durable assertions, context-sensitive retrieval, hypotheses, publication or promotion, or user-, organisation-, project-, source-, theory-, or time-relative knowledge | [contextual knowledge evolution](engineering/contextual_knowledge_evolution.md) |
+| Durable assertions, context-sensitive retrieval, hypotheses, publication or promotion, or user-, organisation-, project-, source-, theory-, or time-relative knowledge | [contextual knowledge evolution](engineering/contextual_knowledge_evolution.md); for canonical ontology publication or scope change, the candidate [ontology publication authority boundary](engineering/ontology_publication_authority.md) |
 | Evaluation, benchmarks, or research-sensitive architecture | [agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) |
 | Minimal imposition, elicitation, or write policy | [minimal-imposition principle](engineering/minimal_imposition_design_principle.md) |
 | Frontend or browser acceptance | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md), at the validation tier justified by the claim |
@@ -109,6 +109,7 @@ from `AGENTS.md`.
 | [Prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) | Active playbook | Normative only within its stated prompt/model scope |
 | [Agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) | Active design guide | Normative only within its stated memory/retrieval scope |
 | [Contextual knowledge evolution](engineering/contextual_knowledge_evolution.md) | Active design guide | Advisory under `AGENTS.md` when assertion/context distinctions are material; it does not select a microtheory formalism or prove present implementation |
+| [Ontology publication authority](engineering/ontology_publication_authority.md) | Draft candidate design/implementation boundary | Candidate reference for `JVNAUTOSCI-2632`; distinguish semantic publication from visibility and operational administration, and verify target-environment implementation before relying on it |
 | [Agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) | Active protocol/design guide | Normative only for the evaluation or research claim being made |
 | [Minimal-imposition principle](engineering/minimal_imposition_design_principle.md) | Active principle | Explanatory guidance under `AGENTS.md`; it adds no independent per-task gates |
 | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md) | Active practical guide | Risk-tiered reference; browser evidence needs a dated locator when used |

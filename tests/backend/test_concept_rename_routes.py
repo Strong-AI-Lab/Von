@@ -13,7 +13,7 @@ def _make_concept_app() -> Flask:
     return app
 
 
-def test_concept_rename_route_forbids_non_admin_session(monkeypatch):
+def test_concept_rename_route_returns_semantic_authority_denial(monkeypatch):
     app = _make_concept_app()
     called = {"hit": False}
 
@@ -22,14 +22,19 @@ def test_concept_rename_route_forbids_non_admin_session(monkeypatch):
         return {"success": True}
 
     monkeypatch.setattr(
-        "src.backend.services.concept_rename_service.rename_concept",
-        _fake_rename,
+        "src.backend.server.routes.concept_routes._execute_governed_http_mutation",
+        lambda **_kwargs: {
+            "success": False,
+            "error_code": "organisation_ontology_admin_authority_required",
+            "authority_decision": {"allowed": False},
+        },
     )
+    monkeypatch.setattr("src.backend.services.concept_rename_service.rename_concept", _fake_rename)
 
     with app.test_client() as client:
         with client.session_transaction() as sess:
             sess["user_concept_id"] = "#V#member"
-            sess["role_in_org"] = "member"
+            sess["role_in_org"] = "admin"  # Deliberately not semantic authority.
 
         response = client.post(
             "/api/concepts/%23V%23old_name/rename",
@@ -40,29 +45,29 @@ def test_concept_rename_route_forbids_non_admin_session(monkeypatch):
     assert called["hit"] is False
 
 
-def test_concept_rename_route_defaults_to_preview_for_admin(monkeypatch):
+def test_concept_rename_route_uses_governed_semantic_command(monkeypatch):
     app = _make_concept_app()
     captured: dict[str, object] = {}
 
-    def _fake_rename(**kwargs):
+    def _fake_governed(**kwargs):
         captured.update(kwargs)
         return {
             "success": True,
-            "simulate": kwargs["simulate"],
-            "old_id": kwargs["old_id"],
-            "new_id": "#V#new_name",
-            "operations": [{"type": "update_concept_id"}],
+            "simulate": kwargs["arguments"]["simulate"],
+            "new_id": kwargs["arguments"]["new_id"],
+            "authority_decision": {"allowed": True},
         }
 
+    # The transport route is tested against a result already authorised by the
+    # shared command service; session role labels no longer decide authority.
     monkeypatch.setattr(
-        "src.backend.services.concept_rename_service.rename_concept",
-        _fake_rename,
+        "src.backend.server.routes.concept_routes._execute_governed_http_mutation",
+        _fake_governed,
     )
 
     with app.test_client() as client:
         with client.session_transaction() as sess:
-            sess["user_concept_id"] = "#V#admin"
-            sess["role_in_org"] = "admin"
+            sess["user_concept_id"] = "#V#semantic_admin"
 
         response = client.post(
             "/api/concepts/%23V%23old_name/rename",
@@ -73,67 +78,30 @@ def test_concept_rename_route_defaults_to_preview_for_admin(monkeypatch):
     payload = response.get_json() or {}
     assert payload["success"] is True
     assert payload["simulate"] is True
-    assert captured == {
-        "old_id": "#V#old_name",
+    assert captured["arguments"] == {
+        "concept_id": "#V#old_name",
         "new_id": "#V#new_name",
         "simulate": True,
-        "preserve_alias": True,
-        "skip_inaccessible": False,
+        "request_id": None,
     }
 
 
-def test_concept_rename_route_allows_owner_execution(monkeypatch):
+def test_concept_rename_route_coerces_string_booleans_for_governed_command(monkeypatch):
     app = _make_concept_app()
     captured: dict[str, object] = {}
 
-    def _fake_rename(**kwargs):
+    def _fake_governed(**kwargs):
         captured.update(kwargs)
-        return {
-            "success": True,
-            "simulate": kwargs["simulate"],
-            "executed": not kwargs["simulate"],
-            "old_id": kwargs["old_id"],
-            "new_id": "#V#new_name",
-        }
+        return {"success": True, "simulate": kwargs["arguments"]["simulate"]}
 
     monkeypatch.setattr(
-        "src.backend.services.concept_rename_service.rename_concept",
-        _fake_rename,
+        "src.backend.server.routes.concept_routes._execute_governed_http_mutation",
+        _fake_governed,
     )
 
     with app.test_client() as client:
         with client.session_transaction() as sess:
-            sess["user_concept_id"] = "#V#owner"
-            sess["role_in_org"] = "owner"
-
-        response = client.post(
-            "/api/concepts/%23V%23old_name/rename",
-            json={"new_id": "#V#new_name", "simulate": False},
-        )
-
-    assert response.status_code == 200
-    payload = response.get_json() or {}
-    assert payload["executed"] is True
-    assert captured["simulate"] is False
-
-
-def test_concept_rename_route_coerces_string_booleans(monkeypatch):
-    app = _make_concept_app()
-    captured: dict[str, object] = {}
-
-    def _fake_rename(**kwargs):
-        captured.update(kwargs)
-        return {"success": True, "simulate": kwargs["simulate"]}
-
-    monkeypatch.setattr(
-        "src.backend.services.concept_rename_service.rename_concept",
-        _fake_rename,
-    )
-
-    with app.test_client() as client:
-        with client.session_transaction() as sess:
-            sess["user_concept_id"] = "#V#admin"
-            sess["role_in_org"] = "admin"
+            sess["user_concept_id"] = "#V#semantic_admin"
 
         response = client.post(
             "/api/concepts/%23V%23old_name/rename",
@@ -146,6 +114,50 @@ def test_concept_rename_route_coerces_string_booleans(monkeypatch):
         )
 
     assert response.status_code == 200
-    assert captured["simulate"] is False
-    assert captured["preserve_alias"] is False
-    assert captured["skip_inaccessible"] is True
+    assert captured["arguments"] == {
+        "concept_id": "#V#old_name",
+        "new_id": "#V#new_name",
+        "simulate": False,
+        "request_id": None,
+    }
+    assert captured["preview"] is False
+
+
+def test_concept_rename_route_maps_canonical_lookup_failure_to_typed_not_found(monkeypatch):
+    app = _make_concept_app()
+
+    def _raise_lookup_error(**_kwargs):
+        raise LookupError("concept store unavailable")
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service.execute_governed_ontology_method",
+        _raise_lookup_error,
+    )
+
+    response = app.test_client().post(
+        "/api/concepts/%23V%23old_name/rename",
+        json={"new_id": "#V#new_name"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error_code"] == "ontology_mutation_target_not_found"
+
+
+def test_concept_rename_route_maps_store_failure_to_typed_unavailable(monkeypatch):
+    app = _make_concept_app()
+
+    def _raise_store_error(**_kwargs):
+        raise ConnectionError("ontology store unavailable")
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service.execute_governed_ontology_method",
+        _raise_store_error,
+    )
+
+    response = app.test_client().post(
+        "/api/concepts/%23V%23old_name/rename",
+        json={"new_id": "#V#new_name"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error_code"] == "ontology_mutation_store_unavailable"

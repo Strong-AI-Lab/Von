@@ -10,9 +10,6 @@ from ...services.annotation_extraction_service import (
     build_prompt_preview_with_output,
     get_last_llm_io,
 )
-from ...db.mongo_client import get_text_relations_collection
-from datetime import datetime, timezone
-
 annotations_bp = Blueprint("annotations", __name__)
 
 
@@ -78,6 +75,20 @@ def annotate_turn_route():
     suggestions = []
     auto_generated = False
     metadata = payload.get("metadata") or {}
+    if metadata.get("auto_upsert"):
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "error_code": "annotation_auto_upsert_not_governed",
+                    "error": (
+                        "Annotation auto-upsert is unavailable until it uses the "
+                        "trusted governed concept-creation path."
+                    ),
+                }
+            ),
+            410,
+        )
 
     def _norm_flag(val):
         if isinstance(val, bool):
@@ -198,25 +209,6 @@ def annotate_turn_route():
 
     response["suggestions"] = suggestions
 
-    # Optionally, the caller can request auto-upsert via a flag in metadata
-    if metadata.get("auto_upsert"):
-        # For now, only attempt to upsert if a single span and no candidates
-        try:
-            for s in suggestions:
-                if not s.get("candidates"):
-                    span = s.get("span")
-                    # Build a basic concept record
-                    concept_payload = {
-                        "name": span.get("text"),
-                        "concept_id": None,
-                        "vontology_path": metadata.get("vontology_path"),
-                    }
-                    if hasattr(concept_service, "create_concept"):
-                        created = concept_service.create_concept(**concept_payload)
-                        s["created"] = created
-        except Exception as e:
-            current_app.logger.exception(f"Error during auto_upsert: {e}")
-
     return jsonify(response), 200
 
 
@@ -226,53 +218,19 @@ def accept_annotation_route():
 
     Expected JSON: { turn_id: str, span: {start, end, text}, candidate: {id|concept_id|name}, user_id?: str }
     """
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify(error="Request body must be JSON"), 400
-
-    # Extract user context for request-scoped identity
-    user_ctx = _extract_user_context(payload)
-
-    # Basic validation
-    turn_id = payload.get("turn_id")
-    span = payload.get("span")
-    candidate = payload.get("candidate")
-    # Use context user_id if available, fallback to legacy user_id field
-    user_id = user_ctx.get("user_id") or payload.get("user_id") or "unknown"
-    if not turn_id or not span or not candidate:
-        return jsonify(error="turn_id, span and candidate are required"), 400
-
-    # Log context for audit trail
-    current_app.logger.info(
-        f"[annotations/accept] user={user_id} org={user_ctx.get('org_id')} turn={turn_id} concept={candidate.get('concept_id')}"
+    return (
+        jsonify(
+            {
+                "status": "error",
+                "error_code": "annotation_assertion_mutation_not_governed",
+                "error": (
+                    "Annotation assertion persistence is unavailable until it uses "
+                    "the actor-scoped assertion lifecycle."
+                ),
+            }
+        ),
+        410,
     )
-
-    # Build a relation doc to store in text_relations collection
-    try:
-        coll = get_text_relations_collection()
-        if coll is None:
-            return jsonify(error="Database not available"), 500
-
-        relation = {
-            "subject_concept_id": candidate.get("concept_id")
-            or candidate.get("id")
-            or candidate.get("conceptId"),
-            "predicate": "mentioned_in_text",
-            "object_text": span.get("text"),
-            "object_span": {"start": span.get("start"), "end": span.get("end")},
-            "source": {
-                "turn_id": turn_id,
-                "user_id": user_id,
-            },
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
-        }
-        coll.insert_one(relation)
-    except Exception as e:
-        current_app.logger.exception(f"Error persisting annotation accept: {e}")
-        return jsonify(error="failed to persist annotation"), 500
-
-    return jsonify({"status": "accepted"}), 200
 
 
 @annotations_bp.route("/revoke", methods=["POST"])
@@ -281,47 +239,19 @@ def revoke_annotation_route():
 
     Expected JSON: { turn_id?: str, candidate_id?: str, object_text?: str }
     """
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify(error="Request body must be JSON"), 400
-
-    turn_id = payload.get("turn_id")
-    candidate_id = payload.get("candidate_id")
-    object_text = payload.get("object_text")
-
-    if not (turn_id or candidate_id or object_text):
-        return (
-            jsonify(
-                error="must provide turn_id or candidate_id or object_text to revoke"
-            ),
-            400,
-        )
-
-    try:
-        coll = get_text_relations_collection()
-        if coll is None:
-            return jsonify(error="Database not available"), 500
-
-        query = {}
-        if turn_id:
-            query["source.turn_id"] = turn_id
-        if candidate_id:
-            query["subject_concept_id"] = str(candidate_id)
-        if object_text and not candidate_id:
-            # if object_text provided and no candidate specified, match by object_text
-            query["object_text"] = object_text
-
-        if not query:
-            return jsonify(error="no valid filter for revoke"), 400
-
-        result = coll.delete_many(query)
-        return (
-            jsonify({"status": "revoked", "deleted_count": result.deleted_count}),
-            200,
-        )
-    except Exception as e:
-        current_app.logger.exception(f"Error revoking annotation: {e}")
-        return jsonify(error="failed to revoke annotation"), 500
+    return (
+        jsonify(
+            {
+                "status": "error",
+                "error_code": "annotation_assertion_mutation_not_governed",
+                "error": (
+                    "Annotation assertion revocation is unavailable until it uses "
+                    "the actor-scoped assertion lifecycle."
+                ),
+            }
+        ),
+        410,
+    )
 
 
 @annotations_bp.route("/manual_instance", methods=["POST"])

@@ -32,7 +32,7 @@ def _build_gateway() -> InternalMCPGateway:
     )
 
 
-def test_uncertain_relationship_tools_gateway_create_list_promote_flow() -> None:
+def test_uncertain_relationship_tools_gateway_denies_sessionless_promotion() -> None:
     gateway = _build_gateway()
 
     ConceptsRepository.insert_one({"concept_id": "#V#alice", "relationships": {}})
@@ -64,12 +64,20 @@ def test_uncertain_relationship_tools_gateway_create_list_promote_flow() -> None
         "promote_uncertain_relationship_assertion",
         {"source_id": "#V#alice", "assertion_id": assertion_id},
     ).payload
-    assert promoted.get("success") is True
-    assert (promoted.get("assertion") or {}).get("status") == "promoted"
+    assert promoted.get("success") is False
+    assert promoted.get("error_code") == "ontology_agent_delegation_required"
+    assert promoted.get("effect_status") == "not_started"
+    assert promoted.get("changed") is False
 
     source_doc = ConceptsRepository.find_one({"concept_id": "#V#alice"})
     relationships = (source_doc or {}).get("relationships") or {}
-    assert "#V#strong_ai_lab" in (relationships.get("related_to") or [])
+    assert "#V#strong_ai_lab" not in (relationships.get("related_to") or [])
+
+    unchanged = gateway.invoke(
+        "list_uncertain_relationship_assertions",
+        {"source_id": "#V#alice", "predicate": "#V#related_to"},
+    ).payload
+    assert (unchanged.get("assertions") or [{}])[0].get("status") == "proposed"
 
 
 def test_uncertain_relationship_tools_gateway_reject_and_migrate_legacy() -> None:
@@ -104,4 +112,3 @@ def test_uncertain_relationship_tools_gateway_reject_and_migrate_legacy() -> Non
     ).payload
     assert rejected.get("success") is True
     assert (rejected.get("assertion") or {}).get("status") == "rejected"
-

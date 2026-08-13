@@ -731,6 +731,8 @@ TEXT_RELATIONS_COLLECTION_NAME = (
     "text_relations"  # New collection linking concepts to text values
 )
 SCOPED_KNOWLEDGE_ASSERTIONS_COLLECTION_NAME = "scoped_knowledge_assertions"
+ONTOLOGY_AUTHORITY_DELEGATIONS_COLLECTION_NAME = "ontology_authority_delegations"
+ONTOLOGY_MUTATION_RECEIPTS_COLLECTION_NAME = "ontology_mutation_receipts"
 META_RELATIONS_COLLECTION_NAME = "meta_relations"  # New collection for relation elicitation meta-data (JVNAUTOSCI-371)
 RELATIONSHIP_EXTENT_INDEX_COLLECTION_NAME = "relationship_extent_index"
 
@@ -1894,6 +1896,79 @@ def _ensure_meta_relations_indexes(coll: Collection) -> None:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
+def _ensure_ontology_authority_delegation_indexes(coll: Collection) -> None:
+    """Ensure short-lived semantic-authority grants remain exact and auditable."""
+
+    coll.create_index(
+        [("delegation_id", ASCENDING)],
+        name="delegation_id_unique",
+        unique=True,
+    )
+    coll.create_index(
+        [
+            ("grantor_actor_concept_id", ASCENDING),
+            ("status", ASCENDING),
+            ("expires_at", ASCENDING),
+        ],
+        name="grantor_status_expiry",
+    )
+    coll.create_index(
+        [
+            ("delegate_concept_id", ASCENDING),
+            ("audience", ASCENDING),
+            ("status", ASCENDING),
+            ("expires_at", ASCENDING),
+        ],
+        name="delegate_audience_status_expiry",
+    )
+    coll.create_index([("issued_at", DESCENDING)], name="issued_at_desc")
+
+
+def _ensure_ontology_mutation_receipt_indexes(coll: Collection) -> None:
+    """Ensure mutation decisions and canonical read-backs are retrievable."""
+
+    coll.create_index(
+        [("receipt_id", ASCENDING)],
+        name="receipt_id_unique",
+        unique=True,
+    )
+    # The first candidate indexed key+fingerprint, which allowed one actor to
+    # reuse a key for a different effect and accidentally made identical keys
+    # collide across actors. This collection is introduced with the authority
+    # feature, so replace that unreleased shape with an actor-bound claim.
+    existing_indexes = coll.index_information()
+    if "idempotency_intent_unique" in existing_indexes:
+        coll.drop_index("idempotency_intent_unique")
+    coll.create_index(
+        [
+            ("actor_concept_id", ASCENDING),
+            ("idempotency_key", ASCENDING),
+        ],
+        name="actor_idempotency_unique",
+        unique=True,
+        partialFilterExpression={
+            "idempotency_key": {"$exists": True, "$type": "string"},
+        },
+    )
+    coll.create_index(
+        [
+            ("actor_concept_id", ASCENDING),
+            ("created_at", DESCENDING),
+        ],
+        name="actor_created_at_desc",
+    )
+    coll.create_index(
+        [
+            ("publication_context.kind", ASCENDING),
+            ("publication_context.concept_id", ASCENDING),
+            ("created_at", DESCENDING),
+        ],
+        name="publication_context_created_at_desc",
+    )
+    coll.create_index([("status", ASCENDING)], name="status_1")
+    coll.create_index([("updated_at", DESCENDING)], name="updated_at_desc")
+
+
 def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
     existing = [idx for idx in coll.list_indexes() if isinstance(idx, Mapping)]
     existing_names = {str(idx.get("name") or "") for idx in existing if idx.get("name")}
@@ -2194,6 +2269,32 @@ def get_scoped_knowledge_assertions_collection() -> Collection | None:
             db,
             SCOPED_KNOWLEDGE_ASSERTIONS_COLLECTION_NAME,
             _ensure_scoped_knowledge_assertions_indexes,
+        )
+    return None
+
+
+def get_ontology_authority_delegations_collection() -> Collection | None:
+    """Return revocable, bounded ontology-authority delegation records."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            ONTOLOGY_AUTHORITY_DELEGATIONS_COLLECTION_NAME,
+            _ensure_ontology_authority_delegation_indexes,
+        )
+    return None
+
+
+def get_ontology_mutation_receipts_collection() -> Collection | None:
+    """Return provenance-bearing semantic mutation decision receipts."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            ONTOLOGY_MUTATION_RECEIPTS_COLLECTION_NAME,
+            _ensure_ontology_mutation_receipt_indexes,
         )
     return None
 

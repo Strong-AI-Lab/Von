@@ -15,21 +15,19 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from datetime import datetime, timezone
     from src.backend.vontology.utils_vontology import (
         get_vontology_node_content,
         get_vontology_tree,
-        simulate_or_delete_concept,
     )
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_service import (
         enrich_concept_with_text_relations,
         get_concept_by_concept_id,
         get_concept_display_name_with_names_fallback,
-        update_concept,
     )
     from src.backend.services.concept_relation_service import (
         build_concept_relations_payload,
@@ -47,24 +45,10 @@ if TYPE_CHECKING:
         derive_actor_context_from_namespace,
     )
     from src.backend.services.text_value_service import (
-        delete_text_relation,
-        delete_text_relation_by_predicate_and_text,
         get_text_relations_summary,
         get_texts_for_concept,
-        update_text_relation_text,
-        upsert_singleton_text_relation,
-        upsert_text_for_concept,
-    )
-    from src.backend.services.text_relation_predicate_validation_service import (
-        TextRelationPredicateResolutionError,
-        resolve_text_relation_predicate_for_write,
-    )
-    from src.backend.services.rag_text_relation_change_hook_service import (
-        maybe_delete_text_relation_doc_from_rag,
-        maybe_sync_concept_text_relations_to_rag,
     )
     from src.backend.services.annotation_extraction_service import extract_annotations
-    from src.backend.services.concept_merge_service import merge_concepts
     from src.backend.services.settings_service import (
         get_preferred_language,
         get_setting,
@@ -265,7 +249,6 @@ _bind_imports(
     [
         "get_vontology_node_content",
         "get_vontology_tree",
-        "simulate_or_delete_concept",
     ],
 )
 _bind_imports(
@@ -278,7 +261,6 @@ _bind_imports(
         "get_concept_display_name_with_names_fallback",
         "get_concept_by_concept_id",
         "enrich_concept_with_text_relations",
-        "update_concept",
     ],
 )
 _bind_imports(
@@ -305,34 +287,14 @@ _bind_imports(
 _bind_imports(
     "src.backend.services.text_value_service",
     [
-        "upsert_text_for_concept",
         "get_texts_for_concept",
         "get_text_relations_summary",
-        "upsert_singleton_text_relation",
-        "update_text_relation_text",
-        "delete_text_relation",
-        "delete_text_relation_by_predicate_and_text",
-    ],
-)
-_bind_imports(
-    "src.backend.services.text_relation_predicate_validation_service",
-    [
-        "TextRelationPredicateResolutionError",
-        "resolve_text_relation_predicate_for_write",
-    ],
-)
-_bind_imports(
-    "src.backend.services.rag_text_relation_change_hook_service",
-    [
-        "maybe_delete_text_relation_doc_from_rag",
-        "maybe_sync_concept_text_relations_to_rag",
     ],
 )
 _bind_imports(
     "src.backend.services.annotation_extraction_service",
     ["extract_annotations"],
 )
-_bind_imports("src.backend.services.concept_merge_service", ["merge_concepts"])
 _bind_imports(
     "src.backend.services.settings_service",
     [
@@ -1031,12 +993,79 @@ _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS = frozenset(
     }
 )
 
+_STDIO_GOVERNED_ONTOLOGY_METHODS = {
+    "create_concepts": "create_concepts",
+    "upsert_text_relation": "upsert_text_relation",
+    "update_text_relation": "update_text_relation",
+    "delete_text_relation": "delete_text_relation",
+    "upsert_singleton_text_relation": "upsert_singleton_text_relation",
+    "add_names": "add_names_to_concept",
+    "add_relationship": "add_relationship",
+    "remove_relationship": "remove_relationship",
+    "remove_relationships_bulk": "remove_relationships_bulk",
+    "delete_concept": "delete_concept",
+    "merge_concepts": "merge_concepts",
+    "update_concept": "update_concept",
+}
+
+# A direct stdio client has no authenticated user or organisation session. Do
+# not let an MCP payload make its eventual artefacts appear to have been
+# created by, scoped to, or authorised by an arbitrary person or organisation.
+# The shared authority resolver derives any actual actor from trusted server
+# context; here the only admissible authority carrier is the opaque,
+# server-issued delegation above.
+_STDIO_UNTRUSTED_ONTOLOGY_AUTHORITY_FIELDS = frozenset(
+    {
+        "actor",
+        "actor_concept_id",
+        "actor_id",
+        "admin",
+        "administrator",
+        "allow_admin",
+        "authority",
+        "authority_role",
+        "created_by",
+        "created_by_concept_id",
+        "namespace",
+        "global_admin",
+        "is_admin",
+        "is_operator",
+        "organisation_concept_id",
+        "organisation_id",
+        "organization_concept_id",
+        "organization_id",
+        "org_id",
+        "operator",
+        "operator_override",
+        "role",
+        "roles",
+        "user",
+        "user_concept_id",
+        "user_id",
+    }
+)
+
+
+def _strip_untrusted_ontology_authority_payload(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Drop client-supplied identity/scope claims before a canonical write."""
+
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key not in _STDIO_UNTRUSTED_ONTOLOGY_AUTHORITY_FIELDS
+    }
+
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ignore[misc]
     """Handle tool calls by delegating to specific handlers."""
 
-    parsed_arguments = arguments if isinstance(arguments, dict) else {}
+    # Never mutate the object supplied by the MCP implementation/caller: the
+    # authority carrier is removed before dispatch and should not leak into
+    # nested handler use or caller-side retry state.
+    parsed_arguments = dict(arguments) if isinstance(arguments, dict) else {}
     handler = _TOOL_HANDLERS.get(name)
     if not handler:
         surface_diagnostic = classify_stdio_missing_tool(name)
@@ -1096,7 +1125,48 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                 )
             ]
 
+    if name == "undo_relationship_removal":
+        # This action currently resolves its target only from an undo token;
+        # stdio must not execute it until that selector is bound to the shared
+        # ontology-mutation authority decision.  Keeping the operator write
+        # toggle above is intentional: it remains a defence-in-depth safety
+        # gate, never semantic authority.
+        return [
+            _json_error(
+                "Relationship undo is unavailable on direct stdio until its target is governed.",
+                error_code="ontology_mutation_not_governed",
+                suggestions=[
+                    "Use a governed HTTP or internal-MCP mutation path that can bind the undo token to its canonical target.",
+                    "Use preview_remove_relationship or canonical read-back to inspect the relationship first.",
+                ],
+            )
+        ]
+
     try:
+        governed_method = _STDIO_GOVERNED_ONTOLOGY_METHODS.get(name)
+        if governed_method:
+            # Stdio has no independently authenticated actor context. Binding
+            # a delegation grantor before matching caller arguments to the
+            # stored exact intent would expose a private read oracle, so this
+            # surface remains fail-closed until it executes server-stored
+            # canonical arguments directly.
+            return [
+                _json_text(
+                    {
+                        "success": False,
+                        "effect_status": "not_started",
+                        "mutation_outcome": "not_started",
+                        "changed": False,
+                        "error_code": (
+                            "ontology_sessionless_delegation_not_supported"
+                        ),
+                        "error": (
+                            "Sessionless ontology delegation execution is "
+                            "unavailable; use an actor-bound trusted surface."
+                        ),
+                    }
+                )
+            ]
         if name in _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS:
             # This stdio server is the deliberately local coding/operator
             # surface.  Bind that provenance only around its direct Gmail
@@ -1666,70 +1736,11 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle upsert_text_relation tool call."""
-    namespace = (
-        arguments.get("namespace")
-        if isinstance(arguments.get("namespace"), str)
-        else None
-    )
-    concept_id = arguments.get("concept_id")
-    predicate = arguments.get("predicate")
-    text = arguments.get("text")
-    language = arguments.get("language", "en-NZ")
-    context = arguments.get("context")
+    """Use the same governed command as chat, workflow, and internal MCP."""
 
-    if not concept_id:
-        return [_json_text({"success": False, "error": "Missing concept_id parameter"})]
-    if not predicate:
-        return [_json_text({"success": False, "error": "Missing predicate parameter"})]
-    if not text:
-        return [_json_text({"success": False, "error": "Missing text parameter"})]
-
-    try:
-        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
-        storage_predicate = predicate_resolution.storage_predicate
-        result = upsert_text_for_concept(
-            subject_concept_id=concept_id,
-            predicate=storage_predicate,
-            text=text,
-            lang=language,
-            context=context,
-        )
-
-        maybe_sync_concept_text_relations_to_rag(
-            namespace=namespace,
-            concept_id=concept_id,
-            predicate=storage_predicate,
-        )
-
-        text_preview = text[:100] + "..." if len(text) > 100 else text
-        payload = {
-            "success": True,
-            "text_value_id": str(result.get("text_value_id")),
-            "relation_id": str(result.get("relation_id")),
-            "relation_created": result.get("relation_created"),
-            "predicate": storage_predicate,
-            "input_predicate": predicate_resolution.input_predicate,
-            "predicate_concept_id": predicate_resolution.predicate_concept_id,
-            "text_preview": text_preview,
-            "language": language,
-        }
-        return [_json_text(payload)]
-    except TextRelationPredicateResolutionError as exc:
-        return [
-            _json_error(
-                str(exc),
-                error_code=exc.error_code,
-                details=exc.details,
-                suggestions=exc.suggestions,
-            )
-        ]
-    except Exception as exc:
-        return [
-            _json_text(
-                {"success": False, "error": f"Failed to upsert text relation: {exc}"}
-            )
-        ]
+    return [
+        _json_text(internal_mcp_catalogue_module._upsert_text_relation(**arguments))
+    ]
 
 
 async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextContent]:
@@ -1802,284 +1813,25 @@ def _warn_if_underscore_replaced(old_text: str, new_text: str) -> list[str]:
 
 
 async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle update_text_relation tool call."""
-    namespace = (
-        arguments.get("namespace")
-        if isinstance(arguments.get("namespace"), str)
-        else None
-    )
-    concept_id = arguments.get("concept_id")
-    relation_id = arguments.get("relation_id")
-    new_text = arguments.get("new_text")
-    language = arguments.get("language", "en-NZ")
+    """Use the shared canonical mutation command once catalogue-governed."""
 
-    if not concept_id:
-        return [
-            _json_error(
-                "Missing concept_id parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide the concept_id that owns the text relation",
-                    "Use fetch_concept with include_text_relations_arg1=true to see available relations",
-                ],
-            )
-        ]
-    if not relation_id:
-        return [
-            _json_error(
-                "Missing relation_id parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide the relation_id of the text relation to update",
-                    "Use fetch_concept with include_text_relations_arg1=true to find relation IDs",
-                ],
-            )
-        ]
-    if not new_text:
-        return [
-            _json_error(
-                "Missing new_text parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide the new_text content to replace the existing text"
-                ],
-            )
-        ]
-
-    try:
-        result = update_text_relation_text(
-            subject_concept_id=concept_id,
-            relation_id=relation_id,
-            new_text=new_text,
-            lang=language,
-        )
-
-        maybe_sync_concept_text_relations_to_rag(
-            namespace=namespace,
-            concept_id=concept_id,
-        )
-
-        old_text = str(result.get("old_text", ""))
-        old_preview = old_text[:100]
-        new_preview = new_text[:100] + "..." if len(new_text) > 100 else new_text
-        warnings = _warn_if_underscore_replaced(old_text, new_text)
-
-        payload = {
-            "success": True,
-            "relation_id": relation_id,
-            "old_text_preview": old_preview,
-            "new_text_preview": new_preview,
-            "text_value_id": str(result.get("text_value_id")),
-        }
-        if warnings:
-            payload["warnings"] = warnings
-        return [_json_text(payload)]
-    except Exception as exc:
-        return [
-            _json_error(
-                f"Failed to update text relation: {exc}",
-                error_code="update_failed",
-                suggestions=[
-                    "Verify the concept_id and relation_id exist",
-                    "Check that new_text is a valid string",
-                ],
-                related_concept_ids=[concept_id] if concept_id else None,
-            )
-        ]
+    return [
+        _json_text(internal_mcp_catalogue_module._update_text_relation(**arguments))
+    ]
 
 
 async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle delete_text_relation tool call."""
-    namespace = (
-        arguments.get("namespace")
-        if isinstance(arguments.get("namespace"), str)
-        else None
-    )
-    concept_id = arguments.get("concept_id")
-    relation_id = arguments.get("relation_id")
-    predicate = arguments.get("predicate")
-    text = arguments.get("text")
-    language = arguments.get("language")
-    garbage_collect = bool(arguments.get("garbage_collect"))
+    """Use the same governed command as chat, workflow, and internal MCP."""
 
-    if not concept_id:
-        return [
-            _json_error(
-                "Missing concept_id parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide the concept_id that owns the text relation",
-                    "Use fetch_concept with include_text_relations_arg1=true to see available relations",
-                ],
-            )
-        ]
-
-    try:
-        if relation_id:
-            # Delete by relation ID (preferred)
-            result = delete_text_relation(
-                subject_concept_id=concept_id,
-                relation_id=relation_id,
-                garbage_collect=garbage_collect,
-            )
-
-            maybe_delete_text_relation_doc_from_rag(
-                namespace=namespace,
-                relation_id=relation_id,
-            )
-
-            payload = {
-                "success": True,
-                "deleted_relation_id": relation_id,
-                "deleted_text_preview": None,
-                "text_value_cleaned_up": bool(
-                    result.get(
-                        "orphaned_text_value_deleted",
-                        result.get("text_value_cleaned_up", False),
-                    )
-                ),
-            }
-        elif predicate and text:
-            # Delete by predicate + text match
-            result = delete_text_relation_by_predicate_and_text(
-                subject_concept_id=concept_id,
-                predicate=predicate,
-                text=text,
-                lang=language,
-                garbage_collect=garbage_collect,
-            )
-
-            maybe_delete_text_relation_doc_from_rag(
-                namespace=namespace,
-                relation_id=result.get("relation_id"),
-            )
-
-            payload = {
-                "success": True,
-                "deleted_relation_id": result.get("relation_id"),
-                "deleted_text_preview": text[:100],
-                "text_value_cleaned_up": result.get(
-                    "orphaned_text_value_deleted", False
-                ),
-            }
-        else:
-            return [
-                _json_error(
-                    "Must provide either relation_id or both predicate and text",
-                    error_code="invalid_parameter",
-                    suggestions=[
-                        "Provide relation_id for exact deletion",
-                        "Or provide both predicate and text for pattern match deletion",
-                    ],
-                )
-            ]
-
-        return [_json_text(payload)]
-    except Exception as exc:
-        return [
-            _json_error(
-                f"Failed to delete text relation: {exc}",
-                error_code="operation_failed",
-                suggestions=["Verify the concept_id and identifiers are correct"],
-                related_concept_ids=[concept_id] if concept_id else None,
-            )
-        ]
+    return [
+        _json_text(internal_mcp_catalogue_module._delete_text_relation(**arguments))
+    ]
 
 
 async def _handle_add_names(arguments: dict[str, Any]) -> list[TextContent]:
-    concept_id = arguments.get("concept_id")
-    names = arguments.get("names")
-    if not concept_id:
-        return [
-            _json_error(
-                "Missing concept_id parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide the concept_id of the concept to add names to",
-                    "Use search_concepts to find the concept first",
-                ],
-            )
-        ]
-    if not names or not isinstance(names, list):
-        return [
-            _json_error(
-                "Missing or invalid names array",
-                error_code="invalid_parameter",
-                suggestions=[
-                    "Provide names as an array of strings or objects with name, language, name_type",
-                    "Example: ['Name1', {'name': 'Name2', 'language': 'en-NZ', 'name_type': 'NL'}]",
-                ],
-            )
-        ]
-
-    concept = ConceptsRepository.find_one({"concept_id": concept_id})
-    if not concept:
-        return [
-            _json_error(
-                f"Concept '{concept_id}' not found",
-                error_code="concept_not_found",
-                suggestions=[
-                    "Check the concept_id spelling",
-                    "Use search_concepts to verify the concept exists",
-                ],
-                related_concept_ids=[concept_id],
-            )
-        ]
-
-    results: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    for idx, name_obj in enumerate(names):
-        if isinstance(name_obj, str):
-            name_text = name_obj
-            language = "en-NZ"
-            name_type = "NL"
-        elif isinstance(name_obj, dict):
-            name_text = name_obj.get("name")
-            language = name_obj.get("language", "en-NZ")
-            name_type = name_obj.get("name_type", "NL")
-        else:
-            errors.append({"index": idx, "error": "Invalid name format"})
-            continue
-
-        if not name_text or not isinstance(name_text, str) or not name_text.strip():
-            errors.append({"index": idx, "error": "Missing or invalid name text"})
-            continue
-
-        try:
-            result = upsert_text_for_concept(
-                subject_concept_id=concept_id,
-                predicate="hasName",
-                text=name_text.strip(),
-                lang=language,
-                context={"name_type": name_type},
-            )
-            if result:
-                results.append(
-                    {
-                        "index": idx,
-                        "name": name_text.strip(),
-                        "language": language,
-                        "name_type": name_type,
-                        "text_value_id": str(result.get("text_value_id")),
-                        "relation_id": str(result.get("relation_id")),
-                    }
-                )
-            else:
-                errors.append(
-                    {"index": idx, "name": name_text, "error": "Failed to add"}
-                )
-        except Exception as exc:
-            errors.append({"index": idx, "name": name_text, "error": str(exc)})
-
-    payload = {
-        "success": len(errors) == 0,
-        "concept_id": concept_id,
-        "added_count": len(results),
-        "error_count": len(errors),
-        "results": results,
-        "errors": errors if errors else [],
-    }
-    return [_json_text(payload)]
+    return [
+        _json_text(internal_mcp_catalogue_module._add_names_to_concept(**arguments))
+    ]
 
 
 async def _handle_get_tree(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2412,77 +2164,13 @@ async def _handle_get_text_relations_summary(
 async def _handle_upsert_singleton_text_relation(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    concept_id = arguments.get("concept_id")
-    predicate = arguments.get("predicate")
-    text = arguments.get("text")
-
-    if not concept_id:
-        return [
-            _json_error(
-                "Missing concept_id parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide the concept_id to add the text relation to",
-                    "Use search_concepts to find the concept first",
-                ],
+    return [
+        _json_text(
+            internal_mcp_catalogue_module._upsert_singleton_text_relation(
+                **arguments
             )
-        ]
-    if not predicate:
-        return [
-            _json_error(
-                "Missing predicate parameter",
-                error_code="missing_parameter",
-                suggestions=[
-                    "Provide a predicate (e.g. 'hasDescription', 'hasContent', 'hasName')",
-                    "Use search_concepts to find predicate concepts",
-                ],
-            )
-        ]
-    if not text:
-        return [
-            _json_error(
-                "Missing text parameter",
-                error_code="missing_parameter",
-                suggestions=["Provide the text content to associate with the concept"],
-            )
-        ]
-
-    try:
-        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
-        payload = upsert_singleton_text_relation(
-            subject_concept_id=concept_id,
-            predicate=predicate_resolution.storage_predicate,
-            text=text,
-            lang=arguments.get("language", "en-NZ"),
-            policy=arguments.get("policy", "replace_others"),
-            provenance=arguments.get("provenance"),
-            context=arguments.get("context"),
-            garbage_collect=arguments.get("garbage_collect", True),
         )
-        payload["input_predicate"] = predicate_resolution.input_predicate
-        payload["predicate_concept_id"] = predicate_resolution.predicate_concept_id
-        return [_json_text(payload)]
-    except TextRelationPredicateResolutionError as exc:
-        return [
-            _json_error(
-                str(exc),
-                error_code=exc.error_code,
-                details=exc.details,
-                suggestions=exc.suggestions,
-            )
-        ]
-    except Exception as exc:
-        return [
-            _json_error(
-                f"Failed to upsert singleton text relation: {exc}",
-                error_code="operation_failed",
-                suggestions=[
-                    "Verify the concept_id exists",
-                    "Check that predicate is a valid predicate concept_id or name",
-                ],
-                related_concept_ids=[concept_id],
-            )
-        ]
+    ]
 
 
 async def _handle_audit_concept_text_relations(
@@ -3560,7 +3248,10 @@ async def _handle_delete_concept(arguments: dict[str, Any]) -> list[TextContent]
                 ],
             )
         ]
-    result = simulate_or_delete_concept(concept_id, execute=not simulate)
+    result = internal_mcp_catalogue_module._delete_concept(
+        concept_id=concept_id,
+        simulate=simulate,
+    )
     return [_json_text(result)]
 
 
@@ -3579,7 +3270,11 @@ async def _handle_merge_concepts(arguments: dict[str, Any]) -> list[TextContent]
                 ],
             )
         ]
-    result = merge_concepts(source_id, target_id, simulate=simulate)
+    result = internal_mcp_catalogue_module._merge_concepts(
+        source_id=source_id,
+        target_id=target_id,
+        simulate=simulate,
+    )
     return [_json_text(result)]
 
 
@@ -3609,22 +3304,11 @@ async def _handle_update_concept(arguments: dict[str, Any]) -> list[TextContent]
             )
         ]
     try:
-        result = update_concept(concept_id=concept_id, update_data=update_data)
-        if result:
-            return [
-                _json_text(
-                    {
-                        "success": True,
-                        "concept_id": concept_id,
-                        "updated_fields": list(update_data.keys()),
-                    }
-                )
-            ]
-        return [
-            _json_text(
-                {"error": "Update failed or concept not found", "success": False}
-            )
-        ]
+        result = internal_mcp_catalogue_module._update_concept(
+            concept_id=concept_id,
+            update_data=update_data,
+        )
+        return [_json_text(result)]
     except Exception as exc:
         return [_json_text({"error": str(exc), "success": False})]
 

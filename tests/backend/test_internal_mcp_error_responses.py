@@ -117,7 +117,9 @@ class TestHandlerErrorStructure:
         assert method_def is not None
 
         # Missing source_concept_id - access handler via method_def.handler
-        result = method_def.handler(
+        # Exercise handler validation below the separately tested governed
+        # authority wrapper.
+        result = method_def.handler.__wrapped__(
             target_concept_id="#V#target", predicate_id="#V#pred"
         )
 
@@ -137,7 +139,7 @@ class TestHandlerErrorStructure:
         assert method_def is not None
 
         # Missing all required params
-        result = method_def.handler()
+        result = method_def.handler.__wrapped__()
 
         assert result["success"] is False
         assert "error_code" in result
