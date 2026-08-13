@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 
 import pytest
+from bson import ObjectId
 
 from src.backend.services import von_operational_administrator_service as service
 
@@ -97,6 +98,42 @@ def test_bootstrap_grant_and_revoke_have_exact_read_back(monkeypatch) -> None:
         subject_concept_id="#V#other"
     )
     assert revoked["canonical_read_back"]["active"] is False
+
+
+def test_role_read_back_resolves_string_text_reference_to_object_id(
+    monkeypatch,
+) -> None:
+    relation_id = ObjectId()
+    text_id = ObjectId()
+    monkeypatch.setattr(
+        service.TextRelationsRepository,
+        "find",
+        lambda _query: [
+            {
+                "_id": relation_id,
+                "subject_concept_id": "#V#michael",
+                "predicate": service.VON_OPERATIONAL_ADMINISTRATOR_PREDICATE,
+                "object_text_id": str(text_id),
+                "context": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        service.TextValuesRepository,
+        "find_one",
+        lambda query: (
+            {"_id": text_id, "text": service._ROLE_STORAGE_TEXT}
+            if query.get("_id") == text_id
+            else None
+        ),
+    )
+
+    read_back = service.von_operational_administrator_read_back(
+        subject_concept_id="#V#michael"
+    )
+
+    assert read_back["active"] is True
+    assert read_back["grants"][0]["relation_id"] == str(relation_id)
 
 
 def test_last_operational_administrator_cannot_be_revoked(monkeypatch) -> None:

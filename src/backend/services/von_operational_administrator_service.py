@@ -12,6 +12,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
 from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
@@ -72,7 +75,20 @@ def _role_rows(subject_concept_id: str | None = None) -> list[dict[str, Any]]:
     for relation in TextRelationsRepository.find(query):
         if not isinstance(relation, Mapping):
             continue
-        text = TextValuesRepository.find_one({"_id": relation.get("object_text_id")})
+        object_text_id = relation.get("object_text_id")
+        text = None
+        candidates: list[object] = []
+        if object_text_id is not None:
+            try:
+                candidates.append(ObjectId(str(object_text_id)))
+            except (InvalidId, TypeError):
+                pass
+            if object_text_id not in candidates:
+                candidates.append(object_text_id)
+        for candidate in candidates:
+            text = TextValuesRepository.find_one({"_id": candidate})
+            if isinstance(text, Mapping):
+                break
         if not isinstance(text, Mapping) or text.get("text") != _ROLE_STORAGE_TEXT:
             continue
         subject_id = _normalise_concept_id(relation.get("subject_concept_id"))
