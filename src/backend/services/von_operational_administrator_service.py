@@ -72,7 +72,7 @@ def _role_rows(subject_concept_id: str | None = None) -> list[dict[str, Any]]:
     for relation in TextRelationsRepository.find(query):
         if not isinstance(relation, Mapping):
             continue
-        text = TextValuesRepository.find_one({"_id": relation.get("object_text_id")})
+        text = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if not isinstance(text, Mapping) or text.get("text") != _ROLE_STORAGE_TEXT:
             continue
         subject_id = _normalise_concept_id(relation.get("subject_concept_id"))

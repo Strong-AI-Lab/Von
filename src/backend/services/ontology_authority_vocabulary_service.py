@@ -75,7 +75,7 @@ def semantic_authority_has_been_bootstrapped() -> bool:
         if not isinstance(relation, Mapping):
             continue
         text_id = relation.get("object_text_id")
-        text_value = TextValuesRepository.find_one({"_id": text_id})
+        text_value = TextValuesRepository.find_one_by_id(text_id)
         if not isinstance(text_value, Mapping):
             continue
         role, _organisation_id = parse_authority_role_storage_text(
@@ -102,9 +102,7 @@ def semantic_authority_scope_has_been_bootstrapped(
     for relation in relations:
         if not isinstance(relation, Mapping):
             continue
-        text_value = TextValuesRepository.find_one(
-            {"_id": relation.get("object_text_id")}
-        )
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if not isinstance(text_value, Mapping):
             continue
         stored_role, stored_org = parse_authority_role_storage_text(
@@ -152,7 +150,9 @@ def bootstrap_first_semantic_authority(
                 f"ontology-authority-role:{role_value}:{organisation_id or 'global'}"
             ):
                 if semantic_authority_has_been_bootstrapped():
-                    raise PermissionError("ontology_authority_bootstrap_already_completed")
+                    raise PermissionError(
+                        "ontology_authority_bootstrap_already_completed"
+                    )
                 with bypass_access_control():
                     subject = ConceptsRepository.find_one({"concept_id": subject_id})
                 if not isinstance(subject, Mapping):

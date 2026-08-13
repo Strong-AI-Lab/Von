@@ -76,6 +76,13 @@ def mock_text_repos():
             "src.backend.db.repositories.text_value_repository.TextValuesRepository"
         ) as text_vals,
     ):
+        def find_text_value_by_id(value, projection=None):
+            query = {"_id": value}
+            if projection is None:
+                return text_vals.find_one(query)
+            return text_vals.find_one(query, projection)
+
+        text_vals.find_one_by_id.side_effect = find_text_value_by_id
         yield text_rels, text_vals
 
 

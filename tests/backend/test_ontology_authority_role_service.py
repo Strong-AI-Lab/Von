@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import mongomock
 import pytest
+from bson import ObjectId
 
 from src.backend.security.access_control import override_current_actor
 from src.backend.services import ontology_authority_role_service as roles
@@ -108,6 +109,53 @@ def _with_roles(
 ) -> None:
     monkeypatch.setattr(authority, "resolve_live_semantic_roles", role_lookup)
     monkeypatch.setattr(roles, "resolve_live_semantic_roles", role_lookup)
+
+
+def test_semantic_role_readers_resolve_string_text_reference_to_object_id(
+    monkeypatch,
+) -> None:
+    relation_id = ObjectId()
+    text_id = ObjectId()
+    relation = {
+        "_id": relation_id,
+        "subject_concept_id": "#V#michael",
+        "predicate": authority.AUTHORITY_ROLE_PREDICATE,
+        "object_text_id": str(text_id),
+        "context": {"authority_scope": "global"},
+    }
+    text_value = {
+        "_id": text_id,
+        "text": authority.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE,
+    }
+    monkeypatch.setattr(
+        roles.TextRelationsRepository,
+        "find",
+        lambda _query: [relation],
+    )
+    monkeypatch.setattr(
+        authority.TextRelationsRepository,
+        "find",
+        lambda _query: [relation],
+    )
+    monkeypatch.setattr(
+        roles.TextValuesRepository,
+        "find_one",
+        lambda query, _projection=None: (
+            text_value if query.get("_id") == text_id else None
+        ),
+    )
+
+    read_back = roles.authority_role_read_back(
+        subject_concept_id="#V#michael",
+        role=authority.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE,
+        organisation_concept_id=None,
+    )
+    evidence = authority.resolve_live_semantic_roles("#V#michael")
+
+    assert read_back["active"] is True
+    assert read_back["grants"][0]["relation_id"] == str(relation_id)
+    assert len(evidence) == 1
+    assert evidence[0].relation_id == str(relation_id)
 
 
 def test_exact_org_admin_grants_and_revokes_only_its_own_org(
