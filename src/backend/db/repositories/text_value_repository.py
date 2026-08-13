@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
+
+from bson import ObjectId
+from bson.errors import InvalidId
 from pymongo.collection import Collection
 from pymongo.database import Database
-import logging
 
 from ..mongo_client import (
     get_db,
-    get_text_values_collection,
     get_text_relations_collection,
+    get_text_values_collection,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,31 @@ class TextValuesRepository:
         if coll is None:
             return None
         return coll.find_one(filter, projection)
+
+    @staticmethod
+    def find_one_by_id(
+        value: Any, projection: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve stored text references across string/ObjectId representations."""
+
+        if value is None:
+            return None
+        candidates: list[Any] = []
+        try:
+            candidates.append(ObjectId(str(value)))
+        except (InvalidId, TypeError):
+            pass
+        if value not in candidates:
+            candidates.append(value)
+        for candidate in candidates:
+            found = (
+                TextValuesRepository.find_one({"_id": candidate}, projection)
+                if projection is not None
+                else TextValuesRepository.find_one({"_id": candidate})
+            )
+            if found is not None:
+                return found
+        return None
 
     @staticmethod
     def find(

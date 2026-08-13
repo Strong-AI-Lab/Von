@@ -606,7 +606,7 @@ def resolve_live_semantic_roles(
         object_text_id = relation.get("object_text_id")
         if object_text_id is None:
             continue
-        text_value = TextValuesRepository.find_one({"_id": object_text_id})
+        text_value = TextValuesRepository.find_one_by_id(object_text_id)
         if not isinstance(text_value, Mapping):
             continue
         context = relation.get("context")
@@ -666,9 +666,7 @@ def _organisation_authority_root_exists(organisation_concept_id: str) -> bool:
     for relation in relations:
         if not isinstance(relation, Mapping):
             continue
-        text_value = TextValuesRepository.find_one(
-            {"_id": relation.get("object_text_id")}
-        )
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if not isinstance(text_value, Mapping):
             continue
         role, role_org = parse_authority_role_storage_text(

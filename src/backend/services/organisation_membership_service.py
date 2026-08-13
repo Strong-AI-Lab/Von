@@ -109,14 +109,11 @@ def resolve_user_organisation_membership(
     for membership in memberships.get("memberships", []):
         if not isinstance(membership, dict):
             continue
-        if _normalise_concept_id(
-            membership.get("organisation_concept_id")
-        ) == org_id:
+        if _normalise_concept_id(membership.get("organisation_concept_id")) == org_id:
             return {
                 "user_concept_id": user_id,
                 "organisation_concept_id": org_id,
-                "role": str(membership.get("role") or "member").strip()
-                or "member",
+                "role": str(membership.get("role") or "member").strip() or "member",
             }
     return None
 
@@ -297,7 +294,7 @@ def get_user_memberships(user_concept_id: str) -> dict[str, Any]:
             if text_value_id:
                 from ..db.repositories.text_value_repository import TextValuesRepository
 
-                tv = TextValuesRepository.find_one({"_id": text_value_id})
+                tv = TextValuesRepository.find_one_by_id(text_value_id)
                 if tv:
                     role, stored_org = parse_organisation_role_storage_text(
                         tv.get("text"),
@@ -345,7 +342,9 @@ def get_organisation_members(
     # access gate so cross-org org concepts can always be resolved by authenticated
     # callers regardless of which org window is currently active.
     with bypass_access_control():
-        org_concept = ConceptsRepository.find_one({"concept_id": organisation_concept_id})
+        org_concept = ConceptsRepository.find_one(
+            {"concept_id": organisation_concept_id}
+        )
     if not org_concept:
         raise ValueError(f"Organisation concept '{organisation_concept_id}' not found")
 
@@ -370,7 +369,7 @@ def get_organisation_members(
             if text_value_id:
                 from ..db.repositories.text_value_repository import TextValuesRepository
 
-                tv = TextValuesRepository.find_one({"_id": text_value_id})
+                tv = TextValuesRepository.find_one_by_id(text_value_id)
                 if tv:
                     role, stored_org = parse_organisation_role_storage_text(
                         tv.get("text"),
@@ -486,7 +485,7 @@ def update_user_role(
         if text_value_id:
             from ..db.repositories.text_value_repository import TextValuesRepository
 
-            tv = TextValuesRepository.find_one({"_id": text_value_id})
+            tv = TextValuesRepository.find_one_by_id(text_value_id)
             if tv:
                 old_role = tv.get("text", "member")
 

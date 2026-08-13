@@ -71,9 +71,7 @@ _MIGRATION_RESOURCE_KEY = "ontology-authority-role-migration:michael-witbrock:v1
 _MIGRATION_OPERATION_NAME = "jvnautosci-2632-initial-administrator-roles-v1"
 _MIGRATION_REASON = "JVNAUTOSCI-2632 authorised administrator-role migration"
 _OWNER_ROLE = "owner"
-_NON_PRIVILEGED_ORGANISATION_ROLES = frozenset(
-    {"", "user", "viewer", "member"}
-)
+_NON_PRIVILEGED_ORGANISATION_ROLES = frozenset({"", "user", "viewer", "member"})
 _OPERATIONAL_ROLE_TOKENS = frozenset(
     {
         "von administrator",
@@ -237,9 +235,7 @@ def _assignment(
         "source": source,
         "subject_concept_id": subject_id,
         "role": _normalise_role(role),
-        "organisation_concept_id": _normalise_concept_id(
-            organisation_concept_id
-        ),
+        "organisation_concept_id": _normalise_concept_id(organisation_concept_id),
         "relation_id": _clean(relation_id) or None,
     }
 
@@ -287,9 +283,7 @@ def _text_privileged_role_assignments() -> list[dict[str, Any]]:
     for relation in TextRelationsRepository.find({"predicate": ROLE_PREDICATE}):
         if not isinstance(relation, Mapping):
             continue
-        text_value = TextValuesRepository.find_one(
-            {"_id": relation.get("object_text_id")}
-        )
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if not isinstance(text_value, Mapping):
             continue
         context = relation.get("context")
@@ -398,9 +392,7 @@ def _semantic_role_assignments() -> list[dict[str, Any]]:
     ):
         if not isinstance(relation, Mapping):
             continue
-        text_value = TextValuesRepository.find_one(
-            {"_id": relation.get("object_text_id")}
-        )
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if not isinstance(text_value, Mapping):
             continue
         context = relation.get("context")
@@ -449,9 +441,7 @@ def _target_membership_role_assignments() -> list[dict[str, Any]]:
         )
         if not organisation_id:
             continue
-        text_value = TextValuesRepository.find_one(
-            {"_id": relation.get("object_text_id")}
-        )
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
         if not isinstance(text_value, Mapping):
             continue
         role, stored_organisation_id = parse_organisation_role_storage_text(
@@ -480,9 +470,7 @@ def _target_membership_role_assignments() -> list[dict[str, Any]]:
 
 
 def _target_memberships() -> tuple[list[dict[str, Any]], list[str]]:
-    membership_payload = get_user_memberships(
-        ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET
-    )
+    membership_payload = get_user_memberships(ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET)
     memberships: list[dict[str, Any]] = []
     missing_organisations: list[str] = []
     seen: set[str] = set()
@@ -505,8 +493,7 @@ def _target_memberships() -> tuple[list[dict[str, Any]], list[str]]:
         memberships.append(
             {
                 "organisation_concept_id": organisation_id,
-                "legacy_role": _normalise_role(raw_membership.get("role"))
-                or "member",
+                "legacy_role": _normalise_role(raw_membership.get("role")) or "member",
             }
         )
     memberships.sort(key=lambda row: row["organisation_concept_id"])
@@ -530,12 +517,8 @@ def _collect_inventory() -> dict[str, Any]:
         "target_exists": target_exists,
         "memberships": memberships,
         "missing_membership_organisations": missing_organisations,
-        "legacy_privileged_role_assignments": (
-            _legacy_privileged_role_assignments()
-        ),
-        "target_membership_role_assignments": (
-            _target_membership_role_assignments()
-        ),
+        "legacy_privileged_role_assignments": (_legacy_privileged_role_assignments()),
+        "target_membership_role_assignments": (_target_membership_role_assignments()),
         "semantic_role_assignments": _semantic_role_assignments(),
         "operational_role_assignments": list_von_operational_administrators(),
     }
@@ -760,8 +743,7 @@ def _inventory_conflicts(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
         row
         for row in semantic_rows
         if isinstance(row, Mapping)
-        and _normalise_role(row.get("role"))
-        == GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE
+        and _normalise_role(row.get("role")) == GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE
     ]
     if semantic_rows and not global_roles:
         conflicts.append(
@@ -801,9 +783,11 @@ def plan_ontology_authority_role_migration() -> dict[str, Any]:
     conflicts = _inventory_conflicts(inventory)
     semantic_rows = list(inventory.get("semantic_role_assignments") or [])
     operational_rows = list(inventory.get("operational_role_assignments") or [])
-    target_operational_role_present = len(operational_rows) == 1 and _clean(
-        operational_rows[0].get("subject_concept_id")
-    ) == ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET
+    target_operational_role_present = (
+        len(operational_rows) == 1
+        and _clean(operational_rows[0].get("subject_concept_id"))
+        == ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET
+    )
     actions: list[dict[str, Any]] = [
         {
             "operation": "bootstrap_von_operational_administrator",
@@ -828,7 +812,7 @@ def plan_ontology_authority_role_migration() -> dict[str, Any]:
                 )
                 else "required"
             ),
-        }
+        },
     ]
     for membership in inventory.get("memberships") or []:
         if not isinstance(membership, Mapping):
@@ -873,9 +857,10 @@ def plan_ontology_authority_role_migration() -> dict[str, Any]:
             and _normalise_concept_id(row.get("organisation_concept_id"))
             == organisation_id
         ]
-        exact_owner = len(exact_rows) == 1 and _normalise_role(
-            exact_rows[0].get("role")
-        ) == _OWNER_ROLE
+        exact_owner = (
+            len(exact_rows) == 1
+            and _normalise_role(exact_rows[0].get("role")) == _OWNER_ROLE
+        )
         actions.append(
             {
                 "operation": "replace_legacy_organisation_role_with_owner",
@@ -908,9 +893,7 @@ def plan_ontology_authority_role_migration() -> dict[str, Any]:
             "owner_permissions": sorted(get_effective_permissions(_OWNER_ROLE)),
         },
         "elevation_boundary": {
-            "allowed_subject_concept_ids": [
-                ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET
-            ],
+            "allowed_subject_concept_ids": [ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET],
             "other_subjects_elevated": False,
         },
     }
@@ -967,8 +950,7 @@ def _membership_role_read_back(organisation_concept_id: str) -> dict[str, Any]:
     rows = [
         row
         for row in _target_membership_role_assignments()
-        if _normalise_concept_id(row.get("organisation_concept_id"))
-        == organisation_id
+        if _normalise_concept_id(row.get("organisation_concept_id")) == organisation_id
     ]
     exact_owner = len(rows) == 1 and _normalise_role(rows[0].get("role")) == _OWNER_ROLE
     return {
@@ -1080,9 +1062,7 @@ def _replace_membership_role_with_owner(
 
 def _canonical_action_read_back(action: Mapping[str, Any]) -> dict[str, Any]:
     operation = _clean(action.get("operation"))
-    organisation_id = _normalise_concept_id(
-        action.get("organisation_concept_id")
-    )
+    organisation_id = _normalise_concept_id(action.get("organisation_concept_id"))
     if operation == "bootstrap_von_operational_administrator":
         return _verified_operational_read_back()
     if operation == "replace_legacy_organisation_role_with_owner":
@@ -1096,9 +1076,7 @@ def _canonical_action_read_back(action: Mapping[str, Any]) -> dict[str, Any]:
 def _execute_migration_action(action: Mapping[str, Any]) -> dict[str, Any]:
     operation = _clean(action.get("operation"))
     role = _normalise_role(action.get("role"))
-    organisation_id = _normalise_concept_id(
-        action.get("organisation_concept_id")
-    )
+    organisation_id = _normalise_concept_id(action.get("organisation_concept_id"))
     if operation == "bootstrap_von_operational_administrator":
         result = bootstrap_first_von_operational_administrator(
             subject_concept_id=ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET,
@@ -1347,17 +1325,13 @@ def apply_ontology_authority_role_migration(
                     "mode": "apply",
                     "success": True,
                     "changed": changed,
-                    "replayed": _clean(
-                        operation.get("source_inventory_fingerprint")
-                    )
+                    "replayed": _clean(operation.get("source_inventory_fingerprint"))
                     != _clean(plan.get("inventory_fingerprint")),
                     "target_concept_id": ONTOLOGY_AUTHORITY_ROLE_MIGRATION_TARGET,
                     "inventory_fingerprint_before": _clean(
                         operation.get("source_inventory_fingerprint")
                     ),
-                    "inventory_fingerprint_after": final_plan[
-                        "inventory_fingerprint"
-                    ],
+                    "inventory_fingerprint_after": final_plan["inventory_fingerprint"],
                     "effects": effects,
                     "canonical_read_back": {
                         "von_operational_administrator": (
@@ -1387,11 +1361,15 @@ def apply_ontology_authority_role_migration(
             "Another administrator-role migration is already in progress.",
         ) from exc
     except OntologyAuthorityRoleMigrationError as exc:
-        if exc.reason_code in {
-            "ontology_authority_role_migration_inventory_changed",
-            "ontology_authority_role_migration_inventory_conflict",
-            "ontology_authority_role_migration_completed_state_changed",
-        } and not effects_by_key:
+        if (
+            exc.reason_code
+            in {
+                "ontology_authority_role_migration_inventory_changed",
+                "ontology_authority_role_migration_inventory_conflict",
+                "ontology_authority_role_migration_completed_state_changed",
+            }
+            and not effects_by_key
+        ):
             raise
         completed_effects = _ordered_effects(
             list(plan.get("actions") or []) if isinstance(plan, Mapping) else [],
