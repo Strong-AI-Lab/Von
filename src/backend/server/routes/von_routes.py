@@ -21,7 +21,6 @@ from urllib.parse import unquote
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Mapping, Sequence, cast
-from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
 from ...workflows.durable.models import WorkflowInstanceStatus
@@ -4592,6 +4591,48 @@ def upload_file_to_blob_store_and_vontology():
             401,
         )
 
+    # An ordinary upload may create a private file-copy instance, but it must
+    # never bootstrap or repair the global ontology type as a side effect.
+    # Check this before storing bytes so a missing release prerequisite cannot
+    # leave an unreferenced blob behind.
+    from ...db.repositories.concepts_repository import ConceptsRepository
+    from ...security.access_control import bypass_access_control
+
+    type_concept_id = "#V#computer_file_copy"
+    try:
+        with bypass_access_control():
+            file_copy_type = ConceptsRepository.find_one(
+                {"concept_id": type_concept_id}
+            )
+    except Exception as exc:
+        current_app.logger.warning(
+            "[files/upload] File-copy type read failed: %s",
+            exc,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "ontology_store_unavailable",
+                }
+            ),
+            503,
+        )
+    if not file_copy_type:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "file_copy_type_not_provisioned",
+                    "message": (
+                        "The computer-file-copy ontology type is not provisioned; "
+                        "upload cannot create global ontology infrastructure."
+                    ),
+                }
+            ),
+            503,
+        )
+
     # Ensure the upload is associated with a stable chat session so it becomes part
     # of the same persisted history that /von/generate uses.
     if "session_id" not in session:
@@ -4663,59 +4704,11 @@ def upload_file_to_blob_store_and_vontology():
 
     blob_ref = stored.ref
 
-    # --- Ensure KR infrastructure exists ---
-    type_concept_id = "#V#computer_file_copy"
-
-    try:
-        from ...db.repositories.concepts_repository import ConceptsRepository
-        from ...vontology.utils_vontology import (
-            THING_PRIMARY_ID,
-            create_vontology_concept,
-            ensure_thing_exists_and_link_orphans,
-        )
-
-        if not ConceptsRepository.find_one({"concept_id": type_concept_id}):
-            # Prefer a store-of-information parent if present; otherwise fall back to Thing.
-            parent_id = (
-                "#V#store_of_information"
-                if ConceptsRepository.find_one(
-                    {"concept_id": "#V#store_of_information"}
-                )
-                else THING_PRIMARY_ID
-            )
-            if parent_id == THING_PRIMARY_ID:
-                # Best-effort: ensure Thing exists.
-                ensure_thing_exists_and_link_orphans()
-
-            created = create_vontology_concept(
-                parent_id=parent_id,
-                new_concept_name="Computer File Copy",
-                create_as_instance=False,
-                description=(
-                    "A computer file copy is an information-bearing artefact representing a specific stored byte sequence "
-                    "(for example an uploaded file stored in Von's blob store)."
-                ),
-                notes=(
-                    "Created on-demand by Von's chat file upload flow. Instances typically have blob store metadata "
-                    "(URI, key, content type, size, and hash) recorded as text relations."
-                ),
-            )
-            if not created.get("success"):
-                current_app.logger.warning(
-                    "[files/upload] Failed to create Computer File Copy type: %s",
-                    created.get("message"),
-                )
-    except Exception as exc:
-        current_app.logger.warning(
-            f"[files/upload] KR type ensure failed (continuing): {exc}"
-        )
-
     # --- Create the file-copy instance concept ---
     instance_concept_id = f"#V#uploaded_file_copy_{uuid.uuid4().hex}"
 
     try:
         from ...services import concept_service
-        from ...db.repositories.concepts_repository import ConceptsRepository
         from ...services.text_value_service import upsert_text_for_concept
 
         concept_service.create_concept(
@@ -4732,18 +4725,10 @@ def upload_file_to_blob_store_and_vontology():
                 "blob_key": blob_ref.key,
                 "blob_uri": blob_ref.uri,
             },
-        )
-
-        # Scope visibility to the current user.
-        ConceptsRepository.update_one(
-            {"concept_id": instance_concept_id},
-            {
-                "$set": {
-                    f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
-                        user_concept_id.strip()
-                    ]
-                }
-            },
+            created_by_concept_id=user_concept_id.strip(),
+            visibility_scope_mode="user_only_default",
+            maintain_relationship_inverses=False,
+            resolve_visibility_from_event_namespace=False,
         )
 
         # Attach blob + metadata as text relations (authoritative)

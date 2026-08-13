@@ -4,22 +4,37 @@ Tests the Vontology-based membership model that stores user-organisation
 relationships and roles using the memberOf predicate and hasRole text relations.
 """
 
-import pytest
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.backend.services.organisation_membership_service import (
-    create_organisation_membership,
-    get_user_memberships,
-    get_organisation_members,
-    update_user_role,
-    remove_organisation_membership,
     MEMBERSHIP_RELATIONSHIP_KIND,
+    create_organisation_membership,
+    get_organisation_members,
+    get_user_memberships,
+    organisation_role_storage_text,
+    parse_organisation_role_storage_text,
+    remove_organisation_membership,
+    update_user_role,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_membership_authority_barrier(monkeypatch):
+    """Keep unit tests off live coordination storage."""
+
+    monkeypatch.setattr(
+        "src.backend.services.organisation_membership_service."
+        "ontology_authority_membership_mutation_barrier",
+        nullcontext,
+    )
 
 
 @pytest.fixture
@@ -124,7 +139,7 @@ class TestCreateOrganisationMembership:
         assert call_args[1]["subject_concept_id"] == user_id
         # Predicate is stored as namespaced concept identifier
         assert call_args[1]["predicate"] == "#V#hasRole"
-        assert call_args[1]["text"] == role
+        assert call_args[1]["text"] == f"{role}::{org_id}"
 
     def test_create_membership_already_exists(
         self, mock_concepts_repo, mock_text_value_service, mock_access_control
@@ -286,6 +301,40 @@ class TestGetUserMemberships:
         assert result["total_memberships"] == 0
         assert result["memberships"] == []
 
+    def test_get_memberships_decodes_scope_distinct_equal_roles(
+        self, mock_concepts_repo, mock_access_control, mock_text_repos
+    ):
+        user_id = "#V#michael_witbrock"
+        orgs = ["#V#org_a", "#V#org_b"]
+        mock_concepts_repo.find_one.return_value = {
+            "concept_id": user_id,
+            "relationships": {"memberOf": orgs},
+        }
+        text_rels, text_vals = mock_text_repos
+        text_rels.find.return_value = [
+            {
+                "subject_concept_id": user_id,
+                "object_text_id": "owner-a",
+                "context": {"organisation_id": "#V#org_a"},
+            },
+            {
+                "subject_concept_id": user_id,
+                "object_text_id": "owner-b",
+                "context": {"organisation_id": "#V#org_b"},
+            },
+        ]
+        text_vals.find_one.side_effect = [
+            {"text": "owner::#V#org_a"},
+            {"text": "owner::#V#org_b"},
+        ]
+
+        result = get_user_memberships(user_id)
+
+        assert result["memberships"] == [
+            {"organisation_concept_id": "#V#org_a", "role": "owner"},
+            {"organisation_concept_id": "#V#org_b", "role": "owner"},
+        ]
+
     def test_get_memberships_invalid_user_id(self, mock_access_control):
         """Test retrieval with invalid user_id."""
         with pytest.raises(
@@ -293,6 +342,21 @@ class TestGetUserMemberships:
         ):
             get_user_memberships("")
 
+
+def test_organisation_role_storage_is_scope_distinct_and_legacy_readable():
+    first = organisation_role_storage_text("owner", "#V#org_a")
+    second = organisation_role_storage_text("owner", "#V#org_b")
+
+    assert first != second
+    assert parse_organisation_role_storage_text(
+        first, {"organisation_id": "#V#org_a"}
+    ) == ("owner", "#V#org_a")
+    assert parse_organisation_role_storage_text(
+        "admin", {"organisation_id": "#V#org_a"}
+    ) == ("admin", "#V#org_a")
+    assert parse_organisation_role_storage_text(
+        first, {"organisation_id": "#V#org_b"}
+    ) == (None, None)
 
 # --- Tests for get_organisation_members ---
 
@@ -484,7 +548,7 @@ class TestRemoveOrganisationMembership:
     """Tests for removing memberships."""
 
     def test_remove_membership_success(
-        self, mock_concepts_repo, mock_access_control, mock_text_repos
+        self, mock_concepts_repo, mock_access_control, mock_text_repos, monkeypatch
     ):
         """Test successful removal of membership."""
         user_id = "#V#michael_witbrock"
@@ -499,6 +563,10 @@ class TestRemoveOrganisationMembership:
             "predicate": "hasRole",
             "context": {"organisation_id": org_id},
         }
+        monkeypatch.setattr(
+            "src.backend.services.ontology_authority_role_service.authority_role_read_back",
+            lambda **_kwargs: {"active": False, "grants": []},
+        )
 
         # Execute
         result = remove_organisation_membership(user_id, org_id)
@@ -510,6 +578,22 @@ class TestRemoveOrganisationMembership:
 
         # Verify mutate_relationship_edge was called
         mock_concepts_repo.mutate_relationship_edge.assert_called_once()
+
+    def test_remove_membership_requires_semantic_authority_revocation_first(
+        self, mock_concepts_repo, mock_access_control, mock_text_repos, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "src.backend.services.ontology_authority_role_service.authority_role_read_back",
+            lambda **_kwargs: {"active": True, "grants": [{"relation_id": "role"}]},
+        )
+
+        with pytest.raises(
+            PermissionError,
+            match="organisation_ontology_authority_must_be_revoked",
+        ):
+            remove_organisation_membership("#V#admin", "#V#org")
+
+        mock_concepts_repo.mutate_relationship_edge.assert_not_called()
 
     def test_remove_membership_invalid_user_id(self, mock_access_control):
         """Test removal with invalid user_id."""

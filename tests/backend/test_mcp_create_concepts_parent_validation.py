@@ -8,7 +8,11 @@ and correctly canonicalises parent IDs.
 import pytest
 import uuid
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
-from src.backend.integrations.internal_mcp.catalogue import _create_concepts
+from src.backend.integrations.internal_mcp.catalogue import (
+    _create_concepts as _governed_create_concepts,
+)
+
+_create_concepts = _governed_create_concepts.__wrapped__
 
 
 @pytest.fixture(autouse=True)

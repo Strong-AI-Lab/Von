@@ -44,7 +44,9 @@ def test_add_relationship_adds_inverse_for_structural_predicates(monkeypatch):
         _fake_update_one,
     )
 
-    result = catalogue._add_relationship(
+    # Exercise the relationship handler itself; governed entrypoint authority
+    # is covered by the ontology-authority gateway tests.
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="typeOf", target="#V#target"
     )
 
@@ -107,7 +109,7 @@ def test_add_relationship_when_forward_exists_still_ensures_inverse(monkeypatch)
         _fake_update_one,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="typeOf", target="#V#target"
     )
 
@@ -135,7 +137,7 @@ def test_add_relationship_surfaces_inverse_failure_as_partial(monkeypatch):
         },
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="typeOf",
         target="#V#target",

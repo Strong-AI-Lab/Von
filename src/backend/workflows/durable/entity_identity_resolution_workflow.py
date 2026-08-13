@@ -31,7 +31,6 @@ from ...security.visibility_predicates import (
     get_specific_to_org_values,
     get_specific_to_user_values,
 )
-from ...services.concept_merge_service import merge_concepts
 from ...services.entity_identity_evidence_service import (
     build_candidate_evidence_pairs,
     DEFAULT_AUTHORED_PAPER_LIMIT,
@@ -62,7 +61,9 @@ IDENTITY_REVIEW_PREDICATE = "#V#potential_duplicate_of"
 IDENTITY_POLICY_VERSION = "entity_identity_resolution_policy.v2_llm_rumination"
 
 ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID = "#V#entity_duplicate_reasoning_prompt"
-ENTITY_DUPLICATE_REASONING_PROMPT_LINK_PREDICATE = "#V#hasEntityDuplicateReasoningPrompt"
+ENTITY_DUPLICATE_REASONING_PROMPT_LINK_PREDICATE = (
+    "#V#hasEntityDuplicateReasoningPrompt"
+)
 
 DEFAULT_SCAN_LIMIT = 300
 DEFAULT_FOCUSED_SCAN_LIMIT = 1000
@@ -77,6 +78,52 @@ VALID_LLM_ACTIONS = {
     "insufficient_evidence",
 }
 ACTIONABLE_LLM_ACTIONS = {"auto_merge", "queue_review"}
+
+
+def merge_concepts(
+    source_id: str,
+    target_id: str,
+    *,
+    simulate: bool,
+    request: WorkflowActionRequest | None = None,
+) -> dict[str, Any]:
+    """Enter identity consolidation through the governed MCP command boundary."""
+
+    # Import lazily: the catalogue also discovers durable workflow actions at
+    # startup. The decorated handler binds the exact plan, delegation, receipt,
+    # locks and canonical read-back that a direct primitive call would bypass.
+    from ...integrations.internal_mcp.catalogue import _merge_concepts
+    from ...services.ontology_publication_authority_service import (
+        bind_ontology_invocation,
+    )
+
+    if request is None:
+        # Compatibility callers and tests still enter the governed handler, but
+        # a durable auto-merge needs the request below so its workflow-agent
+        # provenance and exact server-issued delegation are bound.
+        return _merge_concepts(
+            source_id=source_id,
+            target_id=target_id,
+            simulate=simulate,
+        )
+    workflow_id = _as_text(request.workflow_id) or (
+        ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
+    )
+    state_id = _as_text(request.workflow_state_id) or "apply"
+    effect_id = f"workflow:{workflow_id}:{state_id}:merge_concepts"
+    with bind_ontology_invocation(
+        surface="workflow",
+        executing_agent_concept_id="#V#von_system",
+        audience="workflow",
+        delegation_id=request.environment.ontology_delegation_id,
+        effect_id=effect_id,
+        workflow_id=workflow_id,
+    ):
+        return _merge_concepts(
+            source_id=source_id,
+            target_id=target_id,
+            simulate=simulate,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +529,7 @@ def _record_merge_audit(
     }
     ConceptsRepository.update_one(
         {"concept_id": target_id},
-        {
-            "$push": {
-                "identity_resolution_audit": {"$each": [event], "$slice": -400}
-            }
-        },
+        {"$push": {"identity_resolution_audit": {"$each": [event], "$slice": -400}}},
     )
 
 
@@ -574,7 +617,7 @@ def build_entity_identity_resolution_workflow_test_definition() -> WorkflowDefin
                     ],
                     "response_contract_text": (
                         "Return JSON of the form "
-                        "{\"identity_recommendations\": [...]}, where each "
+                        '{"identity_recommendations": [...]}, where each '
                         "recommendation has pair_ids, action (auto_merge | "
                         "queue_review | leave_distinct | insufficient_evidence), "
                         "source_id, target_id, confidence (0..1), rationale, "
@@ -839,7 +882,12 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
                 would_merge_count += 1
                 detail["outcome"] = "would_merge"
             else:
-                merge_result = merge_concepts(source_id, target_id, simulate=False)
+                merge_result = merge_concepts(
+                    source_id,
+                    target_id,
+                    simulate=False,
+                    request=request,
+                )
                 if bool(merge_result.get("success")):
                     merged_count += 1
                     consumed_sources.add(source_id)
@@ -859,9 +907,9 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
                 else:
                     failed_count += 1
                     detail["outcome"] = "merge_failed"
-                    detail["merge_error"] = (
-                        merge_result.get("errors") or merge_result.get("error")
-                    )
+                    detail["merge_error"] = merge_result.get(
+                        "errors"
+                    ) or merge_result.get("error")
                     queue_result = _queue_uncertain(source_id, target_id, rec)
                     if bool(queue_result.get("success")):
                         queued_count += 1
@@ -940,7 +988,9 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
 # ---------------------------------------------------------------------------
 
 
-def build_entity_identity_resolution_workflow_test_registration() -> WorkflowRegistration:
+def build_entity_identity_resolution_workflow_test_registration() -> (
+    WorkflowRegistration
+):
     return WorkflowRegistration(
         workflow_id=ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
         definition=build_entity_identity_resolution_workflow_test_definition(),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Lock
@@ -40,6 +40,12 @@ _SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER = 1.25
 _SUCCESSFUL_DURATION_HARD_MULTIPLIER = 2.0
 INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE = "tool_payload_fallback"
 INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE = "trusted_operator_payload_fallback"
+# Internal-MCP is an agent execution surface, not a direct human publication
+# surface.  These are deliberately fixed server-side rather than accepted from
+# a tool payload.  A more specific adaptive-turn, workflow, or HTTP invocation
+# context takes precedence when it is already bound by its trusted entry point.
+INTERNAL_MCP_ONTOLOGY_AGENT_CONCEPT_ID = "#V#von_system"
+INTERNAL_MCP_ONTOLOGY_AUDIENCE = "internal_mcp"
 _ACTOR_CONTEXT_SOURCE: ContextVar[str | None] = ContextVar(
     "internal_mcp_actor_context_source",
     default=None,
@@ -533,6 +539,51 @@ class InternalMCPGateway:
         with override_current_user(user_id), override_current_organisation(org_id):
             yield
 
+    @staticmethod
+    def _ontology_mutation_invocation_context(
+        *,
+        method_name: str,
+        delegation_id: Any,
+        effect_id: Any,
+    ):
+        """Bind default agent provenance for unlabelled canonical writes.
+
+        Specific trusted surfaces bind their own invocation before calling the
+        gateway.  Their context is intentionally preserved.  In every other
+        case, an internal-MCP canonical write is an agent effect and therefore
+        needs an exact server-issued delegation; merely presenting actor or
+        administrator fields in the tool payload cannot turn it into a direct
+        human publication.
+        """
+
+        from src.backend.services.ontology_mutation_command_service import (
+            is_ontology_mutation_method,
+        )
+        from src.backend.services.ontology_publication_authority_service import (
+            bind_ontology_invocation,
+            current_ontology_invocation,
+        )
+
+        if not is_ontology_mutation_method(method_name):
+            return nullcontext()
+        if current_ontology_invocation() is not None:
+            return nullcontext()
+        return bind_ontology_invocation(
+            surface="internal_mcp_gateway",
+            executing_agent_concept_id=INTERNAL_MCP_ONTOLOGY_AGENT_CONCEPT_ID,
+            audience=INTERNAL_MCP_ONTOLOGY_AUDIENCE,
+            delegation_id=(
+                delegation_id.strip()
+                if isinstance(delegation_id, str) and delegation_id.strip()
+                else None
+            ),
+            effect_id=(
+                effect_id.strip()
+                if isinstance(effect_id, str) and effect_id.strip()
+                else None
+            ),
+        )
+
     def invoke(
         self,
         method_name: str,
@@ -546,6 +597,16 @@ class InternalMCPGateway:
             raise GatewayDisabledError("Internal MCP gateway is disabled.")
 
         payload_dict: MutableMapping[str, Any] = dict(payload or {})
+        # Delegation credentials are invocation metadata, never handler
+        # arguments.  Extract them before schema validation so all governed
+        # methods have one consistent gateway-level path without widening each
+        # method's public argument schema.  An existing trusted invocation
+        # context below wins over these caller-provided opaque values.
+        supplied_ontology_delegation_id = payload_dict.pop(
+            "ontology_delegation_id",
+            None,
+        )
+        supplied_ontology_effect_id = payload_dict.pop("ontology_effect_id", None)
         definition = self._catalogue.get(method_name)
         self.register_metrics_if_missing(method_name)
 
@@ -685,6 +746,14 @@ class InternalMCPGateway:
 
             existing_user_id = get_effective_user_concept_id()
             existing_org_id = get_effective_organisation_concept_id()
+            from src.backend.services.ontology_mutation_command_service import (
+                is_ontology_mutation_method,
+            )
+
+            has_ontology_delegation = bool(
+                supplied_ontology_delegation_id
+                and is_ontology_mutation_method(method_name)
+            )
             payload_user_id, payload_org_id = self._resolve_access_actor_context(
                 payload_dict
             )
@@ -693,6 +762,29 @@ class InternalMCPGateway:
                 if existing_user_id or existing_org_id
                 else None
             )
+            if has_ontology_delegation and preexisting_actor_context is None:
+                # Binding a grantor before the caller's proposed arguments are
+                # matched to the stored exact intent creates a temporary private
+                # read oracle. Sessionless execution remains closed until it can
+                # execute server-stored canonical arguments; adaptive/workflow
+                # surfaces already carry their trusted actor context.
+                payload = {
+                    "success": False,
+                    "effect_status": "not_started",
+                    "mutation_outcome": "not_started",
+                    "changed": False,
+                    "error_code": "ontology_sessionless_delegation_not_supported",
+                    "error": (
+                        "Sessionless ontology delegation execution is unavailable; "
+                        "use an actor-bound trusted surface."
+                    ),
+                }
+                self._record_failure(
+                    method_name,
+                    payload["error_code"],
+                    duration_ms=0.0,
+                )
+                return TransportResult(payload=payload, duration_ms=0.0)
             if preexisting_actor_context is not None:
                 # Ambient authentication/workflow authority is one indivisible
                 # actor scope.  Do not let a tool payload fill a missing user or
@@ -716,47 +808,55 @@ class InternalMCPGateway:
             )
             try:
                 with self._access_actor_context(user_id, org_id):
-                    # A trusted in-process AgentTest harness may bind a
-                    # represented, context-scoped fault plan.  Resolve and bind
-                    # the exact authenticated actor before applying it so a
-                    # synthetic transport fact cannot bypass actor-scope
-                    # establishment.  The hook owns no scenario or recovery
-                    # policy and accepts no payload control fields.
-                    from .agent_test_fault_plan import (
-                        maybe_inject_agent_test_mcp_fault,
+                    ontology_invocation_context = (
+                        self._ontology_mutation_invocation_context(
+                            method_name=method_name,
+                            delegation_id=supplied_ontology_delegation_id,
+                            effect_id=supplied_ontology_effect_id,
+                        )
                     )
+                    with ontology_invocation_context:
+                        # A trusted in-process AgentTest harness may bind a
+                        # represented, context-scoped fault plan.  Resolve and bind
+                        # the exact authenticated actor before applying it so a
+                        # synthetic transport fact cannot bypass actor-scope
+                        # establishment.  The hook owns no scenario or recovery
+                        # policy and accepts no payload control fields.
+                        from .agent_test_fault_plan import (
+                            maybe_inject_agent_test_mcp_fault,
+                        )
 
-                    injected_fault = maybe_inject_agent_test_mcp_fault(method_name)
-                    if injected_fault is not None:
-                        self._record_failure(
-                            method_name,
-                            injected_fault.error_code,
+                        injected_fault = maybe_inject_agent_test_mcp_fault(method_name)
+                        if injected_fault is not None:
+                            self._record_failure(
+                                method_name,
+                                injected_fault.error_code,
+                            )
+                            logger.warning(
+                                "%s AgentTest fault plan injected %s for %s "
+                                "(fault_id=%s)",
+                                self._log_tag,
+                                injected_fault.event.get("fault_class"),
+                                method_name,
+                                injected_fault.event.get("fault_id"),
+                            )
+                            return TransportResult(
+                                payload=dict(injected_fault.payload),
+                                duration_ms=0.0,
+                            )
+                        transport_result = self._transport.execute(
+                            method_name=definition.name,
+                            handler=definition.handler,
+                            payload=dict(payload_dict),
+                            timeout_sec=timeout,
+                            category=definition.category,
+                            advisory_timeout_sec=advisory_timeout,
+                            deadline_monotonic=deadline_monotonic,
+                            minimum_execution_window_sec=minimum_execution_window,
+                            log_tag=self._log_tag,
+                            late_completion_observer=observed_late_completion,
+                            hard_timeout_enabled=definition.hard_timeout_enabled,
                         )
-                        logger.warning(
-                            "%s AgentTest fault plan injected %s for %s "
-                            "(fault_id=%s)",
-                            self._log_tag,
-                            injected_fault.event.get("fault_class"),
-                            method_name,
-                            injected_fault.event.get("fault_id"),
-                        )
-                        return TransportResult(
-                            payload=dict(injected_fault.payload),
-                            duration_ms=0.0,
-                        )
-                    transport_result = self._transport.execute(
-                        method_name=definition.name,
-                        handler=definition.handler,
-                        payload=dict(payload_dict),
-                        timeout_sec=timeout,
-                        category=definition.category,
-                        advisory_timeout_sec=advisory_timeout,
-                        deadline_monotonic=deadline_monotonic,
-                        minimum_execution_window_sec=minimum_execution_window,
-                        log_tag=self._log_tag,
-                        late_completion_observer=observed_late_completion,
-                        hard_timeout_enabled=definition.hard_timeout_enabled,
-                    )
             finally:
                 _PREEXISTING_ACTOR_CONTEXT.reset(preexisting_actor_token)
                 _ACTOR_CONTEXT_SOURCE.reset(actor_source_token)

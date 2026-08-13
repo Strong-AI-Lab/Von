@@ -7,7 +7,7 @@ import uuid
 import time
 import logging
 from collections import defaultdict
-from typing import Any
+from typing import Any, Mapping
 
 try:
     from bson import ObjectId  # type: ignore
@@ -65,6 +65,47 @@ from ...services.window_session_context_service import get_effective_context
 from ...utilities.salient_recompute import recompute_salient_predicates
 
 vontology_bp = Blueprint("vontology", __name__)
+
+
+def _governed_mutation_response(
+    result: Mapping[str, Any], *, success_status: int = 200
+):
+    """Render the authority-command result; policy stays in the shared service."""
+
+    if result.get("success") is not False and not result.get("error_code"):
+        return jsonify(dict(result)), success_status
+    error_code = str(result.get("error_code") or "")
+    authority_denials = {
+        "authenticated_actor_context_required",
+        "client_supplied_identity_is_not_authority",
+        "von_operator_is_not_semantic_ontology_authority",
+        "global_ontology_admin_authority_required",
+        "organisation_ontology_admin_authority_required",
+        "ontology_publication_authority_required",
+        "private_scope_canonical_publication_not_delegated",
+        "dedicated_ontology_governance_operation_required",
+        "explicit_scope_adoption_required",
+        "ontology_mutation_target_not_accessible",
+    }
+    authority_decision = result.get("authority_decision")
+    decision_denied = isinstance(authority_decision, Mapping) and (
+        authority_decision.get("allowed") is False
+    )
+    if error_code in authority_denials or decision_denied:
+        return jsonify(dict(result)), 403
+    if error_code.endswith("not_found"):
+        return jsonify(dict(result)), 404
+    if error_code in {
+        "ontology_authority_store_unavailable",
+        "ontology_mutation_receipt_store_unavailable",
+        "ontology_mutation_store_unavailable",
+        "ontology_mutation_receipt_finalisation_failed",
+        "ontology_mutation_postcondition_failed",
+        "canonical_read_back_failed",
+        "ontology_mutation_replay_projection_unavailable",
+    }:
+        return jsonify(dict(result)), 503
+    return jsonify(dict(result)), 400
 
 # Simple in-memory TTL cache for instance counts: { key: (timestamp, payload) }
 # Key is a comma-joined sorted list of type ids. TTL is small to keep values fresh.
@@ -595,7 +636,7 @@ def get_tree():
 
 @vontology_bp.route("/ensure_thing", methods=["POST"])
 def ensure_thing_route():
-    """Endpoint to ensure Thing root concept exists and link any orphan concepts.
+    """Fail closed until root/orphan repair has an exact governed command.
 
     This is called automatically by the frontend when it detects an empty or incomplete ontology.
     It will:
@@ -605,6 +646,20 @@ def ensure_thing_route():
     Returns:
         JSON with thing_created, thing_concept_id, orphans_linked, orphan_ids
     """
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Root and orphan repair requires a governed ontology command.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     current_app.logger.info("Received request for /api/vontology/ensure_thing")
 
     try:
@@ -790,7 +845,24 @@ def unified_delete_node():
     current_app.logger.info(
         f"[unified_delete:start] corr={correlation_id} simulate={simulate} concept={concept_id}"
     )
-    result = simulate_or_delete_concept(concept_id, execute=not simulate)
+    from ...services.ontology_mutation_command_service import (
+        execute_governed_ontology_method,
+    )
+
+    result = execute_governed_ontology_method(
+        method_name="delete_concept",
+        arguments={
+            "concept_id": concept_id,
+            "simulate": simulate,
+            "request_id": correlation_id,
+        },
+        mutate=lambda: simulate_or_delete_concept(concept_id, execute=not simulate),
+        preview=simulate,
+    )
+    if result.get("success") is False and result.get("authority_decision"):
+        response, status = _governed_mutation_response(result)
+        response.headers["X-Correlation-ID"] = correlation_id
+        return response, status
 
     status = 200
     if not result.get("success", False):
@@ -1134,7 +1206,26 @@ def update_description_route():
                 "Error resolving identifier to concept_id in update_description_route; using original"
             )
 
-        ok = update_concept_description(resolved_concept_id, description)
+        from ...services.ontology_mutation_command_service import (
+            execute_governed_ontology_method,
+        )
+
+        governed = execute_governed_ontology_method(
+            method_name="update_concept",
+            arguments={
+                "concept_id": resolved_concept_id,
+                "update_data": {"description": description},
+                "request_id": data.get("request_id"),
+            },
+            mutate=lambda: {
+                "success": bool(
+                    update_concept_description(resolved_concept_id, description)
+                )
+            },
+        )
+        if governed.get("success") is False:
+            return _governed_mutation_response(governed)
+        ok = True
         if not ok:
             return (
                 jsonify(
@@ -1164,7 +1255,21 @@ def update_description_route():
 
 @vontology_bp.route("/create_concept", methods=["POST"])
 def create_concept_route():
-    """Endpoint to create a new Vontology concept."""
+    """Deprecated unscoped creation path; use the governed concepts command."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Use the governed ontology concept creation API.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     current_app.logger.info("Received request for /api/vontology/create_concept")
     data = request.get_json()
     if data is None:
@@ -1268,7 +1373,21 @@ def create_concept_route():
 
 @vontology_bp.route("/add_closure", methods=["POST"])
 def add_closure_route():
-    """API endpoint to add upward closure nodes for a Vontology concept."""
+    """Fail closed: closure materialisation needs an exact governed command."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Upward-closure materialisation requires a governed ontology command.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     current_app.logger.info("Received request for /api/vontology/add_closure")
     data = request.get_json()
     if not data:
@@ -1342,6 +1461,20 @@ def import_nodes_route():
     2. Von format: A JSON object with concept_id keys.
     3. OpenCyc format: A JSON object with "nodes" and "edges" keys.
     """
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Ontology imports require a governed import command.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     current_app.logger.info("Received request for /import_nodes")
 
     # Check if this is a file upload (FormData) or JSON
@@ -2412,9 +2545,21 @@ def debug_database():
 
 @vontology_bp.route("/delete_node", methods=["DELETE"])
 def delete_node():
-    """
-    Delete a specific node by concept_id.
-    """
+    """Deprecated unsafe delete path; use the governed /node endpoint."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Use DELETE /api/vontology/node for a governed ontology deletion.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     current_app.logger.info("Received request for /api/vontology/delete_node")
 
     data = request.get_json()
@@ -3710,6 +3855,20 @@ def promote_uncertain_relationship_route():
         return jsonify({"success": False, "error": "Missing 'assertion_id'."}), 400
 
     try:
+        from ...integrations.internal_mcp.catalogue import (
+            _promote_uncertain_relationship_assertion,
+        )
+
+        return _governed_mutation_response(
+            _promote_uncertain_relationship_assertion(
+                source_id=source_id,
+                assertion_id=assertion_id,
+                # Do not treat the UI's descriptive operator field as authority.
+                operator="http",
+                request_id=data.get("request_id"),
+            )
+        )
+
         from ...services.uncertain_relationship_service import (
             promote_uncertain_relationship_assertion,
         )
@@ -3750,7 +3909,21 @@ def promote_uncertain_relationship_route():
 
 @vontology_bp.route("/relationships/uncertain/reject", methods=["POST"])
 def reject_uncertain_relationship_route():
-    """Reject an uncertain relationship assertion with an operator reason."""
+    """Fail closed until candidate rejection has an exact governed command."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_ontology_mutation_required",
+                "error": "Uncertain-assertion rejection requires a governed ontology command.",
+            }
+        ),
+        410,
+    )
+
+    # Retained below temporarily for source-history readability; unreachable.
     data = request.get_json(silent=True) or {}
     source_id = str(data.get("source_id") or "").strip()
     assertion_id = str(data.get("assertion_id") or "").strip()
@@ -3817,6 +3990,21 @@ def add_relationship_route():
     target_id = data.get("target_id")
     current_app.logger.info(
         f"Received request for /api/vontology/relationships/add: {data}"
+    )
+
+    # This legacy HTTP surface deliberately delegates all canonical writes to
+    # the catalogue command.  It derives actor/organisation from Flask's
+    # trusted context and ignores any identity fields in the JSON body.
+    from ...integrations.internal_mcp.catalogue import _add_relationship
+
+    return _governed_mutation_response(
+        _add_relationship(
+            source_id=source_id,
+            predicate=kind,
+            target=target_id,
+            request_id=data.get("request_id"),
+            namespace=None,
+        )
     )
 
     if not source_id or not target_id or not kind:
@@ -4664,6 +4852,25 @@ def remove_relationship_route():
         f"Received request for /api/vontology/relationships/remove: {data}"
     )
 
+    from ...integrations.internal_mcp.catalogue import _remove_relationship
+
+    return _governed_mutation_response(
+        _remove_relationship(
+            relation_id=relation_id,
+            source_id=source_id,
+            predicate=kind,
+            target=target_id,
+            mode=mode,
+            cascade=cascade,
+            dry_run=dry_run,
+            confirmed=confirmed,
+            # Client-controlled operator override cannot widen semantic authority.
+            operator_override=False,
+            reason=reason,
+            request_id=request_id,
+        )
+    )
+
     if not relation_id and (not source_id or not target_id or not kind):
         return (
             jsonify(
@@ -4946,9 +5153,9 @@ def preview_remove_relationship_route():
 def remove_relationships_bulk_route():
     """Bulk-remove relationships with deterministic summary reporting."""
     data = request.get_json() or {}
-    from ...services.relationship_removal_service import remove_relationships_bulk
+    from ...integrations.internal_mcp.catalogue import _remove_relationships_bulk
 
-    result = remove_relationships_bulk(
+    result = _remove_relationships_bulk(
         relation_ids=data.get("relation_ids"),
         relations=data.get("relations"),
         filter=data.get("filter"),
@@ -4956,45 +5163,29 @@ def remove_relationships_bulk_route():
         cascade=data.get("cascade"),
         dry_run=data.get("dry_run", False),
         confirmed=data.get("confirmed", False),
-        operator_override=data.get("operator_override", False),
+        operator_override=False,
         reason=data.get("reason"),
         request_id=data.get("request_id"),
         stop_on_error=data.get("stop_on_error", False),
     )
-
-    status_name = str(result.get("status") or "")
-    if status_name == "forbidden":
-        return jsonify(result), 403
-    if status_name == "confirmation_required":
-        return jsonify(result), 400
-    if status_name == "error":
-        return jsonify(result), 500 if not result.get("success") else 200
-    return jsonify(result), 200
+    return _governed_mutation_response(result)
 
 
 @vontology_bp.route("/relationships/remove/undo", methods=["POST"])
 def undo_relationship_removal_route():
-    """Restore a prior soft-delete relationship removal by undo_token."""
-    data = request.get_json() or {}
-    undo_token = data.get("undo_token")
-    if not undo_token:
-        return jsonify({"success": False, "error": "undo_token required"}), 400
-
-    from ...services.relationship_removal_service import undo_relationship_removal
-
-    result = undo_relationship_removal(
-        undo_token=undo_token,
-        request_id=data.get("request_id"),
-        confirmed=data.get("confirmed", True),
+    """Fail closed until relationship restoration has an exact governed command."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_relationship_restore_required",
+                "error": "Relationship restoration requires a governed ontology command.",
+            }
+        ),
+        410,
     )
-    status_name = str(result.get("status") or "")
-    if status_name == "not_found":
-        return jsonify(result), 404
-    if status_name == "confirmation_required":
-        return jsonify(result), 400
-    if status_name == "error":
-        return jsonify(result), 500
-    return jsonify(result), 200
 
 
 @vontology_bp.route("/concept/flag", methods=["POST"])
@@ -5008,14 +5199,23 @@ def toggle_concept_flag():
         concept_id = data["concept_id"]
         flagged = data.get("flagged", True)  # Default to True if not specified
         from ...db.repositories.concepts_repository import ConceptsRepository
-
-        # Update the concept with the flagged status
-        result = ConceptsRepository.update_one(
-            {"concept_id": concept_id}, {"$set": {"flagged": flagged}}
+        from ...services.ontology_mutation_command_service import (
+            execute_governed_ontology_method,
         )
 
-        if result.matched_count == 0:
-            return jsonify({"success": False, "error": "Concept not found"}), 404
+        governed = execute_governed_ontology_method(
+            method_name="update_concept",
+            arguments={"concept_id": concept_id, "update_data": {"flagged": flagged}},
+            mutate=lambda: {
+                "success": bool(
+                    ConceptsRepository.update_one(
+                        {"concept_id": concept_id}, {"$set": {"flagged": flagged}}
+                    ).matched_count
+                )
+            },
+        )
+        if governed.get("success") is False:
+            return _governed_mutation_response(governed)
 
         return (
             jsonify(
@@ -5038,7 +5238,28 @@ def toggle_concept_flag():
 
 @vontology_bp.route("/concept/organization-relation", methods=["POST"])
 def toggle_organization_relation():
-    """Toggle the specific_to_organisation relationship for a concept."""
+    """Deprecated: publication scope must use the dedicated governed command."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_scope_change_required",
+                "error": (
+                    "Concept publication scope changes require the governed "
+                    "scope-change API with an explicit preview fingerprint."
+                ),
+                "recovery_affordances": [
+                    {"action_type": "preview_concept_publication_scope"},
+                    {"action_type": "change_concept_publication_scope"},
+                ],
+            }
+        ),
+        410,
+    )
+
+    # Kept below temporarily for source-history readability; unreachable.
     try:
         data = request.get_json() or {}
         concept_id = data.get("concept_id")
@@ -5145,7 +5366,28 @@ def toggle_organization_relation():
 
 @vontology_bp.route("/concept/user-relation", methods=["POST"])
 def toggle_user_relation():
-    """Toggle the specific_to_user relationship for a concept."""
+    """Deprecated: publication scope must use the dedicated governed command."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "error_code": "governed_scope_change_required",
+                "error": (
+                    "Concept publication scope changes require the governed "
+                    "scope-change API with an explicit preview fingerprint."
+                ),
+                "recovery_affordances": [
+                    {"action_type": "preview_concept_publication_scope"},
+                    {"action_type": "change_concept_publication_scope"},
+                ],
+            }
+        ),
+        410,
+    )
+
+    # Kept below temporarily for source-history readability; unreachable.
     try:
         data = request.get_json() or {}
         concept_id = data.get("concept_id")
@@ -5248,13 +5490,10 @@ def toggle_key_concept():
     try:
         data = request.get_json()
         concept_id = data.get("concept_id")
-        user_concept_id = data.get("user_concept_id")
         action = data.get("action", "add")
 
         if not concept_id:
             return jsonify({"success": False, "error": "concept_id required"}), 400
-        if not user_concept_id:
-            return jsonify({"success": False, "error": "user_concept_id required"}), 400
         if action not in ["add", "remove"]:
             return (
                 jsonify(
@@ -5264,6 +5503,10 @@ def toggle_key_concept():
             )
 
         from ...db.repositories.concepts_repository import ConceptsRepository
+        from ...integrations.internal_mcp.catalogue import (
+            _add_relationship,
+            _remove_relationship,
+        )
 
         # Verify target concept exists
         target_concept = ConceptsRepository.find_one({"concept_id": concept_id})
@@ -5275,66 +5518,24 @@ def toggle_key_concept():
                 404,
             )
 
-        # Verify user concept exists
-        user_concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
-        if not user_concept:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": f"User concept '{user_concept_id}' not found",
-                    }
-                ),
-                404,
-            )
-
         if action == "add":
-            # Add #V#vontologykeyconcept to is_an_instance_of relationship
-            result = ConceptsRepository.update_one(
-                {"concept_id": concept_id},
-                {
-                    "$addToSet": {
-                        "relationships.is_an_instance_of": "#V#vontologykeyconcept"
-                    }
-                },
+            result = _add_relationship(
+                source_id=concept_id,
+                predicate="is_an_instance_of",
+                target="#V#vontologykeyconcept",
+                request_id=data.get("request_id"),
             )
-
-            return (
-                jsonify(
-                    {
-                        "success": True,
-                        "action": "add",
-                        "concept_id": concept_id,
-                        "user_concept_id": user_concept_id,
-                        "modified": result.modified_count > 0,
-                    }
-                ),
-                200,
-            )
+            return _governed_mutation_response(result)
 
         else:  # remove
-            # Remove #V#vontologykeyconcept from is_an_instance_of relationship
-            result = ConceptsRepository.update_one(
-                {"concept_id": concept_id},
-                {
-                    "$pull": {
-                        "relationships.is_an_instance_of": "#V#vontologykeyconcept"
-                    }
-                },
+            result = _remove_relationship(
+                source_id=concept_id,
+                predicate="is_an_instance_of",
+                target="#V#vontologykeyconcept",
+                confirmed=bool(data.get("confirmed", False)),
+                request_id=data.get("request_id"),
             )
-
-            return (
-                jsonify(
-                    {
-                        "success": True,
-                        "action": "remove",
-                        "concept_id": concept_id,
-                        "user_concept_id": user_concept_id,
-                        "modified": result.modified_count > 0,
-                    }
-                ),
-                200,
-            )
+            return _governed_mutation_response(result)
 
     except Exception as e:
         current_app.logger.error(f"Error toggling key concept: {e}", exc_info=True)

@@ -7,11 +7,15 @@ when callers included additional top-level context.
 
 import pytest
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
-from src.backend.integrations.internal_mcp.catalogue import _create_concepts
+from src.backend.integrations.internal_mcp.catalogue import (
+    _create_concepts as _governed_create_concepts,
+)
 from src.backend.security.visibility_predicates import (
     CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
     CANONICAL_SPECIFIC_TO_USER_PREDICATE,
 )
+
+_create_concepts = _governed_create_concepts.__wrapped__
 
 
 @pytest.fixture(autouse=True)

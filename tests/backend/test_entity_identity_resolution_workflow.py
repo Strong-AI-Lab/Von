@@ -51,14 +51,10 @@ def test_workflow_definition_structure() -> None:
     action = reason_state.actions[0]
     assert action.action_id == "llm.action"
     assert action.execution_mode == "llm"
-    prompt_ids = (action.prompt_contract or {}).get(
-        "requested_prompt_concept_ids", []
-    )
+    prompt_ids = (action.prompt_contract or {}).get("requested_prompt_concept_ids", [])
     assert ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID in prompt_ids
     assert (action.validation_policy or {}).get("output_format") == "json_value"
-    mappings = (reason_state.metadata or {}).get(
-        "tool_output_context_mappings", []
-    )
+    mappings = (reason_state.metadata or {}).get("tool_output_context_mappings", [])
     assert any(
         m.get("context_key") == "identity_reasoning_payload"
         and m.get("tool_output_field") == "validated_json"
@@ -452,10 +448,64 @@ def test_apply_handler_consumes_llm_recommendations_and_dispatches() -> None:
     assert summary["skipped_count"] == 1  # leave_distinct
     assert summary["recommendation_count"] == 3
     assert "v2_llm_rumination" in summary["policy_version"]
-    merge_mock.assert_called_once_with(
-        "#V#person_alice_dup", "#V#person_alice", simulate=False
+    merge_mock.assert_called_once()
+    merge_call = merge_mock.call_args
+    assert merge_call.args == ("#V#person_alice_dup", "#V#person_alice")
+    assert merge_call.kwargs["simulate"] is False
+    assert merge_call.kwargs["request"].action_id == (
+        "identity_resolution.apply_resolutions"
     )
     queue_mock.assert_called_once()
+
+
+def test_durable_merge_binds_workflow_agent_and_exact_delegation(monkeypatch) -> None:
+    from src.backend.services import ontology_publication_authority_service as authority
+    from src.backend.workflows.action_registry import WorkflowEnvironment
+    from src.backend.workflows.durable import entity_identity_resolution_workflow as mod
+
+    captured = {}
+
+    def governed_merge(**kwargs):
+        captured["kwargs"] = kwargs
+        captured["invocation"] = authority.current_ontology_invocation()
+        return {"success": False, "error_code": "test_stop"}
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._merge_concepts",
+        governed_merge,
+    )
+    request = _request("identity_resolution.apply_resolutions", {})
+    request = type(request)(
+        **{
+            **request.__dict__,
+            "environment": WorkflowEnvironment(
+                llm_client=None,
+                ontology_delegation_id="delegation:exact",
+            ),
+            "workflow_id": mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+            "workflow_state_id": "apply",
+        }
+    )
+
+    result = mod.merge_concepts(
+        "#V#duplicate",
+        "#V#canonical",
+        simulate=False,
+        request=request,
+    )
+
+    assert result["error_code"] == "test_stop"
+    assert captured["kwargs"] == {
+        "source_id": "#V#duplicate",
+        "target_id": "#V#canonical",
+        "simulate": False,
+    }
+    invocation = captured["invocation"]
+    assert invocation.surface == "workflow"
+    assert invocation.executing_agent_concept_id == "#V#von_system"
+    assert invocation.audience == "workflow"
+    assert invocation.delegation_id == "delegation:exact"
+    assert invocation.effect_id.endswith(":apply:merge_concepts")
 
 
 def test_apply_handler_dry_run_does_not_write() -> None:

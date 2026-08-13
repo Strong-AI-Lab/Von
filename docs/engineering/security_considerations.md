@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 27 July 2026
+- **Last reviewed:** 13 August 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -99,7 +99,7 @@ Use different controls for different data and capability classes.
 | SAIL internal operational data | Jira tasks, SAIL project notes, internal telemetry | SAIL-authenticated or trusted local operator only |
 | User/org private data | chat history, uploaded files, private RAG chunks, partner data | Authenticated, namespace-scoped, fail closed on missing or conflicting scope |
 | Secrets and credentials | `.env`, API keys, OAuth tokens, DB URIs, device secrets | Never printed, never committed, redacted in diagnostics |
-| Authority-bearing artefacts | Vontology prompts/workflows/policies, publication gates, MCP write tools | Keep effects within authenticated standing delegation; use provenance, read-back, recovery, and additional approval in proportion to the concrete commitment |
+| Authority-bearing artefacts | Vontology prompts/workflows/policies, publication gates, MCP write tools | Keep effects within authenticated standing delegation; for canonical ontology publication or scope changes, require the separate semantic-authority and exact-delegation boundary, plus provenance, read-back, and recovery appropriate to the commitment |
 | Admin/operator actions | sync, reindex, DB reconnect, shutdown, imports, backups | Admin auth or local trusted operator profile only |
 
 ## Known Security Limitations
@@ -232,6 +232,15 @@ Current implementation details:
 - Add session timeout and idle timeout
 
 ### 4. MCP Tool Access Control and Agentic-AI Threats
+
+Canonical ontology publication is not part of an ordinary tool's visibility
+aperture. The `JVNAUTOSCI-2632` candidate separates organisation/global
+semantic roles from Von operational administration and requires an exact,
+server-issued, short-lived, non-recursive delegation when an agent performs a
+covered ontology effect. Its current design/implementation boundary is
+[Ontology publication authority](ontology_publication_authority.md). This is a
+candidate branch reference, not evidence that a deployment has represented
+roles or released the capability.
 
 **Current as of 11 August 2026**: When internal MCP is enabled, authenticated
 ordinary turns receive a bounded additive representation aperture. Trusted
@@ -594,6 +603,12 @@ be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-08-13**: Added the candidate boundary for canonical ontology
+  publication authority
+  - Distinguished organisation/global semantic roles from Von operational
+    administration
+  - Recorded exact short-lived agent delegation and receipt/read-back
+    expectations for covered ontology effects
 - **2026-07-27**: Distinguished logical read semantics from physical write
   purity and documented the bounded ordinary-turn representation-effect
   aperture

@@ -349,6 +349,24 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
         "errors_by_workflow_id"
     ) or {}
     assert graph_errors == {}
+    # The upload route deliberately no longer bootstraps global ontology
+    # infrastructure. Model the release prerequisite explicitly in this
+    # isolated integration database.
+    active_db = mongo_client_module.get_db()
+    assert active_db is not None
+    active_db["concepts"].update_one(
+        {"concept_id": "#V#computer_file_copy"},
+        {
+            "$setOnInsert": {
+                "concept_id": "#V#computer_file_copy",
+                "relationships": {
+                    "is_a_type_of": ["#V#store_of_information"],
+                    "is_an_instance_of": [],
+                },
+            }
+        },
+        upsert=True,
+    )
 
     from src.backend.services import workflow_event_integration_service
 
@@ -398,7 +416,7 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
         data={"file": (io.BytesIO(upload_payload), "2502.14996.pdf")},
         content_type="multipart/form-data",
     )
-    assert first_upload.status_code == 200
+    assert first_upload.status_code == 200, first_upload.get_json()
     first_body = first_upload.get_json()
     assert isinstance(first_body, dict)
     assert first_body.get("success") is True

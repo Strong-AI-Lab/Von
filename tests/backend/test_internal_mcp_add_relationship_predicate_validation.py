@@ -32,7 +32,8 @@ def test_add_relationship_returns_typed_recovery_for_unknown_predicate_name(
         _fake_update_one,
     )
 
-    result = catalogue._add_relationship(
+    # Exercise handler resolution below the separately tested authority wrapper.
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="has_item", target="#V#target"
     )
 
@@ -91,7 +92,7 @@ def test_add_relationship_resolves_accessible_predicate_name_before_write(
         _add_edge,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="Depends on",
         target="#V#target",
@@ -138,7 +139,7 @@ def test_add_relationship_returns_candidates_for_ambiguous_predicate_name(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="about",
         target="#V#target",
@@ -231,7 +232,7 @@ def test_add_relationship_typed_reference_can_create_text_predicate(
         _upsert_text,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         target="A concise summary",
         predicate_ref={
@@ -266,7 +267,7 @@ def test_add_relationship_rejects_missing_dynamic_predicate_concepts(monkeypatch
         _fake_find_one,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="#V#has_item", target="#V#target"
     )
 
@@ -296,7 +297,7 @@ def test_add_relationship_rejects_dynamic_concepts_that_are_not_predicates(monke
         _fake_find_one,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="#V#has_todo_item", target="#V#target"
     )
 
@@ -337,7 +338,7 @@ def test_add_relationship_returns_structured_error_for_missing_source(monkeypatc
         _fake_find_one,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="typeOf", target="#V#target"
     )
 
@@ -361,7 +362,7 @@ def test_add_relationship_returns_structured_error_for_missing_target(monkeypatc
         _fake_find_one,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source", predicate="typeOf", target="#V#target"
     )
 
@@ -391,7 +392,7 @@ def test_add_relationship_commit_then_raise_is_indeterminate(monkeypatch):
         _commit_then_raise,
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="typeOf",
         target="#V#target",
@@ -421,7 +422,7 @@ def test_add_relationship_unexpected_pre_dispatch_failure_remains_definite(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="typeOf",
         target="#V#target",
@@ -521,7 +522,7 @@ def test_add_relationship_creates_and_verifies_exact_missing_predicate_before_ed
     )
 
     with override_current_actor("#V#user", "#V#org"):
-        result = catalogue._add_relationship(
+        result = catalogue._add_relationship.__wrapped__(
             source_id="#V#source",
             predicate="#V#depends_on",
             target="#V#target",
@@ -572,7 +573,7 @@ def test_add_relationship_reuses_verified_predicate_without_creation(monkeypatch
         },
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -630,7 +631,7 @@ def test_add_relationship_fails_closed_when_predicate_creation_is_indeterminate(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -708,7 +709,7 @@ def test_add_relationship_stops_after_persisted_predicate_when_cancelled(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -778,7 +779,7 @@ def test_add_relationship_reports_partial_when_predicate_persists_but_edge_fails
         },
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -859,7 +860,7 @@ def test_add_relationship_cancellation_preserves_unchanged_dependency_failure(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -926,7 +927,7 @@ def test_add_relationship_edge_failure_preserves_unchanged_dependency_failure(
         },
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -995,7 +996,7 @@ def test_add_relationship_preserves_created_dependency_when_validation_raises(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -1046,7 +1047,7 @@ def test_add_relationship_does_not_create_predicate_when_target_is_missing(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#missing_target",
@@ -1089,7 +1090,7 @@ def test_add_relationship_propagates_cancellation_without_dependency(
     )
 
     with pytest.raises(InternalMCPHandlerCancelled, match="deadline elapsed"):
-        catalogue._add_relationship(
+        catalogue._add_relationship.__wrapped__(
             source_id="#V#source",
             predicate="typeOf",
             target="#V#target",
@@ -1132,7 +1133,7 @@ def test_add_relationship_propagates_cancellation_from_predicate_create(
     )
 
     with pytest.raises(InternalMCPHandlerCancelled, match="nested create cancelled"):
-        catalogue._add_relationship(
+        catalogue._add_relationship.__wrapped__(
             source_id="#V#source",
             predicate="#V#depends_on",
             target="#V#target",
@@ -1187,7 +1188,7 @@ def test_add_relationship_preserves_known_dependency_when_edge_is_indeterminate(
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",
@@ -1227,7 +1228,7 @@ def test_add_relationship_rejects_predicate_dependency_name_mismatch(monkeypatch
         ),
     )
 
-    result = catalogue._add_relationship(
+    result = catalogue._add_relationship.__wrapped__(
         source_id="#V#source",
         predicate="#V#depends_on",
         target="#V#target",

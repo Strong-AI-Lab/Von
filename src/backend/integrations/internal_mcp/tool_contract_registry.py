@@ -42,6 +42,95 @@ KNOWN_SURFACES: tuple[str, ...] = (
     SURFACE_JIRA_FAMILY_SERVER,
 )
 
+# Opaque, server-issued execution data accepted only by direct stdio canonical
+# ontology writes.  These are not identity, organisation, or role parameters:
+# the mutation boundary validates a delegation against its exact intent and
+# effect before invoking a write primitive.
+_STDIO_GOVERNED_ONTOLOGY_MUTATION_TOOLS = frozenset(
+    {
+        "add_names",
+        "add_relationship",
+        "change_concept_publication_scope",
+        "create_concepts",
+        "delete_concept",
+        "delete_text_relation",
+        "merge_concepts",
+        "preview_concept_publication_scope_change",
+        "remove_relationship",
+        "remove_relationships_bulk",
+        "update_concept",
+        "update_text_relation",
+        "upsert_singleton_text_relation",
+        "upsert_text_relation",
+    }
+)
+
+_STDIO_UNTRUSTED_ONTOLOGY_AUTHORITY_CONTRACT_FIELDS = frozenset(
+    {
+        "actor",
+        "actor_concept_id",
+        "actor_id",
+        "admin",
+        "administrator",
+        "allow_admin",
+        "authority",
+        "authority_role",
+        "created_by",
+        "created_by_concept_id",
+        "namespace",
+        "global_admin",
+        "is_admin",
+        "is_operator",
+        "organisation_concept_id",
+        "organisation_id",
+        "organization_concept_id",
+        "organization_id",
+        "org_id",
+        "operator",
+        "operator_override",
+        "role",
+        "roles",
+        "user",
+        "user_concept_id",
+        "user_id",
+    }
+)
+
+
+def _with_stdio_ontology_delegation_contract(
+    tool_name: str,
+    input_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose opaque delegation carriers without adding identity claims."""
+
+    if tool_name not in _STDIO_GOVERNED_ONTOLOGY_MUTATION_TOOLS:
+        return input_schema
+
+    payload = dict(input_schema)
+    properties = dict(payload.get("properties") or {})
+    for field_name in _STDIO_UNTRUSTED_ONTOLOGY_AUTHORITY_CONTRACT_FIELDS:
+        properties.pop(field_name, None)
+    properties.update(
+        {
+            "ontology_delegation_id": {
+                "type": "string",
+                "description": (
+                    "Opaque server-issued delegation for this exact canonical "
+                    "ontology mutation. It does not identify or authenticate a user."
+                ),
+            },
+            "ontology_effect_id": {
+                "type": "string",
+                "description": (
+                    "Opaque server-issued effect identifier bound to the delegation. "
+                    "It is used for exact authorisation and idempotent receipts."
+                ),
+            },
+        }
+    )
+    payload["properties"] = properties
+    return payload
+
 
 @dataclass(frozen=True)
 class ToolSurfaceExposure:
@@ -193,7 +282,10 @@ def _contract_from_method_definition(
             )
             or f"Execute {definition.name}."
         ),
-        input_schema=schema_to_json_schema(definition.input_schema),
+        input_schema=_with_stdio_ontology_delegation_contract(
+            definition.name,
+            schema_to_json_schema(definition.input_schema),
+        ),
         output_schema=(
             schema_to_json_schema(definition.output_schema)
             if definition.output_schema is not None

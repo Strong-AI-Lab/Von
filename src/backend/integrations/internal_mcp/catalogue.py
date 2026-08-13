@@ -32,6 +32,7 @@ import os
 import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, List, Mapping, Sequence, cast
 
@@ -54,6 +55,69 @@ _JIRA_ISSUE_KEY_PATTERN = re.compile(
 )
 _DEFAULT_JIRA_BASE_URL = "https://naoinstitute.atlassian.net"
 _WORKFLOW_OBSERVATION_MAX_SECONDS = 90.0
+
+
+def _governed_ontology_mutation(method_name: str):
+    """Route a generic canonical write through the shared authority command."""
+
+    def decorate(handler):
+        @wraps(handler)
+        def governed(**kwargs):
+            from ...services.ontology_mutation_command_service import (
+                execute_governed_ontology_method,
+                normalise_governed_ontology_arguments,
+                resolve_governed_ontology_arguments,
+            )
+
+            if method_name == "create_concepts":
+                input_error = _create_concepts_input_placement_error(kwargs)
+                if input_error is not None:
+                    return input_error
+            governed_arguments = normalise_governed_ontology_arguments(
+                method_name,
+                kwargs,
+            )
+            try:
+                governed_arguments = resolve_governed_ontology_arguments(
+                    method_name,
+                    governed_arguments,
+                )
+            except Exception as exc:
+                from ...services.ontology_mutation_command_service import (
+                    OntologyMutationCommandError,
+                )
+
+                if isinstance(exc, OntologyMutationCommandError):
+                    return {
+                        "success": False,
+                        "effect_status": "not_started",
+                        "mutation_outcome": "not_started",
+                        "changed": False,
+                        "error_code": exc.reason_code,
+                        "error": exc.public_message,
+                    }
+                raise
+            preview = bool(
+                (
+                    method_name
+                    in {"delete_concept", "merge_concepts", "rename_concept"}
+                    and governed_arguments.get("simulate", True)
+                )
+                or (
+                    method_name in {"remove_relationship", "remove_relationships_bulk"}
+                    and governed_arguments.get("dry_run", False)
+                )
+            )
+            return execute_governed_ontology_method(
+                method_name=method_name,
+                arguments=governed_arguments,
+                mutate=lambda: handler(**governed_arguments),
+                preview=preview,
+            )
+
+        return governed
+
+    return decorate
 
 
 def _utc_now_iso() -> str:
@@ -170,12 +234,9 @@ def _resolve_internal_mcp_scoped_assertion_actor_scope(
     try:
         source = get_internal_mcp_actor_context_source()
         preexisting_actor = get_internal_mcp_preexisting_actor_context()
-        payload_claims_are_trusted = (
-            source == "trusted_operator_payload_fallback"
-        )
+        payload_claims_are_trusted = source == "trusted_operator_payload_fallback"
         discard_payload_claims = (
-            ignore_untrusted_payload_identity
-            and not payload_claims_are_trusted
+            ignore_untrusted_payload_identity and not payload_claims_are_trusted
         )
         if discard_payload_claims:
             claimed_user = None
@@ -242,14 +303,10 @@ def _resolve_internal_mcp_scoped_assertion_actor_scope(
                 }
                 allow_unscoped_claims = True
             else:
-                raise WorkflowActorScopeError(
-                    "workflow_actor_authority_required"
-                )
+                raise WorkflowActorScopeError("workflow_actor_authority_required")
         elif source == "tool_payload_fallback" and not has_identity_claim:
             if require_actor:
-                raise WorkflowActorScopeError(
-                    "workflow_actor_authority_required"
-                )
+                raise WorkflowActorScopeError("workflow_actor_authority_required")
             # Actorless generic reads retain their established base-publication
             # behaviour. With no audience keys, lower services cannot expose
             # scoped rows.
@@ -265,15 +322,14 @@ def _resolve_internal_mcp_scoped_assertion_actor_scope(
             raise WorkflowActorScopeError("workflow_actor_authority_required")
 
         actor_scope = resolve_authoritative_workflow_actor_scope(
-                claimed_user_id=claimed_user,
-                claimed_org_id=claimed_org,
-                claimed_namespace=claimed_namespace,
-                allow_unscoped_claims=allow_unscoped_claims,
-                **ambient_kwargs,
+            claimed_user_id=claimed_user,
+            claimed_org_id=claimed_org,
+            claimed_namespace=claimed_namespace,
+            allow_unscoped_claims=allow_unscoped_claims,
+            **ambient_kwargs,
         )
         if require_actor and not bool(
-            actor_scope.user_concept_id
-            or actor_scope.organisation_concept_id
+            actor_scope.user_concept_id or actor_scope.organisation_concept_id
         ):
             raise WorkflowActorScopeError("workflow_actor_authority_required")
         return actor_scope, None
@@ -447,6 +503,157 @@ def _get_vontology_tree(**kwargs):
     return get_vontology_tree(**kwargs)
 
 
+def _get_concept_publication_scope(**kwargs):
+    from ...services.ontology_scope_change_service import (
+        get_concept_publication_scope,
+    )
+
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="ontology publication scope",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            snapshot = get_concept_publication_scope(kwargs.get("concept_id"))
+    except (LookupError, PermissionError):
+        return make_error_response(
+            "ontology_scope_target_not_found",
+            "The requested ontology scope target is unavailable.",
+        )
+    except ValueError as exc:
+        return make_error_response("invalid_ontology_scope_read", str(exc))
+    return {"success": True, **snapshot}
+
+
+def _scope_change_request_id(kwargs: Mapping[str, Any]) -> str:
+    supplied = kwargs.get("request_id")
+    if isinstance(supplied, str) and supplied.strip():
+        return supplied.strip()
+    from ...services.ontology_publication_authority_service import (
+        current_ontology_invocation,
+    )
+
+    invocation = current_ontology_invocation()
+    return (
+        str(invocation.effect_id).strip()
+        if invocation is not None and invocation.effect_id
+        else ""
+    )
+
+
+def _scope_change_payload_provenance_denial(
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Reject payload-established identity before any scope snapshot read."""
+
+    from ...services.ontology_publication_authority_service import (
+        current_ontology_invocation,
+    )
+    from .gateway import get_internal_mcp_actor_context_source
+
+    def denied(error_code: str, message: str) -> dict[str, Any]:
+        return {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": error_code,
+            "error": message,
+        }
+
+    source = get_internal_mcp_actor_context_source()
+    has_payload_identity_claim = any(
+        isinstance(kwargs.get(field_name), str)
+        and bool(str(kwargs.get(field_name)).strip())
+        for field_name in (
+            "actor_concept_id",
+            "organisation_concept_id",
+            "organization_concept_id",
+            "org_id",
+            "user_concept_id",
+            "user_id",
+        )
+    )
+    if source == "tool_payload_fallback" and has_payload_identity_claim:
+        return denied(
+            "client_supplied_identity_is_not_authority",
+            "Client or model supplied identity cannot authorise publication.",
+        )
+    if source == "trusted_operator_payload_fallback":
+        return denied(
+            "von_operator_is_not_semantic_ontology_authority",
+            "Von operational authority does not confer semantic ontology authority.",
+        )
+    invocation = current_ontology_invocation()
+    if (
+        invocation is not None
+        and invocation.executing_agent_concept_id
+        and not invocation.delegation_id
+    ):
+        return denied(
+            "ontology_agent_delegation_required",
+            "An executing agent needs an exact server-issued ontology delegation.",
+        )
+    return None
+
+
+def _run_concept_publication_scope_change(
+    *,
+    preview: bool,
+    invocation_tool_name: str,
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    from ...services.ontology_scope_change_service import (
+        change_concept_publication_scope,
+    )
+
+    provenance_denial = _scope_change_payload_provenance_denial(kwargs)
+    if provenance_denial is not None:
+        return provenance_denial
+    try:
+        return change_concept_publication_scope(
+            concept_id=kwargs.get("concept_id"),
+            destination_kind=kwargs.get("destination_kind"),
+            destination_concept_id=kwargs.get("destination_concept_id"),
+            expected_scope_fingerprint=kwargs.get("expected_scope_fingerprint"),
+            request_id=_scope_change_request_id(kwargs),
+            preview=preview,
+            reason=kwargs.get("reason"),
+            invocation_tool_name=invocation_tool_name,
+        )
+    except (LookupError, PermissionError):
+        return make_error_response(
+            "ontology_scope_target_not_found",
+            "The requested ontology scope target is unavailable.",
+        )
+    except ValueError as exc:
+        return make_error_response("invalid_ontology_scope_change", str(exc))
+    except RuntimeError:
+        return make_error_response(
+            "ontology_authority_store_unavailable",
+            "Ontology authority verification or durable receipts are unavailable.",
+        )
+
+
+def _preview_concept_publication_scope_change(**kwargs):
+    return _run_concept_publication_scope_change(
+        preview=True,
+        invocation_tool_name="preview_concept_publication_scope_change",
+        kwargs=kwargs,
+    )
+
+
+def _change_concept_publication_scope(**kwargs):
+    return _run_concept_publication_scope_change(
+        preview=False,
+        invocation_tool_name="change_concept_publication_scope",
+        kwargs=kwargs,
+    )
+
+
 def _get_concept_by_concept_id(**kwargs):
     from ...security.access_control import describe_concept_access
     from ...services.concept_relation_service import build_concept_relations_payload
@@ -546,9 +753,7 @@ def _get_concept_by_concept_id(**kwargs):
         concept["scoped_assertions"] = scoped_assertions
         concept["scoped_assertion_count"] = len(scoped_assertions)
         concept["scoped_assertions_truncated"] = scoped_assertions_truncated
-        concept["scoped_assertion_count_is_lower_bound"] = (
-            scoped_assertions_truncated
-        )
+        concept["scoped_assertion_count_is_lower_bound"] = scoped_assertions_truncated
 
         # Detect vacuous typing (soft warning for agents to repair)
         vacuous_warning = detect_vacuous_typing(concept)
@@ -1277,6 +1482,7 @@ def _coerce_scholarly_materialisation_metadata(
 
 
 _CREATE_CONCEPTS_SCOPE_DEFAULT = "user_org_default"
+_CREATE_CONCEPTS_SCOPE_USER_ONLY = "user_only_default"
 _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL = "organisation_general"
 _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL = "global_general"
 _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY = "canonical_id_only"
@@ -1288,7 +1494,9 @@ _CREATE_CONCEPTS_SCOPE_MODE_ALIASES: dict[str, str] = {
     "default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
     "user_org_default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
     "user_org": _CREATE_CONCEPTS_SCOPE_DEFAULT,
-    "private": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+    "private": _CREATE_CONCEPTS_SCOPE_USER_ONLY,
+    "user_only": _CREATE_CONCEPTS_SCOPE_USER_ONLY,
+    "user_only_default": _CREATE_CONCEPTS_SCOPE_USER_ONLY,
     "organisation_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
     "organization_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
     "org_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
@@ -1296,6 +1504,75 @@ _CREATE_CONCEPTS_SCOPE_MODE_ALIASES: dict[str, str] = {
     "global": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
     "public": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
 }
+
+
+def _create_concepts_input_placement_error(
+    arguments: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Reject deterministic create-input errors before canonical lookups."""
+
+    misplaced_fields = [
+        field_name
+        for field_name in _CREATE_CONCEPTS_PER_ITEM_IDENTITY_REVIEW_FIELDS
+        if field_name in arguments
+    ]
+    if misplaced_fields:
+        expected_paths = [
+            f"concepts[i].{field_name}" for field_name in misplaced_fields
+        ]
+        return make_error_response(
+            "invalid_parameter",
+            (
+                "Identity candidate review fields apply to one concept item and "
+                "cannot be supplied at the create_concepts top level. Move them "
+                f"to {', '.join(expected_paths)}. No concepts were created."
+            ),
+            details={
+                "misplaced_top_level_fields": misplaced_fields,
+                "expected_concept_item_paths": expected_paths,
+            },
+            suggestions=[
+                (
+                    f"Move {field_name} into the relevant concept object at "
+                    f"concepts[i].{field_name}"
+                )
+                for field_name in misplaced_fields
+            ],
+        )
+
+    duplicate_resolution_mode = arguments.get("duplicate_resolution_mode")
+    if (
+        duplicate_resolution_mode is not None
+        and duplicate_resolution_mode
+        != _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+    ):
+        return make_error_response(
+            "invalid_parameter",
+            (
+                "Invalid duplicate_resolution_mode "
+                f"'{duplicate_resolution_mode}'."
+            ),
+            details={
+                "duplicate_resolution_mode": duplicate_resolution_mode,
+                "supported_duplicate_resolution_modes": [
+                    _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                ],
+                "default_behaviour": (
+                    "canonical identity then semantic name resolution"
+                ),
+            },
+            suggestions=[
+                (
+                    "Omit duplicate_resolution_mode to preserve semantic "
+                    "duplicate resolution"
+                ),
+                (
+                    "Use duplicate_resolution_mode='canonical_id_only' only "
+                    "for deterministic stable identities"
+                ),
+            ],
+        )
+    return None
 
 
 def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
@@ -1307,6 +1584,7 @@ def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
     return _CREATE_CONCEPTS_SCOPE_MODE_ALIASES.get(cleaned)
 
 
+@_governed_ontology_mutation("create_concepts")
 def _create_concepts(**kwargs):
     from .transport import (
         InternalMCPHandlerCancelled,
@@ -1317,35 +1595,9 @@ def _create_concepts(**kwargs):
     # deadline. Never begin a write-side preflight in that state.
     raise_if_internal_mcp_cancelled()
 
-    misplaced_identity_review_fields = [
-        field_name
-        for field_name in _CREATE_CONCEPTS_PER_ITEM_IDENTITY_REVIEW_FIELDS
-        if field_name in kwargs
-    ]
-    if misplaced_identity_review_fields:
-        expected_paths = [
-            f"concepts[i].{field_name}"
-            for field_name in misplaced_identity_review_fields
-        ]
-        return make_error_response(
-            "invalid_parameter",
-            (
-                "Identity candidate review fields apply to one concept item and "
-                "cannot be supplied at the create_concepts top level. Move them "
-                f"to {', '.join(expected_paths)}. No concepts were created."
-            ),
-            details={
-                "misplaced_top_level_fields": misplaced_identity_review_fields,
-                "expected_concept_item_paths": expected_paths,
-            },
-            suggestions=[
-                (
-                    f"Move {field_name} into the relevant concept object at "
-                    f"concepts[i].{field_name}"
-                )
-                for field_name in misplaced_identity_review_fields
-            ],
-        )
+    input_error = _create_concepts_input_placement_error(kwargs)
+    if input_error is not None:
+        return input_error
 
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
@@ -1435,12 +1687,13 @@ def _create_concepts(**kwargs):
                 "scope_mode": raw_scope_mode,
                 "supported_scope_modes": [
                     _CREATE_CONCEPTS_SCOPE_DEFAULT,
+                    _CREATE_CONCEPTS_SCOPE_USER_ONLY,
                     _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
                     _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
                 ],
             },
             suggestions=[
-                "Use scope_mode='user_org_default' for authenticated default scoping",
+                "Use scope_mode='user_only_default' for actor-private concepts",
                 "Use scope_mode='organisation_general' for organisation-scoped shared concepts",
                 "Use scope_mode='global_general' for broadly visible concepts",
             ],
@@ -1469,7 +1722,7 @@ def _create_concepts(**kwargs):
             suggestions=[
                 "Provide namespace in #V#user@org form",
                 "Or include organisation_concept_id in the tool payload",
-                "Or use scope_mode='user_org_default' or 'global_general'",
+                "Or use scope_mode='user_only_default' or 'global_general'",
             ],
         )
 
@@ -1576,6 +1829,23 @@ def _create_concepts(**kwargs):
         )
     assert parent_resolution.resolved_parent_id is not None
     validated_parent_id: str = parent_resolution.resolved_parent_id
+    authority_resolved_parent_id = kwargs.get("authority_resolved_parent_id")
+    if (
+        isinstance(authority_resolved_parent_id, str)
+        and authority_resolved_parent_id.strip()
+        and validated_parent_id != authority_resolved_parent_id.strip()
+    ):
+        return make_error_response(
+            "create_parent_precondition_changed",
+            (
+                "The canonical parent changed after the create effect was "
+                "authorised. No concepts were created."
+            ),
+            details={
+                "authorised_parent_id": authority_resolved_parent_id.strip(),
+                "current_parent_id": validated_parent_id,
+            },
+        )
     if not concepts or not isinstance(concepts, list):
         return make_error_response(
             "missing_parameter",
@@ -1969,30 +2239,24 @@ def _create_concepts(**kwargs):
                         match_source=duplicate_match.match_source,
                     )
                     if duplicate_match.match_source.startswith("external_identifier:"):
-                        # Duplicate resolution is read-only and may consume the
-                        # remaining transport budget. Do not begin the marker
-                        # repair after cancellation.
-                        if _cancelled_after_completed_items():
-                            break
-                        identity_persistence = persist_external_identity_markers(
-                            concept_id=duplicate_match.existing_concept_id,
-                            identifiers=external_identifiers,
-                        )
-                        (
-                            identity_effect_status,
-                            identity_changed,
-                            identity_failures,
-                            identity_indeterminate_failures,
-                        ) = _identity_persistence_outcome(identity_persistence)
-                        result["effect_status"] = identity_effect_status
-                        result["changed"] = identity_changed
+                        # A create grant authorises a new concept only. Reusing an
+                        # existing identity is therefore strictly read-only: marker
+                        # repair would be an edit to a target and publication context
+                        # absent from this create intent.
                         result["external_identity"] = {
                             "identifiers": [
                                 identifier.to_dict()
                                 for identifier in external_identifiers
                             ],
-                            "persistence": identity_persistence,
+                            "persistence": {
+                                "success": True,
+                                "effect_status": "not_started",
+                                "changed": False,
+                                "reason_code": "duplicate_reuse_is_read_only",
+                            },
                         }
+                        result["effect_status"] = "not_started"
+                        result["changed"] = False
                         result["requested_parent_id"] = (
                             duplicate_match.requested_parent_id
                         )
@@ -2004,50 +2268,6 @@ def _create_concepts(**kwargs):
                             and duplicate_match.requested_parent_id
                             in set(duplicate_match.existing_parent_ids)
                         )
-                        if identity_effect_status == "indeterminate":
-                            result.update(
-                                {
-                                    "success": False,
-                                    "error_code": (
-                                        "external_identity_persistence_indeterminate"
-                                    ),
-                                    "indeterminate_failures": (
-                                        identity_indeterminate_failures
-                                        or [
-                                            {
-                                                "stage": (
-                                                    "external_identity_persistence"
-                                                ),
-                                                "outcome": "indeterminate",
-                                            }
-                                        ]
-                                    ),
-                                }
-                            )
-                        elif identity_failures or identity_effect_status in {
-                            "failed",
-                            "partial",
-                        }:
-                            persistence_failures = identity_failures or [
-                                {
-                                    "stage": "external_identity_persistence",
-                                    "outcome": identity_effect_status,
-                                }
-                            ]
-                            result.update(
-                                {
-                                    "success": False,
-                                    "effect_status": (
-                                        "partial"
-                                        if identity_changed is True
-                                        else "failed"
-                                    ),
-                                    "error_code": (
-                                        "external_identity_persistence_failed"
-                                    ),
-                                    "partial_failures": persistence_failures,
-                                }
-                            )
                 if duplicate_match.resolution_source:
                     result["external_identity_resolution_source"] = (
                         duplicate_match.resolution_source
@@ -2067,11 +2287,18 @@ def _create_concepts(**kwargs):
                 allow_duplicate_instance_suffix=allow_duplicate_instances,
                 description=concept_data.get("description"),
                 notes=concept_data.get("notes"),
+                vontology_path=concept_data.get("vontology_path"),
+                instance_of_type=concept_data.get("instance_of_type")
+                or kwargs.get("instance_of_type"),
                 created_by_concept_id=actor_user_id,
                 organisation_concept_id=actor_org_id,
                 event_namespace=namespace,
                 visibility_scope_mode=scope_mode,
-                canonical_concept_id_override=canonical_concept_id_override,
+                canonical_concept_id_override=(
+                    canonical_concept_id_override or concept_data.get("concept_id")
+                ),
+                maintain_relationship_inverses=False,
+                resolve_visibility_from_event_namespace=False,
             )
             if (
                 external_identifiers
@@ -2423,6 +2650,7 @@ def _indeterminate_effect_error(
     return response
 
 
+@_governed_ontology_mutation("upsert_text_relation")
 def _upsert_text_relation(**kwargs):
     from ...services.text_value_service import upsert_text_for_concept
     from ...services.text_relation_predicate_validation_service import (
@@ -2604,8 +2832,7 @@ def _upsert_scoped_assertion(**kwargs):
                 # Derived-index maintenance must not turn that durable receipt
                 # into an indeterminate write result.
                 logger.warning(
-                    "Scoped assertion persisted but RAG refresh scheduling "
-                    "failed: %s",
+                    "Scoped assertion persisted but RAG refresh scheduling failed: %s",
                     exc,
                 )
                 derived_maintenance = {
@@ -2697,8 +2924,7 @@ def _retract_scoped_assertion(**kwargs):
                 )
             except Exception as exc:
                 logger.warning(
-                    "Scoped assertion retracted but RAG refresh scheduling "
-                    "failed: %s",
+                    "Scoped assertion retracted but RAG refresh scheduling failed: %s",
                     exc,
                 )
                 derived_maintenance = {
@@ -2785,9 +3011,7 @@ def _list_scoped_assertions(**kwargs):
             "counts_are_lower_bounds": counts_are_lower_bounds,
         },
         **(
-            {"assertions_found_is_lower_bound": True}
-            if counts_are_lower_bounds
-            else {}
+            {"assertions_found_is_lower_bound": True} if counts_are_lower_bounds else {}
         ),
         "canonical_publication": False,
     }
@@ -2857,6 +3081,7 @@ def _get_text_relations(**kwargs):
         )
 
 
+@_governed_ontology_mutation("update_text_relation")
 def _update_text_relation(**kwargs):
     from ...services.text_value_service import update_text_relation_text
     from ...services.rag_text_relation_change_hook_service import (
@@ -2923,6 +3148,7 @@ def _update_text_relation(**kwargs):
         )
 
 
+@_governed_ontology_mutation("delete_text_relation")
 def _delete_text_relation(**kwargs):
     from ...services.text_value_service import (
         delete_text_relation,
@@ -3055,6 +3281,7 @@ def _get_text_relations_summary(**kwargs):
         )
 
 
+@_governed_ontology_mutation("upsert_singleton_text_relation")
 def _upsert_singleton_text_relation(**kwargs):
     from ...services.text_value_service import upsert_singleton_text_relation
     from ...services.text_relation_predicate_validation_service import (
@@ -3234,6 +3461,7 @@ def _fetch_concept_content(**kwargs):
         )
 
 
+@_governed_ontology_mutation("add_names_to_concept")
 def _add_names_to_concept(**kwargs):
     from ...services.text_value_service import upsert_text_for_concept
     from ...db.repositories.concepts_repository import ConceptsRepository
@@ -3330,6 +3558,7 @@ def _add_names_to_concept(**kwargs):
     }
 
 
+@_governed_ontology_mutation("add_relationship")
 def _add_relationship(**kwargs):
     """Add a relationship between two concepts or from concept to text value."""
     from ...db.repositories.concepts_repository import ConceptsRepository
@@ -3387,7 +3616,7 @@ def _add_relationship(**kwargs):
         if has_concept_id == has_name:
             return make_error_response(
                 "invalid_predicate_reference",
-                ("predicate_ref must provide exactly one of concept_id or " "name."),
+                ("predicate_ref must provide exactly one of concept_id or name."),
                 details={
                     "required_choice": ["concept_id", "name"],
                 },
@@ -4199,6 +4428,7 @@ def _add_relationship(**kwargs):
         return response
 
 
+@_governed_ontology_mutation("remove_relationship")
 def _remove_relationship(**kwargs):
     """Remove one concept-to-concept relationship via the canonical service path."""
     from ...services.relationship_removal_service import remove_relationship
@@ -4344,6 +4574,7 @@ def _list_uncertain_relationship_assertions(**kwargs):
         )
 
 
+@_governed_ontology_mutation("promote_uncertain_relationship_assertion")
 def _promote_uncertain_relationship_assertion(**kwargs):
     from ...services.uncertain_relationship_service import (
         promote_uncertain_relationship_assertion,
@@ -4467,6 +4698,7 @@ def _preview_remove_relationship(**kwargs):
         )
 
 
+@_governed_ontology_mutation("remove_relationships_bulk")
 def _remove_relationships_bulk(**kwargs):
     from ...services.relationship_removal_service import remove_relationships_bulk
 
@@ -4493,31 +4725,18 @@ def _remove_relationships_bulk(**kwargs):
 
 
 def _undo_relationship_removal(**kwargs):
-    from ...services.relationship_removal_service import undo_relationship_removal
+    """Fail closed until tombstone restoration has an exact authority intent."""
 
-    undo_token = kwargs.get("undo_token")
-    if not undo_token:
-        return make_error_response(
-            "missing_parameter",
-            "Missing 'undo_token' parameter",
-            details={"missing": ["undo_token"]},
-            suggestions=[
-                "Provide the undo_token returned by remove_relationship(s)_bulk"
-            ],
-        )
-
-    try:
-        return undo_relationship_removal(
-            undo_token=undo_token,
-            request_id=kwargs.get("request_id"),
-            confirmed=kwargs.get("confirmed", True),
-        )
-    except Exception as e:
-        return make_error_response(
-            "exception",
-            f"Exception: {str(e)}",
-            details={"exception_type": type(e).__name__},
-        )
+    return make_error_response(
+        "ontology_mutation_not_governed",
+        (
+            "Relationship restoration is temporarily unavailable on this "
+            "generic surface because an undo token does not itself establish "
+            "semantic authority over every restored source."
+        ),
+        details={"changed": False, "mutation_outcome": "not_started"},
+        suggestions=["Use a governed ontology restoration endpoint when available"],
+    )
 
 
 # arXiv MCP proxy handlers
@@ -7065,7 +7284,18 @@ def _interpret_file_copy(**kwargs):
             )
 
     allow_large = bool(kwargs.get("allow_large", False))
-    persist = bool(kwargs.get("persist", True))
+    persist = bool(kwargs.get("persist", False))
+    if persist:
+        return make_error_response(
+            "file_copy_interpretation_persistence_not_governed",
+            (
+                "File-copy interpretation is read-only until each materialised "
+                "ontology effect uses an exact governed command."
+            ),
+            suggestions=[
+                "Call interpret_file_copy with persist=false and review the proposed interpretation."
+            ],
+        )
     persist_description = bool(kwargs.get("persist_description", True))
     persist_content = bool(kwargs.get("persist_content", True))
     persist_interpretation_json = bool(kwargs.get("persist_interpretation_json", True))
@@ -9278,6 +9508,7 @@ def _resilient_extract_url(**kwargs):
     }
 
 
+@_governed_ontology_mutation("delete_concept")
 def _delete_concept(**kwargs):
     from ...vontology.utils_vontology import simulate_or_delete_concept
 
@@ -9295,12 +9526,14 @@ def _delete_concept(**kwargs):
     return simulate_or_delete_concept(concept_id, execute=not simulate)
 
 
+@_governed_ontology_mutation("merge_concepts")
 def _merge_concepts(**kwargs):
     from ...services.concept_merge_service import merge_concepts
 
     source_id = kwargs.get("source_id")
     target_id = kwargs.get("target_id")
     simulate = kwargs.get("simulate", True)
+    exact_plan = kwargs.get("exact_plan")
 
     if not source_id or not target_id:
         missing = []
@@ -9317,9 +9550,15 @@ def _merge_concepts(**kwargs):
             ],
         )
 
-    return merge_concepts(source_id, target_id, simulate=simulate)
+    return merge_concepts(
+        source_id,
+        target_id,
+        simulate=simulate,
+        exact_plan=exact_plan,
+    )
 
 
+@_governed_ontology_mutation("rename_concept")
 def _rename_concept(**kwargs):
     """Rename a concept's ID while preserving its GUID (JVNAUTOSCI-945).
 
@@ -9357,6 +9596,7 @@ def _rename_concept(**kwargs):
     )
 
 
+@_governed_ontology_mutation("update_concept")
 def _update_concept(**kwargs):
     from ...services.concept_service import update_concept
 
@@ -9499,8 +9739,9 @@ def _concepts_create_input_schema() -> Schema:
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
             "For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' "
             "to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. "
-            "Scope defaults to authenticated user+organisation visibility when context is available. "
-            "Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' "
+            "Governed creation defaults to actor-private visibility. "
+            "Use scope_mode='user_only_default' for an actor-private concept, "
+            "scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' "
             "for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). "
             "Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. "
             "Unknown top-level fields are still tolerated for orchestrator-added context."
@@ -10515,6 +10756,97 @@ def _resolve_concept_by_text_relation_output_schema() -> Schema:
             "resolve_concept_by_text_relation output: status in {resolved, "
             "ambiguous, not_found}; only a complete singleton exact match is "
             "resolved, and bounded incomplete scans remain ambiguous."
+        ),
+    )
+
+
+def _get_concept_publication_scope_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=True,
+        description=(
+            "Read the exact actor-visible publication context, visibility edges, "
+            "and optimistic scope fingerprint for one concept. Actor and "
+            "organisation identity are taken only from trusted server context."
+        ),
+    )
+
+
+def _get_concept_publication_scope_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+            "publication_context": dict,
+            "scope_edges": dict,
+            "scope_fingerprint": (str, type(None)),
+        },
+        optional={},
+        allow_unknown=True,
+        description=(
+            "Canonical publication-scope snapshot and fingerprint for optimistic "
+            "preview or execution."
+        ),
+    )
+
+
+def _concept_publication_scope_change_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+            "destination_kind": str,
+            "expected_scope_fingerprint": str,
+        },
+        optional={
+            "destination_concept_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "reason": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        enum_values={
+            "destination_kind": (
+                "global",
+                "organisation",
+                "organization",
+                "org",
+            )
+        },
+        description=(
+            "Preview or execute one exact publication-scope transition from a "
+            "canonical fingerprint. destination_concept_id is required for an "
+            "organisation destination. Actor, organisation, administrator, and "
+            "operator payload claims are ignored; an agent effect requires an "
+            "opaque exact server-issued delegation."
+        ),
+    )
+
+
+def _concept_publication_scope_change_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "effect_status": str,
+            "mutation_outcome": str,
+            "changed": bool,
+        },
+        optional={
+            "preview": (bool, type(None)),
+            "from": (dict, type(None)),
+            "to": (dict, type(None)),
+            "scope_delta": (dict, type(None)),
+            "authority_decision": (dict, type(None)),
+            "receipt": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "outcome_finality": (str, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Authority decision, durable receipt, and canonical scope read-back; "
+            "preview reports no scope mutation."
         ),
     )
 
@@ -11630,12 +11962,12 @@ def _interpret_file_copy_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "interpret_file_copy input: concept_id for a #V#computer_file_copy instance. "
-            "Optionally pass namespace, max_bytes/allow_large, and persistence controls. "
+            "Optionally pass namespace and max_bytes/allow_large; persist must remain false. "
             "For image files (including screenshots, faces, and building photos), this tool "
             "extracts OCR and semantic descriptions. For PDF documents, it can also perform "
             "diagram-aware organisation candidate extraction with provenance (candidate-only; "
-            "human confirmation required) and persists canonical hasDescription/hasContent "
-            "plus structured interpretation metadata."
+            "human confirmation required), returning proposed description/content and structured "
+            "interpretation metadata without canonical mutation."
         ),
     )
 
@@ -12531,9 +12863,7 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
             {
                 "namespace": None,
                 "namespace_source": "untrusted_payload_rejected",
-                "namespace_resolution_note": (
-                    "authenticated_actor_context_required"
-                ),
+                "namespace_resolution_note": ("authenticated_actor_context_required"),
                 "namespace_mismatch": False,
                 "provided_namespace": explicit_namespace,
                 "derived_namespace": None,
@@ -18688,13 +19018,8 @@ def _search_knowledge_base(**kwargs):
             and resolved_user_concept_id.strip()
         ):
             permissions_context["user_id"] = resolved_user_concept_id.strip()
-        resolved_org_concept_id = ns_report.get(
-            "derived_organisation_concept_id"
-        )
-        if (
-            isinstance(resolved_org_concept_id, str)
-            and resolved_org_concept_id.strip()
-        ):
+        resolved_org_concept_id = ns_report.get("derived_organisation_concept_id")
+        if isinstance(resolved_org_concept_id, str) and resolved_org_concept_id.strip():
             permissions_context["organisation_concept_id"] = (
                 resolved_org_concept_id.strip()
             )
@@ -18713,9 +19038,7 @@ def _search_knowledge_base(**kwargs):
             ) and flask_session.get("user_id"):
                 # Backwards compatibility: some sessions store a non-concept user_id.
                 session_user_concept_id = flask_session.get("user_id")
-            session_org_concept_id = flask_session.get(
-                "organisation_concept_id"
-            )
+            session_org_concept_id = flask_session.get("organisation_concept_id")
             if not session_org_concept_id:
                 # Backwards compatibility for older session key.
                 session_org_concept_id = flask_session.get("org_id")
@@ -20282,6 +20605,17 @@ def _internal_mcp_global_workflow_admin_authorised() -> bool:
     source = get_internal_mcp_actor_context_source()
     if source == "trusted_operator_payload_fallback":
         return True
+    if source == "preexisting_authenticated_or_workflow_context":
+        preexisting = get_internal_mcp_preexisting_actor_context()
+        actor_id = preexisting[0] if preexisting is not None else None
+        if actor_id:
+            from ...services.von_operational_administrator_service import (
+                is_live_von_operational_administrator,
+            )
+
+            # This lookup is deliberately operational-only. It does not bind a
+            # bypass, organisation, or semantic-publication capability.
+            return is_live_von_operational_administrator(actor_id)
     if source is not None or get_internal_mcp_preexisting_actor_context() is not None:
         return False
     # Preserve deliberately direct operator/startup calls, while refusing a
@@ -20873,14 +21207,10 @@ def _workflow_execute(**kwargs):
                 )
                 observation_advisory_exceeded = bool(
                     getattr(wait_result, "advisory_exceeded", False)
-                    or (
-                        wait_result.timed_out
-                        and observation_enforcement == "advisory"
-                    )
+                    or (wait_result.timed_out and observation_enforcement == "advisory")
                 )
                 timed_out = bool(
-                    wait_result.timed_out
-                    and observation_enforcement != "advisory"
+                    wait_result.timed_out and observation_enforcement != "advisory"
                 )
                 if timed_out:
                     try:
@@ -21384,10 +21714,7 @@ def _workflow_get_instance(**kwargs):
         )
         observation_advisory_exceeded = bool(
             getattr(wait_result, "advisory_exceeded", False)
-            or (
-                wait_result.timed_out
-                and observation_enforcement == "advisory"
-            )
+            or (wait_result.timed_out and observation_enforcement == "advisory")
         )
         timed_out = bool(
             wait_result.timed_out and observation_enforcement != "advisory"
@@ -21419,9 +21746,7 @@ def _workflow_get_instance(**kwargs):
                 "timed_out": timed_out,
                 "elapsed_time_enforcement": observation_enforcement,
                 "advisory_exceeded": observation_advisory_exceeded,
-                "hard_timeout_seconds": (
-                    timeout_seconds if timed_out else None
-                ),
+                "hard_timeout_seconds": (timeout_seconds if timed_out else None),
             }
         )
 
@@ -24621,9 +24946,11 @@ def _rag_list_indexed(**kwargs):
                 if isinstance(discovery_payload_raw, Mapping)
                 else {}
             )
-            discovery_elapsed_time_enforcement = str(
-                discovery_payload.get("elapsed_time_enforcement") or "legacy_hard"
-            ).strip().lower()
+            discovery_elapsed_time_enforcement = (
+                str(discovery_payload.get("elapsed_time_enforcement") or "legacy_hard")
+                .strip()
+                .lower()
+            )
             discovery_budget_exhausted = bool(
                 discovery_payload.get("hard_timeout_exceeded")
             ) or (
@@ -24631,9 +24958,9 @@ def _rag_list_indexed(**kwargs):
                 and (
                     bool(discovery_payload.get("budget_exhausted"))
                     or (
-                        str(
-                            discovery_payload.get("match_absence_reason") or ""
-                        ).strip().lower()
+                        str(discovery_payload.get("match_absence_reason") or "")
+                        .strip()
+                        .lower()
                         == "workflow_discovery_budget_exhausted"
                     )
                 )
@@ -25124,9 +25451,7 @@ def _rag_list_indexed(**kwargs):
                 items.append(
                     {
                         "collection": collection,
-                        "session_id": (
-                            relation_id or assertion_id or index_item_id
-                        ),
+                        "session_id": (relation_id or assertion_id or index_item_id),
                         "index_item_id": index_item_id,
                         "row_kind": row_kind,
                         "relation_id": relation_id,
@@ -25509,9 +25834,11 @@ def _rag_get_item(**kwargs):
         discovery_payload: Mapping[str, Any] = (
             discovery_payload_raw if isinstance(discovery_payload_raw, Mapping) else {}
         )
-        discovery_elapsed_time_enforcement = str(
-            discovery_payload.get("elapsed_time_enforcement") or "legacy_hard"
-        ).strip().lower()
+        discovery_elapsed_time_enforcement = (
+            str(discovery_payload.get("elapsed_time_enforcement") or "legacy_hard")
+            .strip()
+            .lower()
+        )
         discovery_budget_exhausted = bool(
             discovery_payload.get("hard_timeout_exceeded")
         ) or (
@@ -25770,9 +26097,7 @@ def _rag_get_item(**kwargs):
             **collection_report,
             "session_id": session_id,
             "index_item_id": doc.doc_id,
-            "row_kind": (
-                doc.metadata.get("row_kind") or "base_text_relation"
-            ),
+            "row_kind": (doc.metadata.get("row_kind") or "base_text_relation"),
             "relation_id": doc.metadata.get("relation_id"),
             "assertion_id": doc.metadata.get("assertion_id"),
             "subject_concept_id": doc.metadata.get("subject_concept_id"),
@@ -26328,7 +26653,9 @@ def _gmail_api_error_response(
         "gmail_api_error",
         f"Gmail {operation} failed: {error_text}",
         details=details,
-        suggestions=list(suggestions or ["Check Gmail API connectivity and credentials"]),
+        suggestions=list(
+            suggestions or ["Check Gmail API connectivity and credentials"]
+        ),
     )
 
 
@@ -26463,9 +26790,7 @@ def _gmail_list_messages(**kwargs):
         # semantic scope values above rather than depend on this mechanism.
         bypass_profile_query_prefix = legacy_bypass
         effective_scope = (
-            "whole_mailbox"
-            if bypass_profile_query_prefix
-            else "profile_default_view"
+            "whole_mailbox" if bypass_profile_query_prefix else "profile_default_view"
         )
         scope_source = (
             "legacy_bypass_profile_query_prefix"
@@ -26530,9 +26855,7 @@ def _gmail_list_messages(**kwargs):
             else None
         )
         if applied_query_prefix and caller_query_text:
-            effective_query_string = (
-                f"({applied_query_prefix}) ({caller_query_text})"
-            )
+            effective_query_string = f"({applied_query_prefix}) ({caller_query_text})"
         else:
             effective_query_string = applied_query_prefix or caller_query_text
 
@@ -26578,9 +26901,7 @@ def _gmail_list_messages(**kwargs):
             effective_query=effective_query,
             notes=notes or None,
             requested_metadata_fields=(
-                kwargs.get("include_metadata")
-                if "include_metadata" in kwargs
-                else None
+                kwargs.get("include_metadata") if "include_metadata" in kwargs else None
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -26920,9 +27241,7 @@ def _gmail_attachment_source_payload(
 
     filename = part_metadata.get("filename")
     if not isinstance(filename, str) or not filename.strip():
-        message_slug = re.sub(
-            r"[^A-Za-z0-9._-]+", "_", str(message_id)
-        ).strip("._")
+        message_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(message_id)).strip("._")
         message_slug = message_slug or "message"
         suffix = ".pdf" if content_type == "application/pdf" else ".bin"
         filename = f"gmail-attachment-{message_slug}-{content_sha256[:12]}{suffix}"
@@ -27154,9 +27473,7 @@ def _gmail_import_attachment(**kwargs):
         attachment_id_sha256 = hashlib.sha256(
             str(attachment_id).encode("utf-8")
         ).hexdigest()
-        source_identifier = (
-            f"{profile}:{message_id}:content-sha256:{content_sha256}"
-        )
+        source_identifier = f"{profile}:{message_id}:content-sha256:{content_sha256}"
         source_uri = f"gmail://{profile}/messages/{message_id}"
         import_result = import_bytes_file_copy(
             data=attachment_bytes,
@@ -27211,9 +27528,7 @@ def _gmail_import_attachment(**kwargs):
                 },
             )
             if isinstance(import_result, Mapping):
-                effect_status = str(
-                    import_result.get("effect_status") or ""
-                ).strip()
+                effect_status = str(import_result.get("effect_status") or "").strip()
                 if effect_status in {"partial", "indeterminate"}:
                     mutation_outcome = str(
                         import_result.get("mutation_outcome") or "unknown"
@@ -27229,9 +27544,7 @@ def _gmail_import_attachment(**kwargs):
                             "mutation_outcome": mutation_outcome,
                             "outcome_finality": outcome_finality,
                             "effect": {
-                                "schema_version": (
-                                    "gmail_attachment_import_effect.v1"
-                                ),
+                                "schema_version": ("gmail_attachment_import_effect.v1"),
                                 "effect_type": "computer_file_copy_import",
                                 "status": effect_status,
                                 **(
@@ -27260,13 +27573,10 @@ def _gmail_import_attachment(**kwargs):
                         failure["changed"] = changed
                     record_internal_mcp_effect_receipt(
                         {
-                            "schema_version": (
-                                "gmail_attachment_import_receipt.v1"
-                            ),
+                            "schema_version": ("gmail_attachment_import_receipt.v1"),
                             "success": False,
                             "status": str(
-                                import_result.get("error")
-                                or "attachment_import_failed"
+                                import_result.get("error") or "attachment_import_failed"
                             ),
                             "effect_status": effect_status,
                             "mutation_outcome": mutation_outcome,
@@ -27443,9 +27753,7 @@ def _gmail_import_attachment(**kwargs):
                 "effect_status": (
                     "succeeded" if readback_succeeded else "indeterminate"
                 ),
-                "mutation_outcome": (
-                    "completed" if readback_succeeded else "unknown"
-                ),
+                "mutation_outcome": ("completed" if readback_succeeded else "unknown"),
                 "outcome_finality": (
                     "canonical_durable_readback"
                     if readback_succeeded
@@ -31549,19 +31857,27 @@ def _authorise_task_actor_mutation(
         return None, None, scope_error
     task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
-        return actor_scope, None, make_error_response(
-            "MISSING_PARAM",
-            "Missing required parameter: task_concept_id",
-            suggestions=["Provide the task's concept_id"],
+        return (
+            actor_scope,
+            None,
+            make_error_response(
+                "MISSING_PARAM",
+                "Missing required parameter: task_concept_id",
+                suggestions=["Provide the task's concept_id"],
+            ),
         )
     try:
         task = get_task(task_id.strip())
     except TaskNotFoundError as exc:
         return actor_scope, None, make_error_response("NOT_FOUND", str(exc))
     except Exception as exc:
-        return actor_scope, None, make_error_response(
-            "UNEXPECTED_ERROR",
-            f"Unable to verify task authority: {exc}",
+        return (
+            actor_scope,
+            None,
+            make_error_response(
+                "UNEXPECTED_ERROR",
+                f"Unable to verify task authority: {exc}",
+            ),
         )
 
     assert actor_scope is not None
@@ -31573,11 +31889,15 @@ def _authorise_task_actor_mutation(
         str(task.get("created_by_concept_id") or "").strip(),
     }
     if task_org_id != actor_org_id or not actor_controls_task:
-        return actor_scope, None, make_error_response(
-            "task_actor_scope_denied",
-            (
-                "An ordinary-turn agent may change only a task in its authenticated "
-                "organisation that it created or is assigned to."
+        return (
+            actor_scope,
+            None,
+            make_error_response(
+                "task_actor_scope_denied",
+                (
+                    "An ordinary-turn agent may change only a task in its authenticated "
+                    "organisation that it created or is assigned to."
+                ),
             ),
         )
     return actor_scope, task, None
@@ -31871,9 +32191,8 @@ def _task_create(**kwargs):
         required_text_persistence_failures = result.get(
             "required_text_persistence_failures"
         )
-        if (
-            required_text_persistence_failures
-            or _canonical_read_back_mismatches(canonical_read_back)
+        if required_text_persistence_failures or _canonical_read_back_mismatches(
+            canonical_read_back
         ):
             return _incomplete_canonical_read_back_response(
                 task_concept_id=task_concept_id,
@@ -36205,6 +36524,52 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ),
         ),
         MethodDefinition(
+            name="get_concept_publication_scope",
+            handler=_get_concept_publication_scope,
+            input_schema=_get_concept_publication_scope_input_schema(),
+            output_schema=_get_concept_publication_scope_output_schema(),
+            category="read",
+            hard_timeout_enabled=False,
+            description=(
+                "Read the exact actor-visible publication scope and optimistic "
+                "fingerprint for one concept before a dedicated scope preview or "
+                "execution. Payload identity claims cannot widen the read."
+            ),
+        ),
+        MethodDefinition(
+            name="preview_concept_publication_scope_change",
+            handler=_preview_concept_publication_scope_change,
+            input_schema=_concept_publication_scope_change_input_schema(),
+            output_schema=_concept_publication_scope_change_output_schema(),
+            category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="concept_id",
+            hard_timeout_enabled=False,
+            description=(
+                "Preview one exact organisation/global publication-scope change "
+                "against a canonical fingerprint. The preview is authority-checked "
+                "and receipted but does not change visibility edges."
+            ),
+        ),
+        MethodDefinition(
+            name="change_concept_publication_scope",
+            handler=_change_concept_publication_scope,
+            input_schema=_concept_publication_scope_change_input_schema(),
+            output_schema=_concept_publication_scope_change_output_schema(),
+            category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="concept_id",
+            hard_timeout_enabled=False,
+            write_guardrail={"ordinary_turn_explicit_request": True},
+            description=(
+                "Execute one explicitly requested, exact organisation/global "
+                "publication-scope transition after preview. The server requires "
+                "live source and destination semantic authority, an unchanged "
+                "fingerprint, exact same-turn agent delegation, a durable receipt, "
+                "and canonical read-back."
+            ),
+        ),
+        MethodDefinition(
             name="find_relations_with_argument",
             handler=_find_relations_with_argument,
             input_schema=_find_relations_with_argument_input_schema(),
@@ -36247,7 +36612,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_fixed_arguments={
                 "organisation_concept_id": None,
                 "org_id": None,
-                "scope_mode": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+                "scope_mode": _CREATE_CONCEPTS_SCOPE_USER_ONLY,
                 "visibility_scope_mode": None,
             },
             ordinary_turn_effect=True,
@@ -36268,9 +36633,9 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "in identity_rejected_candidate_concept_ids. For deterministic stable "
                 "identities, duplicate_resolution_mode='canonical_id_only' skips "
                 "semantic name resolution after an exact concept-id miss; "
-                "omitting it preserves the default semantic fallback. Default "
-                "visibility is user+organisation scoped when authenticated "
-                "context exists. Override with "
+                "omitting it preserves the default semantic fallback. Ordinary-turn "
+                "creation and direct governed creation default to actor-private "
+                "visibility. Use "
                 "scope_mode='organisation_general' for organisation-shared "
                 "concepts, or scope_mode='global_general' for broadly visible "
                 "concepts when the concept is clearly general. Supports "
@@ -36858,7 +37223,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "query uses Gmail q grammar and is otherwise passed through unchanged: "
             "adjacent clauses mean AND, uppercase OR or braces express a union, "
             "and quotes delimit a phrase. Example: newer_than:2d "
-            "from:airline@example.com subject:\"booking confirmation\". "
+            'from:airline@example.com subject:"booking confirmation". '
             "Set include_metadata to a list containing sender/from, subject, date, "
             "snippet, or label_ids to project those fields for the returned rows "
             "using Gmail metadata reads only; id/message_id and threadId/thread_id "
@@ -37515,7 +37880,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "clauses "
                 "mean AND, uppercase OR or braces express a union, and quotes "
                 "delimit a phrase. For example, newer_than:2d "
-                "from:airline@example.com subject:\"booking confirmation\" is one "
+                'from:airline@example.com subject:"booking confirmation" is one '
                 "sender-and-recency-and-subject query. Returned rows include a message_id alias for "
                 "Gmail's id and a thread_id alias for threadId. Set include_metadata "
                 "to any of sender/from, subject, date, snippet, or label_ids when "
@@ -37725,9 +38090,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
                 "user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": (
-                    "actor_organisation_concept_id"
-                ),
+                "organisation_concept_id": ("actor_organisation_concept_id"),
             },
             description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
         ),
@@ -37742,9 +38105,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
                 "user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": (
-                    "actor_organisation_concept_id"
-                ),
+                "organisation_concept_id": ("actor_organisation_concept_id"),
             },
             description=(
                 "Semantic search over concept descriptions only (hasDescription text relations) for the current namespace. "
@@ -37762,9 +38123,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
                 "user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": (
-                    "actor_organisation_concept_id"
-                ),
+                "organisation_concept_id": ("actor_organisation_concept_id"),
             },
             description=(
                 "Find concepts with similar descriptions (vector similarity) within the current namespace. "
@@ -37788,9 +38147,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_external_integration_definitions() -> List[
+    MethodDefinition
+]:
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -38312,9 +38671,9 @@ def _build_default_catalogue_external_integration_definitions() -> (
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
+    MethodDefinition
+]:
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",

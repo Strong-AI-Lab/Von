@@ -747,7 +747,6 @@ def get_db_guardrails():
     """Return redacted MongoDB cost/latency guardrails for operators."""
     try:
         effective_uri = get_effective_mongo_uri()
-        sanitized_uri = _sanitize_mongo_uri_for_display(effective_uri)
         fallback_policy = get_mongo_fallback_policy_state()
         connection_location = build_safe_mongo_connection_location(
             effective_uri,
@@ -2013,7 +2012,19 @@ def get_user_prefs(user_concept_id: str):
     try:
         if not user_concept_id:
             return jsonify({"error": "Missing user_concept_id"}), 400
+        actor_id = get_effective_user_concept_id()
+        if not actor_id:
+            return jsonify({"error": "authenticated_actor_context_required"}), 401
+        normalised_actor = actor_id if actor_id.startswith("#") else f"#V#{actor_id}"
+        normalised_subject = (
+            user_concept_id
+            if user_concept_id.startswith("#")
+            else f"#V#{user_concept_id}"
+        )
+        if normalised_subject != normalised_actor:
+            return jsonify({"error": "user_preferences_subject_mismatch"}), 403
         from ...services.concept_service import get_concept_by_concept_id
+        from ...services.text_value_service import get_texts_for_concept
 
         concept = get_concept_by_concept_id(concept_id=user_concept_id)
         if not concept:
@@ -2028,6 +2039,15 @@ def get_user_prefs(user_concept_id: str):
             return v if isinstance(v, str) and v else None
 
         preferred_language = first_val(lang_raw)
+        if preferred_language is None:
+            language_rows = get_texts_for_concept(
+                normalised_subject,
+                predicate=USER_PREF_LANG_PREDICATE,
+                limit=1,
+                recent_first=True,
+            )
+            if language_rows:
+                preferred_language = language_rows[0].get("text")
         organisation_concept_id = first_val(org_raw)
         return (
             jsonify(
@@ -2048,70 +2068,99 @@ def get_user_prefs(user_concept_id: str):
 
 @settings_bp.route("/user_prefs/<path:user_concept_id>", methods=["POST"])
 def set_user_prefs(user_concept_id: str):
-    """Upsert preferred language & organisation for a user concept.
-    Body: { preferred_language?: str|null, organisation_concept_id?: str|null }
-    Stores values in the concept's relationships dict under predicates defined above.
-    """
+    """Update only the authenticated user's non-authority preferences."""
     try:
         data = request.get_json(silent=True) or {}
-        preferred_language = data.get("preferred_language")
-        organisation_concept_id = data.get("organisation_concept_id")
-        from ...services.concept_service import (
-            get_concept_by_concept_id,
-            update_concept,
+        actor_id = get_effective_user_concept_id()
+        if not actor_id:
+            return jsonify({"error": "authenticated_actor_context_required"}), 401
+        normalised_actor = actor_id if actor_id.startswith("#") else f"#V#{actor_id}"
+        normalised_subject = (
+            user_concept_id
+            if user_concept_id.startswith("#")
+            else f"#V#{user_concept_id}"
         )
+        if normalised_subject != normalised_actor:
+            return jsonify({"error": "user_preferences_subject_mismatch"}), 403
+        if "organisation_concept_id" in data:
+            return (
+                jsonify(
+                    {
+                        "error": "organisation_membership_requires_dedicated_lifecycle",
+                        "message": (
+                            "Organisation membership is authority-bearing and cannot "
+                            "be changed through user preferences."
+                        ),
+                    }
+                ),
+                400,
+            )
+        preferred_language = data.get("preferred_language")
+        from ...services.concept_service import get_concept_by_concept_id
+        from ...services.ontology_mutation_command_service import (
+            execute_governed_ontology_method,
+        )
+        from ...services.text_value_service import upsert_singleton_text_relation
 
         concept = get_concept_by_concept_id(concept_id=user_concept_id)
         if not concept:
             return jsonify({"error": "User concept not found"}), 404
-        rel = _normalize_relationships(concept.get("relationships", {}))
-
-        def _as_list(value) -> list[str]:
-            if isinstance(value, list):
-                return [v for v in value if isinstance(v, str) and v]
-            if isinstance(value, str) and value:
-                return [value]
-            return []
-
-        # Preferred language update (single value)
-        existing_lang = _as_list(rel.get(USER_PREF_LANG_PREDICATE))
         desired_lang = (
             preferred_language.strip() if isinstance(preferred_language, str) else None
         )
         desired_lang = desired_lang or None
-
-        existing_lang = [desired_lang] if desired_lang else []
-        if existing_lang:
-            rel[USER_PREF_LANG_PREDICATE] = existing_lang
-        else:
-            rel.pop(USER_PREF_LANG_PREDICATE, None)
-
-        # Organisation membership update (single value)
-        existing_org = _as_list(rel.get(USER_PREF_ORG_PREDICATE))
-        desired_org = (
-            organisation_concept_id.strip()
-            if isinstance(organisation_concept_id, str)
-            else None
-        )
-        desired_org = desired_org or None
-
-        existing_org = [desired_org] if desired_org else []
-        if existing_org:
-            rel[USER_PREF_ORG_PREDICATE] = existing_org
-        else:
-            rel.pop(USER_PREF_ORG_PREDICATE, None)
-
-        # Persist updated relationships via the normal concept service update path.
-        update_concept(user_concept_id, {"relationships": rel})
+        governed: dict[str, Any] | None = None
+        if desired_lang:
+            preference_context = {"preference": "preferred_language"}
+            preference_provenance = {
+                "source": "user_preferences",
+                "actor_concept_id": normalised_actor,
+            }
+            governed = execute_governed_ontology_method(
+                method_name="upsert_singleton_text_relation",
+                arguments={
+                    "concept_id": normalised_subject,
+                    "predicate": USER_PREF_LANG_PREDICATE,
+                    "text": desired_lang,
+                    "language": "en-NZ",
+                    "context": preference_context,
+                    "provenance": preference_provenance,
+                    "request_id": data.get("request_id"),
+                },
+                mutate=lambda: upsert_singleton_text_relation(
+                    subject_concept_id=normalised_subject,
+                    predicate=USER_PREF_LANG_PREDICATE,
+                    text=desired_lang,
+                    lang="en-NZ",
+                    context=preference_context,
+                    provenance=preference_provenance,
+                ),
+            )
+            if governed.get("success") is False:
+                status = (
+                    503
+                    if governed.get("error_code")
+                    in {
+                        "ontology_mutation_receipt_store_unavailable",
+                        "ontology_mutation_receipt_finalisation_failed",
+                        "canonical_read_back_failed",
+                    }
+                    else 400
+                )
+                return jsonify(governed), status
 
         return (
             jsonify(
                 {
                     "status": "success",
                     "user_concept_id": user_concept_id,
-                    "preferred_language": existing_lang[0] if existing_lang else None,
-                    "organisation_concept_id": (
-                        existing_org[0] if existing_org else None
+                    "preferred_language": desired_lang,
+                    "organisation_concept_id": None,
+                    "authority_receipt": (
+                        governed.get("authority_receipt") if governed else None
+                    ),
+                    "canonical_read_back": (
+                        governed.get("canonical_read_back") if governed else None
                     ),
                 }
             ),
@@ -2673,6 +2722,22 @@ def _repair_concept_id(doc, index):
 @settings_bp.route("/export-ontology", methods=["GET"])
 def export_ontology():
     """API endpoint to export the entire concepts collection as JSON."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error_code": "ontology_bulk_export_not_governed",
+                "error": (
+                    "Whole-ontology HTTP export is unavailable because it cannot "
+                    "preserve actor-scoped visibility."
+                ),
+            }
+        ),
+        410,
+    )
+
+    # Unreachable legacy implementation retained temporarily for compatibility
+    # archaeology; it must not be re-enabled without a scope-partitioned export.
     try:
         current_app.logger.info("Starting ontology export...")
 
@@ -2764,6 +2829,22 @@ def export_ontology():
 @settings_bp.route("/repair-ontology", methods=["POST"])
 def repair_ontology():
     """API endpoint to repair missing concept_ids in the database."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error_code": "ontology_bulk_repair_not_governed",
+                "error": (
+                    "Whole-ontology HTTP repair is unavailable until it has an "
+                    "exact global-authority plan, receipt, and canonical read-back."
+                ),
+            }
+        ),
+        410,
+    )
+
+    # Unreachable legacy implementation retained temporarily for compatibility
+    # archaeology.
     try:
         current_app.logger.info("Starting ontology repair...")
 
@@ -2865,6 +2946,22 @@ def repair_ontology():
 @settings_bp.route("/import-ontology", methods=["POST"])
 def import_ontology():
     """API endpoint to import ontology JSON and replace the concepts collection."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error_code": "ontology_bulk_import_not_governed",
+                "error": (
+                    "Whole-ontology HTTP import is unavailable until it has an "
+                    "exact global-authority plan, receipt, and canonical read-back."
+                ),
+            }
+        ),
+        410,
+    )
+
+    # Unreachable legacy implementation retained temporarily for compatibility
+    # archaeology.
     try:
         current_app.logger.info("Starting ontology import...")
 

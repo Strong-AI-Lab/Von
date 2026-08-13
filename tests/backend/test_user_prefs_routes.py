@@ -1,8 +1,8 @@
-"""Tests for per-user preference (language & organisation) routes.
+"""Tests for actor-owned, non-authority user preference routes.
 
 Covers /api/settings/user_prefs/<user_concept_id> GET/POST behaviour while
-stubbing out DB access. These preferences are stored as relationships on the
-user concept.
+stubbing out DB access. Organisation membership has its own lifecycle and is
+never writable through this surface.
 """
 
 from __future__ import annotations
@@ -95,8 +95,14 @@ def app_client(monkeypatch):
 def test_get_user_prefs_returns_404_when_user_concept_missing(app_client, monkeypatch):
     _, client = app_client
 
+    import src.backend.server.routes.settings_routes as settings_routes
     import src.backend.services.concept_service as concept_service
 
+    monkeypatch.setattr(
+        settings_routes,
+        "get_effective_user_concept_id",
+        lambda: "#V#missing_user",
+    )
     monkeypatch.setattr(concept_service, "get_concept_by_concept_id", lambda **_: None)
 
     resp = client.get("/api/settings/user_prefs/%23V%23missing_user")
@@ -108,6 +114,7 @@ def test_get_user_prefs_returns_404_when_user_concept_missing(app_client, monkey
 def test_get_user_prefs_reads_relationship_values(app_client, monkeypatch):
     _, client = app_client
 
+    import src.backend.server.routes.settings_routes as settings_routes
     import src.backend.services.concept_service as concept_service
 
     def _fake_get_concept_by_concept_id(*, concept_id: str, **_kwargs):
@@ -123,6 +130,11 @@ def test_get_user_prefs_reads_relationship_values(app_client, monkeypatch):
     monkeypatch.setattr(
         concept_service, "get_concept_by_concept_id", _fake_get_concept_by_concept_id
     )
+    monkeypatch.setattr(
+        settings_routes,
+        "get_effective_user_concept_id",
+        lambda: "#V#lu_yunli",
+    )
 
     resp = client.get("/api/settings/user_prefs/%23V%23lu_yunli")
 
@@ -132,51 +144,88 @@ def test_get_user_prefs_reads_relationship_values(app_client, monkeypatch):
     assert data["organisation_concept_id"] == "#V#the_lu_witbrock_household"
 
 
-def test_set_user_prefs_updates_relationships_via_concept_service(
-    app_client, monkeypatch
-):
+def test_set_user_language_uses_governed_text_effect(app_client, monkeypatch):
     _, client = app_client
 
+    import src.backend.server.routes.settings_routes as settings_routes
     import src.backend.services.concept_service as concept_service
+    import src.backend.services.ontology_mutation_command_service as command
 
     def _fake_get_concept_by_concept_id(*, concept_id: str, **_kwargs):
+        return {"concept_id": concept_id, "relationships": {}}
+
+    captured: dict = {}
+
+    def _fake_execute(**kwargs):
+        captured["arguments"] = kwargs["arguments"]
+        captured["mutation"] = kwargs["mutate"]()
         return {
-            "concept_id": concept_id,
-            "relationships": {
-                "#V#some_other_predicate": ["#V#untouched"],
-                "#V#preferred_language": ["en"],
-                "#V#member_of_organisation": ["#V#old_org"],
-            },
+            "success": True,
+            "changed": True,
+            "authority_receipt": {"receipt_id": "receipt-language"},
+            "canonical_read_back": {"text_sha256": "exact"},
         }
 
-    captured = {}
-
-    def _fake_update_concept(concept_id: str, update_data):
-        captured["concept_id"] = concept_id
-        captured["update_data"] = update_data
-        return {"concept_id": concept_id}
-
+    monkeypatch.setattr(
+        settings_routes,
+        "get_effective_user_concept_id",
+        lambda: "#V#lu_yunli",
+    )
     monkeypatch.setattr(
         concept_service, "get_concept_by_concept_id", _fake_get_concept_by_concept_id
     )
-    monkeypatch.setattr(concept_service, "update_concept", _fake_update_concept)
+    monkeypatch.setattr(command, "execute_governed_ontology_method", _fake_execute)
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **kwargs: captured.setdefault("text_write", kwargs) or {"success": True},
+    )
 
     resp = client.post(
         "/api/settings/user_prefs/%23V%23lu_yunli",
-        json={
-            "preferred_language": "en-NZ",
-            "organisation_concept_id": "#V#the_lu_witbrock_household",
-        },
+        json={"preferred_language": "en-NZ", "request_id": "pref-language-1"},
     )
 
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["status"] == "success"
     assert data["preferred_language"] == "en-NZ"
-    assert data["organisation_concept_id"] == "#V#the_lu_witbrock_household"
+    assert data["organisation_concept_id"] is None
+    assert data["authority_receipt"] == {"receipt_id": "receipt-language"}
 
-    assert captured["concept_id"] == "#V#lu_yunli"
-    rel = captured["update_data"]["relationships"]
-    assert rel["#V#some_other_predicate"] == ["#V#untouched"]
-    assert rel["#V#preferred_language"] == ["en-NZ"]
-    assert rel["#V#member_of_organisation"] == ["#V#the_lu_witbrock_household"]
+    assert captured["arguments"] == {
+        "concept_id": "#V#lu_yunli",
+        "predicate": "#V#preferred_language",
+        "text": "en-NZ",
+        "language": "en-NZ",
+        "context": {"preference": "preferred_language"},
+        "provenance": {
+            "source": "user_preferences",
+            "actor_concept_id": "#V#lu_yunli",
+        },
+        "request_id": "pref-language-1",
+    }
+    assert captured["text_write"]["subject_concept_id"] == "#V#lu_yunli"
+
+
+def test_set_user_prefs_cannot_change_organisation_membership(
+    app_client,
+    monkeypatch,
+):
+    _, client = app_client
+
+    import src.backend.server.routes.settings_routes as settings_routes
+
+    monkeypatch.setattr(
+        settings_routes,
+        "get_effective_user_concept_id",
+        lambda: "#V#lu_yunli",
+    )
+    response = client.post(
+        "/api/settings/user_prefs/%23V%23lu_yunli",
+        json={"organisation_concept_id": "#V#forged_org"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == (
+        "organisation_membership_requires_dedicated_lifecycle"
+    )

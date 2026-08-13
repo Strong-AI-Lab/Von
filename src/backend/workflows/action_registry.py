@@ -125,6 +125,10 @@ class WorkflowEnvironment:
     # LLM selection, namespace resolution, and access filtering work correctly.
     user_concept_id: str | None = None
     org_concept_id: str | None = None
+    # Server-issued, exact semantic-ontology delegation for an agent effect.
+    # Workflow definitions and model output may reference this value but cannot
+    # create it or widen its bound operation, target, audience, or expiry.
+    ontology_delegation_id: str | None = None
     step_callback: Callable[[Mapping[str, Any]], None] | None = None
 
 

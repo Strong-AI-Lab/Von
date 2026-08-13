@@ -21,7 +21,8 @@ def test_remove_relationship_rejects_non_vontology_predicate_keys(monkeypatch):
         _fake_update_one,
     )
 
-    result = catalogue._remove_relationship(
+    # Exercise handler validation below the separately tested authority wrapper.
+    result = catalogue._remove_relationship.__wrapped__(
         source_id="#V#source", predicate="has_item", target="#V#target"
     )
 
@@ -44,7 +45,7 @@ def test_remove_relationship_rejects_missing_dynamic_predicate_concepts(monkeypa
         _fake_find_one,
     )
 
-    result = catalogue._remove_relationship(
+    result = catalogue._remove_relationship.__wrapped__(
         source_id="#V#source", predicate="#V#has_item", target="#V#target"
     )
 
@@ -65,7 +66,7 @@ def test_remove_relationship_returns_structured_error_for_missing_source(monkeyp
         _fake_find_one,
     )
 
-    result = catalogue._remove_relationship(
+    result = catalogue._remove_relationship.__wrapped__(
         source_id="#V#source", predicate="typeOf", target="#V#target"
     )
 
@@ -87,7 +88,7 @@ def test_remove_relationship_rejects_text_relation_predicates(monkeypatch):
         _fake_find_one,
     )
 
-    result = catalogue._remove_relationship(
+    result = catalogue._remove_relationship.__wrapped__(
         source_id="#V#source", predicate="hasContent", target="hello"
     )
 

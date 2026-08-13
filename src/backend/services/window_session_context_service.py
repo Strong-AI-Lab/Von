@@ -230,6 +230,22 @@ class WindowSessionStore:
             del self._sessions[window_session_id]
             return True
 
+    def delete_all_owned(self, user_id: Optional[str]) -> int:
+        """Delete every live window context owned by one exact actor."""
+
+        requested_owner = _normalise_owner_id(user_id)
+        if not requested_owner:
+            return 0
+        with self._lock:
+            matching_ids = [
+                window_session_id
+                for window_session_id, ctx in self._sessions.items()
+                if _normalise_owner_id(ctx.user_id) == requested_owner
+            ]
+            for window_session_id in matching_ids:
+                del self._sessions[window_session_id]
+            return len(matching_ids)
+
     def cleanup_expired(self) -> int:
         """Remove all expired sessions. Returns count removed."""
         with self._lock:
@@ -410,6 +426,12 @@ def delete_window_context_if_owned(
     if not isinstance(window_session_id, str) or not window_session_id.strip():
         return False
     return get_window_session_store().delete_if_owned(window_session_id.strip(), user_id)
+
+
+def delete_all_window_contexts_owned_by(user_id: Optional[str]) -> int:
+    """Invalidate all derived per-window role caches for one actor."""
+
+    return get_window_session_store().delete_all_owned(user_id)
 
 
 def set_window_chat_session(

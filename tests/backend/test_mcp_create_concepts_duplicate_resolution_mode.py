@@ -8,7 +8,7 @@ import pytest
 
 from src.backend.integrations.internal_mcp.catalogue import (
     _concepts_create_input_schema,
-    _create_concepts,
+    _create_concepts as _governed_create_concepts,
 )
 from src.backend.integrations.internal_mcp.schemas import validate_payload
 from src.backend.integrations.internal_mcp.transport import (
@@ -21,6 +21,8 @@ from src.backend.services.concept_external_identity_service import (
     ExternalIdentityResolution,
 )
 from src.backend.utils.concept_id_utils import canonicalise_vontology_concept_id
+
+_create_concepts = _governed_create_concepts.__wrapped__
 
 _PARENT_ID = "#V#abstract_object"
 _EXTERNAL_IDENTITY_PARENT_ID = "#V#archival_record"
@@ -828,49 +830,8 @@ def test_external_identity_reuses_same_kind_across_parent_classifications(
     assert create_calls == []
 
 
-@pytest.mark.parametrize(
-    ("persistence_receipt", "expected_status", "expected_success"),
-    [
-        (
-            {
-                "success": False,
-                "effect_status": "indeterminate",
-                "changed": None,
-                "writes": [],
-                "failures": [],
-                "indeterminate_failures": [
-                    {
-                        "stage": "external_identity_persistence",
-                        "outcome": "indeterminate",
-                    }
-                ],
-            },
-            "indeterminate",
-            False,
-        ),
-        (
-            {
-                "success": True,
-                "effect_status": "succeeded",
-                "changed": None,
-                "writes": [
-                    {
-                        "write_outcome": "readback_verified_after_exception",
-                    }
-                ],
-                "failures": [],
-                "indeterminate_failures": [],
-            },
-            "succeeded",
-            True,
-        ),
-    ],
-)
-def test_external_identity_reuse_preserves_marker_write_finality(
+def test_external_identity_reuse_is_read_only(
     monkeypatch: pytest.MonkeyPatch,
-    persistence_receipt: dict[str, Any],
-    expected_status: str,
-    expected_success: bool,
 ) -> None:
     _patch_external_identity_preflights(monkeypatch)
     existing_id = "#V#existing_catalogued_entity"
@@ -899,10 +860,11 @@ def test_external_identity_reuse_preserves_marker_write_finality(
             resolution_source="persisted_identity_marker",
         ),
     )
+    persistence_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         "src.backend.services.concept_external_identity_service."
         "persist_external_identity_markers",
-        lambda **_kwargs: dict(persistence_receipt),
+        lambda **kwargs: persistence_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(
         "src.backend.vontology.utils_vontology.create_vontology_concept",
@@ -924,17 +886,17 @@ def test_external_identity_reuse_preserves_marker_write_finality(
         ],
     )
 
-    assert result["effect_status"] == expected_status
-    assert result["success"] is expected_success
-    assert result["changed"] is None
-    if expected_status == "indeterminate":
-        assert result["already_existed"] == 0
-        assert result["indeterminate_failure_count"] == 1
-        assert result["results"][0]["error_code"] == (
-            "external_identity_persistence_indeterminate"
-        )
-    else:
-        assert result["already_existed"] == 1
+    assert result["success"] is True
+    assert result["effect_status"] == "succeeded"
+    assert result["changed"] is False
+    assert result["already_existed"] == 1
+    assert result["results"][0]["external_identity"]["persistence"] == {
+        "success": True,
+        "effect_status": "not_started",
+        "changed": False,
+        "reason_code": "duplicate_reuse_is_read_only",
+    }
+    assert persistence_calls == []
 
 
 def test_external_identity_reuse_does_not_start_marker_repair_after_cancellation(
@@ -1943,7 +1905,7 @@ def test_external_identity_marker_uncertainty_propagates_to_batch_receipt(
     assert result["results"][0]["effect_status"] == "indeterminate"
 
 
-def test_marker_repair_reuses_explicit_stable_candidate_without_second_create(
+def test_explicit_stable_candidate_reuse_does_not_repair_markers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.backend.services import concept_external_identity_service as identity_service
@@ -2085,10 +2047,10 @@ def test_marker_repair_reuses_explicit_stable_candidate_without_second_create(
     assert first["created_concept_ids"] == [stable_id]
     assert repaired["success"] is True
     assert repaired["effect_status"] == "succeeded"
-    assert repaired["changed"] is True
+    assert repaired["changed"] is False
     assert repaired["already_existed"] == 1
     assert repaired["results"][0]["external_identity_resolution_source"] == (
         "caller_confirmed_stable_identity"
     )
     assert create_calls == [stable_id]
-    assert persistence_calls == [stable_id, stable_id]
+    assert persistence_calls == [stable_id]

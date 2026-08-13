@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from contextlib import nullcontext
 from functools import lru_cache
 from typing import Any
 
@@ -363,6 +364,40 @@ def _runtime_write_policy_missing(
     return not _has_explicit_write_policy(metadata)
 
 
+def _ontology_invocation_context(
+    *,
+    request: WorkflowActionRequest,
+    resolved_tool_name: str,
+):
+    """Bind workflow-agent provenance even when no delegation was supplied."""
+
+    from ..services.ontology_mutation_command_service import (
+        is_ontology_mutation_method,
+    )
+
+    if not is_ontology_mutation_method(resolved_tool_name):
+        return nullcontext()
+    from ..services.ontology_publication_authority_service import (
+        bind_ontology_invocation,
+    )
+
+    workflow_id = _clean_text(request.workflow_id) or None
+    state_id = _clean_text(request.workflow_state_id) or "unbound_state"
+    effect_id = f"workflow:{workflow_id or 'unbound_workflow'}:{state_id}:{resolved_tool_name}"
+    return bind_ontology_invocation(
+        surface="workflow",
+        executing_agent_concept_id="#V#von_system",
+        audience="workflow",
+        delegation_id=getattr(
+            request.environment,
+            "ontology_delegation_id",
+            None,
+        ),
+        effect_id=effect_id,
+        workflow_id=workflow_id,
+    )
+
+
 def _handle_workflow_mcp_invoke_tool(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
@@ -487,9 +522,15 @@ def _handle_workflow_mcp_invoke_tool(
 
         from ..security.access_control import override_current_actor
 
-        with override_current_actor(
-            getattr(request.environment, "user_concept_id", None),
-            getattr(request.environment, "org_concept_id", None),
+        with (
+            override_current_actor(
+                getattr(request.environment, "user_concept_id", None),
+                getattr(request.environment, "org_concept_id", None),
+            ),
+            _ontology_invocation_context(
+                request=request,
+                resolved_tool_name=resolved_tool_name,
+            ),
         ):
             if event_launch_suppression_requested:
                 from ..services.workflow_event_integration_service import (

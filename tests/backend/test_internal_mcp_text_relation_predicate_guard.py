@@ -4,20 +4,16 @@ import asyncio
 import json
 from typing import Any
 
-from src.backend.integrations.internal_mcp import (
-    InternalMCPGateway,
-    InternalMCPTransport,
-    build_default_catalogue,
-)
+from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.mcp_server import mcp_stdio_server
 
 
-def _build_gateway() -> InternalMCPGateway:
-    return InternalMCPGateway(
-        catalogue=build_default_catalogue(),
-        transport=InternalMCPTransport(),
-        enabled=True,
-    )
+def _invoke_handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Exercise predicate semantics below the governed authority wrapper."""
+
+    method = build_default_catalogue().get(name)
+    assert method is not None
+    return method.handler.__wrapped__(**arguments)
 
 
 def _decode_stdio_payload(result: object) -> dict[str, Any]:
@@ -29,8 +25,6 @@ def _decode_stdio_payload(result: object) -> dict[str, Any]:
 def test_upsert_singleton_text_relation_rejects_missing_vontology_predicate(
     monkeypatch,
 ) -> None:
-    gateway = _build_gateway()
-
     def _missing_concept(_concept_id: str) -> dict[str, Any]:
         raise RuntimeError("concept not found")
 
@@ -46,14 +40,14 @@ def test_upsert_singleton_text_relation_rejects_missing_vontology_predicate(
         _unexpected_upsert,
     )
 
-    payload = gateway.invoke(
+    payload = _invoke_handler(
         "upsert_singleton_text_relation",
         {
             "concept_id": "#V#target_concept",
             "predicate": "#V#made_up_field_name",
             "text": "Supplied metadata value",
         },
-    ).payload
+    )
 
     assert payload["success"] is False
     assert payload["error_code"] == "predicate_concept_not_found"
@@ -66,7 +60,6 @@ def test_upsert_singleton_text_relation_rejects_missing_vontology_predicate(
 def test_upsert_singleton_text_relation_accepts_core_predicate_concept_alias(
     monkeypatch,
 ) -> None:
-    gateway = _build_gateway()
     calls: list[dict[str, Any]] = []
 
     def _fake_upsert(**kwargs: Any) -> dict[str, Any]:
@@ -88,14 +81,14 @@ def test_upsert_singleton_text_relation_accepts_core_predicate_concept_alias(
         _fake_upsert,
     )
 
-    payload = gateway.invoke(
+    payload = _invoke_handler(
         "upsert_singleton_text_relation",
         {
             "concept_id": "#V#represented_item",
             "predicate": "#V#hasDescription",
             "text": "Abstract text.",
         },
-    ).payload
+    )
 
     assert payload["success"] is True
     assert payload["predicate"] == "hasDescription"
@@ -107,7 +100,6 @@ def test_upsert_singleton_text_relation_accepts_core_predicate_concept_alias(
 def test_upsert_text_relation_accepts_existing_custom_predicate_concept(
     monkeypatch,
 ) -> None:
-    gateway = _build_gateway()
     calls: list[dict[str, Any]] = []
 
     def _get_concept(concept_id: str) -> dict[str, Any]:
@@ -138,14 +130,14 @@ def test_upsert_text_relation_accepts_existing_custom_predicate_concept(
         lambda **_kwargs: None,
     )
 
-    payload = gateway.invoke(
+    payload = _invoke_handler(
         "upsert_text_relation",
         {
             "concept_id": "#V#represented_item",
             "predicate": "#V#has_external_identifier",
             "text": "external-id-123",
         },
-    ).payload
+    )
 
     assert payload["success"] is True
     assert payload["predicate"] == "#V#has_external_identifier"
@@ -153,7 +145,7 @@ def test_upsert_text_relation_accepts_existing_custom_predicate_concept(
     assert calls[0]["predicate"] == "#V#has_external_identifier"
 
 
-def test_stdio_upsert_singleton_text_relation_rejects_missing_vontology_predicate(
+def test_sessionless_stdio_text_write_fails_before_predicate_resolution(
     monkeypatch,
 ) -> None:
     def _missing_concept(_concept_id: str) -> dict[str, Any]:
@@ -167,13 +159,22 @@ def test_stdio_upsert_singleton_text_relation_rejects_missing_vontology_predicat
         _missing_concept,
     )
     monkeypatch.setattr(
-        mcp_stdio_server,
-        "upsert_singleton_text_relation",
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
         _unexpected_upsert,
+    )
+    monkeypatch.setattr(
+        mcp_stdio_server,
+        "_evaluate_stdio_write_access",
+        lambda *_args, **_kwargs: (
+            True,
+            {},
+            {"write_category_tools_allowed": True},
+        ),
     )
 
     async def _runner() -> dict[str, Any]:
-        result = await mcp_stdio_server._handle_upsert_singleton_text_relation(
+        result = await mcp_stdio_server.call_tool(
+            "upsert_singleton_text_relation",
             {
                 "concept_id": "#V#target_concept",
                 "predicate": "#V#made_up_field_name",
@@ -185,5 +186,7 @@ def test_stdio_upsert_singleton_text_relation_rejects_missing_vontology_predicat
     payload = asyncio.run(_runner())
 
     assert payload["success"] is False
-    assert payload["error_code"] == "predicate_concept_not_found"
-    assert payload["error_details"]["predicate"] == "#V#made_up_field_name"
+    assert payload["error_code"] == "ontology_sessionless_delegation_not_supported"
+    assert payload["effect_status"] == "not_started"
+    assert payload["mutation_outcome"] == "not_started"
+    assert payload["changed"] is False

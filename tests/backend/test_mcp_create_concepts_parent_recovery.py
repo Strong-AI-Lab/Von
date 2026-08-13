@@ -7,13 +7,15 @@ import json
 from typing import Any
 
 from src.backend.integrations.internal_mcp.catalogue import (
-    _create_concepts,
+    _create_concepts as _governed_create_concepts,
     build_default_catalogue,
 )
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.mcp_server import mcp_stdio_server
 from src.backend.security.access_control import is_bypass_enabled
+
+_create_concepts = _governed_create_concepts.__wrapped__
 
 
 def _patch_create_concept_success(monkeypatch):
@@ -259,7 +261,7 @@ def test_create_concepts_rejects_relationship_derived_predicate_parent(monkeypat
     assert created == []
 
 
-def test_create_concepts_recovery_works_through_gateway(monkeypatch):
+def test_sessionless_gateway_create_fails_before_parent_recovery(monkeypatch):
     _patch_create_concept_success(monkeypatch)
     monkeypatch.setattr(
         "src.backend.services.create_concepts_parent_resolution_service.resolve_available_workflow_type_ids",
@@ -288,14 +290,14 @@ def test_create_concepts_recovery_works_through_gateway(monkeypatch):
         },
     ).payload
 
-    assert payload.get("successful") == 1
-    assert payload.get("created_concept_ids") == ["#V#gateway_workflow_recovery_type"]
-    assert (payload.get("results") or [{}])[0].get("concept_id") == "#V#gateway_workflow_recovery_type"
-    assert payload.get("parent_id_used") == "#V#durable_workflow"
-    assert (payload.get("parent_resolution") or {}).get("fallback_used") is True
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "authenticated_actor_context_required"
+    assert payload.get("effect_status") == "not_started"
+    assert payload.get("mutation_outcome") == "not_started"
+    assert payload.get("changed") is False
 
 
-def test_stdio_create_concepts_recovery_uses_same_parent_logic(monkeypatch):
+def test_sessionless_stdio_create_fails_before_parent_recovery(monkeypatch):
     _patch_create_concept_success(monkeypatch)
     monkeypatch.setattr(
         "src.backend.services.create_concepts_parent_resolution_service.resolve_available_workflow_type_ids",
@@ -322,8 +324,10 @@ def test_stdio_create_concepts_recovery_uses_same_parent_logic(monkeypatch):
     response = asyncio.run(_invoke())
     assert response
     payload = json.loads(response[0].text)
-    assert payload.get("successful") == 1
-    assert payload.get("created_concept_ids") == ["#V#stdio_workflow_recovery_type"]
-    assert (payload.get("results") or [{}])[0].get("concept_id") == "#V#stdio_workflow_recovery_type"
-    assert payload.get("parent_id_used") == "#V#durable_workflow"
-    assert (payload.get("parent_resolution") or {}).get("fallback_used") is True
+    assert payload.get("success") is False
+    assert payload.get("error_code") == (
+        "ontology_sessionless_delegation_not_supported"
+    )
+    assert payload.get("effect_status") == "not_started"
+    assert payload.get("mutation_outcome") == "not_started"
+    assert payload.get("changed") is False

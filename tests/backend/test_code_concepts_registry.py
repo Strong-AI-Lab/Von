@@ -76,6 +76,12 @@ def test_workflow_runtime_policy_predicates_are_registered():
     assert "#V#hasWorkflowTerminalSuccessContractJson" in ids
     assert "#V#has_workflow_terminal_success_contract_json" in ids
     assert "#V#hasWorkflowRequiredEffectsContractJson" in ids
+
+
+def test_operational_administrator_predicate_is_registered():
+    ids = set(list_code_predicate_ids())
+
+    assert "#V#has_von_operational_administrator" in ids
     assert "#V#has_workflow_required_effects_contract_json" in ids
 
 

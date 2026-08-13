@@ -183,7 +183,9 @@ _CONCEPT_SCOPE_MODE_ALIASES: Dict[str, str] = {
     "default": CONCEPT_SCOPE_USER_ORG_DEFAULT,
     "user_org_default": CONCEPT_SCOPE_USER_ORG_DEFAULT,
     "user_org": CONCEPT_SCOPE_USER_ORG_DEFAULT,
-    "private": CONCEPT_SCOPE_USER_ORG_DEFAULT,
+    "private": CONCEPT_SCOPE_USER_ONLY_DEFAULT,
+    "user_only": CONCEPT_SCOPE_USER_ONLY_DEFAULT,
+    "user_only_default": CONCEPT_SCOPE_USER_ONLY_DEFAULT,
     "organisation_general": CONCEPT_SCOPE_ORGANISATION_GENERAL,
     "organization_general": CONCEPT_SCOPE_ORGANISATION_GENERAL,
     "org_general": CONCEPT_SCOPE_ORGANISATION_GENERAL,
@@ -381,7 +383,10 @@ def _resolve_creation_visibility_scope(
             relationships,
             [actor_user_id],
         )
-        if actor_org_id:
+        if (
+            actor_org_id
+            and mode_for_resolution != CONCEPT_SCOPE_USER_ONLY_DEFAULT
+        ):
             relationships = set_specific_to_org_values(
                 relationships,
                 [actor_org_id],
@@ -527,6 +532,8 @@ def create_concept(
     event_namespace: Optional[str] = None,
     visibility_scope_mode: Optional[str] = None,
     defer_text_relations: bool = False,
+    maintain_relationship_inverses: bool = True,
+    resolve_visibility_from_event_namespace: bool = True,
 ) -> Dict[str, Any]:
     """Creates a new concept in the 'concepts' collection.
     REFACTORING_NOTE: This is the first CRUD operation for the new generalized concept model.
@@ -542,6 +549,17 @@ def create_concept(
     that create non-user-facing graph artefacts and immediately store their
     authoritative payload in concept_data. Normal concept creation should leave
     this false so canonical names/descriptions are attached as text relations.
+
+    maintain_relationship_inverses controls whether creation also mutates each
+    referenced target concept with structural reverse edges. Governed external
+    creation sets this false because its create authority covers the new child,
+    not pre-existing parent concepts; reverse traversal remains available from
+    the derived relationship extent.
+
+    resolve_visibility_from_event_namespace permits legacy internal callers to
+    derive missing actor scope from their trusted event namespace. Governed
+    external callers set this false so event attribution cannot alter the exact
+    scope authorised from trusted actor context.
     """
     # Use repository for concepts collection access
     concepts_coll = ConceptsRepository.collection()
@@ -601,7 +619,9 @@ def create_concept(
     visibility_scope = _resolve_creation_visibility_scope(
         created_by_concept_id=created_by_concept_id,
         organisation_concept_id=organisation_concept_id,
-        event_namespace=event_namespace,
+        event_namespace=(
+            event_namespace if resolve_visibility_from_event_namespace else None
+        ),
         visibility_scope_mode=visibility_scope_mode,
     )
     visibility_relationships = visibility_scope.get("relationships") or {}
@@ -725,7 +745,7 @@ def create_concept(
                 )
 
         try:
-            if concept_identifier:
+            if concept_identifier and maintain_relationship_inverses:
                 ConceptsRepository.reconcile_relationships(
                     concept_identifier,
                     concept_doc.get("relationships") or {},

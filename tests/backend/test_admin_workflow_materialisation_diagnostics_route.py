@@ -107,3 +107,75 @@ def test_org_admin_cannot_probe_global_workflow_concept_ids(
         "error": "trusted_operator_authority_required"
     }
     assert calls == []
+
+
+def test_global_semantic_ontology_admin_cannot_use_operator_only_diagnostics(
+    monkeypatch,
+) -> None:
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    client = _build_test_client()
+    calls: list[object] = []
+    semantic_admin = "#V#semantic_global_admin"
+    global_role = authority.AuthorityRoleEvidence(
+        role=authority.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE,
+        actor_concept_id=semantic_admin,
+        organisation_concept_id=None,
+        relation_id="role:semantic-global-admin",
+        revision="operator-separation-test",
+    )
+    monkeypatch.setattr(
+        authority,
+        "resolve_live_semantic_roles",
+        lambda actor: (global_role,) if actor == semantic_admin else (),
+    )
+    monkeypatch.setattr(
+        admin_routes,
+        "build_workflow_materialisation_diagnostics",
+        lambda **_kwargs: calls.append(object()),
+    )
+    # Configure the distinct operator credential, but do not give it to the
+    # represented global semantic administrator.
+    monkeypatch.setenv("VON_ADMIN_TOKEN", "operator-token")
+    with client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = semantic_admin
+
+    authority_summary = authority.list_actor_semantic_authority(semantic_admin)
+    assert [item["role"] for item in authority_summary["roles"]] == [
+        authority.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE
+    ]
+
+    response = client.get("/admin/workflow_materialisation_diagnostics")
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": "trusted_operator_authority_required"
+    }
+    assert calls == []
+
+
+def test_represented_operational_administrator_can_use_diagnostics(
+    monkeypatch,
+) -> None:
+    from src.backend.services import von_operational_administrator_service as operators
+
+    client = _build_test_client()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        operators,
+        "is_live_von_operational_administrator",
+        lambda actor: actor == "#V#operational_admin",
+    )
+    monkeypatch.setattr(
+        admin_routes,
+        "build_workflow_materialisation_diagnostics",
+        lambda **_kwargs: calls.append(object()) or {"success": True},
+    )
+    with client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#operational_admin"
+
+    response = client.get("/admin/workflow_materialisation_diagnostics")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"success": True}
+    assert len(calls) == 1

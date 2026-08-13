@@ -709,6 +709,21 @@ class TestWindowSessionStoreIsolation:
         assert preserved.user_id == "#V#owner"
         assert preserved.organisation_concept_id == "owner_org"
 
+    def test_store_invalidates_all_and_only_one_users_window_role_caches(self):
+        from src.backend.services.window_session_context_service import (
+            WindowSessionStore,
+        )
+
+        store = WindowSessionStore()
+        store.get_or_create("michael_a", "#V#michael_witbrock")
+        store.get_or_create("michael_b", "#V#michael_witbrock")
+        store.get_or_create("other", "#V#other_person")
+
+        assert store.delete_all_owned("#V#michael_witbrock") == 2
+        assert store.get("michael_a") is None
+        assert store.get("michael_b") is None
+        assert store.get("other") is not None
+
     def test_get_effective_context_prefers_window_session(self):
         """get_effective_context should prefer window session over Flask session."""
         from src.backend.services.window_session_context_service import (
