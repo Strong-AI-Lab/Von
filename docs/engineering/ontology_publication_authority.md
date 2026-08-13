@@ -1,24 +1,26 @@
 # Ontology Publication Authority
 
 - **Kind:** Design and implementation-boundary reference
-- **Lifecycle:** Draft candidate
-- **Authority:** Candidate reference for the `JVNAUTOSCI-2632` branch; it does
-  not prove deployment, represented role assignment, or live authorisation
+- **Lifecycle:** Active
+- **Authority:** Operational reference for the deployed `JVNAUTOSCI-2632`
+  authority boundary
 - **Authority scope:** Canonical Vontology publication, retraction, identity
   consolidation, and publication-scope change
 - **Owner:** Von maintainers
 - **Last reviewed:** 13 August 2026
 - **Review trigger:** Merge, deployment, a role-lifecycle change, or a new
   canonical ontology mutation entry point
-- **Live authority or implementation evidence:** Revalidate the governed
-  mutation service, invocation boundaries, represented role relations, and
-  receipts in the target environment
+- **Live authority or implementation evidence:** Initial activation completed
+  on 13 August 2026 at commit
+  `1248322dad4080e91d89e23b36bc4ca5aa57c9e1`; revalidate the current runtime
+  commit, governed mutation service, represented role relations, and receipts
+  before relying on this record in another environment
 - **Open questions:** Long-term role-assignment lifecycle and any broader
   theory/context model remain separate work
 
 ## 1. Purpose and boundary
 
-This candidate addresses a specific failure mode: historical visibility of a
+This release addresses a specific failure mode: historical visibility of a
 concept must not decide who may alter its canonical meaning or move it between
 publication contexts. Visibility, provenance, scoped assertions, canonical
 publication, and operational administration remain separate facts.
@@ -80,7 +82,7 @@ they must not recover a grantor's private visibility merely from an opaque grant
 
 ## 4. Governed effects and scope transition
 
-The candidate centralises authority decisions for the supported canonical
+The release centralises authority decisions for the supported canonical
 concept, text, and relationship mutations, including promotion/retraction. The
 chat/adaptive turn, workflow, authenticated HTTP, and internal MCP entry points
 enter that governed path rather than each treating visibility as mutation
@@ -104,7 +106,7 @@ operations. Generic mutation is denied for unresolved historical or mixed
 scope. The dedicated scope-change path first exposes a scope read-back and
 preview, then requires an optimistic scope fingerprint, explicit destination,
 source-and-destination authority, and a request identifier. It is the only
-candidate path that may adopt legacy/mixed scope; it must never silently
+governed path that may adopt legacy/mixed scope; it must never silently
 reinterpret malformed legacy data as global publication.
 
 Undo is deliberately fail-closed until it can carry an equally exact target,
@@ -143,7 +145,7 @@ after that, administrators for that exact organisation govern its role
 lifecycle. Neither the last global semantic root nor the last represented
 operational root can be removed.
 
-The candidate also contains one inventory-bound initial migration fixed to
+The release also contains one inventory-bound initial migration fixed to
 `#V#michael_witbrock`. Its dry run inventories legacy elevated roles,
 represented memberships, semantic roles, and operational roles across all
 subjects. Apply requires both the configured bootstrap credential and
@@ -152,10 +154,11 @@ an elevated holder. It represents Michael as the Von operational
 administrator, global ontology administrator, exact-organisation ontology
 administrator, and organisation owner for every represented membership. Each
 effect is read back exactly; interrupted application is recorded as partial
-and can resume only against the same safe inventory. This candidate mechanism
-does not imply that the migration has been run in any live environment.
+and can resume only against the same safe inventory. The migration was applied
+in the primary deployment on 13 August 2026 and then disabled again by a normal
+restart; its completion does not authorise reuse in another environment.
 
-This candidate does not select a universal microtheory, organisation-membership
+This release does not select a universal microtheory, organisation-membership
 model, or context formalism. It also does not grant a global administrator
 visibility into private material merely because it grants global publication
 authority. Those boundaries remain governed by the existing access-control and
@@ -170,10 +173,46 @@ tampering, and cross-audience delegation denial; alternate entry-point
 enforcement; private-context non-leakage; retry/concurrency behaviour; and
 receipt-backed canonical read-back of successful and partial effects.
 
-The motivating historical changes are evidence targets, not permission to
-alter live Vontology during implementation or test work. Applying any such
-change still requires a deployed authority configuration and a separately
-authorised actor/effect.
+The motivating historical changes are evidence targets, not general permission
+to alter live Vontology. Applying any such change still requires a deployed
+authority configuration and a separately authorised actor/effect.
+
+## 8. Primary-deployment evidence
+
+The 13 August 2026 activation used an encrypted pre-activation backup, a
+trusted Michael Witbrock browser session, the inventory-bound migration, and a
+normal restart that closed the one-time bootstrap aperture. Canonical read-back
+showed Michael as the sole represented Von operational administrator, the
+global ontology administrator, and an ontology administrator and owner for
+each of his four represented organisations. Header-supplied identity remained
+denied on both authority-management and governed HTTP mutation paths.
+
+The first live replay repaired the previously blocked global relationship
+`#V#graduate_student --is_a_type_of--> #V#university_student`. Receipt
+`omr_fe7d18665d6801f6705a88413223a2c3d352e8ab58c46938f368bc3e49222f24`
+finished `succeeded` and its canonical read-back proved both the forward edge
+and the `#V#university_student --has_subtype--> #V#graduate_student` inverse.
+
+The candidature replay then resolved the canonical identities and publication
+scope of the 23 historically blocked people. Fresh canonical read-back showed
+all 23 global `#V#is_an_instance_of -> #V#student` edges and all 23 inverse
+`#V#student -> #V#has_instance` edges. Each relationship has its own terminal
+`succeeded` receipt with both directions present; together with the five
+pre-existing classifications, the candidature set is 28 of 28. The replay also
+exposed a false user-visible success claim for one stopped stale identifier.
+The finaliser now rejects a cited ontology relationship-success claim unless
+its durable effect succeeded and the exact relationship read-back agrees.
+
+A read-only, write-tripped live-store preflight for the plausible identity pair
+`#V#ph_d_student -> #V#phd_student` produced deterministic plan digest
+`367e997ab34186fc29bbbde16f90fb45dce68e30e86d110a9b690b544af6a267`.
+It covered seven concepts, five incoming-reference rewrites, and four text
+relations, with no residual source reference or structural target self-edge.
+No live identity merge was executed: a merge still requires an exact identity
+decision and its separately authorised plan.
+
+This is evidence for those exact deployment effects and authority boundaries,
+not a general multi-tenant certification claim.
 
 ## Related guidance
 

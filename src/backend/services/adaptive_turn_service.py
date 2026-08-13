@@ -3530,6 +3530,8 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
         return None
     readback = raw_payload.get("canonical_readback")
     if not isinstance(readback, Mapping):
+        readback = raw_payload.get("canonical_read_back")
+    if not isinstance(readback, Mapping):
         return None
     projected = {
         key: readback[key]
@@ -3553,6 +3555,14 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
             "machine_disclosure_verified",
             "delivery_fingerprint_verified",
             "error_code",
+            "source_id",
+            "source_exists",
+            "predicate",
+            "target",
+            "relationship_present",
+            "inverse_predicate",
+            "inverse_relationship_present",
+            "publication_context",
         )
         if key in readback
     }
@@ -3570,6 +3580,233 @@ _EXACT_READBACK_ARGUMENT_FIELDS = (
     "task_id",
     "thread_id",
 )
+
+
+_ONTOLOGY_RELATION_POSTCONDITION_METHODS = frozenset(
+    {
+        "add_relationship",
+        "remove_relationship",
+    }
+)
+_MUTATION_SUCCESS_CLAIM_RE = re.compile(
+    r"\b(?:"
+    r"added|applied|changed|completed|created|deleted|merged|persisted|"
+    r"present|promoted|published|removed|renamed|retracted|succeeded|"
+    r"successful(?:ly)?|updated|verified"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_NEGATED_MUTATION_SUCCESS_CLAIM_RE = re.compile(
+    r"\b(?:not|never)\s+(?:"
+    r"added|applied|changed|completed|created|deleted|merged|persisted|"
+    r"present|promoted|published|removed|renamed|retracted|succeeded|"
+    r"successful|updated|verified"
+    r")\b"
+    r"|\b(?:could\s+not|couldn't|cannot|can't|did\s+not|didn't)\s+(?:"
+    r"add|apply|change|complete|create|delete|merge|persist|promote|publish|"
+    r"remove|rename|retract|succeed|update|verify"
+    r")\b"
+    r"|\b(?:changed|success|succeeded|verified)\s*[:=]\s*false\b"
+    r"|\bno\s+(?:canonical\s+)?(?:change|relation(?:ship)?)\s+(?:is\s+)?present\b"
+    r"|\bno\s+change\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalise_relation_identity(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    # Governed callers may use the canonical #V# spelling while relationship
+    # read-back stores the structural predicate without that prefix. Preserve
+    # the identifier body exactly: concept IDs are case-sensitive.
+    return cleaned.removeprefix("#V#")
+
+
+def _canonical_relation_readback_matches_invocation(
+    invocation: Mapping[str, Any],
+    readback: Mapping[str, Any] | None,
+) -> bool:
+    """Verify that an embedded read-back proves the exact relation effect."""
+
+    if not isinstance(readback, Mapping):
+        return False
+    method = str(
+        invocation.get("execution_method") or invocation.get("tool") or ""
+    ).strip()
+    if method not in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+        return False
+    arguments = invocation.get("effective_arguments")
+    if not isinstance(arguments, Mapping):
+        return False
+    for argument_key, readback_key in (
+        ("source_id", "source_id"),
+        ("predicate", "predicate"),
+        ("target", "target"),
+    ):
+        expected = _normalise_relation_identity(arguments.get(argument_key))
+        observed = _normalise_relation_identity(readback.get(readback_key))
+        if not expected or observed != expected:
+            return False
+    expected_present = method == "add_relationship"
+    if readback.get("relationship_present") is not expected_present:
+        return False
+    if readback.get("source_exists") is not True:
+        return False
+    return not bool(readback.get("inverse_predicate")) or (
+        readback.get("inverse_relationship_present") is expected_present
+    )
+
+
+def _cited_mutation_success_claim_fragment(
+    response_text: str,
+    *,
+    identifiers: Sequence[str],
+) -> str | None:
+    """Return a cited response line that positively claims mutation success."""
+
+    for line in response_text.splitlines():
+        if not any(identifier in line for identifier in identifiers):
+            continue
+        without_negated_claims = _NEGATED_MUTATION_SUCCESS_CLAIM_RE.sub("", line)
+        if _MUTATION_SUCCESS_CLAIM_RE.search(without_negated_claims):
+            return line.strip()[:500]
+    return None
+
+
+def _cited_ontology_mutation_claim_conflicts(
+    response_text: str,
+    *,
+    tool_invocations: Sequence[Mapping[str, Any]],
+    effect_snapshot: Mapping[str, Mapping[str, Any]],
+    canonically_verified_effect_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Find positive cited ontology claims contradicted by durable evidence."""
+
+    from src.backend.services.ontology_mutation_command_service import (
+        is_ontology_mutation_method,
+    )
+
+    conflicts: list[dict[str, Any]] = []
+    seen_effect_ids: set[str] = set()
+    for invocation in tool_invocations:
+        method = str(
+            invocation.get("execution_method") or invocation.get("tool") or ""
+        ).strip()
+        if not is_ontology_mutation_method(method):
+            continue
+        effect_id = invocation.get("effect_id")
+        if not isinstance(effect_id, str) or not effect_id.strip():
+            continue
+        evidence = invocation.get("evidence")
+        evidence_id = (
+            str(evidence.get("evidence_id") or "").strip()
+            if isinstance(evidence, Mapping)
+            else ""
+        )
+        identifiers = tuple(item for item in (effect_id.strip(), evidence_id) if item)
+        fragment = _cited_mutation_success_claim_fragment(
+            response_text,
+            identifiers=identifiers,
+        )
+        if fragment is None:
+            continue
+        state = effect_snapshot.get(effect_id)
+        state = state if isinstance(state, Mapping) else {}
+        effect_status = str(
+            state.get("effect_status") or invocation.get("effect_status") or "unknown"
+        ).strip()
+        changed = (
+            state.get("changed")
+            if isinstance(state.get("changed"), bool)
+            else invocation.get("changed")
+        )
+        reason: str | None = None
+        if effect_status != "succeeded":
+            reason = "effect_not_succeeded"
+        elif method in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+            embedded_readback = state.get("canonical_readback")
+            relation_verified = _canonical_relation_readback_matches_invocation(
+                invocation,
+                embedded_readback if isinstance(embedded_readback, Mapping) else None,
+            )
+            if (
+                not relation_verified
+                and effect_id not in canonically_verified_effect_ids
+            ):
+                reason = "canonical_relation_not_verified"
+        if reason is None or effect_id in seen_effect_ids:
+            continue
+        seen_effect_ids.add(effect_id)
+        arguments = invocation.get("effective_arguments")
+        arguments = arguments if isinstance(arguments, Mapping) else {}
+        readback = state.get("canonical_readback")
+        conflicts.append(
+            {
+                "effect_id": effect_id,
+                "evidence_id": evidence_id or None,
+                "method": method,
+                "effect_status": effect_status,
+                "changed": changed if isinstance(changed, bool) else None,
+                "reason": reason,
+                "error_code": invocation.get("error_code"),
+                "source_id": arguments.get("source_id"),
+                "predicate": arguments.get("predicate"),
+                "target": arguments.get("target"),
+                "canonical_relationship_present": (
+                    readback.get("relationship_present")
+                    if isinstance(readback, Mapping)
+                    and isinstance(readback.get("relationship_present"), bool)
+                    else None
+                ),
+            }
+        )
+    return conflicts
+
+
+def _cited_ontology_mutation_conflict_response(
+    conflicts: Sequence[Mapping[str, Any]],
+) -> str:
+    lines = [
+        (
+            "I cannot safely present the drafted ontology completion claim because "
+            "it contradicts the cited durable mutation evidence."
+        ),
+        "",
+        "The following cited mutation is not canonically verified:",
+    ]
+    for conflict in conflicts:
+        source_id = str(conflict.get("source_id") or "").strip()
+        predicate = str(conflict.get("predicate") or "").strip()
+        target = str(conflict.get("target") or "").strip()
+        relation = (
+            f"`{source_id} --{predicate}--> {target}`"
+            if source_id and predicate and target
+            else f"`{conflict.get('method') or 'ontology mutation'}`"
+        )
+        status = str(conflict.get("effect_status") or "unknown")
+        changed = conflict.get("changed")
+        evidence_id = str(conflict.get("evidence_id") or "").strip()
+        effect_id = str(conflict.get("effect_id") or "").strip()
+        reason = str(conflict.get("reason") or "")
+        if reason == "canonical_relation_not_verified":
+            detail = (
+                f"handler status `{status}`, but the exact canonical relation "
+                "read-back is absent or negative"
+            )
+        else:
+            detail = f"effect status `{status}` and changed `{str(changed).lower()}`"
+        handle = evidence_id or effect_id
+        lines.append(f"- {relation}: {detail}; evidence `{handle}`.")
+    lines.extend(
+        (
+            "",
+            (
+                "The turn remains partial. Sibling mutations must be assessed from "
+                "their own terminal receipts and exact canonical read-backs; this "
+                "response does not infer a successful batch count."
+            ),
+        )
+    )
+    return "\n".join(lines)
 
 
 def _canonically_verified_material_effect_ids(
@@ -3622,9 +3859,15 @@ def _canonically_verified_material_effect_ids(
         material_effect_ids.add(effect_id)
         embedded_readback = state.get("canonical_readback")
         if isinstance(embedded_readback, Mapping) and (
-            embedded_readback.get("verified") is True
-            and str(embedded_readback.get("status") or "").strip().lower()
-            == "verified"
+            (
+                embedded_readback.get("verified") is True
+                and str(embedded_readback.get("status") or "").strip().lower()
+                == "verified"
+            )
+            or _canonical_relation_readback_matches_invocation(
+                invocation,
+                embedded_readback,
+            )
         ):
             verified_effect_ids.add(effect_id)
             continue
@@ -4885,17 +5128,31 @@ def execute_adaptive_turn(
                 )
             )
         ]
+        cited_ontology_mutation_claim_conflicts = (
+            _cited_ontology_mutation_claim_conflicts(
+                text,
+                tool_invocations=reconciled_invocations,
+                effect_snapshot=effect_snapshot,
+                canonically_verified_effect_ids=canonically_verified_effect_ids,
+            )
+            if model_answer_completed
+            else []
+        )
+        if cited_ontology_mutation_claim_conflicts and status == "completed":
+            status = "effect_partially_completed"
         preserve_pending_durable_response = (
             model_answer_completed
             and status == "effect_partially_completed"
             and _can_preserve_pending_durable_response(text, relevant_effects)
+            and not cited_ontology_mutation_claim_conflicts
         )
         preserve_mixed_effect_response = (
             model_answer_completed
             and status == "effect_partially_completed"
             and preservable_mixed_failures
+            and not cited_ontology_mutation_claim_conflicts
         )
-        effect_finality_fallback = (
+        effect_finality_fallback = bool(cited_ontology_mutation_claim_conflicts) or (
             status != "completed"
             and bool(relevant_effects)
             and not preserve_pending_durable_response
@@ -4960,7 +5217,24 @@ def execute_adaptive_turn(
                     ),
                 }
             )
-        if effect_finality_fallback:
+        if cited_ontology_mutation_claim_conflicts:
+            text = _cited_ontology_mutation_conflict_response(
+                cited_ontology_mutation_claim_conflicts
+            )
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_cited_ontology_mutation_claim_rejected",
+                    "schema_version": (
+                        "adaptive_turn_cited_ontology_mutation_claim_rejected.v1"
+                    ),
+                    "terminal_status": status,
+                    "conflicts": [
+                        dict(conflict)
+                        for conflict in cited_ontology_mutation_claim_conflicts
+                    ],
+                }
+            )
+        elif effect_finality_fallback:
             status_counts = {
                 effect_status: sum(
                     1

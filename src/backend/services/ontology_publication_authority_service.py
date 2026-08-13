@@ -376,7 +376,7 @@ def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat()
+        return _as_utc(value).isoformat()
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(
@@ -2136,13 +2136,13 @@ __all__ = [
     "VON_ADMINISTRATOR_CONCEPT_ID",
     "OntologyAuthorityDecision",
     "OntologyInvocationContext",
-    "OntologyMutationResourceBusy",
     "OntologyMutationIntent",
+    "OntologyMutationResourceBusy",
     "PublicationContext",
     "PublicationContextKind",
     "actor_can_access_intent_targets",
-    "authority_role_storage_text",
     "authorise_ontology_mutation",
+    "authority_role_storage_text",
     "bind_authorised_ontology_mutation",
     "bind_ontology_invocation",
     "concept_publication_context",
@@ -2155,12 +2155,12 @@ __all__ = [
     "list_actor_delegations",
     "list_actor_semantic_authority",
     "ontology_authority_denial_payload",
-    "ontology_mutation_resource_lock",
     "ontology_authority_resource_keys",
-    "publication_context_for_creation",
+    "ontology_mutation_resource_lock",
     "parse_authority_role_storage_text",
-    "resolve_live_semantic_roles",
+    "publication_context_for_creation",
     "resolve_delegation_principal",
+    "resolve_live_semantic_roles",
     "revoke_agent_delegation",
     "verify_agent_delegation",
 ]
