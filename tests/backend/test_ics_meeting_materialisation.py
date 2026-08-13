@@ -7,6 +7,9 @@ import pytest
 from src.backend.services.ics_meeting_parser_service import parse_ics_meeting
 from src.backend.services.meeting_file_representation_service import (
     DOCUMENTARY_EVIDENCE_PREDICATE_ID,
+    MEETING_DATE_PREDICATE_ID,
+    MEETING_END_TIME_PREDICATE_ID,
+    MEETING_START_TIME_PREDICATE_ID,
     IcsMeetingMaterialisationError,
     materialise_ics_meeting_representation_for_file_copy,
 )
@@ -41,6 +44,44 @@ def _meeting(*, uid: str = "meeting-uid@example.org", summary: str = "Lab meetin
     )
     assert parsed.meeting is not None
     return parsed.meeting
+
+
+def _all_day_meeting():
+    parsed = parse_ics_meeting(
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:all-day@example.org\r\n"
+        "SUMMARY:All-day workshop\r\n"
+        "DTSTART;VALUE=DATE:20260813\r\n"
+        "DTEND;VALUE=DATE:20260814\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR"
+    )
+    assert parsed.meeting is not None
+    return parsed.meeting
+
+
+@pytest.fixture(autouse=True)
+def _patch_temporal_singleton_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict]:
+    from src.backend.services import meeting_file_representation_service as service
+
+    writes: list[dict] = []
+
+    def _upsert(**kwargs):
+        writes.append(dict(kwargs))
+        return {
+            "success": True,
+            "concept_id": kwargs["subject_concept_id"],
+            "predicate": kwargs["predicate"],
+            "kept_relation_id": f"temporal-{len(writes)}",
+            "relation_created": True,
+        }
+
+    monkeypatch.setattr(service, "upsert_singleton_text_relation", _upsert)
+    return writes
 
 
 def _patch_external_identity_persistence(
@@ -117,6 +158,7 @@ def _patch_external_identity_resolution(
 
 def test_ics_materialisation_uses_uid_identity_and_returns_real_effect_receipt(
     monkeypatch: pytest.MonkeyPatch,
+    _patch_temporal_singleton_writes: list[dict],
 ) -> None:
     from src.backend.services import meeting_file_representation_service as service
 
@@ -183,7 +225,20 @@ def test_ics_materialisation_uses_uid_identity_and_returns_real_effect_receipt(
         for row in text_writes
     )
     assert any(row["text"] == "Lab meeting" for row in text_writes)
-    assert any(row["text"].startswith("DTSTART: ") for row in text_writes)
+    assert not any(row["text"].startswith("DTSTART: ") for row in text_writes)
+    assert [
+        (row["predicate"], row["text"])
+        for row in _patch_temporal_singleton_writes
+    ] == [
+        (MEETING_DATE_PREDICATE_ID, "2026-08-12"),
+        (MEETING_START_TIME_PREDICATE_ID, "2026-08-12T10:00:00"),
+        (MEETING_END_TIME_PREDICATE_ID, "2026-08-12T11:00:00"),
+    ]
+    assert all(
+        row["context"]["time_zone"] == "Europe/London"
+        for row in _patch_temporal_singleton_writes
+    )
+    assert len(result["temporal_effect_receipts"]) == 3
     assert not any(
         row["text"].startswith(("ORGANIZER: ", "ATTENDEE: ")) for row in text_writes
     )
@@ -207,6 +262,47 @@ def test_ics_materialisation_uses_uid_identity_and_returns_real_effect_receipt(
         "added": True,
         "changed": True,
     }
+
+
+def test_ics_temporal_projection_preserves_all_day_exclusive_end() -> None:
+    from src.backend.services import meeting_file_representation_service as service
+
+    assert service._ics_temporal_relation_specs(_all_day_meeting()) == [
+        (
+            MEETING_DATE_PREDICATE_ID,
+            "2026-08-13",
+            {
+                "icalendar_property": "DTSTART",
+                "source": "ics_meeting_representation",
+                "value_type": "date",
+                "is_utc": False,
+                "raw_value": "20260813",
+            },
+        ),
+        (
+            MEETING_START_TIME_PREDICATE_ID,
+            "2026-08-13",
+            {
+                "icalendar_property": "DTSTART",
+                "source": "ics_meeting_representation",
+                "value_type": "date",
+                "is_utc": False,
+                "raw_value": "20260813",
+            },
+        ),
+        (
+            MEETING_END_TIME_PREDICATE_ID,
+            "2026-08-14",
+            {
+                "icalendar_property": "DTEND",
+                "source": "ics_meeting_representation",
+                "value_type": "date",
+                "is_utc": False,
+                "raw_value": "20260814",
+                "end_semantics": "exclusive",
+            },
+        ),
+    ]
 
 
 def test_ics_uid_identity_keeps_same_title_different_uids_distinct(
@@ -641,6 +737,7 @@ def test_ics_materialisation_fails_before_fact_writes_when_uid_marker_is_indeter
 
 def test_ics_materialisation_reports_partial_state_when_evidence_write_raises(
     monkeypatch: pytest.MonkeyPatch,
+    _patch_temporal_singleton_writes: list[dict],
 ) -> None:
     from src.backend.services import meeting_file_representation_service as service
 
@@ -682,9 +779,55 @@ def test_ics_materialisation_reports_partial_state_when_evidence_write_raises(
     assert error.value.details == {
         "meeting_concept_id": text_writes[0]["subject_concept_id"],
         "created_meeting_concept": True,
-        "persisted_text_relation_count": len(text_writes),
+        "persisted_text_relation_count": (
+            len(text_writes) + len(_patch_temporal_singleton_writes)
+        ),
         "exception_type": "RuntimeError",
     }
+
+
+def test_ics_materialisation_fails_before_notes_when_temporal_write_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import meeting_file_representation_service as service
+
+    _patch_external_identity_resolution(monkeypatch, service)
+    monkeypatch.setattr(
+        service.concept_service,
+        "get_concept_by_concept_id_exact",
+        lambda _concept_id: (_ for _ in ()).throw(
+            service.concept_service.ConceptNotFoundError("not found")
+        ),
+    )
+    monkeypatch.setattr(service.concept_service, "create_concept", lambda **_kwargs: {})
+    note_writes: list[dict] = []
+    monkeypatch.setattr(
+        service,
+        "write_text_relation",
+        lambda **kwargs: (
+            note_writes.append(dict(kwargs)) or {"relation_id": "unexpected"},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("temporal failed")),
+    )
+
+    with pytest.raises(IcsMeetingMaterialisationError) as error:
+        materialise_ics_meeting_representation_for_file_copy(
+            user_concept_id="#V#user",
+            organisation_concept_id="#V#org",
+            namespace="#V#user@org",
+            file_copy_concept_id="#V#file",
+            meeting=_meeting(),
+        )
+
+    assert error.value.code == "ics_meeting_temporal_fact_persist_failed"
+    assert error.value.details["predicate"] == MEETING_DATE_PREDICATE_ID
+    assert error.value.details["exception_type"] == "RuntimeError"
+    assert note_writes == []
 
 
 def _execute_action(*, inputs: dict, context: dict | None = None):
@@ -725,6 +868,7 @@ def _patch_successful_ics_action(
             "reason": "represented",
             "meeting_concept_id": "#V#meeting",
             "relationship_effect_receipt": {"success": True},
+            "temporal_effect_receipts": [{"tool": "upsert_singleton_text_relation"}],
             "response_text": "Represented the meeting.",
         },
     )
@@ -1003,6 +1147,9 @@ def test_ics_action_uses_only_trusted_actor_and_suppresses_nested_workflows(
                 "reason": "pending_readback",
                 "meeting_concept_id": "#V#meeting",
                 "relationship_effect_receipt": receipt,
+                "temporal_effect_receipts": [
+                    {"tool": "upsert_singleton_text_relation"}
+                ],
                 "response_text": "Represented the meeting.",
             }
         ),
@@ -1021,6 +1168,9 @@ def test_ics_action_uses_only_trusted_actor_and_suppresses_nested_workflows(
     assert result.outputs["ics_materialisation_outcome"] == "materialised"
     assert result.outputs["ics_materialisation_succeeded"] is True
     assert result.outputs["relationship_effect_receipt"] == receipt
+    assert result.outputs["temporal_effect_receipts"] == [
+        {"tool": "upsert_singleton_text_relation"}
+    ]
     assert "pending" not in result.outputs["response_text"].casefold()
     assert fetch_calls[0]["user_concept_id"] == "#V#trusted_user"
     assert fetch_calls[0]["organisation_concept_id"] == "#V#trusted_org"

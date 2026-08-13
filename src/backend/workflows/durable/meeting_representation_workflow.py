@@ -257,8 +257,14 @@ def _handle_materialise_ics_file_copy(
         return _failure_result(code="ics_materialisation_response_invalid")
     meeting_concept_id = _clean_text(materialisation.get("meeting_concept_id"))
     receipt = materialisation.get("relationship_effect_receipt")
+    temporal_receipts = materialisation.get("temporal_effect_receipts")
     response_text = _clean_text(materialisation.get("response_text"))
-    if not meeting_concept_id or not isinstance(receipt, Mapping) or not response_text:
+    if (
+        not meeting_concept_id
+        or not isinstance(receipt, Mapping)
+        or not isinstance(temporal_receipts, list)
+        or not response_text
+    ):
         return _failure_result(code="ics_materialisation_response_incomplete")
     participants = _participant_projection(parse_result.meeting)
 
@@ -275,6 +281,9 @@ def _handle_materialise_ics_file_copy(
             "ics_participants": participants,
             "meeting_concept_id": meeting_concept_id,
             "relationship_effect_receipt": dict(receipt),
+            "temporal_effect_receipts": [
+                dict(row) for row in temporal_receipts if isinstance(row, Mapping)
+            ],
             "response_text": response_text,
         },
     )
@@ -352,6 +361,11 @@ def register_meeting_representation_actions(registry: ActionRegistry) -> None:
                     },
                     "meeting_concept_id": {"type": "string"},
                     "relationship_effect_receipt": {"type": "object"},
+                    "temporal_effect_receipts": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {"type": "object"},
+                    },
                     "response_text": {"type": "string"},
                 },
             },

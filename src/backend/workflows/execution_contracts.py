@@ -44,6 +44,9 @@ WORKFLOW_CONTROL_ACTION_KR_RELATIONSHIP_READBACK_ID = (
 WORKFLOW_CONTROL_ACTION_RELATIONSHIP_EFFECT_READBACK_ID = (
     "workflow_control.relationship_effect_readback"
 )
+WORKFLOW_CONTROL_ACTION_TEXT_EFFECT_READBACK_ID = (
+    "workflow_control.text_effect_readback"
+)
 WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID = (
     "workflow_control.pause_at_checkpoint"
 )
