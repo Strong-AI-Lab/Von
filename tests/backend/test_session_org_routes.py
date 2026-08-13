@@ -269,15 +269,18 @@ def test_set_user_concept_updates_session_context_and_org_listing(
     assert orgs_data["organisations"][0]["concept_id"] == "#V#the_lu_witbrock_household"
 
 
-def test_set_user_concept_accepts_header_authenticated_identity(app_client, monkeypatch):
+def test_set_user_concept_rejects_bare_legacy_header_without_seeding_session(
+    app_client,
+    monkeypatch,
+):
     _, client = app_client
 
     import src.backend.security.access_control as access_control
 
     monkeypatch.setattr(
         access_control,
-        "get_effective_user_concept_id",
-        lambda: "#V#michael_witbrock",
+        "_validate_person_concept",
+        lambda concept_id: concept_id,
     )
 
     resp = client.post(
@@ -286,17 +289,22 @@ def test_set_user_concept_accepts_header_authenticated_identity(app_client, monk
         headers={"X-User-Concept-ID": "#V#michael_witbrock"},
     )
 
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["user_id"] == "#V#michael_witbrock"
-    assert data["namespace"] == "#V#michael_witbrock"
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Not authenticated"}
 
     with client.session_transaction() as sess:
-        assert sess["user_concept_id"] == "#V#michael_witbrock"
-        assert sess["user_id"] == "#V#michael_witbrock"
+        assert "user_concept_id" not in sess
+        assert "user_id" not in sess
+
+    # The rejected header cannot become a signed identity on a later request.
+    context = client.get("/von/api/session/context")
+    assert context.status_code == 200
+    assert context.get_json()["authenticated"] is False
 
 
-def test_set_user_concept_accepts_real_header_authenticated_identity(app_client):
+def test_set_user_concept_preserves_preexisting_session_identity_with_legacy_header(
+    app_client,
+):
     _, client = app_client
     real_user_concept_id = "#V#person_hugues_van_assel_b0cd25a1"
 

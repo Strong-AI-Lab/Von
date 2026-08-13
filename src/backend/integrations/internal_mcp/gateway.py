@@ -740,12 +740,21 @@ class InternalMCPGateway:
             observed_late_completion = _observe_validated_late_completion
         try:
             from src.backend.security.access_control import (
+                LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
                 get_effective_organisation_concept_id,
                 get_effective_user_concept_id,
+                get_effective_user_concept_id_with_source,
             )
 
             existing_user_id = get_effective_user_concept_id()
             existing_org_id = get_effective_organisation_concept_id()
+            _, existing_actor_source = get_effective_user_concept_id_with_source()
+            if existing_actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+                # A validated legacy header is still only a compatibility read
+                # claim.  Do not relabel it (or an org selected through it) as
+                # pre-existing authenticated/workflow authority.
+                existing_user_id = None
+                existing_org_id = None
             from src.backend.services.ontology_mutation_command_service import (
                 is_ontology_mutation_method,
             )

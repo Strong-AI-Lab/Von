@@ -10375,14 +10375,25 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     )
     _check_background_cancellation("authentication context")
     try:
-        from ...security.access_control import get_effective_user_concept_id
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id,
+            get_effective_user_concept_id_with_source,
+        )
 
+        # Legacy identity headers remain available to compatibility reads, but
+        # they are not authentication. Never promote one into the signed Flask
+        # session or into adaptive-turn authority.
         user_concept_id = get_effective_user_concept_id()
+        _, actor_identity_source = get_effective_user_concept_id_with_source()
+        if actor_identity_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+            user_concept_id = None
 
         # SECURITY: Do NOT trust client-provided user_id - require proper authentication
         # User must be authenticated via:
         # 1. Server-side session (populated during login flow)
-        # 2. Validated headers (X-User-Concept-ID with concept validation)
+        # Legacy validated identity headers are intentionally excluded here:
+        # they are compatibility read scope, not authenticated turn authority.
         # If no authenticated user, user_concept_id will be None and RAG tools will be unavailable
         if not user_concept_id:
             current_app.logger.info(
@@ -15488,7 +15499,10 @@ def set_user_concept():
     """
     try:
         from ...services.namespace_service import derive_namespace
-        from ...security.access_control import get_effective_user_concept_id
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id_with_source,
+        )
 
         data = request.get_json(silent=True) or {}
         user_concept_id = data.get("user_concept_id")
@@ -15503,7 +15517,11 @@ def set_user_concept():
         # authenticated session, but it is not an account switcher. Resolve the
         # server-side login identity (including its durable email relation) and
         # require an exact match before changing any actor/session scope.
-        authenticated_id = get_effective_user_concept_id()
+        authenticated_id, authenticated_id_source = (
+            get_effective_user_concept_id_with_source()
+        )
+        if authenticated_id_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+            authenticated_id = None
         if not authenticated_id:
             stored_concept_id = session.get("user_concept_id")
             if isinstance(stored_concept_id, str) and stored_concept_id.strip():
