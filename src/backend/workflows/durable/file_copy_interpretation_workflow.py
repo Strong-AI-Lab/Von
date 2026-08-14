@@ -16,14 +16,37 @@ from ..engine import (
 from ..workflow_registry import WorkflowRegistration
 
 FILE_COPY_INTERPRETATION_WORKFLOW_ID = "#V#file_copy_interpretation_workflow"
-_FILE_COPY_CONTEXT_INPUTS = {
+FILE_COPY_INTERPRETATION_LAUNCH_INPUT_CONTRACT = {
+    "schema_version": "workflow_launch_input_contract.v1",
+    "required_inputs": ["file_copy_concept_id"],
+    "input_mappings": [
+        {
+            "target_context_key": "file_copy_concept_id",
+            "source_expression": "inputs.file_copy_concept_id",
+            "extractor": "identity",
+            "required": True,
+            "description": (
+                "Blob-backed #V#computer_file_copy concept to interpret and index."
+            ),
+        },
+    ],
+}
+_INTERPRET_FILE_COPY_INPUTS = {
     "concept_id": {
-        "$context_key": "concept_id",
-        "$mapping_concept_id": "#V#workflow_mapping_concept_id_to_concept_id_parameter",
-    },
-    "file_copy_concept_id": {
         "$context_key": "file_copy_concept_id",
-        "$mapping_concept_id": "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter",
+        "$mapping_concept_id": (
+            "#V#workflow_mapping_file_copy_interpretation_workflow_interpret_"
+            "file_copy_concept_id_to_concept_id_parameter"
+        ),
+    },
+}
+_INDEX_FILE_COPY_INPUTS = {
+    "concept_id": {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": (
+            "#V#workflow_mapping_file_copy_interpretation_workflow_index_"
+            "file_copy_concept_id_to_concept_id_parameter"
+        ),
     },
 }
 
@@ -34,7 +57,7 @@ def build_file_copy_interpretation_workflow_test_definition() -> WorkflowDefinit
         actions=(
             WorkflowActionInvocation(
                 action_id="interpret_file_copy",
-                inputs=dict(_FILE_COPY_CONTEXT_INPUTS),
+                inputs=dict(_INTERPRET_FILE_COPY_INPUTS),
                 description=(
                     "Extract structured interpretation from a blob-backed "
                     "#V#computer_file_copy and persist canonical text relations."
@@ -60,7 +83,7 @@ def build_file_copy_interpretation_workflow_test_definition() -> WorkflowDefinit
         actions=(
             WorkflowActionInvocation(
                 action_id="index_file_copy",
-                inputs=dict(_FILE_COPY_CONTEXT_INPUTS),
+                inputs=dict(_INDEX_FILE_COPY_INPUTS),
                 description="Index extracted file-copy text into RAG for the namespace.",
             ),
         ),
@@ -90,6 +113,10 @@ def build_file_copy_interpretation_workflow_test_definition() -> WorkflowDefinit
             "Interpret newly uploaded file-copy content (including screenshots/"
             "images) and persist rich concept descriptions, then index in RAG."
         ),
+        metadata={
+            "launch_input_contract": FILE_COPY_INTERPRETATION_LAUNCH_INPUT_CONTRACT,
+            "launch_input_contract_source": "built_in_test_definition",
+        },
     )
 
 

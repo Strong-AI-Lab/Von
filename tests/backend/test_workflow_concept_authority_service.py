@@ -1023,6 +1023,65 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
         },
     ]
 
+
+def test_repo_seed_materialises_file_copy_interpretation_single_input_contract(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.services.workflow_repo_seed_bootstrap import (
+        bootstrap_repo_seed_workflow_bundle,
+    )
+    from src.backend.workflows.durable.file_copy_interpretation_workflow import (
+        FILE_COPY_INTERPRETATION_LAUNCH_INPUT_CONTRACT,
+        FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+    )
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+
+    report = bootstrap_repo_seed_workflow_bundle(
+        asset_path=authority_service._CANONICAL_WORKFLOW_PUBLICATION_SEED_BUNDLE_PATH,
+        target_workflow_ids=(FILE_COPY_INTERPRETATION_WORKFLOW_ID,),
+    )
+
+    assert report["publication"]["errors_by_workflow_id"] == {}
+    loaded = load_workflow_definition_from_vontology(
+        FILE_COPY_INTERPRETATION_WORKFLOW_ID
+    )
+    assert loaded is not None
+    assert loaded.metadata["launch_input_contract"] == (
+        FILE_COPY_INTERPRETATION_LAUNCH_INPUT_CONTRACT
+    )
+    assert loaded.metadata["launch_input_contract_source"] == (
+        "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    )
+
+    expected_mapping_ids = {
+        "interpret": (
+            "#V#workflow_mapping_file_copy_interpretation_workflow_interpret_"
+            "file_copy_concept_id_to_concept_id_parameter"
+        ),
+        "index": (
+            "#V#workflow_mapping_file_copy_interpretation_workflow_index_"
+            "file_copy_concept_id_to_concept_id_parameter"
+        ),
+    }
+    for state_id, mapping_id in expected_mapping_ids.items():
+        loaded_state_id = authority_service._step_concept_id(
+            workflow_id=FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+            state_id=state_id,
+        )
+        state = loaded.states[loaded_state_id]
+        assert state.metadata["reads_context_keys"] == ["file_copy_concept_id"]
+        assert len(state.actions) == 1
+        assert state.actions[0].inputs == {
+            "concept_id": {
+                "$context_key": "file_copy_concept_id",
+                "$mapping_concept_id": mapping_id,
+                "$required": True,
+            }
+        }
+
+
 def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contract(
     _reset_mock_workflow_graph_db,
 ):

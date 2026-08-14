@@ -455,10 +455,6 @@ class _RuntimeStepPublicationDetails:
     writes_context_keys: tuple[str, ...] = ()
 
 
-_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
-    "#V#workflow_mapping_concept_id_to_concept_id_parameter",
-    "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter",
-)
 _PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
     PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
 )
