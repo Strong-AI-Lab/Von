@@ -154,6 +154,7 @@ describe('chat session agent-created filtering', () => {
         }));
 
         const menuButtons = Array.from(document.querySelectorAll('.chat-session-menu button'));
+        expect(menuButtons[0]?.textContent).toBe('New conversation');
         const showTestsButton = menuButtons.find((button) => (
             button.textContent || ''
         ).startsWith('Show test conversations'));

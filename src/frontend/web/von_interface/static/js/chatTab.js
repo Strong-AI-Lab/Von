@@ -25077,8 +25077,8 @@ function createNewChatTabButton() {
     const newTab = document.createElement('button');
     newTab.type = 'button';
     newTab.className = 'chat-session-tab chat-session-tab-new';
-    newTab.title = 'New chat. Modifier-click, right-click, or press Shift+F10 for conversation-list options.';
-    newTab.setAttribute('aria-label', 'New chat');
+    newTab.title = 'New conversation. Modifier-click, right-click, or press Shift+F10 for conversation-list options.';
+    newTab.setAttribute('aria-label', 'New conversation');
     newTab.setAttribute('aria-haspopup', 'menu');
     newTab.setAttribute('aria-keyshortcuts', 'Shift+F10');
     newTab.textContent = '+';
@@ -25902,7 +25902,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 function buildNewChatContextMenuItems() {
     const items = [
         {
-            label: 'New chat',
+            label: 'New conversation',
             onClick: () => {
                 void createNewChatSession();
             }
