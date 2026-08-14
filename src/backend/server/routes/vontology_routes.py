@@ -7,6 +7,7 @@ import uuid
 import time
 import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 try:
@@ -132,7 +133,28 @@ _TREE_CACHE = {  # key -> (timestamp, payload, build_secs, alloc_kb, hits)
     # 'Thing': (...)
 }
 _TREE_CACHE_TTL_SECONDS = int(os.environ.get("VONTOLOGY_TREE_TTL", "60"))  # default 60s
-_TREE_CACHE_LOCK = threading.Lock()
+_TREE_CACHE_LOCK = threading.RLock()
+_TreeCacheKey = tuple[str | None, str | None, str]
+
+
+@dataclass
+class _TreeBuildState:
+    cache_key: _TreeCacheKey
+    user_concept_id: str | None
+    organisation_concept_id: str | None
+    generation: int
+    completion: threading.Event = field(default_factory=threading.Event)
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    progress: int = 0
+    build_secs: float = 0.0
+    alloc_kb: float = 0.0
+    completed_at_epoch: float | None = None
+    job_id: str | None = None
+
+
+_TREE_BUILD_GENERATION = 0
+_TREE_BUILDS_IN_FLIGHT: dict[_TreeCacheKey, _TreeBuildState] = {}
 """
 Simple progress cache for asynchronous tree builds.
 
@@ -141,7 +163,7 @@ creation. Completed results remain available briefly for polling and are then
 pruned; active jobs are never expired by result cleanup.
 """
 _TREE_BUILD_PROGRESS: dict[str, dict] = {}
-_TREE_BUILD_PROGRESS_LOCK = threading.Lock()
+_TREE_BUILD_PROGRESS_LOCK = _TREE_CACHE_LOCK
 _TREE_BUILD_RESULT_TTL_SECONDS = 10 * 60
 
 _RELATIONSHIP_ALIAS_TO_CANONICAL = {
@@ -466,181 +488,298 @@ def record_frontend_tree_load_route():
     return jsonify({"success": True}), 200
 
 
-@vontology_bp.route("/tree", methods=["GET"])
-def get_tree():
-    """Endpoint to fetch the Vontology directory tree structure with TTL caching.
+def _tree_cache_key(
+    actor_scope: tuple[str | None, str | None],
+) -> _TreeCacheKey:
+    return actor_scope[0], actor_scope[1], "Thing"
 
-    Query params:
-      refresh=1   Force rebuild bypassing cache
-    Env vars:
-      VONTOLOGY_TREE_TTL (seconds) default 60
-    """
-    current_app.logger.info("Received request for /api/vontology/tree")
-    force_refresh = request.args.get("refresh") in ("1", "true", "True")
-    now = time.time()
-    cache_scope = cache_scope_key()
-    cache_key = f"{cache_scope}|Thing"
-    cache_record = None
-    with _TREE_CACHE_LOCK:
-        cache_record = _TREE_CACHE.get(cache_key)
-        if cache_record:
-            ts, payload, build_secs, alloc_kb, hits = cache_record
-            if force_refresh or (now - ts) > _TREE_CACHE_TTL_SECONDS:
-                cache_record = None  # treat as expired
-    if cache_record:
-        _, payload, build_secs, alloc_kb, hits = cache_record
-        # Increment hit counter
-        with _TREE_CACHE_LOCK:
+
+def _fresh_tree_cache_record_locked(cache_key: _TreeCacheKey, *, now: float):
+    stale_keys = [
+        key
+        for key, record in _TREE_CACHE.items()
+        if (now - record[0]) > _TREE_CACHE_TTL_SECONDS
+    ]
+    for stale_key in stale_keys:
+        _TREE_CACHE.pop(stale_key, None)
+    cache_record = _TREE_CACHE.get(cache_key)
+    if cache_record is None:
+        return None
+    return cache_record
+
+
+def _update_tree_job_locked(state: _TreeBuildState) -> None:
+    if state.job_id is None:
+        return
+    job = _TREE_BUILD_PROGRESS.get(state.job_id)
+    if job is None or job.get("build_state") is not state:
+        return
+    job["total"] = 100
+    job["processed"] = state.progress
+    job["result"] = state.result
+    job["error"] = state.error
+    job["completed_at_epoch"] = state.completed_at_epoch
+
+
+def _execute_tree_build(state: _TreeBuildState) -> None:
+    """Execute and publish one actor-scoped physical tree build."""
+
+    stop_event: threading.Event | None = None
+    ticker_thread: threading.Thread | None = None
+    ticker_started = False
+    t0: float | None = None
+    snap_before = None
+    tree_data: dict[str, Any] | None = None
+    build_error: str | None = None
+    control_flow_error: BaseException | None = None
+    stats = []
+    build_secs = 0.0
+    alloc_kb = 0.0
+    completed_at_epoch = 0.0
+
+    def _record_failure(exc: BaseException, message: str) -> None:
+        nonlocal build_error, control_flow_error, tree_data
+        tree_data = None
+        if isinstance(exc, Exception):
+            if build_error is None:
+                build_error = message
+            return
+        if control_flow_error is None:
+            control_flow_error = exc
+        build_error = exc.__class__.__name__
+
+    def _tick_progress() -> None:
+        assert stop_event is not None
+        while not stop_event.wait(0.5):
+            with _TREE_CACHE_LOCK:
+                if state.completion.is_set():
+                    return
+                state.progress = min(95, max(5, state.progress + 5))
+                _update_tree_job_locked(state)
+
+    try:
+        try:
+            stop_event = threading.Event()
+            t0 = time.time()
+            if tracemalloc.is_tracing():
+                snap_before = tracemalloc.take_snapshot()
+            ticker_thread = threading.Thread(target=_tick_progress, daemon=True)
+            ticker_thread.start()
+            ticker_started = True
+            with (
+                force_access_control_enforcement(),
+                override_current_actor(
+                    state.user_concept_id,
+                    state.organisation_concept_id,
+                ),
+            ):
+                tree_data = get_vontology_tree("Thing")
+            if isinstance(tree_data, Mapping) and tree_data.get("error") is not None:
+                build_error = str(tree_data["error"]).strip() or "Tree build failed."
+                tree_data = None
+        except BaseException as exc:
+            _record_failure(
+                exc,
+                "Failed to retrieve Vontology structure due to an internal server error.",
+            )
+            if isinstance(exc, Exception):
+                logging.getLogger(__name__).exception(
+                    "Unexpected Vontology tree failure"
+                )
+        finally:
+            if stop_event is not None:
+                try:
+                    stop_event.set()
+                except BaseException as exc:
+                    _record_failure(exc, "Tree progress cleanup failed.")
+            if ticker_thread is not None and ticker_started:
+                try:
+                    ticker_thread.join(timeout=0.5)
+                except BaseException as exc:
+                    _record_failure(exc, "Tree progress cleanup failed.")
+
             try:
-                _TREE_CACHE[cache_key] = (
-                    cache_record[0],
-                    payload,
+                completed_at_epoch = time.time()
+                if t0 is not None:
+                    build_secs = completed_at_epoch - t0
+            except BaseException as exc:
+                _record_failure(exc, "Tree timing failed.")
+
+            try:
+                if tracemalloc.is_tracing() and snap_before is not None:
+                    stats = tracemalloc.take_snapshot().compare_to(
+                        snap_before,
+                        "filename",
+                    )
+                    alloc_kb = sum(stat.size_diff for stat in stats) / 1024.0
+            except BaseException as exc:
+                stats = []
+                if not isinstance(exc, Exception):
+                    _record_failure(exc, "Tree allocation tracing failed.")
+    finally:
+        with _TREE_CACHE_LOCK:
+            state.result = tree_data
+            state.error = build_error
+            state.progress = 100
+            state.build_secs = build_secs
+            state.alloc_kb = alloc_kb
+            state.completed_at_epoch = completed_at_epoch
+            if (
+                tree_data is not None
+                and build_error is None
+                and state.generation == _TREE_BUILD_GENERATION
+                and _TREE_BUILDS_IN_FLIGHT.get(state.cache_key) is state
+            ):
+                _TREE_CACHE[state.cache_key] = (
+                    completed_at_epoch,
+                    tree_data,
                     build_secs,
                     alloc_kb,
-                    hits + 1,
+                    0,
                 )
-                hits += 1
-            except Exception:
-                pass
-        current_app.logger.debug(
-            "Tree cache hit (age=%.1fs build=%.2fs alloc=%.1fKB size_nodes=%s)",
-            now - cache_record[0],
-            build_secs,
-            alloc_kb,
-            len(payload.get("nodes", [])) if isinstance(payload, dict) else "n/a",
-        )
-        return jsonify(
-            {
-                **payload,
-                "_cache": {
-                    "hit": True,
-                    "age_sec": now - cache_record[0],
-                    "build_sec": build_secs,
-                    "alloc_kb": alloc_kb,
-                    "ttl_sec": _TREE_CACHE_TTL_SECONDS,
-                    "hits": hits,
-                },
-            }
-        )
-    # Build fresh
-    current_app.logger.debug("Tree cache miss (refresh=%s); building...", force_refresh)
-    t0 = time.time()
-    phase_marks = []
-    phase_log_enabled = (
-        os.getenv("VON_TREE_PHASE_LOG") in ("1", "true", "TRUE", "True")
-    ) and (not getattr(current_app, "testing", False))
-
-    def _mark(phase_name):
-        if not phase_log_enabled:
-            return
-        now = time.time()
-        phase_marks.append((phase_name, now))
-
-    # Only take snapshots if tracemalloc is running
-    snap_before = None
-    if tracemalloc.is_tracing():
-        snap_before = tracemalloc.take_snapshot()
-    _mark("snapshot_before")
-    try:
-        tree_data = get_vontology_tree("Thing")
-        if "error" in tree_data:
-            current_app.logger.error(
-                "Error getting Vontology tree: %s", tree_data["error"]
-            )
-            return jsonify({"error": tree_data["error"]}), 500
-    except Exception as e:
-        current_app.logger.error(
-            "Unexpected error building Vontology tree: %s", e, exc_info=True
-        )
-        return (
-            jsonify(
-                {
-                    "error": "Failed to retrieve Vontology structure due to an internal server error."
-                }
-            ),
-            500,
-        )
-    _mark("tree_built")
-    build_secs = time.time() - t0
-    # Only take snapshots if tracemalloc is running
-    snap_after = None
-    alloc_kb = 0.0
-    if tracemalloc.is_tracing() and snap_before is not None:
-        snap_after = tracemalloc.take_snapshot()
-        _mark("snapshot_after")
-        stats = snap_after.compare_to(snap_before, "filename")
-        _mark("snapshot_compared")
-        alloc_kb = sum([s.size_diff for s in stats]) / 1024.0
-    else:
-        _mark("snapshot_after")
-        stats = []
-        _mark("snapshot_compared")
-
-    # Optional verbose allocation diff logging
-    try:
-        if os.getenv("VON_TRACE_TREE") in ("1", "true", "TRUE", "True") and stats:
-            top_n = 15
+            if _TREE_BUILDS_IN_FLIGHT.get(state.cache_key) is state:
+                _TREE_BUILDS_IN_FLIGHT.pop(state.cache_key, None)
             try:
-                env_n = int(os.getenv("VON_TRACE_TREE_N", "15"))
-                if 1 <= env_n <= 100:
-                    top_n = env_n
-            except Exception:
-                pass
-            # Sort by absolute size diff descending
-            sorted_stats = sorted(stats, key=lambda s: abs(s.size_diff), reverse=True)[
-                :top_n
-            ]
-            for s in sorted_stats:
-                if s.size_diff == 0:
-                    continue
-                current_app.logger.info(
-                    "[tree_alloc_diff] %s size_diff=%.1fKB count_diff=%d",
-                    s.traceback[0].filename if s.traceback else "unknown",
-                    s.size_diff / 1024.0,
-                    s.count_diff,
-                )
-    except Exception:
-        pass
-    _mark("pre_cache_store")
-    with _TREE_CACHE_LOCK:
-        _TREE_CACHE[cache_key] = (time.time(), tree_data, build_secs, alloc_kb, 0)
-    _mark("post_cache_store")
-    # Persist performance metrics (non-blocking best-effort)
-    try:
-        record_tree_build_performance(build_secs)
-    except Exception:
-        pass
-    current_app.logger.info(
-        "Built Vontology tree build=%.2fs alloc_diff=%.1fKB nodes=%s",
-        build_secs,
-        alloc_kb,
-        len(tree_data.get("nodes", [])) if isinstance(tree_data, dict) else "n/a",
-    )
-    if phase_log_enabled:
-        # Emit a compact phase timing summary
+                _update_tree_job_locked(state)
+            finally:
+                state.completion.set()
+
+    if tree_data is not None and build_error is None:
         try:
-            phases_out = []
-            last_t = t0
-            for name, ts in phase_marks:
-                phases_out.append(f"{name}={1000*(ts-last_t):.1f}ms")
-                last_t = ts
-            total_ms = (time.time() - t0) * 1000.0
-            current_app.logger.info(
-                "[tree_build_phase] %s total=%.1fms", " ".join(phases_out), total_ms
-            )
+            record_tree_build_performance(build_secs)
         except Exception:
             pass
+        logging.getLogger(__name__).info(
+            "Built Vontology tree build=%.2fs alloc_diff=%.1fKB",
+            build_secs,
+            alloc_kb,
+        )
+    if os.getenv("VON_TRACE_TREE") in ("1", "true", "TRUE", "True"):
+        top_n = 15
+        try:
+            requested_top_n = int(os.getenv("VON_TRACE_TREE_N", "15"))
+            if 1 <= requested_top_n <= 100:
+                top_n = requested_top_n
+        except (TypeError, ValueError):
+            pass
+        for stat in sorted(
+            stats, key=lambda item: abs(item.size_diff), reverse=True
+        )[:top_n]:
+            if stat.size_diff:
+                try:
+                    logging.getLogger(__name__).info(
+                        "[tree_alloc_diff] %s size_diff=%.1fKB count_diff=%d",
+                        stat.traceback[0].filename if stat.traceback else "unknown",
+                        stat.size_diff / 1024.0,
+                        stat.count_diff,
+                    )
+                except Exception:
+                    pass
+
+    if control_flow_error is not None:
+        raise control_flow_error
+
+
+def _claim_tree_build_locked(
+    actor_scope: tuple[str | None, str | None],
+) -> tuple[_TreeBuildState, bool]:
+    cache_key = _tree_cache_key(actor_scope)
+    state = _TREE_BUILDS_IN_FLIGHT.get(cache_key)
+    if state is not None and state.generation == _TREE_BUILD_GENERATION:
+        return state, False
+    state = _TreeBuildState(
+        cache_key=cache_key,
+        user_concept_id=actor_scope[0],
+        organisation_concept_id=actor_scope[1],
+        generation=_TREE_BUILD_GENERATION,
+    )
+    _TREE_BUILDS_IN_FLIGHT[cache_key] = state
+    return state, True
+
+
+def _tree_payload_with_cache_metadata(
+    payload: Mapping[str, Any],
+    *,
+    hit: bool,
+    build_secs: float,
+    alloc_kb: float,
+    hits: int,
+    age_sec: float | None = None,
+) -> dict[str, Any]:
+    cache_metadata: dict[str, Any] = {
+        "hit": hit,
+        "build_sec": build_secs,
+        "alloc_kb": alloc_kb,
+        "ttl_sec": _TREE_CACHE_TTL_SECONDS,
+        "hits": hits,
+    }
+    if age_sec is not None:
+        cache_metadata["age_sec"] = age_sec
+    return {**payload, "_cache": cache_metadata}
+
+
+@vontology_bp.route("/tree", methods=["GET"])
+def get_tree():
+    """Return the actor-scoped Vontology tree with cache and single-flight reuse."""
+
+    current_app.logger.info("Received request for /api/vontology/tree")
+    force_refresh = request.args.get("refresh") in ("1", "true", "True")
+    actor_scope = _current_tree_job_actor_scope()
+    cache_key = _tree_cache_key(actor_scope)
+    now = time.time()
+
+    cached_response: dict[str, Any] | None = None
+    state: _TreeBuildState | None = None
+    is_owner = False
+    with _TREE_CACHE_LOCK:
+        cache_record = (
+            None
+            if force_refresh
+            else _fresh_tree_cache_record_locked(
+                cache_key,
+                now=now,
+            )
+        )
+        if cache_record is not None:
+            timestamp, payload, build_secs, alloc_kb, hits = cache_record
+            hits += 1
+            _TREE_CACHE[cache_key] = (
+                timestamp,
+                payload,
+                build_secs,
+                alloc_kb,
+                hits,
+            )
+            cached_response = _tree_payload_with_cache_metadata(
+                payload,
+                hit=True,
+                age_sec=now - timestamp,
+                build_secs=build_secs,
+                alloc_kb=alloc_kb,
+                hits=hits,
+            )
+        else:
+            state, is_owner = _claim_tree_build_locked(actor_scope)
+
+    if cached_response is not None:
+        return jsonify(cached_response)
+    assert state is not None
+
+    if is_owner:
+        _execute_tree_build(state)
+    else:
+        state.completion.wait()
+
+    if state.error is not None or state.result is None:
+        return jsonify({"error": state.error or "Tree build failed."}), 500
     return jsonify(
-        {
-            **tree_data,
-            "_cache": {
-                "hit": False,
-                "build_sec": build_secs,
-                "alloc_kb": alloc_kb,
-                "ttl_sec": _TREE_CACHE_TTL_SECONDS,
-                "hits": 0,
-            },
-        }
+        _tree_payload_with_cache_metadata(
+            state.result,
+            hit=False,
+            build_secs=state.build_secs,
+            alloc_kb=state.alloc_kb,
+            hits=0,
+        )
     )
 
 
@@ -681,9 +820,8 @@ def ensure_thing_route():
             current_app.logger.error(f"Error ensuring Thing exists: {result['error']}")
             return jsonify({"success": False, "message": result["error"]}), 500
 
-        # Invalidate tree cache since we modified the ontology structure
-        with _TREE_CACHE_LOCK:
-            _TREE_CACHE.clear()
+        # Invalidate tree cache since we modified the ontology structure.
+        _invalidate_tree_cache()
 
         current_app.logger.info(
             f"Thing ensured: created={result['thing_created']}, orphans_linked={result['orphans_linked']}"
@@ -710,7 +848,7 @@ def ensure_thing_route():
 
 
 def _current_tree_job_actor_scope() -> tuple[str | None, str | None]:
-    """Return the trusted read scope for an asynchronous tree job.
+    """Return the trusted, canonical read scope for a tree build.
 
     Organisation context is meaningful only when it is attached to an
     effective user. Discarding an otherwise residual organisation value keeps
@@ -722,6 +860,16 @@ def _current_tree_job_actor_scope() -> tuple[str | None, str | None]:
         get_effective_organisation_concept_id() if user_concept_id else None
     )
     return user_concept_id, organisation_concept_id
+
+
+def _invalidate_tree_cache() -> None:
+    """Fence stale builders and clear all completed tree projections."""
+
+    global _TREE_BUILD_GENERATION
+    with _TREE_CACHE_LOCK:
+        _TREE_BUILD_GENERATION += 1
+        _TREE_CACHE.clear()
+        _TREE_BUILDS_IN_FLIGHT.clear()
 
 
 def _tree_build_job_is_terminal(job: Mapping[str, Any]) -> bool:
@@ -746,146 +894,102 @@ def _prune_tree_build_progress(*, now_epoch: float | None = None) -> None:
             _TREE_BUILD_PROGRESS.pop(job_id, None)
 
 
-def _build_tree_job(
-    job_id: str,
-    user_concept_id: str | None,
-    organisation_concept_id: str | None,
-) -> None:
-    """Construct one Vontology tree under its captured actor visibility scope."""
+def _build_tree_job(state: _TreeBuildState) -> None:
+    """Background entry point for the shared physical tree builder."""
 
-    stop_event = threading.Event()
-    ticker_thread: threading.Thread | None = None
-    ticker_started = False
-    try:
-        t0 = time.time()
-        with (
-            force_access_control_enforcement(),
-            override_current_actor(
-                user_concept_id,
-                organisation_concept_id,
-            ),
-        ):
-            docs = list(ConceptsRepository.find({}, {"concept_id": 1}))
-            total = len(docs)
-            with _TREE_BUILD_PROGRESS_LOCK:
-                job = _TREE_BUILD_PROGRESS.get(job_id)
-                if job is None:
-                    return
-                job["total"] = total
-                job["processed"] = 0
+    _execute_tree_build(state)
 
-            def ticker():
-                """Increment progress periodically so the client sees activity."""
-                while not stop_event.wait(0.5):
-                    with _TREE_BUILD_PROGRESS_LOCK:
-                        current_job = _TREE_BUILD_PROGRESS.get(job_id)
-                        if not current_job or _tree_build_job_is_terminal(current_job):
-                            break
-                        current = current_job.get("processed", 0)
-                        current_job["processed"] = min(
-                            total,
-                            current + max(1, total // 20),
-                        )
 
-            ticker_thread = threading.Thread(target=ticker, daemon=True)
-            ticker_thread.start()
-            ticker_started = True
-
-            tree_data = get_vontology_tree("Thing")
-
-        returned_error = None
-        if isinstance(tree_data, Mapping) and tree_data.get("error") is not None:
-            returned_error = str(tree_data["error"]).strip() or "Tree build failed."
-
-        with _TREE_BUILD_PROGRESS_LOCK:
-            job = _TREE_BUILD_PROGRESS.get(job_id)
-            if job is not None:
-                job["processed"] = total
-                if returned_error is not None:
-                    job["error"] = returned_error
-                else:
-                    job["result"] = tree_data
-                job["completed_at_epoch"] = time.time()
-
-        try:
-            if returned_error is not None:
-                return
-            if os.getenv("VON_TREE_PHASE_LOG") in ("1", "true", "TRUE", "True"):
-                logger = None
-                try:
-                    logger = current_app.logger
-                    if getattr(current_app, "testing", False):
-                        logger = None
-                except Exception:
-                    pass
-                if logger is None:
-                    logger = logging.getLogger(__name__)
-                total_ms = (time.time() - t0) * 1000.0
-                node_count = "n/a"
-                try:
-
-                    def _count_nodes_list(nodes):
-                        c = 0
-                        for n in nodes or []:
-                            c += 1
-                            try:
-                                c += _count_nodes_list(n.get("children", []))
-                            except Exception:
-                                continue
-                        return c
-
-                    if isinstance(tree_data, dict):
-                        roots = tree_data.get("tree", [])
-                        node_count = _count_nodes_list(roots)
-                except Exception:
-                    pass
-                logger.info(
-                    "[tree_build_async] total=%.1fms nodes=%s", total_ms, node_count
-                )
-        except Exception:
-            pass
-    except Exception as exc:
-        with _TREE_BUILD_PROGRESS_LOCK:
-            job = _TREE_BUILD_PROGRESS.get(job_id)
-            if job is not None:
-                job["error"] = str(exc).strip() or exc.__class__.__name__
-                job["completed_at_epoch"] = time.time()
-    finally:
-        stop_event.set()
-        if ticker_thread is not None and ticker_started:
-            ticker_thread.join(timeout=0.5)
+def _attach_tree_job_locked(
+    state: _TreeBuildState,
+    actor_scope: tuple[str | None, str | None],
+) -> str:
+    if state.job_id is not None and state.job_id in _TREE_BUILD_PROGRESS:
+        return state.job_id
+    job_id = uuid.uuid4().hex
+    state.job_id = job_id
+    _TREE_BUILD_PROGRESS[job_id] = {
+        "total": 100,
+        "processed": state.progress,
+        "result": state.result,
+        "error": state.error,
+        "owner_user_concept_id": actor_scope[0],
+        "owner_organisation_concept_id": actor_scope[1],
+        "completed_at_epoch": state.completed_at_epoch,
+        "build_state": state,
+    }
+    return job_id
 
 
 @vontology_bp.route("/tree_async", methods=["POST"])
 def build_tree_async_route():
-    """Initialise an asynchronous Vontology tree build."""
+    """Initialise or join an actor-scoped asynchronous Vontology tree build."""
+
     _prune_tree_build_progress()
-    job_id = uuid.uuid4().hex
-    user_concept_id, organisation_concept_id = _current_tree_job_actor_scope()
-    with _TREE_BUILD_PROGRESS_LOCK:
-        _TREE_BUILD_PROGRESS[job_id] = {
-            "total": 0,
-            "processed": 0,
-            "result": None,
-            "error": None,
-            "owner_user_concept_id": user_concept_id,
-            "owner_organisation_concept_id": organisation_concept_id,
-            "completed_at_epoch": None,
-        }
-    try:
-        thread = threading.Thread(
-            target=_build_tree_job,
-            args=(job_id, user_concept_id, organisation_concept_id),
-            daemon=True,
+    actor_scope = _current_tree_job_actor_scope()
+    cache_key = _tree_cache_key(actor_scope)
+    force_refresh = request.args.get("refresh") in ("1", "true", "True")
+    with _TREE_CACHE_LOCK:
+        cache_record = None if force_refresh else _fresh_tree_cache_record_locked(
+            cache_key,
+            now=time.time(),
         )
-        thread.start()
-    except Exception:
-        with _TREE_BUILD_PROGRESS_LOCK:
-            _TREE_BUILD_PROGRESS.pop(job_id, None)
-        current_app.logger.exception(
-            "Failed to start asynchronous Vontology tree build"
-        )
-        return jsonify({"error": "tree build could not be started"}), 500
+        if cache_record is not None:
+            timestamp, payload, build_secs, alloc_kb, hits = cache_record
+            hits += 1
+            _TREE_CACHE[cache_key] = (
+                timestamp,
+                payload,
+                build_secs,
+                alloc_kb,
+                hits,
+            )
+            state = _TreeBuildState(
+                cache_key=cache_key,
+                user_concept_id=actor_scope[0],
+                organisation_concept_id=actor_scope[1],
+                generation=_TREE_BUILD_GENERATION,
+                result=_tree_payload_with_cache_metadata(
+                    payload,
+                    hit=True,
+                    age_sec=time.time() - timestamp,
+                    build_secs=build_secs,
+                    alloc_kb=alloc_kb,
+                    hits=hits,
+                ),
+                progress=100,
+                build_secs=build_secs,
+                alloc_kb=alloc_kb,
+                completed_at_epoch=time.time(),
+            )
+            state.completion.set()
+            job_id = _attach_tree_job_locked(state, actor_scope)
+            return jsonify({"job_id": job_id}), 202
+
+        state, is_owner = _claim_tree_build_locked(actor_scope)
+        job_id = _attach_tree_job_locked(state, actor_scope)
+        if is_owner:
+            try:
+                thread = threading.Thread(
+                    target=_build_tree_job,
+                    args=(state,),
+                    daemon=True,
+                )
+                thread.start()
+            except BaseException as exc:
+                if _TREE_BUILDS_IN_FLIGHT.get(cache_key) is state:
+                    _TREE_BUILDS_IN_FLIGHT.pop(cache_key, None)
+                _TREE_BUILD_PROGRESS.pop(job_id, None)
+                state.error = "tree build could not be started"
+                state.progress = 100
+                state.completed_at_epoch = time.time()
+                state.completion.set()
+                current_app.logger.exception(
+                    "Failed to start asynchronous Vontology tree build"
+                )
+                if isinstance(exc, Exception):
+                    return jsonify({"error": "tree build could not be started"}), 500
+                raise
     return jsonify({"job_id": job_id}), 202
 
 

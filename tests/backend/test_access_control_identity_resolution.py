@@ -124,6 +124,34 @@ def test_header_identity_cache_is_request_local(monkeypatch) -> None:
         assert access_control.get_effective_user_concept_id() == "#V#actor_b"
 
 
+def test_explicit_anonymous_actor_suppresses_ambient_identity_without_a_source(
+    monkeypatch,
+) -> None:
+    import src.backend.security.access_control as access_control
+    from flask import session
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    monkeypatch.setattr(
+        access_control,
+        "_validate_person_concept",
+        lambda concept_id: concept_id,
+    )
+
+    with app.test_request_context("/tree"):
+        session["user_concept_id"] = "#V#ambient_user"
+        session["organisation_concept_id"] = "#V#ambient_org"
+        with access_control.override_current_actor(None, None):
+            assert access_control.get_effective_user_concept_id_with_source() == (
+                None,
+                None,
+            )
+            assert access_control.get_effective_organisation_concept_id() is None
+            assert access_control.should_enforce_access_control() is True
+
+        assert access_control.get_effective_user_concept_id() == "#V#ambient_user"
+
+
 def test_visibility_evaluator_is_rebuilt_for_each_request_after_revocation(
     monkeypatch,
 ) -> None:

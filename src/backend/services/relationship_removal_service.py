@@ -1447,6 +1447,7 @@ def undo_relationship_removal(
 
     restored_count = 0
     already_restored_count = 0
+    restored_concept_ids: set[str] = set()
     errors: list[dict[str, Any]] = []
 
     for tombstone in tombstones:
@@ -1478,6 +1479,7 @@ def undo_relationship_removal(
             )
             if changed:
                 restored_count += 1
+                restored_concept_ids.update((source_id, target))
             else:
                 already_restored_count += 1
         except Exception as exc:
@@ -1491,6 +1493,15 @@ def undo_relationship_removal(
                     "error_details": {"exception_type": type(exc).__name__},
                 }
             )
+
+    if restored_count > 0:
+        try:
+            invalidate_vontology_caches(
+                sorted(restored_concept_ids),
+                correlation_id=correlation_id,
+            )
+        except Exception:
+            logger.debug("Relationship undo cache invalidation failed", exc_info=True)
 
     status = "ok"
     if errors and restored_count > 0:

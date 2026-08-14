@@ -7,6 +7,7 @@ from contextvars import ContextVar
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from bson import BSON
 from flask import g, has_request_context, request, session
 
 from ..db.mongo_client import get_concepts_collection
@@ -24,6 +25,10 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _MANUAL_USER: ContextVar[Optional[str]] = ContextVar("access_manual_user", default=None)
 _MANUAL_ORG: ContextVar[Optional[str]] = ContextVar("access_manual_org", default=None)
+_MANUAL_ACTOR_BOUND: ContextVar[bool] = ContextVar(
+    "access_manual_actor_bound",
+    default=False,
+)
 _BYPASS: ContextVar[bool] = ContextVar("access_bypass", default=False)
 _FORCE_ENFORCEMENT: ContextVar[bool] = ContextVar(
     "access_force_enforcement",
@@ -34,6 +39,9 @@ _EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
 )
 
 _REMOVE = object()
+
+_ACCESS_ID_QUERY_MAX_COUNT = 10_000
+_ACCESS_ID_QUERY_MAX_BSON_BYTES = 8 * 1024 * 1024
 
 TRUSTED_IN_PROCESS_ACTOR_SOURCE = "trusted_in_process_actor"
 AUTHENTICATED_SESSION_ACTOR_SOURCE = "authenticated_session"
@@ -58,6 +66,28 @@ def _normalise_stored_org_concept_id(value: Any) -> Optional[str]:
     if not candidate:
         return None
     return candidate if candidate.startswith("#") else f"#V#{candidate}"
+
+
+def _bounded_access_id_query_batches(concept_ids: Iterable[str]) -> Iterable[list[str]]:
+    """Yield deterministic ``$in`` batches below count and BSON safety bounds."""
+
+    def split_to_bson_budget(batch: list[str]) -> Iterable[list[str]]:
+        if len(batch) <= 1:
+            yield batch
+            return
+        encoded_size = len(BSON.encode({"concept_id": {"$in": batch}}))
+        if encoded_size <= _ACCESS_ID_QUERY_MAX_BSON_BYTES:
+            yield batch
+            return
+        midpoint = len(batch) // 2
+        yield from split_to_bson_budget(batch[:midpoint])
+        yield from split_to_bson_budget(batch[midpoint:])
+
+    ordered_ids = sorted(concept_ids)
+    for offset in range(0, len(ordered_ids), _ACCESS_ID_QUERY_MAX_COUNT):
+        yield from split_to_bson_budget(
+            ordered_ids[offset : offset + _ACCESS_ID_QUERY_MAX_COUNT]
+        )
 
 
 def _specific_allows_user(spec: Any, user_id: Optional[str]) -> bool:
@@ -262,21 +292,25 @@ class AccessEvaluator:
             **{f"relationships.{p}": 1 for p in SPECIFIC_TO_ORG_PREDICATES_READ},
         }
         seen: set[str] = set()
-        cursor = coll.find({"concept_id": {"$in": sorted(uncached)}}, projection)
-        set_batch_size = getattr(cursor, "batch_size", None)
-        if callable(set_batch_size):
-            cursor = set_batch_size(min(len(uncached), 20_000))
-        for doc in cursor:
-            if not isinstance(doc, dict):
-                continue
-            concept_id = _normalise_concept_id(doc.get("concept_id"))
-            if concept_id is None:
-                continue
-            seen.add(concept_id)
-            is_visible = _document_visible_to_actor(doc, self.user_id, self.org_id)
-            self._cache[concept_id] = is_visible
-            if is_visible:
-                allowed.add(concept_id)
+        for concept_id_batch in _bounded_access_id_query_batches(uncached):
+            cursor: Any = coll.find(
+                {"concept_id": {"$in": concept_id_batch}},
+                projection,
+            )
+            set_batch_size = getattr(cursor, "batch_size", None)
+            if callable(set_batch_size):
+                cursor = set_batch_size(min(len(concept_id_batch), 20_000))
+            for doc in cursor:
+                if not isinstance(doc, dict):
+                    continue
+                concept_id = _normalise_concept_id(doc.get("concept_id"))
+                if concept_id is None:
+                    continue
+                seen.add(concept_id)
+                is_visible = _document_visible_to_actor(doc, self.user_id, self.org_id)
+                self._cache[concept_id] = is_visible
+                if is_visible:
+                    allowed.add(concept_id)
 
         for concept_id in uncached - seen:
             self._cache[concept_id] = False
@@ -359,6 +393,10 @@ def get_effective_user_concept_id_with_source() -> tuple[str | None, str | None]
     """
 
     manual = _MANUAL_USER.get()
+    if _MANUAL_ACTOR_BOUND.get():
+        if manual is None:
+            return None, None
+        return manual, TRUSTED_IN_PROCESS_ACTOR_SOURCE
     if manual is not None:
         return manual, TRUSTED_IN_PROCESS_ACTOR_SOURCE
     if not has_request_context():
@@ -412,7 +450,7 @@ def get_effective_user_concept_id() -> Optional[str]:
 
 def get_effective_organisation_concept_id() -> Optional[str]:
     manual = _MANUAL_ORG.get()
-    if manual is not None:
+    if _MANUAL_ACTOR_BOUND.get() or manual is not None:
         return manual
     if not has_request_context():
         return None
@@ -450,7 +488,11 @@ def should_enforce_access_control() -> bool:
         return False
     if _FORCE_ENFORCEMENT.get():
         return True
-    if _MANUAL_USER.get() is not None or _MANUAL_ORG.get() is not None:
+    if (
+        _MANUAL_ACTOR_BOUND.get()
+        or _MANUAL_USER.get() is not None
+        or _MANUAL_ORG.get() is not None
+    ):
         return True
     return has_request_context()
 
@@ -888,6 +930,7 @@ def override_current_actor(
 ):
     """Apply one explicit actor scope to access-controlled support lookups."""
 
+    bound_token = _MANUAL_ACTOR_BOUND.set(True)
     user_token = _MANUAL_USER.set(_normalise_concept_id(user_concept_id))
     org_token = _MANUAL_ORG.set(
         _normalise_stored_org_concept_id(organisation_concept_id)
@@ -899,6 +942,7 @@ def override_current_actor(
         _EVALUATOR.reset(eval_token)
         _MANUAL_ORG.reset(org_token)
         _MANUAL_USER.reset(user_token)
+        _MANUAL_ACTOR_BOUND.reset(bound_token)
 
 
 @contextmanager
