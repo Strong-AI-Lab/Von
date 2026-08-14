@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "49",
+  "seed_version": "50",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#tool_calling_workflow": {
       "42": [
@@ -4682,6 +4682,21 @@
       "workflow_id": "#V#file_copy_upload_handler_workflow"
     },
     {
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "file_copy_concept_id"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "file_copy_concept_id",
+            "source_expression": "inputs.file_copy_concept_id",
+            "extractor": "identity",
+            "required": true,
+            "description": "Blob-backed #V#computer_file_copy concept to interpret and index."
+          }
+        ]
+      },
       "publication_spec": {
         "initial_state": "interpret",
         "steps": [
@@ -4717,11 +4732,15 @@
                 "to_state": "complete"
               }
             ],
-            "context_input_mapping_specs": [],
-            "context_input_mappings": [
-              "#V#workflow_mapping_concept_id_to_concept_id_parameter",
-              "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter"
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_file_copy_interpretation_workflow_interpret_file_copy_concept_id_to_concept_id_parameter",
+                "context_key": "file_copy_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
             ],
+            "context_input_mappings": [],
             "effects": [],
             "execution_mode": null,
             "invoked_workflow_id": null,
@@ -4756,11 +4775,15 @@
                 "to_state": "complete"
               }
             ],
-            "context_input_mapping_specs": [],
-            "context_input_mappings": [
-              "#V#workflow_mapping_concept_id_to_concept_id_parameter",
-              "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter"
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_file_copy_interpretation_workflow_index_file_copy_concept_id_to_concept_id_parameter",
+                "context_key": "file_copy_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
             ],
+            "context_input_mappings": [],
             "effects": [],
             "execution_mode": null,
             "invoked_workflow_id": null,

@@ -41,6 +41,7 @@ from src.backend.services.adaptive_turn_service import (
     _bounded_conversation_observation_projection,
     _canonical_effect_readback_receipt,
     _canonical_relation_readback_matches_invocation,
+    _canonical_scoped_assertion_readback_matches_invocation,
     _canonically_verified_material_effect_ids,
     _capability_catalogue,
     _cited_ontology_mutation_claim_conflicts,
@@ -235,6 +236,122 @@ def test_embedded_ontology_relation_readback_verifies_the_exact_effect() -> None
     assert not _canonical_relation_readback_matches_invocation(
         invocation,
         wrong_case_readback,
+    )
+
+
+def test_embedded_scoped_assertion_readback_verifies_the_exact_effect() -> None:
+    canonical_record = {
+        "assertion_id": "ska_research_description",
+        "subject_concept_id": "#V#student_a",
+        "predicate": "#V#has_research_description",
+        "object_kind": "text",
+        "object_text": {
+            "text": "Studies robust multimodal learning.",
+            "language": "en-NZ",
+        },
+        "scope": {
+            "mode": "organisation",
+            "user_concept_id": "#V#person",
+            "organisation_concept_id": "#V#org",
+            "namespace": "#V#person@org",
+            "audience_keys": ["org:#V#org"],
+        },
+        "provenance": {
+            "asserted_by_user_concept_id": "#V#person",
+            "organisation_concept_id": "#V#org",
+            "namespace": "#V#person@org",
+        },
+        "canonical_publication": False,
+        "status": "asserted",
+    }
+    readback = _canonical_effect_readback_receipt(
+        {"canonical_read_back": canonical_record}
+    )
+    invocation = {
+        "effect_id": "effect-scoped-assertion-1",
+        "status": "ok",
+        "execution_method": "upsert_scoped_assertion",
+        "effective_arguments": {
+            "subject_concept_id": "#V#student_a",
+            "predicate": "#V#has_research_description",
+            "target_text": "Studies robust multimodal learning.",
+            "language": "en-NZ",
+            "scope_mode": "organisation",
+            "acting_user_concept_id": "#V#person",
+            "organisation_concept_id": "#V#org",
+            "namespace": "#V#person@org",
+            "canonical_publication": False,
+        },
+    }
+    material, verified = _canonically_verified_material_effect_ids(
+        [invocation],
+        {
+            "effect-scoped-assertion-1": {
+                "effect_status": "succeeded",
+                "changed": True,
+                "turn_finality_required": True,
+                "canonical_readback": readback,
+            }
+        },
+    )
+
+    assert readback is not None
+    assert "object_text" not in readback
+    assert _canonical_scoped_assertion_readback_matches_invocation(
+        invocation,
+        readback,
+    )
+    assert material == {"effect-scoped-assertion-1"}
+    assert verified == {"effect-scoped-assertion-1"}
+    wrong_scope_readback = dict(readback)
+    wrong_scope_readback["scope_mode"] = "user"
+    assert not _canonical_scoped_assertion_readback_matches_invocation(
+        invocation,
+        wrong_scope_readback,
+    )
+    wrong_object_readback = dict(readback)
+    wrong_object_readback["object_text_identity_sha256"] = "wrong"
+    assert not _canonical_scoped_assertion_readback_matches_invocation(
+        invocation,
+        wrong_object_readback,
+    )
+    wrong_actor_readback = dict(readback)
+    wrong_actor_readback["trusted_scope_identity_sha256"] = "wrong"
+    assert not _canonical_scoped_assertion_readback_matches_invocation(
+        invocation,
+        wrong_actor_readback,
+    )
+    mismatched_namespace_record = json.loads(json.dumps(canonical_record))
+    mismatched_namespace_record["scope"]["namespace"] = "#V#other@org"
+    mismatched_namespace_readback = _canonical_effect_readback_receipt(
+        {"canonical_read_back": mismatched_namespace_record}
+    )
+    assert mismatched_namespace_readback is not None
+    assert "trusted_scope_identity_sha256" not in mismatched_namespace_readback
+    wrong_audience_record = json.loads(json.dumps(canonical_record))
+    wrong_audience_record["scope"]["audience_keys"] = ["org:#V#other"]
+    wrong_audience_readback = _canonical_effect_readback_receipt(
+        {"canonical_read_back": wrong_audience_record}
+    )
+    assert wrong_audience_readback is not None
+    assert "trusted_scope_identity_sha256" not in wrong_audience_readback
+    assert not _canonical_scoped_assertion_readback_matches_invocation(
+        invocation,
+        wrong_audience_readback,
+    )
+    extra_audience_record = json.loads(json.dumps(canonical_record))
+    extra_audience_record["scope"]["audience_keys"] = [
+        "org:#V#org",
+        "user:#V#person",
+    ]
+    extra_audience_readback = _canonical_effect_readback_receipt(
+        {"canonical_read_back": extra_audience_record}
+    )
+    assert extra_audience_readback is not None
+    assert "trusted_scope_identity_sha256" not in extra_audience_readback
+    assert not _canonical_scoped_assertion_readback_matches_invocation(
+        invocation,
+        extra_audience_readback,
     )
 
 
@@ -683,7 +800,7 @@ def _effect_gateway(
                     {
                         "organisation_concept_id": None,
                         "org_id": None,
-                        "scope_mode": "user_org_default",
+                        "scope_mode": "user_only_default",
                         "visibility_scope_mode": None,
                     }
                     if name == "create_concepts"
@@ -715,6 +832,25 @@ def _effect_gateway(
         ),
         enabled=True,
     )
+
+
+def _stub_same_turn_ontology_delegation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    """Authorise governed fake effects whose tests target turn mechanics."""
+
+    issued: list[dict[str, Any]] = []
+
+    def issue(**kwargs: Any) -> dict[str, Any]:
+        issued.append(dict(kwargs))
+        return {"delegation_id": f"test-delegation-{kwargs['effect_id']}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue,
+    )
+    return issued
 
 
 def _workflow_gateway(
@@ -2022,7 +2158,10 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
     assert allocation["model_call_hard_timeout_seconds"] is None
 
 
-def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> None:
+def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     seen: dict[str, Any] = {}
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2094,7 +2233,7 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> 
     assert seen["created_by_concept_id"] == "#V#person"
     assert seen["organisation_concept_id"] is None
     assert seen["org_id"] is None
-    assert seen["scope_mode"] == "user_org_default"
+    assert seen["scope_mode"] == "user_only_default"
     assert seen["visibility_scope_mode"] is None
 
 
@@ -2213,7 +2352,8 @@ def test_effect_subject_authority_matches_actor_or_organisation_scope(
     from src.backend.db import mongo_client
 
     class _Collection:
-        relationships: dict[str, Any] = {}
+        def __init__(self) -> None:
+            self.relationships: dict[str, Any] = {}
 
         def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
             return {"relationships": dict(self.relationships)}
@@ -2249,7 +2389,7 @@ def test_effect_subject_authority_matches_actor_or_organisation_scope(
 
 
 def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.backend.db import mongo_client
 
@@ -2260,6 +2400,7 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
             AssertionError("actor identity should not require visibility lookup")
         ),
     )
+    issued = _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[str] = []
 
     def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2306,11 +2447,15 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
     )
 
     assert invoked == ["add_relationship"]
+    assert [item["method_name"] for item in issued] == ["add_relationship"]
     assert result.tool_invocations[0]["effect_status"] == "succeeded"
     assert result.tool_invocations[0]["changed"] is True
 
 
-def test_finality_fallback_rejects_pre_reconciliation_situation() -> None:
+def test_finality_fallback_rejects_pre_reconciliation_situation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     current_situation = "The representation effect has not yet been observed."
     client = _SequenceClient(
         LLMResponse(
@@ -2416,7 +2561,10 @@ def test_model_error_after_read_rejects_interim_situation_sidecar() -> None:
     assert result.conversation_situation == current_situation
 
 
-def test_post_handler_output_validation_failure_is_indeterminate() -> None:
+def test_post_handler_output_validation_failure_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     committed: list[str] = []
 
     def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2481,7 +2629,9 @@ def test_post_handler_output_validation_failure_is_indeterminate() -> None:
 def test_effect_removes_false_draft_from_fresh_final_context(
     answer_reserve: float,
     effect_finished_at: float,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     started = time.monotonic()
     clock = _ManualClock(started)
 
@@ -2548,6 +2698,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 ) -> None:
     from src.backend.services import turn_execution_record_service
 
+    _stub_same_turn_ontology_delegation(monkeypatch)
     release_handler = Event()
     observation_persisted = Event()
     persisted: list[dict[str, Any]] = []
@@ -2629,6 +2780,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 def test_effect_uses_its_method_liveness_window_not_a_turn_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     clock = _ManualClock()
     observed_deadlines: list[float | None] = []
     gateway = _effect_gateway(
@@ -2714,6 +2866,7 @@ def test_effect_uses_its_method_liveness_window_not_a_turn_deadline(
 def test_mixed_effect_batch_preserves_order_with_independent_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     clock = _ManualClock()
     observed: list[tuple[str, float | None]] = []
     gateway = _effect_gateway(
@@ -2801,6 +2954,7 @@ def test_mixed_effect_batch_preserves_order_with_independent_admission(
 def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     clock = _ManualClock()
     invoked: list[str] = []
     gateway = _effect_gateway(
@@ -3117,6 +3271,7 @@ def test_cited_ontology_success_without_relation_readback_is_rejected(
 def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[str] = []
     gateway = _effect_gateway(
         lambda _name, _arguments: {"success": True},
@@ -3221,7 +3376,10 @@ def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     assert blocked["error_code"] == "prior_effect_outcome_indeterminate"
 
 
-def test_per_method_minimum_admits_sequential_effects_below_hard_cap() -> None:
+def test_per_method_minimum_admits_sequential_effects_below_hard_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[str] = []
 
     def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3420,8 +3578,8 @@ def test_ordinary_effect_rejects_unscoped_subject_before_handler(
     )
 
     assert invoked == []
-    assert result.tool_invocations[0]["effect_status"] == "failed"
-    assert "effect_subject_not_authorised" in (
+    assert result.tool_invocations[0]["effect_status"] == "not_started"
+    assert "ontology_mutation_target_not_accessible" in (
         result.tool_invocations[0]["evidence"]["preview"]
     )
 
@@ -3430,6 +3588,7 @@ def test_canonical_text_denial_exposes_scoped_assertion_recovery(
     monkeypatch,
 ) -> None:
     from src.backend.db import mongo_client
+    from src.backend.services import ontology_mutation_command_service
 
     class _Collection:
         def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -3439,6 +3598,18 @@ def test_canonical_text_denial_exposes_scoped_assertion_recovery(
         mongo_client,
         "get_concepts_collection",
         lambda: _Collection(),
+    )
+    original_is_ontology_mutation_method = (
+        ontology_mutation_command_service.is_ontology_mutation_method
+    )
+    monkeypatch.setattr(
+        ontology_mutation_command_service,
+        "is_ontology_mutation_method",
+        lambda method: (
+            False
+            if method == "upsert_text_relation"
+            else original_is_ontology_mutation_method(method)
+        ),
     )
     invoked: list[tuple[str, dict[str, Any]]] = []
 
@@ -3649,9 +3820,9 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     assert recovered_arguments["canonical_publication"] is False
 
     denial = result.tool_invocations[0]
-    assert denial["effect_status"] == "failed"
+    assert denial["effect_status"] == "not_started"
     preview = denial["evidence"]["preview"]
-    assert "effect_subject_not_authorised" in preview
+    assert "ontology_mutation_target_not_accessible" in preview
     assert "assert_in_actor_scope" in preview
     assert "#V#globally_visible_subject" in preview
     assert "#V#hasResearchInterest" in preview
@@ -3770,7 +3941,7 @@ def test_canonical_literal_relationship_denial_recovers_in_chosen_scope(
     assert recovered_arguments["scope_mode"] == "organisation"
     assert recovered_arguments["target_text"] == "Actor-relative observation."
     denial, recovery = result.tool_invocations
-    assert denial["effect_status"] == "failed"
+    assert denial["effect_status"] == "not_started"
     assert "target_text" in denial["evidence"]["preview"]
     assert recovery["effect_status"] == "succeeded"
     assert denial["recovery_status"] == "succeeded"
@@ -3889,11 +4060,11 @@ def test_canonical_literal_relationship_recovery_requires_same_object(
 
     denial = result.tool_invocations[0]
     unrelated_recovery = result.tool_invocations[1]
-    assert denial["effect_status"] == "failed"
+    assert denial["effect_status"] == "not_started"
     assert denial["recovery_status"] == "mismatched"
     assert denial["attempted_recovery_effect_id"] == unrelated_recovery["effect_id"]
     assert "recovered_by_effect_id" not in denial
-    assert result.terminal_status == "effect_failed"
+    assert result.terminal_status == "effect_not_started"
     assert result.response_text != "The scoped assertion was recorded."
 
 
@@ -4171,7 +4342,10 @@ def test_ordinary_relationship_effect_reserves_mail_profile_control_predicates(
     assert denial["error_code"] == "mail_profile_authority_effect_not_delegated"
 
 
-def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs() -> None:
+def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued = _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[tuple[str, dict[str, Any]]] = []
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -4239,6 +4413,7 @@ def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs() 
             },
         )
     ]
+    assert [item["method_name"] for item in issued] == ["add_relationship"]
     assert result.tool_invocations[0]["effect_status"] == "failed"
     assert "mail_profile_authority_effect_not_delegated" in (
         result.tool_invocations[0]["evidence"]["preview"]
@@ -6263,10 +6438,8 @@ def test_repeated_tool_results_resolve_projection_contract_once_per_turn(
 
 
 def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.backend.services import adaptive_turn_service
-
     seen: list[tuple[str, dict[str, Any]]] = []
     state = {"created": False}
 
@@ -6279,11 +6452,7 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
             return {"success": True, "created": state["created"]}
         return {"success": True, "effect_status": "succeeded", "changed": True}
 
-    monkeypatch.setattr(
-        adaptive_turn_service,
-        "_effect_subject_authorised",
-        lambda *_args: True,
-    )
+    _stub_same_turn_ontology_delegation(monkeypatch)
     client = _SequenceClient(
         LLMResponse(
             text_response="",
@@ -6346,16 +6515,10 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
 
 
 def test_relation_progress_emits_one_human_start_and_terminal_summary(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.backend.services import adaptive_turn_service
-
     progress_events: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        adaptive_turn_service,
-        "_effect_subject_authorised",
-        lambda *_args, **_kwargs: True,
-    )
+    _stub_same_turn_ontology_delegation(monkeypatch)
 
     client = _SequenceClient(
         LLMResponse(
@@ -6534,9 +6697,10 @@ def test_concept_search_progress_emits_query_and_bounded_results() -> None:
     }
 
 
-def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> (
-    None
-):
+def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     seen_cases: list[str] = []
     progress_events: list[dict[str, Any]] = []
     release_timeout_handler = Event()
@@ -6638,7 +6802,10 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
     assert not partial_progress["result_summary"].startswith("Finished ")
 
 
-def test_partial_effect_downgrades_nominal_model_completion() -> None:
+def test_partial_effect_downgrades_nominal_model_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     client = _SequenceClient(
         LLMResponse(
             text_response="",
@@ -8798,8 +8965,22 @@ def test_failed_workflow_and_later_direct_trip_effects_preserve_only_verified_an
 ) -> None:
     """Regress request 95c16c12: a failed route must not erase verified recovery."""
 
+    from src.backend.services import ontology_mutation_command_service
     from src.backend.services.workflow_turn_capability_service import (
         WorkflowTurnCapability,
+    )
+
+    original_is_ontology_mutation_method = (
+        ontology_mutation_command_service.is_ontology_mutation_method
+    )
+    monkeypatch.setattr(
+        ontology_mutation_command_service,
+        "is_ontology_mutation_method",
+        lambda method: (
+            False
+            if method in {"create_concepts", "add_relationship"}
+            else original_is_ontology_mutation_method(method)
+        ),
     )
 
     workflow_capability = WorkflowTurnCapability(
@@ -9042,6 +9223,368 @@ def test_failed_workflow_and_later_direct_trip_effects_preserve_only_verified_an
         assert useful_answer not in result.response_text
 
 
+def test_failed_workflows_and_recovered_denials_preserve_verified_scoped_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regress c8df245c: exact scoped recoveries must survive mixed failures."""
+
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    delegation_calls: list[dict[str, Any]] = []
+
+    def deny_global_publication_delegation(**kwargs: Any) -> dict[str, Any]:
+        delegation_calls.append(dict(kwargs))
+        return {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": "global_ontology_admin_authority_required",
+            "error": "Semantic ontology authority is required for this effect.",
+            "recovery_affordances": [
+                {"action_type": "create_scoped_assertion"},
+                {"action_type": "request_ontology_administrator_delegation"},
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        deny_global_publication_delegation,
+    )
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_file_copy_interpretation_test",
+        workflow_id="#V#file_copy_interpretation_test_workflow",
+        display_name="File-copy interpretation test workflow",
+        description="Interpret one durable file copy.",
+        relevance_score=0.99,
+        semantic_effect=True,
+        semantic_effect_source="represented_workflow_declaration",
+        input_schema={
+            "type": "object",
+            "properties": {"inputs": {"type": "object", "additionalProperties": True}},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+    instance_by_file_copy = {
+        "#V#file_copy_student_a": "workflow-file-copy-student-a-failed",
+        "#V#file_copy_student_b": "workflow-file-copy-student-b-failed",
+    }
+
+    def execute_workflow(**kwargs: Any) -> dict[str, Any]:
+        file_copy_id = kwargs["inputs"]["file_copy_concept_id"]
+        return {
+            "success": True,
+            "instance_id": instance_by_file_copy[file_copy_id],
+            "workflow_id": workflow_capability.workflow_id,
+            "created_new": True,
+            "final_status": "failed",
+            "workflow_execution": {
+                "final_status": "failed",
+                "error": ("metadata_read_context_key_missing:concept_id"),
+            },
+        }
+
+    def read_instance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "instance_id": kwargs["instance_id"],
+            "workflow_id": workflow_capability.workflow_id,
+            "status": "failed",
+        }
+
+    gateway = _workflow_gateway(
+        execute_workflow,
+        hard_timeout_enabled=False,
+        instance_handler=read_instance,
+    )
+    denied_handler_calls: list[dict[str, Any]] = []
+
+    def should_be_denied(**kwargs: Any) -> dict[str, Any]:
+        denied_handler_calls.append(dict(kwargs))
+        return {"success": True, "effect_status": "succeeded", "changed": True}
+
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="upsert_text_relation",
+            handler=should_be_denied,
+            input_schema=Schema(allow_unknown=True),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="concept_id",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_fixed_arguments={"provenance": None},
+        )
+    )
+
+    def persist_scoped_assertion(**kwargs: Any) -> dict[str, Any]:
+        subject_id = kwargs["subject_concept_id"]
+        assertion_id = f"ska_{subject_id.removeprefix('#V#')}"
+        readback = {
+            "schema_version": "scoped_knowledge_assertion.v1",
+            "assertion_id": assertion_id,
+            "subject_concept_id": subject_id,
+            "predicate": kwargs["predicate"],
+            "object_kind": "text",
+            "object_text": {
+                "text": kwargs["target_text"],
+                "language": kwargs.get("language") or "en-NZ",
+            },
+            "object_concept_id": None,
+            "scope": {
+                "mode": kwargs["scope_mode"],
+                "user_concept_id": kwargs["acting_user_concept_id"],
+                "organisation_concept_id": kwargs["organisation_concept_id"],
+                "namespace": kwargs["namespace"],
+                "audience_keys": [
+                    f"org:{kwargs['organisation_concept_id']}"
+                ],
+            },
+            "provenance": {
+                "asserted_by_user_concept_id": kwargs["acting_user_concept_id"],
+                "organisation_concept_id": kwargs["organisation_concept_id"],
+                "namespace": kwargs["namespace"],
+            },
+            "canonical_publication": False,
+            "status": "asserted",
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": assertion_id,
+            "assertion": readback,
+            "canonical_read_back": readback,
+            "canonical_publication": False,
+            "storage_surface": "scoped_knowledge_assertions",
+        }
+
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="upsert_scoped_assertion",
+            handler=persist_scoped_assertion,
+            input_schema=Schema(allow_unknown=True),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_fixed_arguments={"canonical_publication": False},
+        )
+    )
+    gateway.register_metrics_if_missing("upsert_text_relation")
+    gateway.register_metrics_if_missing("upsert_scoped_assertion")
+
+    descriptions = {
+        "#V#student_a": "Studies robust multimodal learning.",
+        "#V#student_b": "Studies gradient formation and reshaping.",
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-file-copy-workflow",
+                    payload={"query": "interpret the two durable file copies"},
+                )
+            ],
+        ),
+        *[
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id=f"interpret-{index}",
+                        payload={
+                            "name": workflow_capability.name,
+                            "arguments": {
+                                "inputs": {
+                                    "file_copy_concept_id": file_copy_id,
+                                }
+                            },
+                        },
+                    )
+                ],
+            )
+            for index, file_copy_id in enumerate(instance_by_file_copy, start=1)
+        ],
+        *[
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id=f"read-failed-workflow-{index}",
+                        payload={
+                            "name": "workflow_get_instance",
+                            "arguments": {"instance_id": instance_id},
+                        },
+                    )
+                ],
+            )
+            for index, instance_id in enumerate(
+                instance_by_file_copy.values(),
+                start=1,
+            )
+        ],
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=f"deny-canonical-description-{index}",
+                    payload={
+                        "name": "upsert_text_relation",
+                        "arguments": {
+                            "concept_id": subject_id,
+                            "predicate": "hasDescription",
+                            "text": description,
+                            "language": "en-NZ",
+                        },
+                    },
+                )
+                for index, (subject_id, description) in enumerate(
+                    descriptions.items(),
+                    start=1,
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=f"persist-scoped-description-{index}",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": subject_id,
+                            "predicate": "hasDescription",
+                            "target_text": description,
+                            "language": "en-NZ",
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+                for index, (subject_id, description) in enumerate(
+                    descriptions.items(),
+                    start=1,
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "Both research descriptions were durably read back as "
+                "organisation-scoped assertions."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Add research descriptions for those two students.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-c8df245c-mixed-recovery",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert denied_handler_calls == []
+    assert len(delegation_calls) == 2
+    assert all(
+        call["method_name"] == "upsert_text_relation"
+        for call in delegation_calls
+    )
+    assert {
+        call["arguments"]["concept_id"] for call in delegation_calls
+    } == set(descriptions)
+    assert all(call["actor_concept_id"] == "#V#person" for call in delegation_calls)
+    assert all(
+        call["organisation_concept_id"] == "#V#org"
+        for call in delegation_calls
+    )
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is False
+    assert "Both research descriptions were durably read back" in (result.response_text)
+    assert "2 failed represented-workflow attempts" in result.response_text
+    effects = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("effect_id")
+    ]
+    assert len(effects) == 6
+    workflows = [
+        invocation
+        for invocation in effects
+        if invocation.get("capability_kind") == "represented_workflow"
+    ]
+    assert len(workflows) == 2
+    assert all(invocation["effect_status"] == "failed" for invocation in workflows)
+    assert all(invocation["changed"] is True for invocation in workflows)
+    denials = [
+        invocation
+        for invocation in effects
+        if invocation.get("tool") == "upsert_text_relation"
+    ]
+    recoveries = [
+        invocation
+        for invocation in effects
+        if invocation.get("tool") == "upsert_scoped_assertion"
+    ]
+    assert len(denials) == len(recoveries) == 2
+    assert all(invocation["effect_status"] == "not_started" for invocation in denials)
+    assert all(
+        invocation["error_code"] == "global_ontology_admin_authority_required"
+        for invocation in denials
+    )
+    assert all(invocation["changed"] is False for invocation in denials)
+    assert all(invocation["recovery_status"] == "succeeded" for invocation in denials)
+    assert {invocation["recovered_by_effect_id"] for invocation in denials} == {
+        invocation["effect_id"] for invocation in recoveries
+    }
+    assert all(invocation["changed"] is True for invocation in recoveries)
+    assert all(
+        invocation["canonical_readback"]["scope_mode"] == "organisation"
+        for invocation in recoveries
+    )
+    preservation = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_mixed_effect_response_preserved"
+    )
+    assert preservation["preservation_basis"] == (
+        "failed_workflow_and_material_successes_exactly_read_back"
+    )
+    assert preservation["failed_workflow_count"] == 2
+    assert preservation["canonically_verified_succeeded_count"] == 2
+
+
 def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) -> None:
     from src.backend.services.workflow_turn_capability_service import (
         WorkflowTurnCapability,
@@ -9177,7 +9720,10 @@ def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) ->
     )
 
 
-def test_workflow_instance_readback_does_not_reconcile_unrelated_effect() -> None:
+def test_workflow_instance_readback_does_not_reconcile_unrelated_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     instance_id = "shared-looking-instance-id"
     workflow_id = "#V#shared-looking-workflow-id"
 
@@ -9512,14 +10058,10 @@ def test_represented_workflow_retry_reuses_same_turn_idempotency_key(
 
 
 def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handler_calls: list[dict[str, Any]] = []
-
-    monkeypatch.setattr(
-        "src.backend.services.adaptive_turn_service." "_effect_subject_authorised",
-        lambda *_args, **_kwargs: True,
-    )
+    _stub_same_turn_ontology_delegation(monkeypatch)
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         assert name == "add_relationship"

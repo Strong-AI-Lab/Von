@@ -3523,6 +3523,105 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
     return collected
 
 
+def _scoped_assertion_text_identity_sha256(text: Any, language: Any) -> str | None:
+    """Return a content-safe identity for one persisted text assertion."""
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+    language_token = str(language or "en-NZ").strip() or "en-NZ"
+    return hashlib.sha256(
+        _json_bytes(
+            {
+                "text": text.strip(),
+                "language": language_token,
+            }
+        )
+    ).hexdigest()
+
+
+def _scoped_assertion_trusted_scope_identity_sha256(
+    *,
+    scope_mode: Any,
+    user_concept_id: Any,
+    scope_organisation_concept_id: Any,
+    scope_namespace: Any,
+    scope_audience_keys: Any,
+    provenance_organisation_concept_id: Any,
+    provenance_namespace: Any,
+) -> str | None:
+    """Return a bounded identity for the actor-bound assertion scope."""
+
+    mode = str(scope_mode or "").strip().lower()
+    user_id = str(user_concept_id or "").strip()
+    scope_organisation_id = str(scope_organisation_concept_id or "").strip() or None
+    scope_namespace_id = str(scope_namespace or "").strip()
+    provenance_organisation_id = (
+        str(provenance_organisation_concept_id or "").strip() or None
+    )
+    provenance_namespace_id = str(provenance_namespace or "").strip()
+    if (
+        mode not in {"user", "organisation"}
+        or not user_id
+        or not scope_namespace_id
+        or not provenance_namespace_id
+    ):
+        return None
+    expected_scope_organisation_id = (
+        provenance_organisation_id if mode == "organisation" else None
+    )
+    if mode == "organisation" and expected_scope_organisation_id is None:
+        return None
+    if scope_organisation_id != expected_scope_organisation_id:
+        return None
+    if not isinstance(scope_audience_keys, Sequence) or isinstance(
+        scope_audience_keys,
+        (str, bytes, bytearray),
+    ):
+        return None
+    audience_keys = [
+        str(audience_key).strip()
+        for audience_key in scope_audience_keys
+        if str(audience_key).strip()
+    ]
+    expected_audience_key = (
+        f"user:{user_id}"
+        if mode == "user"
+        else f"org:{scope_organisation_id}"
+    )
+    if audience_keys != [expected_audience_key]:
+        return None
+    from .namespace_service import resolve_canonical_namespace
+
+    expected_scope_namespace = resolve_canonical_namespace(
+        None,
+        user_id,
+        scope_organisation_id,
+    )
+    expected_provenance_namespace = resolve_canonical_namespace(
+        None,
+        user_id,
+        provenance_organisation_id,
+    )
+    if (
+        scope_namespace_id != expected_scope_namespace
+        or provenance_namespace_id != expected_provenance_namespace
+    ):
+        return None
+    return hashlib.sha256(
+        _json_bytes(
+            {
+                "scope_mode": mode,
+                "user_concept_id": user_id,
+                "scope_organisation_concept_id": scope_organisation_id,
+                "scope_namespace": scope_namespace_id,
+                "scope_audience_key": expected_audience_key,
+                "provenance_organisation_concept_id": (provenance_organisation_id),
+                "provenance_namespace": provenance_namespace_id,
+            }
+        )
+    ).hexdigest()
+
+
 def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | None:
     """Project an embedded canonical read-back without private message fields."""
 
@@ -3566,6 +3665,61 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
         )
         if key in readback
     }
+    assertion_id = str(readback.get("assertion_id") or "").strip()
+    subject_concept_id = str(readback.get("subject_concept_id") or "").strip()
+    object_kind = str(readback.get("object_kind") or "").strip().lower()
+    if assertion_id:
+        projected["assertion_id"] = assertion_id
+    if subject_concept_id:
+        projected["subject_concept_id"] = subject_concept_id
+    if object_kind in {"text", "concept"}:
+        projected["object_kind"] = object_kind
+    if object_kind == "text":
+        object_text = readback.get("object_text")
+        if isinstance(object_text, Mapping):
+            text_identity = _scoped_assertion_text_identity_sha256(
+                object_text.get("text"),
+                object_text.get("language"),
+            )
+            if text_identity is not None:
+                projected["object_text_identity_sha256"] = text_identity
+    elif object_kind == "concept":
+        object_concept_id = str(readback.get("object_concept_id") or "").strip()
+        if object_concept_id:
+            projected["object_concept_id"] = object_concept_id
+    scope = readback.get("scope")
+    if isinstance(scope, Mapping):
+        scope_mode = str(scope.get("mode") or "").strip().lower()
+        if scope_mode in {"user", "organisation"}:
+            projected["scope_mode"] = scope_mode
+        provenance = readback.get("provenance")
+        if isinstance(provenance, Mapping):
+            scope_user_id = str(scope.get("user_concept_id") or "").strip()
+            asserted_user_id = str(
+                provenance.get("asserted_by_user_concept_id") or ""
+            ).strip()
+            scope_organisation_id = str(
+                scope.get("organisation_concept_id") or ""
+            ).strip()
+            provenance_organisation_id = str(
+                provenance.get("organisation_concept_id") or ""
+            ).strip()
+            if scope_user_id == asserted_user_id:
+                trusted_scope_identity = (
+                    _scoped_assertion_trusted_scope_identity_sha256(
+                        scope_mode=scope_mode,
+                        user_concept_id=scope_user_id,
+                        scope_organisation_concept_id=scope_organisation_id,
+                        scope_namespace=scope.get("namespace"),
+                        scope_audience_keys=scope.get("audience_keys"),
+                        provenance_organisation_concept_id=(provenance_organisation_id),
+                        provenance_namespace=provenance.get("namespace"),
+                    )
+                )
+                if trusted_scope_identity is not None:
+                    projected["trusted_scope_identity_sha256"] = trusted_scope_identity
+    if isinstance(readback.get("canonical_publication"), bool):
+        projected["canonical_publication"] = readback["canonical_publication"]
     return projected or None
 
 
@@ -3653,6 +3807,103 @@ def _canonical_relation_readback_matches_invocation(
         return False
     return not bool(readback.get("inverse_predicate")) or (
         readback.get("inverse_relationship_present") is expected_present
+    )
+
+
+def _canonical_scoped_assertion_readback_matches_invocation(
+    invocation: Mapping[str, Any],
+    readback: Mapping[str, Any] | None,
+) -> bool:
+    """Verify an embedded scoped-assertion read-back against the exact write."""
+
+    if not isinstance(readback, Mapping):
+        return False
+    method = str(
+        invocation.get("execution_method") or invocation.get("tool") or ""
+    ).strip()
+    if method != "upsert_scoped_assertion":
+        return False
+    arguments = invocation.get("effective_arguments")
+    if not isinstance(arguments, Mapping):
+        return False
+    if not str(readback.get("assertion_id") or "").strip():
+        return False
+    if str(readback.get("status") or "").strip().lower() != "asserted":
+        return False
+    if readback.get("canonical_publication") is not False:
+        return False
+    expected_subject = str(arguments.get("subject_concept_id") or "").strip()
+    if (
+        not expected_subject
+        or str(readback.get("subject_concept_id") or "").strip() != expected_subject
+    ):
+        return False
+
+    def normalise_predicate(value: Any) -> str:
+        from .text_relation_predicate_validation_service import (
+            predicate_concept_id_for_storage,
+        )
+
+        predicate = str(value or "").strip()
+        return predicate_concept_id_for_storage(predicate) or predicate
+
+    expected_predicate = normalise_predicate(arguments.get("predicate"))
+    if (
+        not expected_predicate
+        or normalise_predicate(readback.get("predicate")) != expected_predicate
+    ):
+        return False
+    expected_scope_mode = str(arguments.get("scope_mode") or "user").strip().lower()
+    if readback.get("scope_mode") != expected_scope_mode:
+        return False
+    expected_scope_identity = _scoped_assertion_trusted_scope_identity_sha256(
+        scope_mode=expected_scope_mode,
+        user_concept_id=arguments.get("acting_user_concept_id"),
+        scope_organisation_concept_id=(
+            arguments.get("organisation_concept_id")
+            if expected_scope_mode == "organisation"
+            else None
+        ),
+        scope_namespace=(
+            arguments.get("namespace")
+            if expected_scope_mode == "organisation"
+            else str(arguments.get("acting_user_concept_id") or "").strip()
+        ),
+        scope_audience_keys=[
+            (
+                f"org:{str(arguments.get('organisation_concept_id') or '').strip()}"
+                if expected_scope_mode == "organisation"
+                else f"user:{str(arguments.get('acting_user_concept_id') or '').strip()}"
+            )
+        ],
+        provenance_organisation_concept_id=arguments.get("organisation_concept_id"),
+        provenance_namespace=arguments.get("namespace"),
+    )
+    if (
+        expected_scope_identity is None
+        or readback.get("trusted_scope_identity_sha256") != expected_scope_identity
+    ):
+        return False
+
+    target_text = arguments.get("target_text")
+    target_concept_id = str(arguments.get("target_concept_id") or "").strip()
+    has_text = isinstance(target_text, str) and bool(target_text.strip())
+    has_concept = bool(target_concept_id)
+    if has_text == has_concept:
+        return False
+    if has_text:
+        expected_identity = _scoped_assertion_text_identity_sha256(
+            target_text,
+            arguments.get("language"),
+        )
+        return (
+            readback.get("object_kind") == "text"
+            and expected_identity is not None
+            and readback.get("object_text_identity_sha256") == expected_identity
+        )
+    return (
+        readback.get("object_kind") == "concept"
+        and str(readback.get("object_concept_id") or "").strip() == target_concept_id
     )
 
 
@@ -3865,6 +4116,10 @@ def _canonically_verified_material_effect_ids(
                 == "verified"
             )
             or _canonical_relation_readback_matches_invocation(
+                invocation,
+                embedded_readback,
+            )
+            or _canonical_scoped_assertion_readback_matches_invocation(
                 invocation,
                 embedded_readback,
             )
@@ -4106,6 +4361,57 @@ def _effect_subject_authority_denial(
         }
     ]
     return payload
+
+
+def _with_exact_scoped_assertion_recovery_affordance(
+    payload: Mapping[str, Any],
+    *,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    scoped_assertion_available: bool,
+) -> dict[str, Any]:
+    """Replace a generic scoped recovery hint with one exact bounded action."""
+
+    result = dict(payload)
+    recovery_payload = _effect_subject_authority_denial(
+        capability_name=capability_name,
+        arguments=arguments,
+        scoped_assertion_available=scoped_assertion_available,
+    )
+    exact_affordances = recovery_payload.get("recovery_affordances")
+    if not isinstance(exact_affordances, Sequence) or isinstance(
+        exact_affordances,
+        (str, bytes, bytearray),
+    ):
+        return result
+    existing_affordances = result.get("recovery_affordances")
+    if not (
+        isinstance(existing_affordances, Sequence)
+        and not isinstance(existing_affordances, (str, bytes, bytearray))
+        and any(
+            isinstance(affordance, Mapping)
+            and affordance.get("action_type") == "create_scoped_assertion"
+            for affordance in existing_affordances
+        )
+    ):
+        return result
+    retained_affordances: list[dict[str, Any]] = []
+    if isinstance(existing_affordances, Sequence) and not isinstance(
+        existing_affordances,
+        (str, bytes, bytearray),
+    ):
+        retained_affordances = [
+            dict(affordance)
+            for affordance in existing_affordances
+            if isinstance(affordance, Mapping)
+            and affordance.get("action_type") != "create_scoped_assertion"
+            and affordance.get("tool") != "upsert_scoped_assertion"
+        ]
+    result["recovery_affordances"] = [
+        *(dict(affordance) for affordance in exact_affordances),
+        *retained_affordances,
+    ]
+    return result
 
 
 def _emit(progress_tracker: Any, payload: Mapping[str, Any]) -> None:
@@ -4690,7 +4996,9 @@ def execute_adaptive_turn(
                             failed_state = effect_states.get(attempted_effect_id)
                             if (
                                 failed_state is None
-                                or failed_state.get("effect_status") != "failed"
+                                or failed_state.get("effect_status")
+                                not in {"failed", "not_started"}
+                                or failed_state.get("changed") is not False
                             ):
                                 continue
                             failed_state["attempted_recovery_effect_id"] = (
@@ -4701,7 +5009,12 @@ def execute_adaptive_turn(
             return
         with effect_state_lock:
             failed_state = effect_states.get(failed_effect_id)
-            if failed_state is None or failed_state.get("effect_status") != "failed":
+            if (
+                failed_state is None
+                or failed_state.get("effect_status")
+                not in {"failed", "not_started"}
+                or failed_state.get("changed") is not False
+            ):
                 return
             failed_state["recovered_by_effect_id"] = recovery_effect_id
             failed_state["recovery_status"] = "succeeded"
@@ -5016,7 +5329,8 @@ def execute_adaptive_turn(
             in {"failed", "partial", "indeterminate", "not_started"}
             and state.get("turn_finality_required") is not False
             and not (
-                state.get("effect_status") == "failed"
+                state.get("effect_status") in {"failed", "not_started"}
+                and state.get("changed") is False
                 and state.get("recovery_status") == "succeeded"
                 and state.get("recovered_by_effect_id")
             )
@@ -5176,10 +5490,15 @@ def execute_adaptive_turn(
             failed_count = len(incomplete_effects)
             succeeded_count = len(succeeded_effects)
             if mixed_verified_workflow_fallback:
+                workflow_attempt_label = "attempt" if failed_count == 1 else "attempts"
+                workflow_failure_label = (
+                    "workflow failure" if failed_count == 1 else "workflow failures"
+                )
                 qualification = (
                     f"Effect receipts also report {succeeded_count} succeeded and "
-                    f"{failed_count} failed represented-workflow attempt. The "
-                    "workflow failure and the later changed targets were read back "
+                    f"{failed_count} failed represented-workflow "
+                    f"{workflow_attempt_label}. The {workflow_failure_label} and "
+                    "the later changed targets were read back "
                     "exactly, so the verified successful result is preserved while "
                     "the turn remains partial."
                 )
@@ -6616,13 +6935,30 @@ def execute_adaptive_turn(
                         turn_id=turn_id,
                     )
                 if not isinstance(delegation_result.get("delegation_id"), str):
+                    delegation_result = (
+                        _with_exact_scoped_assertion_recovery_affordance(
+                            delegation_result,
+                            capability_name=execution_method_name,
+                            arguments=arguments,
+                            scoped_assertion_available=(
+                                gateway.get_method_definition(
+                                    "upsert_scoped_assertion"
+                                )
+                                is not None
+                            ),
+                        )
+                    )
+                    delegation_effect_status = _effect_status(
+                        delegation_result,
+                        transport_result=None,
+                    )
                     persist_effect_observation_phase(
                         effect_id=effect_identifier,
                         phase="turn_terminal",
                         observation={
                             "call_id": call.call_id,
                             "capability_name": canonical_name,
-                            "effect_status": "failed",
+                            "effect_status": delegation_effect_status,
                             "changed": False,
                             "transport": {},
                             "receipt": dict(delegation_result),
