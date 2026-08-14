@@ -57,3 +57,12 @@ def test_vontology_mcp_manifest_includes_turn_execution_diagnostics_tool() -> No
     assert "turn_execution_get_live_progress" in names
     assert "workflow_list_use_episodes" in names
     assert "mongo_query_diagnostics_report" in names
+    mongo_tool = next(
+        tool for tool in tools if tool.get("name") == "mongo_query_diagnostics_report"
+    )
+    assert mongo_tool["inputSchema"]["properties"]["source"]["enum"] == [
+        "combined",
+        "in_process",
+        "profiler",
+        "query_stats",
+    ]

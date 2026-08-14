@@ -96,6 +96,17 @@ class _FakeGateway:
                 "reports": {
                     "in_process": {"observed_shape_count": 1},
                     "profiler": {"status": "profiler_unavailable"},
+                    "query_stats": {
+                        "status": "ok",
+                        "selected_shape_count": 3,
+                        "latest_seen_at_utc": "2026-08-14T08:00:00Z",
+                        "truncated": False,
+                    },
+                },
+                "source_status": {
+                    "in_process": "ok",
+                    "profiler": "profiler_unavailable",
+                    "query_stats": "ok",
                 },
                 "recommended_next_step": (
                     "Review high-ratio rows against repo-owned indexes and Atlas "
@@ -185,6 +196,12 @@ def test_mongo_query_diagnostics_maintenance_workflow_invokes_diagnostic_tool() 
     assert maintenance_result["direct_index_mutation"] is False
     assert maintenance_result["observed_shape_count"] == 1
     assert maintenance_result["profiler_status"] == "profiler_unavailable"
+    assert maintenance_result["query_stats_status"] == "ok"
+    assert maintenance_result["query_stats_selected_shape_count"] == 3
+    assert maintenance_result["query_stats_latest_seen_at_utc"] == (
+        "2026-08-14T08:00:00Z"
+    )
+    assert maintenance_result["query_stats_truncated"] is False
     assert maintenance_result["top_risk_rows"][0]["namespace"] == (
         "von_db.text_relations"
     )

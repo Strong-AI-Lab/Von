@@ -76,6 +76,23 @@ def _command_shape_from_started_command(event) -> dict[str, object]:
         return {"collection": coll, "filter_shape": filter_shape}
 
 
+def _is_query_stats_diagnostic_command(event) -> bool:
+    if str(getattr(event, "command_name", "") or "") != "aggregate":
+        return False
+    if str(getattr(event, "database_name", "") or "") != "admin":
+        return False
+    command = getattr(event, "command", None)
+    if not isinstance(command, Mapping):
+        return False
+    pipeline = command.get("pipeline")
+    return bool(
+        isinstance(pipeline, list)
+        and pipeline
+        and isinstance(pipeline[0], Mapping)
+        and "$queryStats" in pipeline[0]
+    )
+
+
 def _safe_mongo_failure_summary(failure) -> dict[str, object]:
     """Summarise a PyMongo command failure without raw command/server bodies."""
 
@@ -124,6 +141,8 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
                 # only as missing context on subsequent failures.
                 return
             shape = _command_shape_from_started_command(event)
+            if _is_query_stats_diagnostic_command(event):
+                shape["skip_query_shape_telemetry"] = True
             self._in_flight[event.request_id] = shape
         warning = observe_mongo_write_command_size(
             command_name=str(getattr(event, "command_name", "") or ""),
@@ -168,6 +187,8 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
         )
         if duration_ms < self._SLOW_COMMAND_DURATION_MS:
             return
+        if shape.get("skip_query_shape_telemetry"):
+            return
         n_returned = extract_n_returned_from_reply(
             command_name,
             getattr(event, "reply", None),
@@ -210,14 +231,15 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
             success=False,
             error_type=type(getattr(event, "failure", None)).__name__,
         )
-        record_mongo_command_observation(
-            command_name=command_name,
-            database=str(getattr(event, "database_name", "") or ""),
-            command_shape=shape,
-            duration_ms=duration_ms if duration_ms >= 0 else None,
-            request_id=getattr(event, "request_id", ""),
-            source="command_listener_failure",
-        )
+        if not shape.get("skip_query_shape_telemetry"):
+            record_mongo_command_observation(
+                command_name=command_name,
+                database=str(getattr(event, "database_name", "") or ""),
+                command_shape=shape,
+                duration_ms=duration_ms if duration_ms >= 0 else None,
+                request_id=getattr(event, "request_id", ""),
+                source="command_listener_failure",
+            )
         logger.warning(
             "[mongo_command_failed] cmd=%s db=%s coll=%s filter_shape=%s sort_shape=%s "
             "projection_shape=%s duration_ms=%.1f request_id=%s failure_summary=%r",

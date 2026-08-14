@@ -3841,7 +3841,7 @@
         },
         {
             "name": "mongo_query_diagnostics_report",
-            "description": "Run read-only Mongo query-targeting diagnostics for trusted operator conversation or VWL maintenance workflows. Reports structural query shapes, scanned/returned ratios, plan/index evidence where available, and recommended next diagnostic steps. Never creates/drops indexes or returns credentials, .env contents, query values, update values, or document bodies.",
+            "description": "Run read-only Mongo query-targeting diagnostics for trusted operator conversation or VWL maintenance workflows. Reports structural query shapes, $queryStats scanned/returned ratios, plan/index evidence where available, and recommended next diagnostic steps. Never creates/drops indexes or returns credentials, .env contents, query values, update values, or document bodies.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3856,7 +3856,8 @@
                         "enum": [
                             "combined",
                             "in_process",
-                            "profiler"
+                            "profiler",
+                            "query_stats"
                         ]
                     },
                     "mongo_namespace": {

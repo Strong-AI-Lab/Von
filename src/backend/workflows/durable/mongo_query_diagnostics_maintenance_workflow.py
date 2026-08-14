@@ -76,6 +76,7 @@ def _handle_finalise(
     reports = _mapping(diagnostic_report.get("reports"))
     profiler = _mapping(reports.get("profiler"))
     in_process = _mapping(reports.get("in_process"))
+    query_stats = _mapping(reports.get("query_stats"))
     top_rows = _top_risk_rows(summary)
 
     result = {
@@ -94,6 +95,11 @@ def _handle_finalise(
         "top_risk_rows": top_rows,
         "profiler_status": profiler.get("status"),
         "in_process_observed_shape_count": in_process.get("observed_shape_count"),
+        "query_stats_status": query_stats.get("status"),
+        "query_stats_selected_shape_count": query_stats.get("selected_shape_count"),
+        "query_stats_latest_seen_at_utc": query_stats.get("latest_seen_at_utc"),
+        "query_stats_truncated": query_stats.get("truncated"),
+        "source_status": _mapping(diagnostic_report.get("source_status")),
         "recommended_next_step": diagnostic_report.get("recommended_next_step"),
         "privacy": _mapping(diagnostic_report.get("privacy")),
         "attribution_jira": diagnostic_report.get("attribution_jira"),
