@@ -701,6 +701,23 @@ def test_failure_case_learning_reads_require_operator_provenance():
         assert result["error_code"] == "workflow_global_admin_authority_required"
 
 
+def test_internal_mcp_mongo_diagnostics_exposes_query_stats_source():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp.schemas import schema_to_json_schema
+
+    method = build_default_catalogue().get("mongo_query_diagnostics_report")
+
+    assert method.input_schema.enum_values["source"] == (
+        "combined",
+        "in_process",
+        "profiler",
+        "query_stats",
+    )
+    assert schema_to_json_schema(method.input_schema)["properties"]["source"][
+        "enum"
+    ] == ["combined", "in_process", "profiler", "query_stats"]
+
+
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
     from src.backend.integrations.internal_mcp import build_default_catalogue
     from src.backend.integrations.internal_mcp.schemas import (

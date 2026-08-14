@@ -3,17 +3,19 @@
 **Status:** Operational guide  
 **Related Jira:** `JVNAUTOSCI-2429`, `JVNAUTOSCI-2428`, `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
 
-Von now has six complementary Mongo query-targeting and cost diagnostics
+Von now has seven complementary Mongo query-targeting and cost diagnostics
 surfaces:
 
 1. In-process slow command telemetry from the global PyMongo command listener.
 2. A bounded profiler report command over MongoDB `system.profile`.
-3. A read-only Atlas Admin API report for Query Shape Insights.
-4. A read-only Atlas report review loop that compares reports and drafts or
+3. A bounded, read-only `$queryStats` report from the configured MongoDB
+   deployment.
+4. A read-only Atlas Admin API report for Query Shape Insights.
+5. A read-only Atlas report review loop that compares reports and drafts or
    upserts Jira review tasks.
-5. A Von-internal MCP tool, `mongo_query_diagnostics_report`, for trusted
+6. A Von-internal MCP tool, `mongo_query_diagnostics_report`, for trusted
    operator conversation and VWL maintenance workflows.
-6. A compact cost guardrail report at `/api/settings/db/guardrails` and through
+7. A compact cost guardrail report at `/api/settings/db/guardrails` and through
    the Von-internal MCP tool `mongo_cost_guardrails_report`.
 
 These surfaces are designed as support plumbing only. They record query shape,
@@ -50,6 +52,8 @@ The report includes:
 - slow operation counts using `VON_MONGO_OPERATION_AUDIT_SLOW_MS`
 - background and poller route activity
 - ranked redacted query-shape telemetry
+- the last successful bounded `$queryStats` snapshot, its collection status,
+  and freshness metadata
 - size-only large write attempts observed by the PyMongo command listener
 - blob/debug/workflow hydration counters grouped by family and cache status
 - runtime posture: local, remote, or Atlas, with credentials removed
@@ -86,7 +90,8 @@ Slow command listener rows can retain:
 - returned count when available from the command reply
 - safe profiler comment attribution such as Von service, operation, and route
 
-Profiler, explain-backed, and Atlas rows can additionally include:
+`$queryStats`, profiler, explain-backed, and Atlas rows can additionally
+include:
 
 - `docsExamined`
 - `keysExamined`
@@ -134,7 +139,9 @@ profiler entries. The report prints execution stats and shapes, not returned
 documents. Keep the sample count low on a busy database.
 
 If `system.profile` is unavailable, use Atlas Query Insights or Performance
-Advisor for the same time window.
+Advisor for the same time window, or use the `query_stats` source described
+below. `$queryStats` counters are cumulative for the current MongoDB member and
+are not a substitute for an exact Atlas time window.
 
 ## Running The Atlas Report
 
@@ -232,9 +239,12 @@ Fields to inspect:
 ## Reconciling With Atlas
 
 Atlas Query Insights and Performance Advisor use cluster-side telemetry. Von's
-local command listener sees only operations from the current process, and the
+local command listener sees only operations from the current process, the
 profiler report sees only what Mongo profiling captured for the selected
-database and time window. Differences are expected.
+database and time window, and `$queryStats` exposes cumulative statistics for
+the current MongoDB member. Member restarts, Atlas sampling, topology, and the
+selected Atlas window can all produce different counts. Differences are
+expected.
 
 Recommended reconciliation loop:
 
@@ -365,10 +375,10 @@ sample counts and max time bounded.
 
 ## Running Diagnostics Through Von
 
-`JVNAUTOSCI-2450` exposes the local Mongo query-targeting diagnostic as the
-internal MCP tool `mongo_query_diagnostics_report`. This is the conversation and
-workflow-facing form of the local profiler/in-process report; it does not shell
-out to `scripts/mongo_query_targeting_report.py`.
+`JVNAUTOSCI-2450` exposes Mongo query-targeting diagnostics as the internal MCP
+tool `mongo_query_diagnostics_report`. This is the conversation and
+workflow-facing form of the in-process, profiler, and `$queryStats` reports; it
+does not shell out to `scripts/mongo_query_targeting_report.py`.
 
 The tool is read-only and requires an explicit operator gate:
 
@@ -390,7 +400,29 @@ Supported `source` values:
 - `in_process`: current-process command-listener telemetry only.
 - `profiler`: bounded `system.profile` samples, optionally with read-only
   `explain("executionStats")`.
-- `combined`: both surfaces, with a merged ranked summary.
+- `query_stats`: bounded, server-ranked `$queryStats` counters for the
+  configured database. The aggregation runs on `admin`, has a 5-second
+  `maxTimeMS`, groups by query-shape hash, and returns at most the bounded sample
+  limit plus one truncation sentinel before redaction.
+- `combined`: all three surfaces, with a merged ranked summary.
+
+`$queryStats` requires a compatible MongoDB deployment and the
+`queryStatsRead` privilege (included in `clusterMonitor`). When it is
+unsupported or unauthorised, the source returns a typed
+`query_stats_unavailable` report and `combined` continues with the other
+available sources. Von does not enable profiling or change MongoDB roles.
+
+The `$queryStats` adapter retains only database/collection names,
+field/operator shape strings, the query-shape hash, aggregate counters,
+scanned/returned ratios, timestamps, and sort/disk flags. Raw query-shape
+documents and literal values do not enter the returned report. A successful
+collection replaces an in-memory redacted snapshot used by
+`/api/settings/db/guardrails`; ordinary guardrail reads never issue a fresh
+MongoDB diagnostic query. Run the maintenance workflow or operator diagnostic
+again to refresh it, and inspect `snapshot_refresh` and
+`latest_seen_at_utc` before treating the data as current. The first/latest
+timestamps describe the selected server-ranked shapes, not every shape in the
+MongoDB query-statistics store.
 
 Use `mongo_namespace` for Mongo namespaces such as
 `von_db.workflow_instances`. The normal Von `namespace` argument is accepted for

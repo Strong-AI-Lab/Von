@@ -23696,7 +23696,7 @@ def _mongo_query_diagnostics_report(**kwargs):
             details={"exception_type": type(exc).__name__},
             suggestions=[
                 "Retry with allow_operator_diagnostics=true only for trusted operator diagnostics",
-                "Use source='in_process' if Mongo profiler is unavailable",
+                "Use source='query_stats' or 'in_process' if Mongo profiler is unavailable",
                 "Use Atlas Query Insights for cluster-side evidence when Atlas credentials are configured",
             ],
         )
@@ -38709,7 +38709,12 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                 },
                 allow_unknown=True,
                 enum_values={
-                    "source": ("combined", "in_process", "profiler"),
+                    "source": (
+                        "combined",
+                        "in_process",
+                        "profiler",
+                        "query_stats",
+                    ),
                 },
                 description=(
                     "Build a bounded, redacted Mongo query-targeting diagnostics report. "
@@ -38725,8 +38730,9 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             description=(
                 "Run read-only Mongo query-targeting diagnostics for trusted operator "
                 "conversation or VWL maintenance workflows. Reports structural query "
-                "shapes, scanned/returned ratios, plan/index evidence where available, "
-                "and recommended next diagnostic steps. Never creates/drops indexes or "
+                "shapes, $queryStats scanned/returned ratios, plan/index evidence where "
+                "available, and recommended next diagnostic steps. Never creates/drops "
+                "indexes or "
                 "returns credentials, .env contents, query values, update values, or "
                 "document bodies."
             ),

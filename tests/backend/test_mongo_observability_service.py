@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 from flask import Flask
 from pymongo.errors import OperationFailure
 
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
-from src.backend.db.mongo_client import _safe_mongo_failure_summary
+from src.backend.db.mongo_client import (
+    _VonMongoFailureLogger,
+    _safe_mongo_failure_summary,
+)
 from src.backend.services import chat_history_service
 from src.backend.services.mongo_observability_service import (
     build_mongo_operation_comment,
@@ -16,6 +22,7 @@ from src.backend.services.mongo_observability_service import (
     build_mongo_query_targeting_report_from_rows,
     get_mongo_operation_audit_snapshot,
     get_mongo_large_write_snapshot,
+    get_mongo_query_stats_snapshot,
     get_mongo_query_targeting_report,
     profiler_document_to_query_shape_row,
     record_blob_hydration_observation,
@@ -25,6 +32,7 @@ from src.backend.services.mongo_observability_service import (
     reset_blob_hydration_snapshot,
     reset_mongo_large_write_snapshot,
     reset_mongo_operation_audit_snapshot,
+    reset_mongo_query_stats_snapshot,
     reset_mongo_query_shape_telemetry,
 )
 from src.backend.services import mongo_query_diagnostics_service as diagnostics_service
@@ -73,6 +81,36 @@ def test_mongo_command_failure_summary_omits_raw_command_body():
     }
     assert "system.profile" not in rendered
     assert "secret" not in rendered
+
+
+def test_query_stats_diagnostic_does_not_record_itself_as_slow_query_shape():
+    reset_mongo_query_shape_telemetry()
+    listener = _VonMongoFailureLogger()
+    listener.started(
+        SimpleNamespace(
+            request_id=987,
+            command_name="aggregate",
+            database_name="admin",
+            command={
+                "aggregate": 1,
+                "pipeline": [
+                    {"$queryStats": {}},
+                    {"$match": {"key.queryShape.cmdNs.db": "von_db"}},
+                ],
+            },
+        )
+    )
+    listener.succeeded(
+        SimpleNamespace(
+            request_id=987,
+            command_name="aggregate",
+            database_name="admin",
+            duration_micros=2_000_000,
+            reply={"cursor": {"firstBatch": [{}]}},
+        )
+    )
+
+    assert get_mongo_query_targeting_report(reset=True)["rows"] == []
 
 
 def test_mongo_operation_audit_snapshot_aggregates_without_payload_content(monkeypatch):
@@ -381,6 +419,184 @@ def test_profiler_report_builder_uses_redacted_rows_without_printing_profile_val
     assert report["profile_sample_count"] == 1
     assert report["rows"][0]["namespace"] == "von_db.workflow_instances"
     assert "pending" not in str(report)
+
+
+def _query_stats_result_document() -> dict:
+    return {
+        "query_shape_hash": (
+            "5C4A9703881BD4599DEC5E2109E1FCB1B966DC65948E2EC2BC501E5098831BEF"
+        ),
+        "query_shape": {
+            "cmdNs": {"db": "von_db", "coll": "concepts"},
+            "command": "find",
+            "filter": {"has_author": {"$eq": "literal-must-not-escape"}},
+            "projection": {"_id": 1, "name": 1},
+            "limit": "?number",
+        },
+        "exec_count": 7,
+        "total_duration_micros": 2_100_000,
+        "max_duration_micros": 400_000,
+        "total_returned": 7,
+        "max_returned": 1,
+        "total_docs_examined": 8_755_985,
+        "max_docs_examined": 1_250_855,
+        "total_keys_examined": 0,
+        "max_keys_examined": 0,
+        "has_sort_stage_count": 0,
+        "used_disk_count": 1,
+        "first_seen_at": datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc),
+        "latest_seen_at": datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc),
+    }
+
+
+class _FakeQueryStatsAdmin:
+    def __init__(self, documents):
+        self.documents = documents
+        self.pipeline = None
+        self.kwargs = None
+
+    def aggregate(self, pipeline, **kwargs):
+        self.pipeline = pipeline
+        self.kwargs = kwargs
+        return list(self.documents)
+
+
+class _FakeQueryStatsClient:
+    def __init__(self, admin):
+        self.admin = admin
+
+    def __getitem__(self, name):
+        assert name == "admin"
+        return self.admin
+
+
+class _FakeQueryStatsDb:
+    name = "von_db"
+
+    def __init__(self, admin):
+        self.client = _FakeQueryStatsClient(admin)
+
+
+def test_query_stats_report_is_bounded_ranked_and_redacted():
+    admin = _FakeQueryStatsAdmin([_query_stats_result_document()])
+    report = diagnostics_service.build_query_stats_targeting_report(
+        _FakeQueryStatsDb(admin),
+        namespace="von_db.concepts",
+        sample_limit=10,
+        report_limit=5,
+    )
+
+    row = report["rows"][0]
+    rendered = str(report)
+    assert admin.pipeline[0] == {"$queryStats": {}}
+    assert admin.pipeline[1] == {
+        "$match": {
+            "key.queryShape.cmdNs.db": "von_db",
+            "key.queryShape.cmdNs.coll": "concepts",
+        }
+    }
+    assert admin.pipeline[-2] == {"$limit": 11}
+    assert admin.kwargs == {"maxTimeMS": 5000}
+    assert report["status"] == "ok"
+    assert report["selected_shape_count"] == 1
+    assert report["truncated"] is False
+    assert row["query_hash"].startswith("5C4A9703")
+    assert row["filter_shape"] == "has_author{$eq}"
+    assert row["docs_examined_per_returned"] == 1_250_855.0
+    assert row["last_used_disk"] is True
+    assert "High query targeting" in row["recommended_next_step"]
+    assert "literal-must-not-escape" not in rendered
+    assert "'query_shape':" not in rendered
+
+
+def test_query_stats_report_keeps_distinct_hashes_for_same_redacted_shape():
+    first = _query_stats_result_document()
+    second = {
+        **first,
+        "query_shape_hash": "A" * 64,
+        "exec_count": 1,
+        "total_docs_examined": 100,
+        "max_docs_examined": 100,
+    }
+    report = diagnostics_service.build_query_stats_targeting_report(
+        _FakeQueryStatsDb(_FakeQueryStatsAdmin([first, second])),
+        namespace="von_db.concepts",
+        sample_limit=10,
+        report_limit=10,
+    )
+
+    assert report["selected_shape_count"] == 2
+    assert report["observed_shape_count"] == 2
+    assert {row["query_hash"] for row in report["rows"]} == {
+        first["query_shape_hash"],
+        second["query_shape_hash"],
+    }
+
+
+def test_query_stats_diagnostic_refreshes_cost_guardrail_snapshot(monkeypatch):
+    reset_mongo_query_stats_snapshot()
+    admin = _FakeQueryStatsAdmin([_query_stats_result_document()])
+    monkeypatch.setattr(
+        diagnostics_service,
+        "get_db",
+        lambda: _FakeQueryStatsDb(admin),
+    )
+
+    diagnostic = diagnostics_service.build_von_mongo_query_diagnostics_report(
+        allow_operator_diagnostics=True,
+        source="query_stats",
+        sample_limit=10,
+        report_limit=5,
+    )
+    guardrail = build_mongo_cost_guardrail_report(local_development=True)
+
+    assert diagnostic["source_status"] == {"query_stats": "ok"}
+    assert diagnostic["summary"]["rows"][0]["collection"] == "concepts"
+    assert guardrail["query_stats_targeting"]["status"] == "ok"
+    assert guardrail["query_stats_targeting"]["snapshot_refresh"]["status"] == "ok"
+    query_warning = next(
+        warning
+        for warning in guardrail["warnings"]
+        if warning["code"] == "query_targeting_waste_high"
+    )
+    assert query_warning["source"] == "query_stats"
+    assert get_mongo_query_stats_snapshot()["rows"][0]["query_hash"].startswith(
+        "5C4A9703"
+    )
+    reset_mongo_query_stats_snapshot()
+
+
+def test_query_stats_unavailable_is_typed_and_does_not_leak_error_body(monkeypatch):
+    class UnauthorisedAdmin:
+        def aggregate(self, *_args, **_kwargs):
+            raise OperationFailure(
+                "raw command includes secret-filter-value",
+                code=13,
+                details={
+                    "codeName": "Unauthorized",
+                    "errmsg": "not authorized for queryStats with secret-filter-value",
+                },
+            )
+
+    monkeypatch.setattr(
+        diagnostics_service,
+        "get_db",
+        lambda: _FakeQueryStatsDb(UnauthorisedAdmin()),
+    )
+
+    report = diagnostics_service.build_von_mongo_query_diagnostics_report(
+        allow_operator_diagnostics=True,
+        source="query_stats",
+    )
+    source_report = report["reports"]["query_stats"]
+
+    assert report["success"] is True
+    assert report["source_status"] == {"query_stats": "query_stats_unavailable"}
+    assert source_report["error_code"] == "Unauthorized"
+    assert source_report["error"] == (
+        "not authorised for requested Mongo diagnostic read"
+    )
+    assert "secret-filter-value" not in str(source_report)
 
 
 def test_von_mongo_query_diagnostics_requires_explicit_operator_gate():

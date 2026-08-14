@@ -8,6 +8,7 @@ credentials, or raw diagnostics.
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
@@ -51,11 +52,72 @@ _BLOB_HYDRATION_STATS: dict[tuple[str, str], dict[str, Any]] = defaultdict(
     }
 )
 _QUERY_SHAPE_STATS: dict[tuple[str, ...], dict[str, Any]] = {}
+_QUERY_STATS_SNAPSHOT_STATE: dict[str, Any] = {
+    "last_refresh_status": "not_collected",
+    "last_refresh_at_utc": None,
+    "last_refresh_error_type": None,
+    "last_refresh_error_code": None,
+    "report": None,
+}
 
 _QUERY_TARGETING_JIRA_KEY = "JVNAUTOSCI-2427"
 _DEFAULT_QUERY_SHAPE_MAX_ROWS = 512
 _QUERY_SHAPE_SAMPLE_REQUEST_IDS = 8
 _MAX_SHAPE_TEXT = 240
+
+_QUERY_STATS_SNAPSHOT_REPORT_FIELDS = (
+    "schema_version",
+    "attribution_jira",
+    "source",
+    "status",
+    "query_shape_telemetry_enabled",
+    "observed_shape_count",
+    "ranking",
+    "database",
+    "selected_shape_count",
+    "query_stats_filter",
+    "observation_scope",
+    "first_seen_at_utc",
+    "latest_seen_at_utc",
+    "collected_at_utc",
+    "truncated",
+    "recommended_next_step",
+)
+_QUERY_STATS_SNAPSHOT_ROW_FIELDS = (
+    "database",
+    "collection",
+    "namespace",
+    "command_name",
+    "filter_shape",
+    "sort_shape",
+    "projection_shape",
+    "update_shape",
+    "pipeline_shape",
+    "limit",
+    "count",
+    "total_duration_ms",
+    "average_duration_ms",
+    "max_duration_ms",
+    "total_returned",
+    "max_n_returned",
+    "total_docs_examined",
+    "total_keys_examined",
+    "max_docs_examined",
+    "max_keys_examined",
+    "docs_examined_per_returned",
+    "keys_examined_per_returned",
+    "max_docs_examined_per_returned",
+    "max_keys_examined_per_returned",
+    "estimated_waste_score",
+    "last_plan_summary",
+    "last_winning_index",
+    "last_in_memory_sort",
+    "last_used_disk",
+    "query_hash",
+    "sample_request_ids",
+    "sources",
+    "recommended_next_step",
+)
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -399,6 +461,7 @@ def _query_shape_key(row: Mapping[str, Any]) -> tuple[str, ...]:
         _safe_str(row.get("update_shape")),
         _safe_str(row.get("pipeline_shape")),
         _safe_str(row.get("limit"), max_len=32),
+        _safe_str(row.get("_query_shape_identity"), max_len=128),
     )
 
 
@@ -550,8 +613,14 @@ def _recommend_next_step(row: Mapping[str, Any]) -> str:
             'Collect profiler/Atlas Query Insights or run bounded explain("executionStats") '
             "for this redacted shape."
         )
-    docs_ratio = _safe_float(row.get("max_docs_examined_per_returned"))
-    keys_ratio = _safe_float(row.get("max_keys_examined_per_returned"))
+    docs_ratio = max(
+        float(_safe_float(row.get("docs_examined_per_returned")) or 0.0),
+        float(_safe_float(row.get("max_docs_examined_per_returned")) or 0.0),
+    )
+    keys_ratio = max(
+        float(_safe_float(row.get("keys_examined_per_returned")) or 0.0),
+        float(_safe_float(row.get("max_keys_examined_per_returned")) or 0.0),
+    )
     if (docs_ratio is not None and docs_ratio >= 1000) or (
         keys_ratio is not None and keys_ratio >= 1000
     ):
@@ -563,6 +632,8 @@ def _recommend_next_step(row: Mapping[str, Any]) -> str:
         return (
             "Investigate sort coverage; profiler/explain indicates an in-memory sort."
         )
+    if row.get("last_used_disk"):
+        return "Investigate this shape; $queryStats reports execution using disk."
     return "Keep under observation; compare with Atlas Query Insights if this recurs."
 
 
@@ -589,6 +660,8 @@ def _ranked_query_shape_rows(
         )
         row["estimated_waste_score"] = round(
             max(
+                float(row.get("docs_examined_per_returned") or 0.0),
+                float(row.get("keys_examined_per_returned") or 0.0),
                 float(row.get("max_docs_examined_per_returned") or 0.0),
                 float(row.get("max_keys_examined_per_returned") or 0.0),
                 0.0,
@@ -678,6 +751,8 @@ def aggregate_mongo_query_shape_rows(
             row["limit"] = _safe_int(raw.get("limit"))
         if raw.get("last_in_memory_sort") is not None:
             row["last_in_memory_sort"] = bool(raw.get("last_in_memory_sort"))
+        if raw.get("last_used_disk") is not None:
+            row["last_used_disk"] = bool(raw.get("last_used_disk"))
         sample_ids = row["sample_request_ids"]
         for request_id in raw.get("sample_request_ids") or []:
             request_text = _safe_str(request_id, max_len=96)
@@ -730,6 +805,86 @@ def get_mongo_query_targeting_report(
 def reset_mongo_query_shape_telemetry() -> None:
     with _QUERY_SHAPE_LOCK:
         _QUERY_SHAPE_STATS.clear()
+
+
+def record_mongo_query_stats_snapshot(report: Mapping[str, Any]) -> None:
+    """Retain the last bounded, already-redacted ``$queryStats`` report.
+
+    Only an explicit allowlist is copied. This keeps the cost-guardrail surface
+    independent of raw MongoDB query-shape documents even if the producer later
+    gains additional internal fields.
+    """
+
+    status = _safe_str(report.get("status"), max_len=64) or "unknown"
+    safe_report: dict[str, Any] | None = None
+    if status == "ok":
+        safe_report = {
+            field: copy.deepcopy(report.get(field))
+            for field in _QUERY_STATS_SNAPSHOT_REPORT_FIELDS
+            if field in report
+        }
+        raw_rows = report.get("rows")
+        safe_report["rows"] = [
+            {
+                field: copy.deepcopy(row.get(field))
+                for field in _QUERY_STATS_SNAPSHOT_ROW_FIELDS
+                if field in row
+            }
+            for row in raw_rows or []
+            if isinstance(row, Mapping)
+        ]
+
+    with _QUERY_SHAPE_LOCK:
+        _QUERY_STATS_SNAPSHOT_STATE["last_refresh_status"] = status
+        _QUERY_STATS_SNAPSHOT_STATE["last_refresh_at_utc"] = _utcnow_iso()
+        _QUERY_STATS_SNAPSHOT_STATE["last_refresh_error_type"] = (
+            _safe_str(report.get("error_type"), max_len=96) or None
+        )
+        _QUERY_STATS_SNAPSHOT_STATE["last_refresh_error_code"] = (
+            _safe_str(report.get("error_code"), max_len=96) or None
+        )
+        if safe_report is not None:
+            _QUERY_STATS_SNAPSHOT_STATE["report"] = safe_report
+
+
+def get_mongo_query_stats_snapshot(*, reset: bool = False) -> dict[str, Any]:
+    """Return the last successful redacted ``$queryStats`` collection result."""
+
+    with _QUERY_SHAPE_LOCK:
+        state = copy.deepcopy(_QUERY_STATS_SNAPSHOT_STATE)
+        if reset:
+            _QUERY_STATS_SNAPSHOT_STATE.update(
+                {
+                    "last_refresh_status": "not_collected",
+                    "last_refresh_at_utc": None,
+                    "last_refresh_error_type": None,
+                    "last_refresh_error_code": None,
+                    "report": None,
+                }
+            )
+
+    report = state.get("report")
+    if not isinstance(report, Mapping):
+        report = {
+            "schema_version": "mongo_query_targeting_report.v1",
+            "source": "$queryStats",
+            "status": state.get("last_refresh_status") or "not_collected",
+            "observed_shape_count": 0,
+            "rows": [],
+        }
+    else:
+        report = dict(report)
+    report["snapshot_refresh"] = {
+        "status": state.get("last_refresh_status") or "not_collected",
+        "at_utc": state.get("last_refresh_at_utc"),
+        "error_type": state.get("last_refresh_error_type"),
+        "error_code": state.get("last_refresh_error_code"),
+    }
+    return report
+
+
+def reset_mongo_query_stats_snapshot() -> None:
+    get_mongo_query_stats_snapshot(reset=True)
 
 
 def profiler_document_to_query_shape_row(
@@ -1287,8 +1442,14 @@ def _top_query_targeting_warning(report: Mapping[str, Any]) -> dict[str, Any] | 
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        docs_ratio = _safe_float(row.get("max_docs_examined_per_returned"))
-        keys_ratio = _safe_float(row.get("max_keys_examined_per_returned"))
+        docs_ratio = max(
+            float(_safe_float(row.get("docs_examined_per_returned")) or 0.0),
+            float(_safe_float(row.get("max_docs_examined_per_returned")) or 0.0),
+        )
+        keys_ratio = max(
+            float(_safe_float(row.get("keys_examined_per_returned")) or 0.0),
+            float(_safe_float(row.get("max_keys_examined_per_returned")) or 0.0),
+        )
         if (docs_ratio is not None and docs_ratio >= 1000) or (
             keys_ratio is not None and keys_ratio >= 1000
         ):
@@ -1322,6 +1483,7 @@ def build_mongo_cost_guardrail_report(
         )
     operations = get_mongo_operation_audit_snapshot(reset=reset)
     query_targeting = get_mongo_query_targeting_report(reset=reset)
+    query_stats_targeting = get_mongo_query_stats_snapshot(reset=reset)
     large_writes = get_mongo_large_write_snapshot(reset=reset)
     hydration = get_blob_hydration_snapshot(reset=reset)
 
@@ -1401,8 +1563,13 @@ def build_mongo_cost_guardrail_report(
                 ),
             }
         )
-    query_warning = _top_query_targeting_warning(query_targeting)
+    query_warning = _top_query_targeting_warning(query_stats_targeting)
+    query_warning_source = "query_stats"
+    if query_warning is None:
+        query_warning = _top_query_targeting_warning(query_targeting)
+        query_warning_source = "in_process"
     if query_warning is not None:
+        query_warning["source"] = query_warning_source
         warnings.append(query_warning)
 
     return {
@@ -1430,6 +1597,7 @@ def build_mongo_cost_guardrail_report(
         "recent_operations": recent_summary,
         "operation_audit": operations,
         "query_targeting": query_targeting,
+        "query_stats_targeting": query_stats_targeting,
         "large_write_attempts": large_writes,
         "cache_and_hydration": hydration,
         "privacy": {
@@ -1456,6 +1624,7 @@ __all__ = [
     "get_blob_hydration_snapshot",
     "get_mongo_large_write_snapshot",
     "get_mongo_operation_audit_snapshot",
+    "get_mongo_query_stats_snapshot",
     "get_mongo_query_targeting_report",
     "mongo_operation_audit_enabled",
     "mongo_operation_slow_threshold_ms",
@@ -1468,9 +1637,11 @@ __all__ = [
     "observe_mongo_operation",
     "record_mongo_command_observation",
     "record_mongo_operation",
+    "record_mongo_query_stats_snapshot",
     "record_mongo_query_shape_observation",
     "reset_blob_hydration_snapshot",
     "reset_mongo_large_write_snapshot",
     "reset_mongo_operation_audit_snapshot",
+    "reset_mongo_query_stats_snapshot",
     "reset_mongo_query_shape_telemetry",
 ]
