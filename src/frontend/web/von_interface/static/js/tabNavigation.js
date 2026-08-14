@@ -3,6 +3,7 @@ import { elements } from './domUtils.js';
 import { initializeDynamicTabs, loadDynamicConceptTabContent } from './dynamicTabs.js';
 import { isExpertTabsEnabled } from './featureFlags.js';
 import { initializeImportExportTab } from './importExportTab.js';
+import { scrollConversationToSessionList } from './utils/conversationListNavigation.js';
 import { initializeVontologyTab } from './vontology.js';
 
 const GUARDED_TAB_IDS = new Set(['vontologyTab', 'importExportTab', 'annotationTab']);
@@ -33,8 +34,12 @@ export function setupTabNavigation() {
         event.preventDefault();
       }
       const tabId = button.dataset.tab;
+      const conversationTabWasActive = tabId === 'chatTab' && button.classList.contains('active');
       console.log(`Tab clicked: ${tabId}`);
       activateTab(tabId);
+      if (conversationTabWasActive) {
+        scrollConversationToSessionList({ smooth: true });
+      }
       if (tabId === 'globalTasksTab') {
         await loadTabData(tabId);
       }

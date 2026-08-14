@@ -571,11 +571,15 @@ function setupDynamicLayout() {
     const headerHeight = header.getBoundingClientRect().height;
     tabContainer.style.top = `${headerHeight}px`;
     const measuredTabHeight = Math.max(
-      48,
-      Math.ceil(tabContainer.getBoundingClientRect().height || tabContainer.scrollHeight || 48)
+      44,
+      Math.ceil(tabContainer.getBoundingClientRect().height || tabContainer.scrollHeight || 44)
     );
     const tabHeight = measuredTabHeight;
     const contentTop = headerHeight + tabHeight + 8; // 8px margin
+    const footerSpace = 64; // Fixed footer overlap space
+
+    document.documentElement.style.setProperty('--von-fixed-shell-height', `${contentTop}px`);
+    document.documentElement.style.setProperty('--von-fixed-footer-clearance', `${footerSpace}px`);
 
     console.log(`Dynamic layout: Header ${headerHeight}px, positioning tabs at ${headerHeight}px, content at ${contentTop}px`);
 
@@ -583,7 +587,6 @@ function setupDynamicLayout() {
     if (tabContentArea) {
       tabContentArea.style.marginTop = `${contentTop}px`;
       // Also update the minimum height calculation to account for dynamic header
-      const footerSpace = 64; // Footer overlap space
       const totalTopSpace = contentTop + 20; // content margin + padding
       tabContentArea.style.minHeight = `calc(100vh - ${totalTopSpace + footerSpace}px)`;
       tabContentArea.style.setProperty('--von-tab-content-available-height', `calc(100vh - ${contentTop + footerSpace}px)`);

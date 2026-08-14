@@ -40,4 +40,52 @@ describe('tab navigation global tasks loading', () => {
         expect(document.querySelector('#globalTasksTab').classList).toContain('active');
         expect(showGlobalTasks).toHaveBeenCalledTimes(1);
     });
+
+    test('re-clicking active Conversations scrolls to the conversation session list', () => {
+        document.body.innerHTML = `
+            <button class="tab-button active" data-tab="chatTab">Conversations</button>
+            <section id="chatTab" class="tab-content active">
+                <div class="chat-session-tabs-row">
+                    <div id="chatSessionTabs"></div>
+                </div>
+            </section>
+        `;
+        const sessionTabsRow = document.querySelector('.chat-session-tabs-row');
+        sessionTabsRow.scrollIntoView = jest.fn();
+        const { setupTabNavigation } = require(tabNavigationModulePath);
+
+        setupTabNavigation();
+        document.querySelector('[data-tab="chatTab"]').click();
+
+        expect(sessionTabsRow.scrollIntoView).toHaveBeenCalledWith({
+            behavior: 'smooth',
+            block: 'start',
+            inline: 'nearest',
+        });
+        expect(document.querySelector('#chatTab').classList).toContain('active');
+    });
+
+    test('clicking inactive Conversations activates it without treating the click as a re-click', () => {
+        document.body.innerHTML = `
+            <button class="tab-button" data-tab="chatTab">Conversations</button>
+            <button class="tab-button active" data-tab="settingsTab">Settings</button>
+            <section id="chatTab" class="tab-content">
+                <div class="chat-session-tabs-row">
+                    <div id="chatSessionTabs"></div>
+                </div>
+            </section>
+            <section id="settingsTab" class="tab-content active"></section>
+        `;
+        const sessionTabsRow = document.querySelector('.chat-session-tabs-row');
+        sessionTabsRow.scrollIntoView = jest.fn();
+        const { setupTabNavigation } = require(tabNavigationModulePath);
+
+        setupTabNavigation();
+        document.querySelector('[data-tab="chatTab"]').click();
+
+        expect(sessionTabsRow.scrollIntoView).not.toHaveBeenCalled();
+        expect(document.querySelector('#chatTab').classList).toContain('active');
+        expect(document.querySelector('[data-tab="chatTab"]').classList).toContain('active');
+        expect(document.querySelector('#settingsTab').classList).not.toContain('active');
+    });
 });

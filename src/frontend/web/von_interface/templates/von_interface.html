@@ -22,40 +22,47 @@
 <body>
   <!-- Fixed Global Header (title + search above tabs) JVNAUTOSCI-550 -->
   <div class="global-header" id="globalHeader">
-    <div class="main-container">
-      <!-- Popup for info (dynamically loaded from Vontology) -->
-      <div class="popup popup-container" id="infoPopup">
-        <div id="infoPopupContent">
-          <p class="info-loading">Loading...</p>
-        </div>
-      </div>
-      <!-- Header with info icon and dynamic organisation name -->
-      <h1>
-        <span class="info-icon" id="infoIcon" title="Click for more info">ℹ️</span>
-        Von: <span id="headerOrgName">...</span>
-      </h1>
-    </div>
-    <!-- Global Concept Search -->
-    <div class="global-concept-search" id="globalConceptSearchRegion">
-      <div class="global-concept-search-inner">
-        <h2 class="vontology-title" id="vontologyGlobalTitle">
-          <span class="vontology-search-icon" aria-hidden="true">
-            <!-- Simple magnifying glass icon (SVG) -->
-            <svg class="icon" viewBox="0 0 24 24" focusable="false" role="img" aria-hidden="true">
-              <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none" />
-              <line x1="16.5" y1="16.5" x2="22" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-            </svg>
-          </span>
-          <span class="visually-hidden">Concept Search</span>
-        </h2>
-        <div class="vontology-search" id="globalVontologySearchWrapper">
-          <input type="text" id="vontologySearchInput" placeholder="Search concepts by name…"
-            aria-label="Search concepts" role="combobox" aria-autocomplete="list" aria-expanded="false"
-            aria-haspopup="listbox" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-            name="_vontology_search" />
-          <div id="vontologySearchResults" class="vontology-search-results" role="listbox" aria-label="Search results">
+    <div class="global-header-shell">
+      <!-- Global Concept Search -->
+      <div class="global-concept-search" id="globalConceptSearchRegion">
+        <div class="global-concept-search-inner">
+          <h2 class="vontology-title" id="vontologyGlobalTitle">
+            <span class="vontology-search-icon" aria-hidden="true">
+              <!-- Simple magnifying glass icon (SVG) -->
+              <svg class="icon" viewBox="0 0 24 24" focusable="false" role="img" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none" />
+                <line x1="16.5" y1="16.5" x2="22" y2="22" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" />
+              </svg>
+            </span>
+            <span class="visually-hidden">Concept Search</span>
+          </h2>
+          <div class="vontology-search" id="globalVontologySearchWrapper">
+            <input type="text" id="vontologySearchInput" placeholder="Search concepts by name…"
+              aria-label="Search concepts" role="combobox" aria-autocomplete="list" aria-expanded="false"
+              aria-haspopup="listbox" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+              name="_vontology_search" />
+            <div id="vontologySearchResults" class="vontology-search-results" role="listbox"
+              aria-label="Search results">
+            </div>
           </div>
         </div>
+      </div>
+
+      <div class="main-container global-organisation-identity">
+        <!-- Popup for info (dynamically loaded from Vontology) -->
+        <div class="popup popup-container" id="infoPopup">
+          <div id="infoPopupContent">
+            <p class="info-loading">Loading...</p>
+          </div>
+        </div>
+        <h1 class="global-organisation-title" title="Current organisation">
+          <span class="global-product-name">Von</span>
+          <span class="global-organisation-separator" aria-hidden="true">·</span>
+          <span id="headerOrgName">...</span>
+        </h1>
+        <button class="info-icon" id="infoIcon" type="button" title="About this organisation"
+          aria-label="About this organisation">i</button>
       </div>
     </div>
   </div>

@@ -24,6 +24,7 @@ import {
     resetCopyJsonButtonPreCopyState
 } from './utils/copyJsonButtonState.js';
 import { saveJsonTextViaDialog } from './utils/fileSave.js';
+import { scrollConversationToSessionList } from './utils/conversationListNavigation.js';
 import {
     armRetryableLoadState,
     clearRetryableLoadState,
@@ -176,7 +177,9 @@ let chatSessionLinksSaveDebounceId = null;
 let chatSessionLinksDirtySessionId = null;
 let chatSessionLinksDirtyPayload = null;
 let chatSessionMetadataOpenKey = null;
-const LS_CHAT_SESSION_METADATA_COLLAPSED = 'von:chatSessionMetadataCollapsed';
+// Versioned so browsers carrying the former expanded-by-default preference
+// start this release furled once. Choices made with the new UI still persist.
+const LS_CHAT_SESSION_METADATA_COLLAPSED = 'von:chatSessionMetadataCollapsed:v2';
 let chatSessionMetadataCollapsed = null;
 
 const chatSessionConceptMetaCache = new Map();
@@ -1009,6 +1012,7 @@ let chatTabsFirstLoadStartEpochMs = null;
 let chatTabsLoadingTickerId = null;
 let chatTabsLoadingTickerLastRenderedSec = -1;
 let chatSessionMenuEl = null;
+let chatSessionMenuReturnFocusEl = null;
 let activeHistoryRequest = null;
 let historyRequestCounter = 0;
 const HISTORY_SEGMENT_SIZE = 200;
@@ -1019,6 +1023,10 @@ const LS_HIDDEN_CHAT_SESSIONS_PREFIX = 'von:hiddenChatSessionIds';
 const LS_PINNED_CHAT_SESSIONS_PREFIX = 'von:pinnedChatSessionIds';
 const LS_CHAT_SESSION_LAST_ACCESSED_PREFIX = 'von:chatSessionLastAccessed';
 const LS_AGENT_CREATED_CHAT_SESSIONS_VISIBLE_PREFIX = 'von:showAgentCreatedChatSessions';
+const LS_CHAT_SESSION_TABS_LAYOUT_PREFIX = 'von:chatSessionTabsLayout';
+const CHAT_SESSION_TABS_LAYOUT_HORIZONTAL = 'horizontal';
+const CHAT_SESSION_TABS_LAYOUT_VERTICAL = 'vertical';
+const CHAT_SESSION_TABS_NARROW_MEDIA_QUERY = '(max-width: 800px)';
 const MAX_DELETABLE_TURNS = 4;
 const CHAT_SESSION_TABS_FETCH_LIMIT = 200;
 const AGENT_CREATED_CHAT_SESSION_ORIGIN_KINDS = new Set([
@@ -1038,6 +1046,9 @@ let _agentCreatedSessionsVisibleUserKey = null;
 let chatSessionLastAccessedMap = new Map();
 let _chatSessionLastAccessedUserKey = null;
 let showAllConversationHistoryMatches = false;
+let chatSessionTabsLayout = CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
+let chatSessionTabsLayoutMediaQuery = null;
+let chatSessionTabsLayoutMediaListenerBound = false;
 let agentCreatedSessionVisibilityState = {
     totalCount: 0,
     hiddenCount: 0,
@@ -1072,6 +1083,144 @@ function getPinnedSessionsStorageKey() {
 
 function getAgentCreatedSessionsVisibleStorageKey() {
     return buildUserScopedStorageKey(LS_AGENT_CREATED_CHAT_SESSIONS_VISIBLE_PREFIX);
+}
+
+function getChatSessionTabsLayoutStorageKey() {
+    // This controls the browser's navigation chrome rather than user-owned
+    // conversation data, so it deliberately survives authentication changes.
+    return LS_CHAT_SESSION_TABS_LAYOUT_PREFIX;
+}
+
+function normaliseChatSessionTabsLayout(value) {
+    return value === CHAT_SESSION_TABS_LAYOUT_VERTICAL
+        ? CHAT_SESSION_TABS_LAYOUT_VERTICAL
+        : CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
+}
+
+function isChatSessionTabsNarrowViewport() {
+    try {
+        return typeof window.matchMedia === 'function'
+            && window.matchMedia(CHAT_SESSION_TABS_NARROW_MEDIA_QUERY).matches;
+    } catch (_) {
+        return false;
+    }
+}
+
+function getEffectiveChatSessionTabsLayout(preferredLayout = chatSessionTabsLayout) {
+    const preferred = normaliseChatSessionTabsLayout(preferredLayout);
+    if (preferred !== CHAT_SESSION_TABS_LAYOUT_VERTICAL) {
+        return CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
+    }
+    if (isChatSessionTabsNarrowViewport()) {
+        return CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
+    }
+    return CHAT_SESSION_TABS_LAYOUT_VERTICAL;
+}
+
+function getChatSessionTabsLayoutMenuLabel() {
+    if (chatSessionTabsLayout === CHAT_SESSION_TABS_LAYOUT_VERTICAL) {
+        return isChatSessionTabsNarrowViewport()
+            ? 'Use conversation tabs across top on wider screens'
+            : 'Move conversation tabs to top';
+    }
+    return isChatSessionTabsNarrowViewport()
+        ? 'Use conversation tabs on left on wider screens'
+        : 'Move conversation tabs to left';
+}
+
+function applyChatSessionTabsLayout(layout = chatSessionTabsLayout) {
+    const preferred = normaliseChatSessionTabsLayout(layout);
+    const effective = getEffectiveChatSessionTabsLayout(preferred);
+    chatSessionTabsLayout = preferred;
+
+    const workspace = document.getElementById('conversationWorkspace');
+    const chatTab = document.getElementById('chatTab');
+    const tabs = getChatSessionTabsContainer();
+
+    if (workspace) {
+        workspace.dataset.tabsLayout = preferred;
+        workspace.dataset.effectiveTabsLayout = effective;
+    }
+    if (chatTab) {
+        chatTab.dataset.conversationTabsLayout = preferred;
+    }
+    if (tabs) {
+        tabs.setAttribute('aria-orientation', effective === CHAT_SESSION_TABS_LAYOUT_VERTICAL ? 'vertical' : 'horizontal');
+    }
+
+    try {
+        document.dispatchEvent(new CustomEvent('von:conversation-tabs-layout-changed', {
+            detail: { preferred, effective }
+        }));
+    } catch (_) {
+        // Layout still applies in constrained test environments without CustomEvent.
+    }
+
+    return { preferred, effective };
+}
+
+function loadChatSessionTabsLayoutPreference() {
+    const storageKey = getChatSessionTabsLayoutStorageKey();
+    let stored = null;
+    try {
+        stored = localStorage.getItem(storageKey);
+    } catch (e) {
+        console.warn('[chatTab] Failed to load conversation tab layout from localStorage:', e);
+    }
+    return applyChatSessionTabsLayout(normaliseChatSessionTabsLayout(stored));
+}
+
+function saveChatSessionTabsLayoutPreference() {
+    const storageKey = getChatSessionTabsLayoutStorageKey();
+    try {
+        localStorage.setItem(storageKey, normaliseChatSessionTabsLayout(chatSessionTabsLayout));
+    } catch (e) {
+        console.warn('[chatTab] Failed to save conversation tab layout to localStorage:', e);
+    }
+}
+
+function setChatSessionTabsLayout(layout, options = {}) {
+    const result = applyChatSessionTabsLayout(layout);
+    if (options.persist !== false) {
+        saveChatSessionTabsLayoutPreference();
+    }
+    if (options.announce === true) {
+        let message;
+        if (result.preferred === CHAT_SESSION_TABS_LAYOUT_VERTICAL
+            && result.effective === CHAT_SESSION_TABS_LAYOUT_HORIZONTAL) {
+            message = 'Left conversation tabs saved for wider screens.';
+        } else if (result.preferred === CHAT_SESSION_TABS_LAYOUT_VERTICAL) {
+            message = 'Conversation tabs moved to the left.';
+        } else {
+            message = 'Conversation tabs set across the top.';
+        }
+        showToast(message, 'success');
+    }
+    return result;
+}
+
+function toggleChatSessionTabsLayout(options = {}) {
+    const next = chatSessionTabsLayout === CHAT_SESSION_TABS_LAYOUT_VERTICAL
+        ? CHAT_SESSION_TABS_LAYOUT_HORIZONTAL
+        : CHAT_SESSION_TABS_LAYOUT_VERTICAL;
+    return setChatSessionTabsLayout(next, options);
+}
+
+function setupChatSessionTabsResponsiveLayout() {
+    if (chatSessionTabsLayoutMediaListenerBound || typeof window.matchMedia !== 'function') {
+        return;
+    }
+    chatSessionTabsLayoutMediaQuery = window.matchMedia(CHAT_SESSION_TABS_NARROW_MEDIA_QUERY);
+    const handleChange = () => {
+        applyChatSessionTabsLayout(chatSessionTabsLayout);
+    };
+    if (typeof chatSessionTabsLayoutMediaQuery.addEventListener === 'function') {
+        chatSessionTabsLayoutMediaQuery.addEventListener('change', handleChange);
+        chatSessionTabsLayoutMediaListenerBound = true;
+    } else if (typeof chatSessionTabsLayoutMediaQuery.addListener === 'function') {
+        chatSessionTabsLayoutMediaQuery.addListener(handleChange);
+        chatSessionTabsLayoutMediaListenerBound = true;
+    }
 }
 
 function loadHiddenChatSessionIds() {
@@ -23517,7 +23666,7 @@ function _appendChatSessionCurrentTitle(container, sessionId) {
     const title = _resolveCurrentChatSessionTitle(sessionId);
     if (!title) return;
 
-    const titleEl = document.createElement('div');
+    const titleEl = document.createElement('h2');
     titleEl.className = 'chat-session-current-title';
     titleEl.textContent = title;
     titleEl.title = title;
@@ -24101,9 +24250,10 @@ function _isChatSessionMetadataCollapsed() {
         return chatSessionMetadataCollapsed;
     }
     try {
-        chatSessionMetadataCollapsed = window.localStorage.getItem(LS_CHAT_SESSION_METADATA_COLLAPSED) === 'true';
+        const stored = window.localStorage.getItem(LS_CHAT_SESSION_METADATA_COLLAPSED);
+        chatSessionMetadataCollapsed = stored === null ? true : stored === 'true';
     } catch (_) {
-        chatSessionMetadataCollapsed = false;
+        chatSessionMetadataCollapsed = true;
     }
     return chatSessionMetadataCollapsed;
 }
@@ -24902,6 +25052,64 @@ function openSettingsToLogin() {
     }
 }
 
+function getNewChatMenuAnchor(button, event = null) {
+    const clientX = Number(event?.clientX);
+    const clientY = Number(event?.clientY);
+    if (Number.isFinite(clientX) && Number.isFinite(clientY) && (clientX !== 0 || clientY !== 0)) {
+        return { x: clientX, y: clientY };
+    }
+    const rect = button?.getBoundingClientRect?.();
+    return {
+        x: Number(rect?.left || 0) + 8,
+        y: Number(rect?.bottom || 0) + 4
+    };
+}
+
+function openNewChatOptions(button, event = null) {
+    const { x, y } = getNewChatMenuAnchor(button, event);
+    openChatSessionMenu(x, y, buildNewChatContextMenuItems(), {
+        focusFirst: true,
+        returnFocus: button
+    });
+}
+
+function createNewChatTabButton() {
+    const newTab = document.createElement('button');
+    newTab.type = 'button';
+    newTab.className = 'chat-session-tab chat-session-tab-new';
+    newTab.title = 'New conversation. Modifier-click, right-click, or press Shift+F10 for conversation-list options.';
+    newTab.setAttribute('aria-label', 'New conversation');
+    newTab.setAttribute('aria-haspopup', 'menu');
+    newTab.setAttribute('aria-keyshortcuts', 'Shift+F10');
+    newTab.textContent = '+';
+
+    newTab.addEventListener('click', (event) => {
+        if (event?.ctrlKey || event?.metaKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            openNewChatOptions(newTab, event);
+            return;
+        }
+        void createNewChatSession();
+    });
+    newTab.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNewChatOptions(newTab, event);
+    });
+    newTab.addEventListener('keydown', (event) => {
+        const opensContextMenu = event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
+        if (!opensContextMenu) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        openNewChatOptions(newTab, event);
+    });
+
+    return newTab;
+}
+
 function renderChatSessionTabsPlaceholder(mode = 'loading') {
     const container = getChatSessionTabsContainer();
     if (!container) {
@@ -24917,16 +25125,7 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
 
     const allowNewChat = mode !== 'unauthenticated';
     if (allowNewChat) {
-        const newTab = document.createElement('button');
-        newTab.type = 'button';
-        newTab.className = 'chat-session-tab chat-session-tab-new';
-        newTab.title = 'New chat';
-        newTab.setAttribute('aria-label', 'New chat');
-        newTab.textContent = '+';
-        newTab.addEventListener('click', () => {
-            void createNewChatSession();
-        });
-        fragment.appendChild(newTab);
+        fragment.appendChild(createNewChatTabButton());
     }
 
     const placeholder = document.createElement('div');
@@ -25368,23 +25567,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const fragment = document.createDocumentFragment();
 
     // Always show the "+" button to create new chats
-    const newTab = document.createElement('button');
-    newTab.type = 'button';
-    newTab.className = 'chat-session-tab chat-session-tab-new';
-    newTab.title = agentCreatedSessionVisibilityState.hiddenCount > 0
-        ? 'New chat. Right-click to show test conversations.'
-        : 'New chat';
-    newTab.setAttribute('aria-label', 'New chat');
-    newTab.textContent = '+';
-    newTab.addEventListener('click', () => {
-        void createNewChatSession();
-    });
-    newTab.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openChatSessionMenu(event.clientX, event.clientY, buildNewChatContextMenuItems());
-    });
-    fragment.appendChild(newTab);
+    fragment.appendChild(createNewChatTabButton());
 
     if (orderedVisibleSessions.length === 0) {
         const placeholder = document.createElement('div');
@@ -25719,9 +25902,15 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 function buildNewChatContextMenuItems() {
     const items = [
         {
-            label: 'New chat',
+            label: 'New conversation',
             onClick: () => {
                 void createNewChatSession();
+            }
+        },
+        {
+            label: getChatSessionTabsLayoutMenuLabel(),
+            onClick: () => {
+                toggleChatSessionTabsLayout({ announce: true });
             }
         }
     ];
@@ -25813,12 +26002,15 @@ function populateChatSessionMenu(items) {
     return menu;
 }
 
-function openChatSessionMenu(x, y, items) {
+function openChatSessionMenu(x, y, items, options = {}) {
     if (!Array.isArray(items) || items.length === 0) {
         return;
     }
 
     const menu = populateChatSessionMenu(items);
+    chatSessionMenuReturnFocusEl = options.returnFocus instanceof HTMLElement
+        ? options.returnFocus
+        : null;
     const padding = 8;
     menu.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
@@ -25828,14 +26020,25 @@ function openChatSessionMenu(x, y, items) {
     const top = Math.max(padding, Math.min(y, maxY));
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
+    if (options.focusFirst === true) {
+        const firstItem = menu.querySelector('button');
+        try { firstItem?.focus?.(); } catch (_) { /* ignore */ }
+    }
 }
 
 function closeChatSessionMenu() {
     if (!chatSessionMenuEl) {
         return;
     }
+    const shouldRestoreFocus = chatSessionMenuEl.contains(document.activeElement)
+        && chatSessionMenuReturnFocusEl?.isConnected;
+    const returnFocusEl = chatSessionMenuReturnFocusEl;
     chatSessionMenuEl.classList.remove('open');
     chatSessionMenuEl.setAttribute('aria-hidden', 'true');
+    chatSessionMenuReturnFocusEl = null;
+    if (shouldRestoreFocus) {
+        try { returnFocusEl.focus(); } catch (_) { /* ignore */ }
+    }
 }
 
 function setupChatTabContextMenu() {
@@ -28275,31 +28478,6 @@ function ensureScrollToEndButton(scrollableField = null) {
     }
 
     return button;
-}
-
-function scrollConversationToSessionList(options = {}) {
-    const tabs = document.getElementById('chatSessionTabs');
-    const target = tabs?.closest?.('.chat-session-tabs-row') || tabs || document.getElementById('chatTab');
-    if (!(target instanceof HTMLElement)) {
-        return false;
-    }
-
-    const smooth = options?.smooth !== false;
-    if (typeof target.scrollIntoView === 'function') {
-        target.scrollIntoView({
-            behavior: smooth ? 'smooth' : 'auto',
-            block: 'start',
-            inline: 'nearest'
-        });
-        return true;
-    }
-
-    if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
-        window.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
-        return true;
-    }
-
-    return false;
 }
 
 function isScrollableFieldNearBottom(scrollableField, thresholdPx = CHAT_SCROLL_BOTTOM_THRESHOLD_PX) {
@@ -30794,6 +30972,8 @@ function handleAuthStatusChangeForChatTab(detail) {
     loadPinnedChatSessionIds();
     loadAgentCreatedSessionsVisibilityPreference();
     loadChatSessionLastAccessedMap();
+    loadChatSessionTabsLayoutPreference();
+    setupChatSessionTabsResponsiveLayout();
     showAllConversationHistoryMatches = false;
 
     const container = getChatSessionTabsContainer();
@@ -30855,6 +31035,8 @@ export function initializeChatTab() {
     loadPinnedChatSessionIds();
     loadAgentCreatedSessionsVisibilityPreference();
     loadChatSessionLastAccessedMap();
+    loadChatSessionTabsLayoutPreference();
+    setupChatSessionTabsResponsiveLayout();
 
     // Reload hidden sessions when user changes (settings change event)
     try {
@@ -36545,6 +36727,19 @@ export function __testOnly_resetConversationSituationState() {
 }
 export async function __testOnly_refreshChatSessionTabs() {
     return refreshChatSessionTabs();
+}
+export function __testOnly_loadChatSessionTabsLayoutPreference() {
+    return loadChatSessionTabsLayoutPreference();
+}
+export function __testOnly_setChatSessionTabsLayout(layout, options = {}) {
+    return setChatSessionTabsLayout(layout, options);
+}
+export function __testOnly_getChatSessionTabsLayout() {
+    return {
+        preferred: chatSessionTabsLayout,
+        effective: getEffectiveChatSessionTabsLayout(chatSessionTabsLayout),
+        storageKey: getChatSessionTabsLayoutStorageKey()
+    };
 }
 export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
     setActiveChatSession(sessionId, sessionName);

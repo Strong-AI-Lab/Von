@@ -18,11 +18,14 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
 describe('chat session metadata label links', () => {
     beforeEach(() => {
         jest.resetModules();
+        localStorage.clear();
         document.body.innerHTML = '<div id="chatSessionMetadata"></div>';
     });
 
     afterEach(() => {
         jest.restoreAllMocks();
+        localStorage.clear();
+        delete global.fetch;
     });
 
     test('Clicking group labels opens the corresponding type concept tab', () => {
@@ -120,5 +123,57 @@ describe('chat session metadata label links', () => {
         const header = metadataEl.querySelector('.chat-session-metadata-header');
         expect(header).toBeTruthy();
         expect(header.previousElementSibling).toBe(titleEl);
+    });
+
+    test('Defaults conversation context to furled and ignores the legacy expanded preference', () => {
+        localStorage.setItem('von:chatSessionMetadataCollapsed', 'false');
+        const { __test_only__renderChatSessionMetadataPanel } = require(chatTabModulePath);
+
+        expect(localStorage.getItem('von:chatSessionMetadataCollapsed:v2')).toBeNull();
+        __test_only__renderChatSessionMetadataPanel({
+            sessionId: 's-default-furled',
+            links: {},
+            statusText: null,
+            statusTone: null,
+            disabled: false
+        });
+
+        const metadataEl = document.getElementById('chatSessionMetadata');
+        const toggle = metadataEl.querySelector('.chat-session-metadata-toggle');
+        const body = metadataEl.querySelector('.chat-session-metadata-body');
+
+        expect(toggle).toBeTruthy();
+        expect(toggle.getAttribute('aria-expanded')).toBe('false');
+        expect(toggle.title).toBe('Show conversation context');
+        expect(body).toBeTruthy();
+        expect(body.classList).toContain('is-collapsed');
+
+        toggle.click();
+        expect(localStorage.getItem('von:chatSessionMetadataCollapsed:v2')).toBe('false');
+        expect(metadataEl.querySelector('.chat-session-metadata-toggle')?.getAttribute('aria-expanded'))
+            .toBe('true');
+    });
+
+    test('Honours an expanded preference chosen with the new furled-default UI', () => {
+        localStorage.setItem('von:chatSessionMetadataCollapsed:v2', 'false');
+        const { __test_only__renderChatSessionMetadataPanel } = require(chatTabModulePath);
+
+        __test_only__renderChatSessionMetadataPanel({
+            sessionId: 's-stored-expanded',
+            links: {},
+            statusText: null,
+            statusTone: null,
+            disabled: false
+        });
+
+        const metadataEl = document.getElementById('chatSessionMetadata');
+        const toggle = metadataEl.querySelector('.chat-session-metadata-toggle');
+        const body = metadataEl.querySelector('.chat-session-metadata-body');
+
+        expect(toggle).toBeTruthy();
+        expect(toggle.getAttribute('aria-expanded')).toBe('true');
+        expect(toggle.title).toBe('Hide conversation context');
+        expect(body).toBeTruthy();
+        expect(body.classList).not.toContain('is-collapsed');
     });
 });
