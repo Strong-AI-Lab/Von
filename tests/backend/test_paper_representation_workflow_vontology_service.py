@@ -961,6 +961,22 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert any(
         isinstance(item, dict)
         and item.get("target_context_key") == "arxiv_id"
+        and item.get("source_expression") == "inputs.conversation_situation"
+        and item.get("extractor") == "arxiv_id"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_ids"
+        and item.get("source_expression") == "inputs.conversation_situation"
+        and item.get("extractor") == "arxiv_id_list"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_id"
         and item.get("source_expression")
         == "inputs.turn_expected_outcome_contract.summary"
         and item.get("extractor") == "arxiv_id"
@@ -1842,6 +1858,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert {
         "inputs.arxiv_id",
         "inputs.augmented_context",
+        "inputs.conversation_situation",
         "inputs.turn_expected_outcome_contract.summary",
         "inputs.turn_expected_outcome_contract_state.fields.summary",
         "inputs.workflow_discovery_result.discovery_query_input",
@@ -1856,6 +1873,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         "inputs.arxiv_id",
         "inputs.prompt",
         "inputs.augmented_context",
+        "inputs.conversation_situation",
         "inputs.turn_expected_outcome_contract.summary",
         "inputs.turn_expected_outcome_contract_state.fields.summary",
         "inputs.workflow_discovery_result.discovery_query_input",
@@ -1871,7 +1889,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "21" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "22" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID

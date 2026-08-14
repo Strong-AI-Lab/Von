@@ -253,6 +253,58 @@ def test_consent_turn_merges_model_sidecar_with_verified_effect_readback() -> No
     assert "private mail must never enter the situation" not in merged
 
 
+def test_later_canonical_reconciliation_supersedes_stale_indeterminate_state() -> None:
+    concept_id = "#V#nichola_raihani"
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-reconciled-create",
+        terminal_status="completed",
+        response_text=f"Represented Nichola Raihani as {concept_id}.",
+        tool_invocations=[
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "effect_id": "effect-create-nichola",
+                "effect_status": "succeeded",
+                "initial_effect_status": "indeterminate",
+                "changed": True,
+                "reconciliation_status": "canonically_verified",
+                "result_target_ids": [concept_id],
+                "effective_payload": {
+                    "success": False,
+                    "effect_status": "indeterminate",
+                    "outcome_finality": "requires_canonical_reconciliation",
+                },
+            }
+        ],
+    )
+
+    assert projection is not None
+    assert projection["verified_concept_ids"] == [concept_id]
+    assert projection["effects"] == [
+        {
+            "tool": "create_concepts",
+            "status": "succeeded",
+            "effect_id": "effect-create-nichola",
+            "changed": True,
+            "reconciliation_status": "canonically_verified",
+            "target_ids": [concept_id],
+            "mode": "created",
+        }
+    ]
+
+    merged = merge_conversation_situation_turn_projection(
+        current_situation=(
+            "The Nichola Raihani mutation may not have completed and needs checking."
+        ),
+        model_situation=None,
+        projection=projection,
+    )
+
+    assert merged is not None
+    assert "reconciliation=canonically_verified" in merged
+    assert f"targets={concept_id}" in merged
+
+
 def test_mixed_partial_turn_preserves_stable_receipt_and_workflow_status_only() -> None:
     projection = build_conversation_situation_turn_projection(
         request_id="turn-partial",

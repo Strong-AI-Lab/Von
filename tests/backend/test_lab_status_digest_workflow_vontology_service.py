@@ -80,6 +80,12 @@ def test_bootstrap_materialises_lab_status_digest_authority(
     )
     assert launch_source.startswith("text_relation:")
     assert (launch_contract or {}).get("required_inputs") == ["prompt"]
+    launch_sources = {
+        mapping.get("source_expression")
+        for mapping in (launch_contract or {}).get("input_mappings") or []
+    }
+    assert "inputs.augmented_context" in launch_sources
+    assert "inputs.conversation_situation" in launch_sources
 
     required_effects = (
         definition.metadata.get("required_effects_contract") or {}
@@ -124,6 +130,14 @@ def test_bootstrap_materialises_lab_status_digest_authority(
     assert synthesise_action.llm_policy["tool_mode"] == "none"
     assert synthesise_action.llm_policy["selection_policy"] == "active_only"
     assert synthesise_action.llm_policy["max_output_tokens"] == 4096
+    assert (
+        synthesise_action.llm_policy["context_messages_context_key"]
+        == "augmented_context"
+    )
+    assert "conversation_situation" in {
+        field.get("context_key")
+        for field in synthesise_action.llm_policy.get("context_fields") or []
+    }
     assert synthesise_action.validation_policy["output_format"] == "json_value"
 
     persist_state = state_for("persist_digest")

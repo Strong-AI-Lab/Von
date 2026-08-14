@@ -223,6 +223,38 @@ def test_legacy_general_mail_review_is_not_an_ordinary_routing_candidate() -> No
     assert routing_profile["retained_for_explicit_durable_review_only"] is True
 
 
+def test_general_mail_review_receives_conversation_context_only_at_judgement_steps() -> (
+    None
+):
+    payload = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in payload.get("workflows", [])
+        if item.get("workflow_id") == "#V#general_mail_review_workflow"
+    )
+    launch_sources = {
+        mapping.get("source_expression")
+        for mapping in workflow["launch_input_contract"]["input_mappings"]
+    }
+    assert "inputs.augmented_context" in launch_sources
+    assert "inputs.conversation_situation" in launch_sources
+
+    steps = {
+        step["state_id"]: step for step in workflow["publication_spec"]["steps"]
+    }
+    for state_id in ("resolve_mail_profile", "extract_mail_review_request_parameters"):
+        policy = steps[state_id]["llm_policy"]
+        assert policy["context_messages_context_key"] == "augmented_context"
+        assert "conversation_situation" in {
+            field.get("context_key") for field in policy["context_fields"]
+        }
+    render_policy = steps["render_mail_review_response"]["llm_policy"]
+    assert render_policy.get("context_messages_context_key") is None
+    assert "conversation_situation" not in {
+        field.get("context_key") for field in render_policy["context_fields"]
+    }
+
+
 def test_repo_seeded_gmail_list_steps_use_semantic_mailbox_scope() -> None:
     canonical = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
     mail_review = next(

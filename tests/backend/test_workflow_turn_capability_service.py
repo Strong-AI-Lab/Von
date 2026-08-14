@@ -249,12 +249,16 @@ def test_execution_arguments_bind_workflow_and_actor_server_side():
             "inputs": {
                 "record_id": "#V#record",
                 "user_concept_id": "#V#spoofed_user",
+                "conversation_situation": "Spoofed conversation situation.",
             },
             "await_terminal": "false",
             "timeout_seconds": 500,
         },
         prompt="Process this record.",
         context=[{"role": "user", "content": "Earlier context"}],
+        conversation_situation=(
+            "The record under discussion is the represented quarterly report."
+        ),
         request_workflow_launch_inputs={
             "file_copy_concept_id": "#V#authorised_file",
             "organisation_concept_id": "#V#spoofed_org",
@@ -279,12 +283,92 @@ def test_execution_arguments_bind_workflow_and_actor_server_side():
     assert effective["inputs"]["augmented_context"] == [
         {"role": "user", "content": "Earlier context"}
     ]
+    assert effective["inputs"]["conversation_situation"] == (
+        "The record under discussion is the represented quarterly report."
+    )
     assert diagnostic["ignored_model_arguments"] == [
         "namespace",
         "org_id",
         "user_id",
         "workflow_id",
     ]
+
+
+def test_completed_workflow_clarification_is_not_a_completed_semantic_effect():
+    from src.backend.services.workflow_turn_capability_service import (
+        normalise_workflow_effect_receipt,
+    )
+
+    clarified = normalise_workflow_effect_receipt(
+        {
+            "success": True,
+            "instance_id": "instance-clarification",
+            "created_new": True,
+            "final_status": "completed",
+            "workflow_execution": {
+                "outputs": {
+                    "requires_user_affirmation": True,
+                    "response_text": "Which person do you mean?",
+                }
+            },
+        },
+        capability=_capability(),
+    )
+
+    assert clarified["effect_status"] == "succeeded"
+    assert clarified["operational_state_effect"] is True
+    assert clarified["semantic_effect"] is False
+    assert clarified["semantic_outcome"] == "clarification_required"
+
+
+def test_workflow_can_report_a_typed_incomplete_semantic_outcome():
+    from src.backend.services.workflow_turn_capability_service import (
+        normalise_workflow_effect_receipt,
+    )
+
+    follow_up = normalise_workflow_effect_receipt(
+        {
+            "success": True,
+            "instance_id": "instance-follow-up",
+            "created_new": True,
+            "final_status": "completed",
+            "workflow_execution": {
+                "outputs": {"semantic_outcome": "follow_up_required"}
+            },
+        },
+        capability=_capability(),
+    )
+
+    assert follow_up["effect_status"] == "succeeded"
+    assert follow_up["semantic_effect"] is None
+    assert follow_up["semantic_outcome"] == "follow_up_required"
+
+
+@pytest.mark.parametrize("semantic_outcome", ["blocked", "failed", "not_completed"])
+def test_completed_workflow_hard_non_completion_is_not_a_semantic_effect(
+    semantic_outcome,
+):
+    from src.backend.services.workflow_turn_capability_service import (
+        normalise_workflow_effect_receipt,
+    )
+
+    incomplete = normalise_workflow_effect_receipt(
+        {
+            "success": True,
+            "instance_id": f"instance-{semantic_outcome}",
+            "created_new": True,
+            "final_status": "completed",
+            "workflow_execution": {
+                "outputs": {"semantic_outcome": semantic_outcome}
+            },
+        },
+        capability=_capability(),
+    )
+
+    assert incomplete["effect_status"] == "succeeded"
+    assert incomplete["operational_state_effect"] is True
+    assert incomplete["semantic_effect"] is False
+    assert incomplete["semantic_outcome"] == semantic_outcome
 
 
 def test_workflow_wait_is_one_bounded_observation_interval():
@@ -297,6 +381,7 @@ def test_workflow_wait_is_one_bounded_observation_interval():
         {"timeout_seconds": 180},
         prompt="Process this record.",
         context=None,
+        conversation_situation=None,
         request_workflow_launch_inputs=None,
         user_concept_id="#V#real_user",
         organisation_concept_id="#V#real_org",
@@ -329,6 +414,7 @@ def test_workflow_wait_rejects_nonfinite_observation_parameters(
             {field_name: invalid_value},
             prompt="Process this record.",
             context=None,
+            conversation_situation=None,
             request_workflow_launch_inputs=None,
             user_concept_id="#V#real_user",
             organisation_concept_id="#V#real_org",

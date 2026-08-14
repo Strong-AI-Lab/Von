@@ -2,11 +2,14 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "21",
+  "seed_version": "22",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
         "bfc761fc3407b0ffdbe7bb5a6662a0c49755ccd6c25df1d8eaede247bacbcfb1"
+      ],
+      "21": [
+        "73d2d1570351c56cfb98fbecb409a8dfc306cade830ff73b40c5d916868a6cb9"
       ]
     },
     "#V#source_neutral_paper_reference_ingestion_workflow": {
@@ -1708,6 +1711,20 @@
             "extractor": "arxiv_id_list",
             "required": false,
             "source_expression": "inputs.augmented_context",
+            "target_context_key": "arxiv_ids"
+          },
+          {
+            "description": "Resolve an arXiv identifier from the server-projected shared situation when the current request refers to an established paper.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.conversation_situation",
+            "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve all arXiv identifiers from the server-projected shared situation when the current request refers to an established paper set.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.conversation_situation",
             "target_context_key": "arxiv_ids"
           },
           {

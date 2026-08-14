@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from src.backend.services.chat_auxiliary_prompt_service import (
+    build_applied_prompt_snapshot,
+)
+
 
 def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
     monkeypatch,
@@ -44,6 +48,17 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
         "preview_truncated": False,
         "sha256": "abc123",
     }
+    applied_prompt_snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#person",
+        namespace="#V#person@org",
+        organisation_concept_id="#V#org",
+        turn_id="req-adaptive-observation",
+        behaviour_fragments=[
+            {"concept_id": "#V#applied_prompt", "content": "Be precise."}
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
 
     result = von_routes._finalise_llm_debug_info(
         llm_debug_info={
@@ -102,6 +117,7 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
         org_id="#V#org",
         workflow_discovery=None,
         workflow_routing=None,
+        applied_prompt_snapshot=applied_prompt_snapshot,
     )
 
     record = result["turn_execution_record"]
@@ -115,6 +131,7 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
     }
     assert record["terminal_status"] == "completed"
     assert record["response"]["present"] is True
+    assert record["applied_prompt_snapshot"] == applied_prompt_snapshot
     assert record["evidence_index"] == [evidence]
     summary = result["llm_usage_cost_summary"]
     assert summary["usage"]["total_tokens"] == 120

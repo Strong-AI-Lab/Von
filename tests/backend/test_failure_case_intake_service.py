@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Mapping
 
+from src.backend.services.chat_auxiliary_prompt_service import (
+    build_applied_prompt_snapshot,
+)
 from src.backend.services.failure_case_intake_service import (
     FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,
     FAILURE_CASE_INTAKE_SCHEMA_VERSION,
@@ -54,6 +57,20 @@ def test_collect_failure_case_intake_uses_canonical_sources_for_unsigned_ref() -
             "include_legacy": False,
         },
     }
+    applied_prompt_snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#michael_witbrock",
+        namespace=namespace,
+        organisation_concept_id="#V#university_of_auckland_strong_ai_lab",
+        turn_id=request_id,
+        behaviour_fragments=[
+            {
+                "concept_id": "#V#gemma_failure_prompt_v1",
+                "content": "The exact prompt content used by the target turn.",
+            }
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
     invoker = RecordingInvoker(
         {
             "chat_history_get_segments": {
@@ -137,6 +154,7 @@ def test_collect_failure_case_intake_uses_canonical_sources_for_unsigned_ref() -
             "turn_execution_get": {
                 "success": True,
                 "request_id": request_id,
+                "applied_prompt_snapshot": applied_prompt_snapshot,
                 "final_response": {"text": "It produced an unhelpful answer."},
                 "workflow_selection": {
                     "selected_workflow_id": "prompt_improvement_failure",
@@ -184,6 +202,15 @@ def test_collect_failure_case_intake_uses_canonical_sources_for_unsigned_ref() -
     assert payload["model"]["target_model_matches_primary"] is True
     assert payload["workflow"]["selected_workflow_id"] == "prompt_improvement_failure"
     assert "#V#gemma_failure_prompt_v1" in payload["prompt_metadata"]["prompt_ids"]
+    assert payload["prompt_metadata"]["applied_prompt_ids"] == [
+        "#V#gemma_failure_prompt_v1"
+    ]
+    assert payload["applied_prompt_snapshot"]["source"] == (
+        "target_turn_applied_prompt_snapshot"
+    )
+    assert payload["applied_prompt_snapshot"]["prompts"][0]["content"] == (
+        "The exact prompt content used by the target turn."
+    )
     assert payload["tool_ledger"]["counts"] == {
         "total": 2,
         "success": 1,

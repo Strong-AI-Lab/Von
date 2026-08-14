@@ -11,7 +11,10 @@ This module keeps the logic small and testable.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import copy
+import hashlib
+import json
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import logging
 import os
 
@@ -33,6 +36,275 @@ _SPECIFIC_TO_USER_PREDICATE_CANDIDATES = (
 
 
 logger = logging.getLogger(__name__)
+
+APPLIED_PROMPT_SNAPSHOT_SCHEMA_VERSION = "applied_prompt_snapshot.v1"
+APPLIED_PROMPT_CONTEXT_SCHEMA_VERSION = "applied_prompt_context.v1"
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def build_applied_prompt_snapshot(
+    *,
+    user_concept_id: str,
+    namespace: str | None,
+    organisation_concept_id: str | None,
+    turn_id: str | None,
+    behaviour_fragments: Sequence[Dict[str, Any]] = (),
+    narration_fragments: Sequence[Dict[str, Any]] = (),
+    screen_fragments: Sequence[Dict[str, Any]] = (),
+    screen_prompt_text: str | None = None,
+    screen_prompt_concept_ids: Sequence[str] = (),
+    screen_prompt_source: str | None = None,
+) -> Dict[str, Any]:
+    """Build the exact server-bound represented-prompt snapshot for one turn."""
+
+    prompts: List[Dict[str, Any]] = []
+
+    def add_fragments(
+        application_kind: str,
+        application_surface: str,
+        fragments: Sequence[Dict[str, Any]],
+        *,
+        source: str = "user_specific_vontology_prompt",
+    ) -> None:
+        for fragment in fragments:
+            if not isinstance(fragment, dict):
+                continue
+            concept_id = fragment.get("concept_id")
+            content = fragment.get("content")
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                continue
+            if not isinstance(content, str) or not content.strip():
+                continue
+            normalised_content = content.strip()
+            prompts.append(
+                {
+                    "application_kind": application_kind,
+                    "application_surface": application_surface,
+                    "application_order": len(prompts),
+                    "concept_id": concept_id.strip(),
+                    "content": normalised_content,
+                    "content_char_count": len(normalised_content),
+                    "content_sha256": _sha256_text(normalised_content),
+                    "source": source,
+                }
+            )
+
+    add_fragments("behaviour", "model_behaviour", behaviour_fragments)
+    add_fragments("narration", "spoken_block", narration_fragments)
+    add_fragments("screen", "screen_block", screen_fragments)
+
+    # The screen prompt may come from the represented stage-prompt fallback rather
+    # than the user's directly linked screen fragments. Preserve what was actually
+    # applied, not merely what a fresh configuration lookup would find later.
+    if (
+        not any(item.get("application_kind") == "screen" for item in prompts)
+        and isinstance(screen_prompt_text, str)
+        and screen_prompt_text.strip()
+    ):
+        prompt_ids = [
+            value.strip()
+            for value in screen_prompt_concept_ids
+            if isinstance(value, str) and value.strip()
+        ]
+        concept_id = prompt_ids[0] if prompt_ids else None
+        if concept_id:
+            normalised_content = screen_prompt_text.strip()
+            prompts.append(
+                {
+                    "application_kind": "screen",
+                    "application_surface": "screen_block",
+                    "application_order": len(prompts),
+                    "concept_id": concept_id,
+                    "content": normalised_content,
+                    "content_char_count": len(normalised_content),
+                    "content_sha256": _sha256_text(normalised_content),
+                    "source": screen_prompt_source or "represented_screen_prompt",
+                }
+            )
+
+    snapshot: Dict[str, Any] = {
+        "schema_version": APPLIED_PROMPT_SNAPSHOT_SCHEMA_VERSION,
+        "turn_id": turn_id,
+        "actor": {
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": organisation_concept_id,
+            "namespace": namespace,
+        },
+        "prompt_count": len(prompts),
+        "prompts": prompts,
+    }
+    snapshot["snapshot_sha256"] = _sha256_text(_canonical_json(snapshot))
+    return snapshot
+
+
+def serialise_applied_prompt_snapshot(snapshot: Dict[str, Any]) -> str:
+    return _canonical_json(snapshot)
+
+
+def normalise_applied_prompt_snapshot(
+    value: Any,
+    *,
+    expected_user_concept_id: str | None = None,
+    expected_namespace: str | None = None,
+) -> Dict[str, Any] | None:
+    """Validate and copy an exact turn-applied prompt snapshot.
+
+    Persisted telemetry may carry the snapshot beyond the request that built it,
+    so consumers must verify both its integrity hash and, when supplied, its
+    actor scope before treating it as historical prompt evidence.
+    """
+
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            snapshot = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, Mapping):
+        snapshot = copy.deepcopy(dict(value))
+    else:
+        return None
+    if snapshot.get("schema_version") != APPLIED_PROMPT_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    supplied_snapshot_sha256 = snapshot.get("snapshot_sha256")
+    unsigned_snapshot = dict(snapshot)
+    unsigned_snapshot.pop("snapshot_sha256", None)
+    expected_snapshot_sha256 = _sha256_text(_canonical_json(unsigned_snapshot))
+    if supplied_snapshot_sha256 != expected_snapshot_sha256:
+        return None
+    actor = snapshot.get("actor")
+    prompts = snapshot.get("prompts")
+    if not isinstance(actor, dict) or not isinstance(prompts, list):
+        return None
+    if (
+        isinstance(expected_user_concept_id, str)
+        and expected_user_concept_id.strip()
+        and actor.get("user_concept_id") != expected_user_concept_id.strip()
+    ):
+        return None
+    if (
+        isinstance(expected_namespace, str)
+        and expected_namespace.strip()
+        and actor.get("namespace") != expected_namespace.strip()
+    ):
+        return None
+    return snapshot
+
+
+def build_applied_prompt_manifest_message(snapshot: Dict[str, Any]) -> str | None:
+    prompts = snapshot.get("prompts")
+    if not isinstance(prompts, list) or not prompts:
+        return None
+    manifest = {
+        "schema_version": "applied_prompt_manifest.v1",
+        "turn_id": snapshot.get("turn_id"),
+        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+        "prompts": [
+            {
+                "application_kind": item.get("application_kind"),
+                "application_surface": item.get("application_surface"),
+                "concept_id": item.get("concept_id"),
+                "content_char_count": item.get("content_char_count"),
+                "content_sha256": item.get("content_sha256"),
+            }
+            for item in prompts
+            if isinstance(item, dict)
+        ],
+    }
+    return (
+        "APPLIED VONTOLOGY PROMPT MANIFEST (server-derived):\n"
+        "These represented prompts are owned by or applicable to the authenticated "
+        "actor and are distinct from provider/platform instructions. Their exact "
+        "turn-applied content is inspectable with the delegated "
+        "chat_get_applied_prompt_context capability.\n" + _canonical_json(manifest)
+    )
+
+
+def render_applied_prompt_context(
+    snapshot_json: str,
+    *,
+    include_content: bool = True,
+    max_chars: int = 20000,
+) -> Dict[str, Any]:
+    """Render a bounded actor-safe view of a trusted turn snapshot."""
+
+    if not isinstance(snapshot_json, str) or not snapshot_json.strip():
+        raise ValueError("trusted applied-prompt snapshot is required")
+    snapshot = normalise_applied_prompt_snapshot(snapshot_json)
+    if snapshot is None:
+        raise ValueError("trusted applied-prompt snapshot is invalid or failed integrity checks")
+    actor = snapshot.get("actor")
+    prompts = snapshot.get("prompts")
+    assert isinstance(actor, dict)
+    assert isinstance(prompts, list)
+
+    bounded_max_chars = max(0, min(int(max_chars), 50000))
+    remaining = bounded_max_chars
+    rendered_prompts: List[Dict[str, Any]] = []
+    truncated = False
+    for item in prompts:
+        if not isinstance(item, dict):
+            continue
+        rendered = {
+            key: item.get(key)
+            for key in (
+                "application_kind",
+                "application_surface",
+                "application_order",
+                "concept_id",
+                "content_char_count",
+                "content_sha256",
+                "source",
+            )
+        }
+        content = item.get("content")
+        if include_content and isinstance(content, str):
+            returned_content = content[:remaining]
+            rendered["content"] = returned_content
+            rendered["content_truncated"] = len(returned_content) < len(content)
+            remaining -= len(returned_content)
+            truncated = truncated or rendered["content_truncated"]
+        rendered_prompts.append(rendered)
+
+    return {
+        "success": True,
+        "schema_version": APPLIED_PROMPT_CONTEXT_SCHEMA_VERSION,
+        "source": "server_bound_turn_snapshot",
+        "turn_id": snapshot.get("turn_id"),
+        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+        "actor": dict(actor),
+        "prompt_count": len(rendered_prompts),
+        "prompt_concept_ids": [
+            item["concept_id"]
+            for item in rendered_prompts
+            if isinstance(item.get("concept_id"), str)
+        ],
+        "prompt_classes": list(
+            dict.fromkeys(
+                item["application_kind"]
+                for item in rendered_prompts
+                if isinstance(item.get("application_kind"), str)
+            )
+        ),
+        "include_content": bool(include_content),
+        "max_chars": bounded_max_chars,
+        "content_truncated": truncated,
+        "prompts": rendered_prompts,
+    }
 
 
 def _debug_user_prompt_logging_enabled() -> bool:

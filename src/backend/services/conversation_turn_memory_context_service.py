@@ -620,6 +620,17 @@ def _render_runtime_turn_fact_block(projection: Mapping[str, Any]) -> str | None
             mode = _safe_str(effect.get("mode"))
             if mode:
                 details.append(f"mode={mode}")
+            reconciliation_status = _safe_str(
+                effect.get("reconciliation_status")
+            )
+            if reconciliation_status:
+                details.append(f"reconciliation={reconciliation_status}")
+            semantic_outcome = _safe_str(effect.get("semantic_outcome"))
+            if semantic_outcome:
+                details.append(f"semantic_outcome={semantic_outcome}")
+            target_ids = _normalise_strings(effect.get("target_ids"), limit=12)
+            if target_ids:
+                details.append("targets=" + ",".join(target_ids))
             rendered_effects.append(f"{identity}: " + "; ".join(details))
         if rendered_effects:
             lines.append("effect receipts:")

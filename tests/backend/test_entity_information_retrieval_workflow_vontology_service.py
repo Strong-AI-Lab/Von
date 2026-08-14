@@ -100,6 +100,12 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     assert isinstance(launch_contract, dict)
     assert launch_source.startswith("text_relation:")
     assert launch_contract.get("required_inputs") == ["prompt"]
+    launch_sources = {
+        mapping.get("source_expression")
+        for mapping in launch_contract.get("input_mappings") or []
+    }
+    assert "inputs.augmented_context" in launch_sources
+    assert "inputs.conversation_situation" in launch_sources
 
     required_effects_contract = definition.metadata.get("required_effects_contract")
     assert isinstance(required_effects_contract, dict)
@@ -174,6 +180,11 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         "list_uncertain_relationship_assertions",
     ]
     assert llm_policy.get("max_tool_invocations") == 5
+    assert llm_policy.get("context_messages_context_key") == "augmented_context"
+    assert "conversation_situation" in {
+        field.get("context_key")
+        for field in llm_policy.get("context_fields") or []
+    }
     response_contract = llm_policy.get("response_contract_text")
     assert isinstance(response_contract, str)
     assert "Once the five required evidence tools have succeeded" in response_contract

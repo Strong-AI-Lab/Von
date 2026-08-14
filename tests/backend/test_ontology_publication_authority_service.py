@@ -423,6 +423,44 @@ def test_mutation_receipt_reconciles_and_replays_idempotently(
     assert receipts.count_documents({}) == 1
 
 
+def test_indeterminate_receipt_can_be_finalised_by_exact_later_reconciliation(
+    authority_stores,
+) -> None:
+    service, _delegations, receipts = authority_stores
+    now = datetime.now(UTC)
+    receipts.insert_one(
+        {
+            "schema_version": service.RECEIPT_SCHEMA_VERSION,
+            "receipt_id": "omr-later-proof",
+            "actor_concept_id": "#V#admin",
+            "intent_fingerprint": "intent-proof-1",
+            "status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "changed": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    with service.override_current_actor("#V#admin", None):
+        reconciled = service.reconcile_indeterminate_mutation_receipt(
+            receipt_id="omr-later-proof",
+            intent_fingerprint="intent-proof-1",
+            canonical_read_back={"concepts": [{"concept_id": "#V#person_a"}]},
+            response_projection={
+                "success": True,
+                "effect_status": "succeeded",
+            },
+        )
+
+    assert reconciled is not None
+    assert reconciled["status"] == "succeeded"
+    assert reconciled["changed"] is True
+    stored = receipts.find_one({"receipt_id": "omr-later-proof"})
+    assert stored["reconciled_from_status"] == "indeterminate"
+    assert stored["response_effect_status"] == "succeeded"
+
+
 def test_agent_without_delegation_and_raw_payload_actor_fail_closed(
     authority_stores,
     monkeypatch,

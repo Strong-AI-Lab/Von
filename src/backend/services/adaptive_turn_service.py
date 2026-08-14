@@ -4206,6 +4206,17 @@ def _effect_requires_turn_finality(
         return False
     if capability_kind != "represented_workflow":
         return True
+    if (
+        effect_status == "succeeded"
+        and isinstance(raw_payload, Mapping)
+        and raw_payload.get("operational_state_effect") is True
+        and raw_payload.get("semantic_effect") is False
+    ):
+        # A represented workflow can terminate successfully by returning a
+        # typed clarification or another explicitly non-semantic outcome. Its
+        # durable instance is real operational state, but it is not a completed
+        # user-domain effect and must not be counted as one.
+        return False
     return not (effect_status == "not_started" and changed is False and not instance_id)
 
 
@@ -5034,6 +5045,10 @@ def execute_adaptive_turn(
         canonical_readback: Mapping[str, Any] | None = None,
         late_observation: Mapping[str, Any] | None = None,
         evidence_id: str | None = None,
+        execution_method: str | None = None,
+        effective_arguments: Mapping[str, Any] | None = None,
+        original_result: Mapping[str, Any] | None = None,
+        result_target_ids: Sequence[str] | None = None,
     ) -> None:
         nonlocal effect_state_generation
         with effect_state_lock:
@@ -5050,7 +5065,18 @@ def execute_adaptive_turn(
                 "instance_id": instance_id,
                 "workflow_id": workflow_id,
                 "evidence_id": evidence_id,
+                "execution_method": execution_method,
             }
+            if effective_arguments is not None:
+                state["effective_arguments"] = dict(effective_arguments)
+            if original_result is not None:
+                state["original_result"] = dict(original_result)
+            if result_target_ids:
+                state["result_target_ids"] = [
+                    str(item).strip()
+                    for item in result_target_ids
+                    if isinstance(item, str) and str(item).strip()
+                ]
             if canonical_readback is not None:
                 state["canonical_readback"] = dict(canonical_readback)
             if late_observation is not None:
@@ -5076,6 +5102,10 @@ def execute_adaptive_turn(
                     "instance_id",
                     "workflow_id",
                     "canonical_readback",
+                    "execution_method",
+                    "effective_arguments",
+                    "original_result",
+                    "result_target_ids",
                 ):
                     if not state.get(identity_field) and existing.get(identity_field):
                         state[identity_field] = existing[identity_field]
@@ -5088,6 +5118,160 @@ def execute_adaptive_turn(
                         state[recovery_field] = existing[recovery_field]
             effect_states[effect_id] = state
             effect_state_generation += 1
+
+    def reconcile_indeterminate_ontology_effects() -> None:
+        """Resolve exact ontology postconditions once more before terminal output."""
+
+        nonlocal effect_state_generation
+        with effect_state_lock:
+            candidates = [
+                (effect_id, dict(state))
+                for effect_id, state in effect_states.items()
+                if state.get("effect_status") == "indeterminate"
+                and state.get("turn_finality_required") is not False
+                and isinstance(state.get("original_result"), Mapping)
+                and state["original_result"].get("outcome_finality")
+                == "requires_canonical_reconciliation"
+                and isinstance(
+                    state["original_result"].get("postcondition_reconciliation"),
+                    Mapping,
+                )
+                and state["original_result"]["postcondition_reconciliation"].get(
+                    "schema_version"
+                )
+                == "ontology_mutation_postcondition_reconciliation.v1"
+            ]
+        if not candidates:
+            return
+        from src.backend.services.ontology_mutation_command_service import (
+            reconcile_governed_ontology_postcondition,
+        )
+
+        for effect_id, candidate in candidates:
+            method_name = str(candidate.get("execution_method") or "").strip()
+            arguments = candidate.get("effective_arguments")
+            original_result = candidate.get("original_result")
+            if not isinstance(arguments, Mapping) or not isinstance(
+                original_result, Mapping
+            ):
+                continue
+            try:
+                with override_current_actor(
+                    scope.user_concept_id,
+                    scope.organisation_concept_id,
+                ):
+                    reconciliation = reconcile_governed_ontology_postcondition(
+                        method_name=method_name,
+                        arguments=arguments,
+                        original_result=original_result,
+                    )
+            except Exception as exc:  # noqa: BLE001 - unresolved remains indeterminate
+                reconciliation = {
+                    "success": False,
+                    "verified": False,
+                    "error_code": "ontology_reconciliation_unavailable",
+                    "exception_type": type(exc).__name__,
+                }
+            verified = reconciliation.get("verified") is True
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_ontology_postcondition_reconciliation",
+                    "schema_version": (
+                        "adaptive_turn_ontology_postcondition_reconciliation.v1"
+                    ),
+                    "effect_id": effect_id,
+                    "method_name": method_name,
+                    "verified": verified,
+                    "receipt_id": reconciliation.get("receipt_id"),
+                    "error_code": reconciliation.get("error_code"),
+                }
+            )
+            if not verified:
+                continue
+            envelope = evidence_store.record(
+                f"{method_name}_canonical_reconciliation",
+                f"{effect_id}:canonical_reconciliation",
+                reconciliation,
+                provenance={
+                    "namespace": scope.namespace,
+                    "user_concept_id": scope.user_concept_id,
+                    "organisation_concept_id": scope.organisation_concept_id,
+                    "effect_id": effect_id,
+                    "effect_status": "succeeded",
+                    "reconciliation": True,
+                },
+                status="succeeded",
+            )
+            target_ids = [
+                str(item).strip()
+                for item in reconciliation.get("target_concept_ids") or ()
+                if isinstance(item, str) and str(item).strip()
+            ]
+            canonical_projection = {
+                "schema_version": "ontology_mutation_canonical_reconciliation.v1",
+                "status": "verified",
+                "verified": True,
+                "method_name": method_name,
+                "receipt_id": reconciliation.get("receipt_id"),
+                "intent_fingerprint": reconciliation.get("intent_fingerprint"),
+                "target_concept_ids": target_ids,
+                "evidence_id": envelope.evidence_id,
+            }
+            with effect_state_lock:
+                current = effect_states.get(effect_id)
+                if (
+                    current is None
+                    or current.get("effect_status") != "indeterminate"
+                    or int(current.get("phase") or 0) > 2
+                ):
+                    continue
+                current.update(
+                    {
+                        "phase": 2,
+                        "initial_effect_status": "indeterminate",
+                        "initial_changed": current.get("changed"),
+                        "effect_status": "succeeded",
+                        "changed": True,
+                        "recovery_status": "succeeded",
+                        "reconciliation_status": "canonically_verified",
+                        "reconciliation_evidence_id": envelope.evidence_id,
+                        "canonical_readback": canonical_projection,
+                        "result_target_ids": target_ids
+                        or list(current.get("result_target_ids") or ()),
+                    }
+                )
+                effect_state_generation += 1
+            try:
+                persist_effect_observation_phase(
+                    effect_id=effect_id,
+                    phase="canonical_reconciliation",
+                    observation={
+                        "schema_version": (
+                            "ontology_mutation_canonical_reconciliation.v1"
+                        ),
+                        "effect_status": "succeeded",
+                        "changed": True,
+                        "method_name": method_name,
+                        "receipt_id": reconciliation.get("receipt_id"),
+                        "intent_fingerprint": reconciliation.get(
+                            "intent_fingerprint"
+                        ),
+                        "target_concept_ids": target_ids,
+                        "evidence_id": envelope.evidence_id,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - receipt is already durable
+                aux_calls.append(
+                    {
+                        "type": "effect_observation_persistence_failure",
+                        "schema_version": (
+                            "effect_observation_persistence_failure.v1"
+                        ),
+                        "effect_id": effect_id,
+                        "phase": "canonical_reconciliation",
+                        "reason": type(exc).__name__,
+                    }
+                )
 
     def reconcile_workflow_instance_readback(
         *,
@@ -5318,6 +5502,7 @@ def execute_adaptive_turn(
                     "user-visible answer."
                 )
         model_answer_completed = status == "completed"
+        reconcile_indeterminate_ontology_effects()
         with effect_state_lock:
             effect_snapshot = {
                 effect_id: dict(state) for effect_id, state in effect_states.items()
@@ -5420,6 +5605,29 @@ def execute_adaptive_turn(
                     )
                 if state.get("recovery_status"):
                     invocation["recovery_status"] = state.get("recovery_status")
+                if state.get("reconciliation_status"):
+                    invocation["reconciliation_status"] = state.get(
+                        "reconciliation_status"
+                    )
+                    invocation["status"] = "ok"
+                    invocation["mutation_outcome"] = "succeeded"
+                    invocation["outcome_finality"] = "terminal_for_turn"
+                    if invocation.get("error_code"):
+                        invocation["initial_error_code"] = invocation.get("error_code")
+                        invocation.pop("error_code", None)
+                if state.get("initial_effect_status"):
+                    invocation["initial_effect_status"] = state.get(
+                        "initial_effect_status"
+                    )
+                    invocation["initial_changed"] = state.get("initial_changed")
+                if state.get("reconciliation_evidence_id"):
+                    invocation["reconciliation_evidence_id"] = state.get(
+                        "reconciliation_evidence_id"
+                    )
+                if state.get("result_target_ids"):
+                    invocation["result_target_ids"] = list(
+                        state.get("result_target_ids") or ()
+                    )
                 if isinstance(state.get("late_observation"), Mapping):
                     invocation["late_completion"] = dict(state["late_observation"])
                 if isinstance(state.get("canonical_readback"), Mapping):
@@ -6591,6 +6799,7 @@ def execute_adaptive_turn(
                         arguments,
                         prompt=prompt,
                         context=current_context,
+                        conversation_situation=conversation_situation,
                         request_workflow_launch_inputs=workflow_launch_inputs,
                         user_concept_id=scope.user_concept_id,
                         organisation_concept_id=scope.organisation_concept_id,
@@ -7274,6 +7483,11 @@ def execute_adaptive_turn(
                 canonical_name = contained_result.capability_name
                 is_effect = contained_result.is_effect
                 semantic_effect = contained_result.semantic_effect
+                if (
+                    isinstance(raw_payload, Mapping)
+                    and isinstance(raw_payload.get("semantic_effect"), bool)
+                ):
+                    semantic_effect = raw_payload["semantic_effect"]
                 execution_method_name = contained_result.execution_method_name
                 effect_identifier = (
                     _effect_id(
@@ -7468,6 +7682,12 @@ def execute_adaptive_turn(
                             else None
                         ),
                         canonical_readback=canonical_effect_readback,
+                        execution_method=execution_method_name,
+                        effective_arguments=arguments,
+                        original_result=(
+                            raw_payload if isinstance(raw_payload, Mapping) else None
+                        ),
+                        result_target_ids=result_target_ids,
                     )
                     remember_recovery_affordance(
                         effect_id=effect_identifier,
@@ -7498,6 +7718,7 @@ def execute_adaptive_turn(
                             "durable_submission_status",
                             "final_status",
                             "created_new",
+                            "semantic_outcome",
                         ):
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
@@ -7602,6 +7823,7 @@ def execute_adaptive_turn(
                             "durable_submission_status",
                             "final_status",
                             "created_new",
+                            "semantic_outcome",
                         ):
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
@@ -7731,6 +7953,12 @@ def execute_adaptive_turn(
                         completed_progress["progress_facts"] = list(progress_facts)
                 _emit(progress_tracker, completed_progress)
 
+        # A batch can contain the original write plus the exact supporting
+        # writes/reads that make its postcondition provable. Reconcile before
+        # the next model call so it receives the latest canonical outcome, not
+        # a stale indeterminate envelope. ``finish`` repeats this bounded read
+        # for terminal paths that do not return to the model loop.
+        reconcile_indeterminate_ontology_effects()
         correlated_results = [
             result for result in batch_results if isinstance(result, ToolResult)
         ]
@@ -7741,6 +7969,60 @@ def execute_adaptive_turn(
                 or "A capability result could not be correlated to its model call.",
                 status=terminal_status,
             )
+        invocation_by_call_id = {
+            str(item.get("call_id") or ""): item
+            for item in tool_invocations
+            if isinstance(item, Mapping) and item.get("call_id")
+        }
+        with effect_state_lock:
+            reconciled_states = {
+                effect_id: dict(state)
+                for effect_id, state in effect_states.items()
+                if state.get("reconciliation_status") == "canonically_verified"
+            }
+        reconciled_results: list[ToolResult] = []
+        for result in correlated_results:
+            invocation = invocation_by_call_id.get(result.call_id)
+            effect_id = (
+                str(invocation.get("effect_id") or "").strip()
+                if isinstance(invocation, Mapping)
+                else ""
+            )
+            state = reconciled_states.get(effect_id)
+            if state is None or not isinstance(result.output, Mapping):
+                reconciled_results.append(result)
+                continue
+            output = dict(result.output)
+            if output.get("error_code"):
+                output["initial_error_code"] = output.get("error_code")
+                output.pop("error_code", None)
+            output.update(
+                {
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "mutation_outcome": "succeeded",
+                    "outcome_finality": "terminal_for_turn",
+                    "reconciliation_status": "canonically_verified",
+                    "reconciliation_evidence_id": state.get(
+                        "reconciliation_evidence_id"
+                    ),
+                    "canonical_readback": dict(
+                        state.get("canonical_readback") or {}
+                    ),
+                    "result_target_ids": list(
+                        state.get("result_target_ids") or ()
+                    ),
+                }
+            )
+            reconciled_results.append(
+                ToolResult(
+                    call_id=result.call_id,
+                    tool_name=result.tool_name,
+                    output=output,
+                    status="ok",
+                )
+            )
+        correlated_results = reconciled_results
         bounded_results = _bound_tool_results_for_model(correlated_results)
         if bounded_results is None:
             aux_calls.append(

@@ -25,6 +25,7 @@ from ..security.visibility_predicates import (
     SPECIFIC_TO_ORG_PREDICATES_READ,
     SPECIFIC_TO_USER_PREDICATES,
 )
+from .concept_predicate_metadata_service import get_structural_inverse_map
 from .ontology_publication_authority_service import (
     RESERVED_GENERIC_MUTATION_PREDICATES,
     OntologyMutationIntent,
@@ -40,8 +41,8 @@ from .ontology_publication_authority_service import (
     ontology_authority_resource_keys,
     ontology_mutation_resource_lock,
     publication_context_for_creation,
+    reconcile_indeterminate_mutation_receipt,
 )
-from .concept_predicate_metadata_service import get_structural_inverse_map
 from .relationship_write_service import (
     CORE_RELATIONSHIP_TEXT_PREDICATES,
     is_structural_predicate,
@@ -1957,6 +1958,205 @@ def _verify_method_postcondition(
     return False
 
 
+def _postcondition_reconciliation_contract(
+    *,
+    method_name: str,
+    intent: OntologyMutationIntent,
+) -> dict[str, Any]:
+    """Carry the immutable verified intent needed for a later exact read."""
+
+    return {
+        "schema_version": "ontology_mutation_postcondition_reconciliation.v1",
+        "method_name": _clean_text(method_name),
+        "intent_fingerprint": intent.fingerprint,
+        "intent": intent.canonical_payload(),
+    }
+
+
+def _publication_context_from_payload(value: Any) -> PublicationContext | None:
+    if not isinstance(value, Mapping):
+        return None
+    from .ontology_publication_authority_service import PublicationContextKind
+
+    try:
+        kind = PublicationContextKind(_clean_text(value.get("kind")))
+    except ValueError:
+        return None
+    historical_predicates = tuple(
+        _clean_text(item)
+        for item in value.get("historical_predicates") or ()
+        if _clean_text(item)
+    )
+    return PublicationContext(
+        kind=kind,
+        concept_id=_normalise_concept_id(value.get("concept_id")),
+        source=_clean_text(value.get("source")) or "resolved",
+        historical_predicates=historical_predicates,
+    )
+
+
+def _intent_from_postcondition_reconciliation_contract(
+    value: Any,
+) -> OntologyMutationIntent | None:
+    if not isinstance(value, Mapping) or value.get("schema_version") != (
+        "ontology_mutation_postcondition_reconciliation.v1"
+    ):
+        return None
+    payload = value.get("intent")
+    if not isinstance(payload, Mapping):
+        return None
+    publication_context = _publication_context_from_payload(
+        payload.get("publication_context")
+    )
+    if publication_context is None:
+        return None
+    source_contexts: list[PublicationContext] = []
+    for raw_context in payload.get("source_contexts") or ():
+        context = _publication_context_from_payload(raw_context)
+        if context is None:
+            return None
+        source_contexts.append(context)
+    intent = OntologyMutationIntent(
+        operation=_clean_text(payload.get("operation")),
+        publication_context=publication_context,
+        target_concept_ids=tuple(
+            concept_id
+            for concept_id in (
+                _normalise_concept_id(item)
+                for item in payload.get("target_concept_ids") or ()
+            )
+            if concept_id
+        ),
+        tool_name=_clean_text(payload.get("tool_name")) or None,
+        predicate=_normalise_predicate(payload.get("predicate")),
+        source_contexts=tuple(source_contexts),
+        delta=dict(payload.get("delta") or {}),
+    )
+    expected_fingerprint = _clean_text(value.get("intent_fingerprint"))
+    if not expected_fingerprint or intent.fingerprint != expected_fingerprint:
+        return None
+    return intent
+
+
+def reconcile_governed_ontology_postcondition(
+    *,
+    method_name: str,
+    arguments: Mapping[str, Any],
+    original_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-read and prove an earlier indeterminate ontology mutation exactly.
+
+    No mutation is retried.  The original command's immutable intent contract
+    and authority receipt are required, then the same method verifier is run
+    over current canonical state.  A successful proof also advances the
+    durable operational receipt from indeterminate to succeeded.
+    """
+
+    method = _clean_text(method_name)
+    contract = original_result.get("postcondition_reconciliation")
+    intent = _intent_from_postcondition_reconciliation_contract(contract)
+    authority_receipt = original_result.get("authority_receipt")
+    authority_receipt = (
+        authority_receipt if isinstance(authority_receipt, Mapping) else {}
+    )
+    if (
+        intent is None
+        or method != intent.tool_name
+        or method != _clean_text((contract or {}).get("method_name"))
+        or authority_receipt.get("intent_fingerprint") != intent.fingerprint
+        or _clean_text(authority_receipt.get("status")) != "indeterminate"
+    ):
+        return {
+            "success": False,
+            "verified": False,
+            "error_code": "ontology_reconciliation_contract_invalid",
+        }
+    try:
+        reconciliation_arguments = resolve_governed_ontology_arguments(
+            method,
+            normalise_governed_ontology_arguments(method, arguments),
+        )
+    except OntologyMutationCommandError:
+        reconciliation_arguments = None
+    if (
+        reconciliation_arguments is None
+        or intent.delta.get("effect_arguments_sha256")
+        != _effect_arguments_sha256(reconciliation_arguments)
+    ):
+        return {
+            "success": False,
+            "verified": False,
+            "error_code": "ontology_reconciliation_contract_invalid",
+        }
+
+    result_hint = dict(original_result)
+    result_hint.update({"success": True, "changed": True})
+    if method == "create_concepts":
+        expected_concept_id = _normalise_concept_id(
+            intent.delta.get("expected_concept_id")
+        )
+        result_hint["created_concept_ids"] = (
+            [expected_concept_id] if expected_concept_id else []
+        )
+    try:
+        canonical_state = canonical_read_back_for_method(
+            method_name=method,
+            arguments=reconciliation_arguments,
+            result=result_hint,
+        )
+        verified = _verify_method_postcondition(
+            method_name=method,
+            intent=intent,
+            result=result_hint,
+            canonical_state=canonical_state,
+        )
+    except Exception:
+        logger.exception("Governed ontology postcondition reconciliation failed")
+        return {
+            "success": False,
+            "verified": False,
+            "error_code": "ontology_reconciliation_read_failed",
+        }
+    if not verified:
+        return {
+            "success": True,
+            "verified": False,
+            "receipt_id": authority_receipt.get("receipt_id"),
+            "intent_fingerprint": intent.fingerprint,
+            "target_concept_ids": list(intent.target_concept_ids),
+            "canonical_read_back": canonical_state,
+        }
+
+    receipt = reconcile_indeterminate_mutation_receipt(
+        receipt_id=_clean_text(authority_receipt.get("receipt_id")),
+        intent_fingerprint=intent.fingerprint,
+        canonical_read_back=canonical_state,
+        response_projection={
+            **result_hint,
+            "effect_status": "succeeded",
+            "mutation_outcome": "succeeded",
+            "outcome_finality": "terminal_for_turn",
+        },
+    )
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "succeeded":
+        return {
+            "success": False,
+            "verified": False,
+            "error_code": "ontology_reconciliation_receipt_not_finalised",
+        }
+    return {
+        "success": True,
+        "verified": True,
+        "status": "verified",
+        "method_name": method,
+        "receipt_id": receipt.get("receipt_id"),
+        "intent_fingerprint": intent.fingerprint,
+        "target_concept_ids": list(intent.target_concept_ids),
+        "canonical_read_back": canonical_state,
+        "authority_receipt": dict(receipt),
+    }
+
+
 def execute_governed_ontology_method(
     *,
     method_name: str,
@@ -2202,7 +2402,7 @@ def execute_governed_ontology_method(
                 "error": "Another ontology mutation is already in progress.",
             }
 
-    return execute_authorised_ontology_mutation(
+    outcome = execute_authorised_ontology_mutation(
         intent=intent,
         mutate=perform,
         read_before=lambda: canonical_read_back_for_method(
@@ -2222,6 +2422,20 @@ def execute_governed_ontology_method(
         ),
         preview=preview,
     )
+    if outcome.get("effect_status") == "indeterminate" or outcome.get(
+        "mutation_outcome"
+    ) in {"unknown", "partial"}:
+        outcome.setdefault(
+            "outcome_finality",
+            "requires_canonical_reconciliation",
+        )
+        outcome["postcondition_reconciliation"] = (
+            _postcondition_reconciliation_contract(
+                method_name=method_name,
+                intent=intent,
+            )
+        )
+    return outcome
 
 
 def issue_same_turn_method_delegation(
@@ -2329,6 +2543,7 @@ __all__ = [
     "is_ontology_mutation_method",
     "issue_same_turn_method_delegation",
     "normalise_governed_ontology_arguments",
+    "reconcile_governed_ontology_postcondition",
     "resolve_governed_ontology_arguments",
     "scope_read_back",
 ]

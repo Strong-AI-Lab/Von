@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from src.backend.security.access_control import override_current_actor
-
 
 WORKFLOW_TURN_CAPABILITY_SCHEMA_VERSION = "workflow_turn_capability.v1"
 WORKFLOW_TURN_DISCOVERY_SCHEMA_VERSION = "workflow_turn_capability_discovery.v1"
@@ -28,6 +28,7 @@ _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS = frozenset(
         "actor_concept_id",
         "actor_user_concept_id",
         "augmented_context",
+        "conversation_situation",
         "namespace",
         "org_concept_id",
         "organisation_concept_id",
@@ -55,6 +56,27 @@ _MODEL_WORKFLOW_CONTROL_ARGUMENTS = frozenset(
 _TERMINAL_SUCCESS_STATUSES = frozenset({"completed", "succeeded", "success"})
 _TERMINAL_FAILURE_STATUSES = frozenset(
     {"cancelled", "canceled", "failed", "rejected", "terminated"}
+)
+
+_WORKFLOW_SEMANTIC_OUTCOMES = frozenset(
+    {
+        "blocked",
+        "clarification_required",
+        "completed",
+        "failed",
+        "follow_up_required",
+        "not_completed",
+        "partial",
+    }
+)
+
+_WORKFLOW_NON_EFFECT_OUTCOMES = frozenset(
+    {
+        "blocked",
+        "clarification_required",
+        "failed",
+        "not_completed",
+    }
 )
 
 
@@ -642,6 +664,7 @@ def build_workflow_execution_arguments(
     *,
     prompt: str,
     context: Sequence[Mapping[str, Any]] | None,
+    conversation_situation: str | None,
     request_workflow_launch_inputs: Mapping[str, Any] | None,
     user_concept_id: str,
     organisation_concept_id: str | None,
@@ -711,6 +734,9 @@ def build_workflow_execution_arguments(
     context_projection = _bounded_context_projection(context)
     if context_projection:
         launch_inputs["augmented_context"] = context_projection
+    clean_situation = str(conversation_situation or "").strip()
+    if clean_situation:
+        launch_inputs["conversation_situation"] = clean_situation[:24_000]
 
     try:
         requested_wait = float(model_arguments.get("timeout_seconds", 60.0))
@@ -846,6 +872,54 @@ def normalise_workflow_effect_receipt(
     else:
         effect_status = "partial" if instance_id is not None else "failed"
 
+    workflow_execution = receipt.get("workflow_execution")
+    workflow_outputs = (
+        workflow_execution.get("outputs")
+        if isinstance(workflow_execution, Mapping)
+        and isinstance(workflow_execution.get("outputs"), Mapping)
+        else None
+    )
+    if workflow_outputs is None and isinstance(workflow_instance, Mapping):
+        candidate_outputs = workflow_instance.get("outputs")
+        workflow_outputs = (
+            candidate_outputs if isinstance(candidate_outputs, Mapping) else None
+        )
+    explicit_semantic_outcome = (
+        _normalise_non_empty_text(workflow_outputs.get("semantic_outcome"))
+        if isinstance(workflow_outputs, Mapping)
+        else None
+    )
+    if explicit_semantic_outcome:
+        explicit_semantic_outcome = explicit_semantic_outcome.lower().replace(" ", "_")
+    clarification_required = bool(
+        effect_status == "succeeded"
+        and isinstance(workflow_outputs, Mapping)
+        and (
+            workflow_outputs.get("requires_user_affirmation") is True
+            or workflow_outputs.get("needs_user_affirmation") is True
+            or explicit_semantic_outcome == "clarification_required"
+        )
+    )
+    if effect_status != "succeeded":
+        semantic_outcome = "not_completed"
+    elif clarification_required:
+        semantic_outcome = "clarification_required"
+    elif explicit_semantic_outcome in _WORKFLOW_SEMANTIC_OUTCOMES:
+        semantic_outcome = explicit_semantic_outcome
+    elif (
+        isinstance(workflow_outputs, Mapping)
+        and workflow_outputs.get("follow_up_required") is True
+    ):
+        semantic_outcome = "follow_up_required"
+    else:
+        semantic_outcome = "completed"
+    semantic_effect = (
+        False
+        if effect_status == "succeeded"
+        and semantic_outcome in _WORKFLOW_NON_EFFECT_OUTCOMES
+        else capability.semantic_effect
+    )
+
     receipt.update(
         {
             "workflow_turn_receipt_schema_version": (
@@ -856,7 +930,8 @@ def normalise_workflow_effect_receipt(
             "workflow_id": capability.workflow_id,
             "effect_status": effect_status,
             "changed": changed,
-            "semantic_effect": capability.semantic_effect,
+            "semantic_effect": semantic_effect,
+            "semantic_outcome": semantic_outcome,
             "operational_state_effect": True,
             "mutation_outcome": (
                 "completed"

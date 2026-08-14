@@ -2,7 +2,7 @@
   "family_id": "represented_artefact_creation_workflow_seed_bundle",
   "managed_by": "represented_artefact_creation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
+  "seed_version": "9",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#represented_artefact_creation_workflow": {
       "5": [
@@ -12,6 +12,9 @@
         "8d8667342c20b0f97b99ee48bfb9e875568b28ba5ea022d17fd8a69891f3d2db"
       ],
       "7": [
+        "76a561b09bf0e4ae165ffb25e775373ef8afb1d79a7cee0859aac2212a28d0f9"
+      ],
+      "8": [
         "76a561b09bf0e4ae165ffb25e775373ef8afb1d79a7cee0859aac2212a28d0f9"
       ]
     },
@@ -65,6 +68,20 @@
             "extractor": "identity",
             "required": false,
             "description": "Alias for prompts and replay tooling that use user_prompt."
+          },
+          {
+            "target_context_key": "augmented_context",
+            "source_expression": "inputs.augmented_context",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry bounded prior-turn messages when the represented artefact was specified conversationally."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry the server-projected shared situation into the parent planning boundary only."
           }
         ]
       },
@@ -110,10 +127,15 @@
               "required_tools": [],
               "max_tool_invocations": 4,
               "policy_stage": "represented_artefact_set_extraction",
+              "context_messages_context_key": "augmented_context",
               "context_fields": [
                 {
                   "context_key": "prompt",
                   "label": "Current represented-artefact request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Shared conversation situation for resolving prior artefact specifications and referents"
                 },
                 {
                   "context_key": "user_prompt",
@@ -242,10 +264,15 @@
                 "search_concepts",
                 "fetch_concept"
               ],
+              "context_messages_context_key": "augmented_context",
               "context_fields": [
                 {
                   "context_key": "prompt",
                   "label": "Current represented-artefact request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Shared conversation situation for resolving prior artefact specifications and referents"
                 },
                 {
                   "context_key": "user_prompt",

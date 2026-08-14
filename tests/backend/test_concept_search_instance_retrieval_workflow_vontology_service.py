@@ -87,6 +87,12 @@ def test_bootstrap_materialises_concept_search_instance_retrieval_workflow(
     assert isinstance(launch_contract, dict)
     assert launch_source.startswith("text_relation:")
     assert launch_contract.get("required_inputs") == ["prompt"]
+    launch_sources = {
+        mapping.get("source_expression")
+        for mapping in launch_contract.get("input_mappings") or []
+    }
+    assert "inputs.augmented_context" in launch_sources
+    assert "inputs.conversation_situation" in launch_sources
 
     required_effects_contract = definition.metadata.get("required_effects_contract")
     assert isinstance(required_effects_contract, dict)
@@ -129,6 +135,11 @@ def test_bootstrap_materialises_concept_search_instance_retrieval_workflow(
         "find_relations_with_argument",
     ]
     assert llm_policy.get("max_tool_invocations") == 6
+    assert llm_policy.get("context_messages_context_key") == "augmented_context"
+    assert "conversation_situation" in {
+        field.get("context_key")
+        for field in llm_policy.get("context_fields") or []
+    }
 def test_concept_search_instance_retrieval_prompt_support_seeds_content(
     _reset_mock_db: Any,
 ) -> None:

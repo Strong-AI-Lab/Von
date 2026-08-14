@@ -113,6 +113,12 @@ def _base_prompt_from_intake(
         if prompt_id:
             return prompt_id
 
+    applied_prompt_ids = _normalise_strings(
+        _first_path(failure_case_intake, ("prompt_metadata", "applied_prompt_ids"))
+    )
+    if applied_prompt_ids:
+        return applied_prompt_ids[0]
+
     prompt_ids = _normalise_strings(
         _first_path(failure_case_intake, ("prompt_metadata", "prompt_ids"))
     )

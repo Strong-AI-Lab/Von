@@ -1240,6 +1240,11 @@ def run_turn_execution_critic(
         ),
         method_catalogue=method_catalogue,
         workflow_failure_evidence=data,
+        applied_prompt_snapshot=(
+            data.get("applied_prompt_snapshot")
+            if isinstance(data.get("applied_prompt_snapshot"), Mapping)
+            else None
+        ),
     )
 
     completion_gate = turn_execution_record.get("completion_gate")

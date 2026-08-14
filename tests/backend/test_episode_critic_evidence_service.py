@@ -1,7 +1,22 @@
 from types import SimpleNamespace
 
+from src.backend.services.chat_auxiliary_prompt_service import (
+    build_applied_prompt_snapshot,
+)
+
 
 def _sample_llm_debug() -> dict:
+    applied_prompt_snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#user",
+        namespace="#V#user@org",
+        organisation_concept_id="#V#org",
+        turn_id="req-critic-1",
+        behaviour_fragments=[
+            {"concept_id": "#V#critic_prompt", "content": "Be precise."}
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
     return {
         "request_id": "req-critic-1",
         "model": "gpt-5.4-mini",
@@ -27,6 +42,7 @@ def _sample_llm_debug() -> dict:
         "llm_allowed_tools": ["search_concepts"],
         "allowed_write_tools": [],
         "aux_llm_calls": [{"model": "gpt-5.4-mini", "prompt": "x", "response": "y"}],
+        "applied_prompt_snapshot": applied_prompt_snapshot,
     }
 
 
@@ -96,9 +112,13 @@ def test_episode_critic_bundle_reconstructs_turn_record_and_emits_receipts(monke
         == "chat_history.reconstructed_turn_execution_record"
     )
     assert result["observed_evidence"]["turn_execution_record"]["request_id"] == "req-critic-1"
+    assert result["observed_evidence"]["applied_prompt_snapshot"]["prompts"][0][
+        "concept_id"
+    ] == "#V#critic_prompt"
     assert result["observed_evidence"]["tool_ledger"]["search_evidence_count"] == 1
     assert result["expected_context"]["allowed_tool_families"] == ["search"]
     assert result["receipts"]["turn_execution_record"]["present"] is True
+    assert result["receipts"]["applied_prompt_snapshot"]["present"] is True
     assert result["bundle_receipt"]["sha256"]
 
 

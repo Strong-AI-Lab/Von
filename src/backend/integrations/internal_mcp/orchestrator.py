@@ -10454,6 +10454,11 @@ class InternalMCPChatOrchestrator:
                 if isinstance(data.get("required_prompt_tools"), list)
                 else None
             ),
+            applied_prompt_snapshot=(
+                data.get("applied_prompt_snapshot")
+                if isinstance(data.get("applied_prompt_snapshot"), Mapping)
+                else None
+            ),
         )
 
         completion_gate = turn_execution_record.get("completion_gate")

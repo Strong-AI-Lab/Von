@@ -2,11 +2,14 @@
   "family_id": "concept_search_instance_retrieval_workflow_seed_bundle",
   "managed_by": "concept_search_instance_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "3",
+  "seed_version": "4",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#concept_search_instance_retrieval_workflow": {
       "2": [
         "a5887e22fb952dbdc92312f1e325e6044a0365d29d319f38379000395125357c"
+      ],
+      "3": [
+        "3d008215ae98e89b3743a84795cc144292919e90df3acca5471e1e195cbe595c"
       ]
     }
   },
@@ -36,6 +39,20 @@
             "extractor": "identity",
             "required": true,
             "description": "Pass through the user's concept-profile request."
+          },
+          {
+            "target_context_key": "augmented_context",
+            "source_expression": "inputs.augmented_context",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry bounded prior-turn messages for deictic concept-profile requests."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry the server-projected shared conversation situation for focal-concept continuity."
           }
         ]
       },
@@ -110,6 +127,10 @@
                 {
                   "context_key": "prompt",
                   "label": "Current turn request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Shared conversation situation: prior referents, objectives, constraints, and unresolved questions"
                 },
                 {
                   "context_key": "user_concept_id",

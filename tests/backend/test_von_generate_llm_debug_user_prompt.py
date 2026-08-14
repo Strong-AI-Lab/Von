@@ -1,3 +1,4 @@
+import json
 
 import pytest
 from flask import Flask
@@ -38,6 +39,7 @@ def app(monkeypatch):
                 "user_concept_id": kwargs["user_concept_id"],
                 "org_concept_id": kwargs["org_concept_id"],
                 "user_namespace": kwargs["user_namespace"],
+                "trusted_argument_values": kwargs["trusted_argument_values"],
             }
         )
         return AdaptiveTurnResult(
@@ -79,21 +81,30 @@ def app(monkeypatch):
         lambda: "#V#test_user",
     )
 
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id, **kwargs: (
-            [
+    def _prompt_fragments(_user_id, **kwargs):
+        prompt_types = kwargs.get("prompt_types")
+        if prompt_types == (
+            "#V#von_chat_behaviour_prompt",
+            "#V#von_chat_behavior_prompt",
+            "#V#von_llm_prompt",
+        ):
+            return [
                 {"concept_id": "#V#prompt1", "content": "First prompt."},
                 {"concept_id": "#V#prompt2", "content": "Second prompt."},
             ]
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else []
-        ),
+        if prompt_types == ("#V#von_chat_narration_prompt",):
+            return [
+                {"concept_id": "#V#narration_prompt", "content": "Speak briefly."}
+            ]
+        if prompt_types == ("#V#von_chat_screen_content_prompt",):
+            return [
+                {"concept_id": "#V#screen_prompt", "content": "Show evidence."}
+            ]
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
+        _prompt_fragments,
     )
     monkeypatch.setattr(
         "src.backend.services.concept_service.get_concept_by_concept_id",
@@ -110,6 +121,10 @@ def app(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
         lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._load_conversation_session_state_fail_soft",
+        lambda **_kwargs: ([], None, None, 0, [], {}),
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes._ensure_generate_conversation_session",
@@ -228,6 +243,30 @@ def test_generate_includes_user_prompt_debug_metadata(app):
     )
     assert "First prompt." in injected_msg.get("content", "")
     assert "Second prompt." in injected_msg.get("content", "")
+
+    manifest_msg = next(
+        msg
+        for msg in sent_context
+        if msg.get("role") == "system"
+        and "APPLIED VONTOLOGY PROMPT MANIFEST" in msg.get("content", "")
+    )
+    assert "chat_get_applied_prompt_context" in manifest_msg["content"]
+    assert "#V#prompt1" in manifest_msg["content"]
+    assert "#V#narration_prompt" in manifest_msg["content"]
+    assert "#V#screen_prompt" in manifest_msg["content"]
+
+    trusted_values = llm_calls[0]["trusted_argument_values"]
+    snapshot = json.loads(trusted_values["applied_prompt_snapshot"])
+    assert snapshot["actor"]["user_concept_id"] == "#V#test_user"
+    assert [item["application_kind"] for item in snapshot["prompts"]] == [
+        "behaviour",
+        "behaviour",
+        "narration",
+        "screen",
+    ]
+    assert llm_debug["user_prompt"]["applied_prompt_snapshot_sha256"] == (
+        snapshot["snapshot_sha256"]
+    )
 
 
 def _messages_text(messages):
