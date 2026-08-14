@@ -125,10 +125,11 @@ describe('chat session metadata label links', () => {
         expect(header.previousElementSibling).toBe(titleEl);
     });
 
-    test('Defaults conversation context to furled when no preference is stored', () => {
+    test('Defaults conversation context to furled and ignores the legacy expanded preference', () => {
+        localStorage.setItem('von:chatSessionMetadataCollapsed', 'false');
         const { __test_only__renderChatSessionMetadataPanel } = require(chatTabModulePath);
 
-        expect(localStorage.getItem('von:chatSessionMetadataCollapsed')).toBeNull();
+        expect(localStorage.getItem('von:chatSessionMetadataCollapsed:v2')).toBeNull();
         __test_only__renderChatSessionMetadataPanel({
             sessionId: 's-default-furled',
             links: {},
@@ -146,10 +147,15 @@ describe('chat session metadata label links', () => {
         expect(toggle.title).toBe('Show conversation context');
         expect(body).toBeTruthy();
         expect(body.classList).toContain('is-collapsed');
+
+        toggle.click();
+        expect(localStorage.getItem('von:chatSessionMetadataCollapsed:v2')).toBe('false');
+        expect(metadataEl.querySelector('.chat-session-metadata-toggle')?.getAttribute('aria-expanded'))
+            .toBe('true');
     });
 
-    test('Honours a stored expanded conversation-context preference', () => {
-        localStorage.setItem('von:chatSessionMetadataCollapsed', 'false');
+    test('Honours an expanded preference chosen with the new furled-default UI', () => {
+        localStorage.setItem('von:chatSessionMetadataCollapsed:v2', 'false');
         const { __test_only__renderChatSessionMetadataPanel } = require(chatTabModulePath);
 
         __test_only__renderChatSessionMetadataPanel({

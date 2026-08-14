@@ -177,7 +177,9 @@ let chatSessionLinksSaveDebounceId = null;
 let chatSessionLinksDirtySessionId = null;
 let chatSessionLinksDirtyPayload = null;
 let chatSessionMetadataOpenKey = null;
-const LS_CHAT_SESSION_METADATA_COLLAPSED = 'von:chatSessionMetadataCollapsed';
+// Versioned so browsers carrying the former expanded-by-default preference
+// start this release furled once. Choices made with the new UI still persist.
+const LS_CHAT_SESSION_METADATA_COLLAPSED = 'von:chatSessionMetadataCollapsed:v2';
 let chatSessionMetadataCollapsed = null;
 
 const chatSessionConceptMetaCache = new Map();
