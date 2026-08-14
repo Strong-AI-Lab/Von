@@ -800,7 +800,7 @@ def _effect_gateway(
                     {
                         "organisation_concept_id": None,
                         "org_id": None,
-                        "scope_mode": "user_org_default",
+                        "scope_mode": "user_only_default",
                         "visibility_scope_mode": None,
                     }
                     if name == "create_concepts"
@@ -832,6 +832,25 @@ def _effect_gateway(
         ),
         enabled=True,
     )
+
+
+def _stub_same_turn_ontology_delegation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    """Authorise governed fake effects whose tests target turn mechanics."""
+
+    issued: list[dict[str, Any]] = []
+
+    def issue(**kwargs: Any) -> dict[str, Any]:
+        issued.append(dict(kwargs))
+        return {"delegation_id": f"test-delegation-{kwargs['effect_id']}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue,
+    )
+    return issued
 
 
 def _workflow_gateway(
@@ -2139,7 +2158,10 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
     assert allocation["model_call_hard_timeout_seconds"] is None
 
 
-def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> None:
+def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     seen: dict[str, Any] = {}
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2211,7 +2233,7 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> 
     assert seen["created_by_concept_id"] == "#V#person"
     assert seen["organisation_concept_id"] is None
     assert seen["org_id"] is None
-    assert seen["scope_mode"] == "user_org_default"
+    assert seen["scope_mode"] == "user_only_default"
     assert seen["visibility_scope_mode"] is None
 
 
@@ -2330,7 +2352,8 @@ def test_effect_subject_authority_matches_actor_or_organisation_scope(
     from src.backend.db import mongo_client
 
     class _Collection:
-        relationships: dict[str, Any] = {}
+        def __init__(self) -> None:
+            self.relationships: dict[str, Any] = {}
 
         def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
             return {"relationships": dict(self.relationships)}
@@ -2366,7 +2389,7 @@ def test_effect_subject_authority_matches_actor_or_organisation_scope(
 
 
 def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.backend.db import mongo_client
 
@@ -2377,6 +2400,7 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
             AssertionError("actor identity should not require visibility lookup")
         ),
     )
+    issued = _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[str] = []
 
     def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2423,11 +2447,15 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
     )
 
     assert invoked == ["add_relationship"]
+    assert [item["method_name"] for item in issued] == ["add_relationship"]
     assert result.tool_invocations[0]["effect_status"] == "succeeded"
     assert result.tool_invocations[0]["changed"] is True
 
 
-def test_finality_fallback_rejects_pre_reconciliation_situation() -> None:
+def test_finality_fallback_rejects_pre_reconciliation_situation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     current_situation = "The representation effect has not yet been observed."
     client = _SequenceClient(
         LLMResponse(
@@ -2533,7 +2561,10 @@ def test_model_error_after_read_rejects_interim_situation_sidecar() -> None:
     assert result.conversation_situation == current_situation
 
 
-def test_post_handler_output_validation_failure_is_indeterminate() -> None:
+def test_post_handler_output_validation_failure_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     committed: list[str] = []
 
     def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2598,7 +2629,9 @@ def test_post_handler_output_validation_failure_is_indeterminate() -> None:
 def test_effect_removes_false_draft_from_fresh_final_context(
     answer_reserve: float,
     effect_finished_at: float,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     started = time.monotonic()
     clock = _ManualClock(started)
 
@@ -2665,6 +2698,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 ) -> None:
     from src.backend.services import turn_execution_record_service
 
+    _stub_same_turn_ontology_delegation(monkeypatch)
     release_handler = Event()
     observation_persisted = Event()
     persisted: list[dict[str, Any]] = []
@@ -2746,6 +2780,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 def test_effect_uses_its_method_liveness_window_not_a_turn_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     clock = _ManualClock()
     observed_deadlines: list[float | None] = []
     gateway = _effect_gateway(
@@ -2831,6 +2866,7 @@ def test_effect_uses_its_method_liveness_window_not_a_turn_deadline(
 def test_mixed_effect_batch_preserves_order_with_independent_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     clock = _ManualClock()
     observed: list[tuple[str, float | None]] = []
     gateway = _effect_gateway(
@@ -2918,6 +2954,7 @@ def test_mixed_effect_batch_preserves_order_with_independent_admission(
 def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     clock = _ManualClock()
     invoked: list[str] = []
     gateway = _effect_gateway(
@@ -3234,6 +3271,7 @@ def test_cited_ontology_success_without_relation_readback_is_rejected(
 def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[str] = []
     gateway = _effect_gateway(
         lambda _name, _arguments: {"success": True},
@@ -3338,7 +3376,10 @@ def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     assert blocked["error_code"] == "prior_effect_outcome_indeterminate"
 
 
-def test_per_method_minimum_admits_sequential_effects_below_hard_cap() -> None:
+def test_per_method_minimum_admits_sequential_effects_below_hard_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[str] = []
 
     def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3537,8 +3578,8 @@ def test_ordinary_effect_rejects_unscoped_subject_before_handler(
     )
 
     assert invoked == []
-    assert result.tool_invocations[0]["effect_status"] == "failed"
-    assert "effect_subject_not_authorised" in (
+    assert result.tool_invocations[0]["effect_status"] == "not_started"
+    assert "ontology_mutation_target_not_accessible" in (
         result.tool_invocations[0]["evidence"]["preview"]
     )
 
@@ -3779,9 +3820,9 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     assert recovered_arguments["canonical_publication"] is False
 
     denial = result.tool_invocations[0]
-    assert denial["effect_status"] == "failed"
+    assert denial["effect_status"] == "not_started"
     preview = denial["evidence"]["preview"]
-    assert "effect_subject_not_authorised" in preview
+    assert "ontology_mutation_target_not_accessible" in preview
     assert "assert_in_actor_scope" in preview
     assert "#V#globally_visible_subject" in preview
     assert "#V#hasResearchInterest" in preview
@@ -3900,7 +3941,7 @@ def test_canonical_literal_relationship_denial_recovers_in_chosen_scope(
     assert recovered_arguments["scope_mode"] == "organisation"
     assert recovered_arguments["target_text"] == "Actor-relative observation."
     denial, recovery = result.tool_invocations
-    assert denial["effect_status"] == "failed"
+    assert denial["effect_status"] == "not_started"
     assert "target_text" in denial["evidence"]["preview"]
     assert recovery["effect_status"] == "succeeded"
     assert denial["recovery_status"] == "succeeded"
@@ -4019,11 +4060,11 @@ def test_canonical_literal_relationship_recovery_requires_same_object(
 
     denial = result.tool_invocations[0]
     unrelated_recovery = result.tool_invocations[1]
-    assert denial["effect_status"] == "failed"
+    assert denial["effect_status"] == "not_started"
     assert denial["recovery_status"] == "mismatched"
     assert denial["attempted_recovery_effect_id"] == unrelated_recovery["effect_id"]
     assert "recovered_by_effect_id" not in denial
-    assert result.terminal_status == "effect_failed"
+    assert result.terminal_status == "effect_not_started"
     assert result.response_text != "The scoped assertion was recorded."
 
 
@@ -4301,7 +4342,10 @@ def test_ordinary_relationship_effect_reserves_mail_profile_control_predicates(
     assert denial["error_code"] == "mail_profile_authority_effect_not_delegated"
 
 
-def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs() -> None:
+def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued = _stub_same_turn_ontology_delegation(monkeypatch)
     invoked: list[tuple[str, dict[str, Any]]] = []
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -4369,6 +4413,7 @@ def test_ordinary_actor_cannot_self_grant_mail_profile_but_safe_relation_runs() 
             },
         )
     ]
+    assert [item["method_name"] for item in issued] == ["add_relationship"]
     assert result.tool_invocations[0]["effect_status"] == "failed"
     assert "mail_profile_authority_effect_not_delegated" in (
         result.tool_invocations[0]["evidence"]["preview"]
@@ -6393,10 +6438,8 @@ def test_repeated_tool_results_resolve_projection_contract_once_per_turn(
 
 
 def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.backend.services import adaptive_turn_service
-
     seen: list[tuple[str, dict[str, Any]]] = []
     state = {"created": False}
 
@@ -6409,11 +6452,7 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
             return {"success": True, "created": state["created"]}
         return {"success": True, "effect_status": "succeeded", "changed": True}
 
-    monkeypatch.setattr(
-        adaptive_turn_service,
-        "_effect_subject_authorised",
-        lambda *_args: True,
-    )
+    _stub_same_turn_ontology_delegation(monkeypatch)
     client = _SequenceClient(
         LLMResponse(
             text_response="",
@@ -6476,16 +6515,10 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
 
 
 def test_relation_progress_emits_one_human_start_and_terminal_summary(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.backend.services import adaptive_turn_service
-
     progress_events: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        adaptive_turn_service,
-        "_effect_subject_authorised",
-        lambda *_args, **_kwargs: True,
-    )
+    _stub_same_turn_ontology_delegation(monkeypatch)
 
     client = _SequenceClient(
         LLMResponse(
@@ -6664,9 +6697,10 @@ def test_concept_search_progress_emits_query_and_bounded_results() -> None:
     }
 
 
-def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> (
-    None
-):
+def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     seen_cases: list[str] = []
     progress_events: list[dict[str, Any]] = []
     release_timeout_handler = Event()
@@ -6768,7 +6802,10 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
     assert not partial_progress["result_summary"].startswith("Finished ")
 
 
-def test_partial_effect_downgrades_nominal_model_completion() -> None:
+def test_partial_effect_downgrades_nominal_model_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     client = _SequenceClient(
         LLMResponse(
             text_response="",
@@ -9683,7 +9720,10 @@ def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) ->
     )
 
 
-def test_workflow_instance_readback_does_not_reconcile_unrelated_effect() -> None:
+def test_workflow_instance_readback_does_not_reconcile_unrelated_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
     instance_id = "shared-looking-instance-id"
     workflow_id = "#V#shared-looking-workflow-id"
 
@@ -10018,14 +10058,10 @@ def test_represented_workflow_retry_reuses_same_turn_idempotency_key(
 
 
 def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handler_calls: list[dict[str, Any]] = []
-
-    monkeypatch.setattr(
-        "src.backend.services.adaptive_turn_service." "_effect_subject_authorised",
-        lambda *_args, **_kwargs: True,
-    )
+    _stub_same_turn_ontology_delegation(monkeypatch)
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         assert name == "add_relationship"
