@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from src.backend.services.chat_auxiliary_prompt_service import (
+    build_applied_prompt_snapshot,
+)
 from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
 
 
@@ -77,6 +80,55 @@ def test_assess_prefers_user_namespace_for_prompt_lookup(monkeypatch):
     assert result.ok
     assert result.outputs["maintenance_context"]["prompt_lookup_namespace"] == "#V#user"
     assert lookup_calls[0] == "#V#user"
+
+
+def test_assess_retains_target_turn_applied_prompt_snapshot(monkeypatch):
+    from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
+
+    snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#user",
+        namespace="#V#user@org",
+        organisation_concept_id="#V#org",
+        turn_id="req-applied-1",
+        behaviour_fragments=[
+            {
+                "concept_id": "#V#historical_prompt",
+                "content": "Always use create_task.",
+            }
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
+
+    def _fake_invoke(tool_name: str, payload: dict):
+        if tool_name == "workflow_list_definitions":
+            return {"success": True, "count": 1, "definitions": []}
+        if tool_name == "chat_get_prompt_context":
+            return {"success": True, "behaviour_prompt_concepts": []}
+        if tool_name == "turn_execution_get":
+            return {
+                "success": True,
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "applied_prompt_snapshot": snapshot,
+            }
+        if tool_name == "fetch_concept":
+            return {"success": True, "concept_id": "#V#tool_calling_workflow"}
+        return {"success": True}
+
+    monkeypatch.setattr(mod, "_invoke_mcp_tool", _fake_invoke)
+    monkeypatch.setattr(mod, "_available_tool_names", lambda: ["task_create"])
+
+    result = mod._handle_assess_context(
+        _request(
+            action_id="workflow_introspection.assess_context",
+            data={"request_id": "req-applied-1"},
+        )
+    )
+
+    assert result.ok
+    retained = result.outputs["maintenance_evidence"]["applied_prompt_snapshot"]
+    assert retained["snapshot_sha256"] == snapshot["snapshot_sha256"]
+    assert retained["prompts"][0]["concept_id"] == "#V#historical_prompt"
 
 
 def test_assess_collects_github_evidence(monkeypatch):
@@ -239,6 +291,54 @@ def test_diagnose_detects_alias_scope_and_cross_domain_signals():
     assert "completion_gate_false_positive" in causes
 
 
+def test_diagnose_prefers_target_turn_applied_prompt_over_current_prompt():
+    from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
+
+    snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#user",
+        namespace="#V#user@org",
+        organisation_concept_id="#V#org",
+        turn_id="req-historical-prompt",
+        behaviour_fragments=[
+            {
+                "concept_id": "#V#general_prompt",
+                "content": "Always use create_task for every request.",
+            }
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
+    data = {
+        "maintenance_context": {
+            "namespace": "#V#user@org",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+        },
+        "maintenance_evidence": {
+            "incident_text": "The turn created a task for an ontology request.",
+            "known_tool_names": ["task_create"],
+            "applied_prompt_snapshot": snapshot,
+            "prompt_context": {
+                "behaviour_prompt_concepts": [
+                    {
+                        "concept_id": "#V#general_prompt",
+                        "content": "Use tools only when they fit the request.",
+                    }
+                ]
+            },
+            "turn_execution": {},
+        },
+    }
+
+    result = mod._handle_diagnose_conflation(
+        _request(action_id="workflow_introspection.diagnose_conflation", data=data)
+    )
+
+    assert result.ok
+    diagnosis = result.outputs["maintenance_diagnosis"]
+    assert diagnosis["prompt_evidence_source"] == "turn_applied_snapshot"
+    assert diagnosis["implicated_prompt_concept_ids"] == ["#V#general_prompt"]
+
+
 def test_plan_repairs_builds_prompt_patch_and_workflow_note():
     from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
 
@@ -285,6 +385,80 @@ def test_plan_repairs_builds_prompt_patch_and_workflow_note():
     tools = {item["tool_name"] for item in repair_plan["operations"]}
     assert "upsert_singleton_text_relation" in tools
     assert "upsert_text_relation" in tools
+
+
+def test_plan_repairs_does_not_overwrite_prompt_changed_since_target_turn():
+    from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
+
+    snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#user",
+        namespace="#V#user@org",
+        organisation_concept_id="#V#org",
+        turn_id="req-stale-prompt",
+        behaviour_fragments=[
+            {
+                "concept_id": "#V#general_prompt",
+                "content": "Always use create_task.",
+            }
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
+    data = {
+        "maintenance_context": {
+            "namespace": "#V#user@org",
+            "request_id": "req-stale-prompt",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "apply_repairs": True,
+            "dry_run": False,
+            "max_operations": 10,
+        },
+        "maintenance_evidence": {
+            "applied_prompt_snapshot": snapshot,
+            "prompt_context": {
+                "behaviour_prompt_concepts": [
+                    {
+                        "concept_id": "#V#general_prompt",
+                        "content": "Use task_create only for explicit task requests.",
+                    }
+                ]
+            },
+        },
+        "maintenance_diagnosis": {
+            "conflation_detected": True,
+            "root_causes": [{"cause_id": "prompt_scope_overreach"}],
+            "implicated_prompt_concept_ids": ["#V#general_prompt"],
+            "directive_findings": [
+                {
+                    "prompt_concept_id": "#V#general_prompt",
+                    "tool_name": "create_task",
+                    "canonical_tool_name": "task_create",
+                    "is_absolute": True,
+                    "scope_overreach": True,
+                }
+            ],
+        },
+    }
+
+    result = mod._handle_plan_repairs(
+        _request(action_id="workflow_introspection.plan_repairs", data=data)
+    )
+
+    assert result.ok
+    plan = result.outputs["maintenance_repair_plan"]
+    assert plan["prompt_evidence_source"] == "turn_applied_snapshot"
+    assert len(plan["skipped_prompt_repairs"]) == 1
+    skipped = plan["skipped_prompt_repairs"][0]
+    assert skipped["concept_id"] == "#V#general_prompt"
+    assert skipped["reason"] == "current_prompt_changed_since_target_turn"
+    assert skipped["applied_content_sha256"] == snapshot["prompts"][0][
+        "content_sha256"
+    ]
+    assert len(skipped["current_content_sha256"]) == 64
+    assert all(
+        operation["tool_name"] != "upsert_singleton_text_relation"
+        for operation in plan["operations"]
+    )
 
 
 def test_plan_repairs_adds_jira_remediation_operation_when_evidence_available():

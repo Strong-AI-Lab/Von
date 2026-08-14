@@ -10525,11 +10525,21 @@ def build_turn_execution_record(
     tool_observation_ledger: Mapping[str, Any] | None = None,
     method_catalogue: Mapping[str, Any] | None = None,
     workflow_failure_evidence: Mapping[str, Any] | None = None,
+    applied_prompt_snapshot: Mapping[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
         user_id=user_id,
         namespace=namespace,
+    )
+    from .chat_auxiliary_prompt_service import normalise_applied_prompt_snapshot
+
+    applied_prompt_snapshot_payload = normalise_applied_prompt_snapshot(
+        applied_prompt_snapshot,
+        expected_user_concept_id=(
+            _safe_str(user_id) or resolved_actor_concept_id
+        ),
+        expected_namespace=_safe_str(namespace),
     )
     workflow_discovery_normalised = _extract_workflow_discovery(workflow_discovery)
     final_answer_synthesis = _build_final_answer_synthesis_telemetry(
@@ -11535,6 +11545,7 @@ def build_turn_execution_record(
             "sha256": _hash_text(prompt_text),
             "source": "user_message",
         },
+        "applied_prompt_snapshot": applied_prompt_snapshot_payload,
         "workflow_selection": {
             "selected_workflow_id": selected_workflow_id,
             "selector_verdict": selector_verdict,
@@ -11930,6 +11941,7 @@ def persist_failed_turn_execution_record(
     prompt_text: Any = None,
     llm_debug_info: Mapping[str, Any] | None = None,
     progress_snapshot: Mapping[str, Any] | None = None,
+    applied_prompt_snapshot: Mapping[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     """Persist a turn execution record for a turn that did not complete.
 
@@ -12020,6 +12032,11 @@ def persist_failed_turn_execution_record(
             completion_report=_debug_mapping("completion_report"),
             required_prompt_tools=_debug_list("required_prompt_tools"),
             tool_observation_ledger=_debug_mapping("tool_observation_ledger"),
+            applied_prompt_snapshot=(
+                applied_prompt_snapshot
+                or _debug_mapping("applied_prompt_snapshot")
+                or _debug_mapping("applied_prompt_provenance")
+            ),
         )
     except Exception as exc:
         logger.warning(

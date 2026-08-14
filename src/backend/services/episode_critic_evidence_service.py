@@ -23,6 +23,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from .chat_auxiliary_prompt_service import normalise_applied_prompt_snapshot
 from .chat_history_service import get_chat_history_collection_service
 from .namespace_service import coerce_namespace
 from .turn_execution_record_service import (
@@ -71,6 +72,11 @@ _SECTION_LIMITS: dict[str, dict[str, int]] = {
     "turn_execution_record": {
         "max_string_chars": 1200,
         "max_list_items": 60,
+        "max_depth": 7,
+    },
+    "applied_prompt_snapshot": {
+        "max_string_chars": 20_000,
+        "max_list_items": 20,
         "max_depth": 7,
     },
     "selected_llm_debug": {
@@ -702,6 +708,11 @@ def _reconstruct_turn_execution_record_from_history(
             llm_debug.get("aux_llm_calls")
             if isinstance(llm_debug.get("aux_llm_calls"), list)
             else []
+        ),
+        applied_prompt_snapshot=(
+            llm_debug.get("applied_prompt_snapshot")
+            if isinstance(llm_debug.get("applied_prompt_snapshot"), Mapping)
+            else None
         ),
     )
     rebuilt["reconstruction"] = {
@@ -1742,6 +1753,37 @@ def build_episode_critic_evidence_bundle(
     selected_llm_debug = _build_selected_llm_debug(
         llm_debug if isinstance(llm_debug, Mapping) else None
     )
+    raw_applied_prompt_snapshot = (
+        turn_record.get("applied_prompt_snapshot")
+        if isinstance(turn_record, Mapping)
+        and isinstance(turn_record.get("applied_prompt_snapshot"), Mapping)
+        else (
+            llm_debug.get("applied_prompt_snapshot")
+            if isinstance(llm_debug, Mapping)
+            and isinstance(llm_debug.get("applied_prompt_snapshot"), Mapping)
+            else None
+        )
+    )
+    raw_applied_prompt_snapshot_source = (
+        "mongo.turn_execution_records"
+        if isinstance(turn_record, Mapping)
+        and isinstance(turn_record.get("applied_prompt_snapshot"), Mapping)
+        else "mongo.chat_history"
+    )
+    applied_prompt_snapshot = normalise_applied_prompt_snapshot(
+        raw_applied_prompt_snapshot,
+        expected_user_concept_id=(
+            _safe_str(turn_record.get("user_id"))
+            if isinstance(turn_record, Mapping)
+            else _safe_str(history_context.get("user_id"))
+            if isinstance(history_context, Mapping)
+            else None
+        ),
+        expected_namespace=resolved_namespace,
+    )
+    applied_prompt_snapshot_source = (
+        raw_applied_prompt_snapshot_source if applied_prompt_snapshot else None
+    )
     aux_llm_calls = (
         llm_debug.get("aux_llm_calls")
         if isinstance(llm_debug, Mapping) and isinstance(llm_debug.get("aux_llm_calls"), list)
@@ -1785,6 +1827,7 @@ def build_episode_critic_evidence_bundle(
 
     observed_evidence_raw: dict[str, Any] = {
         "turn_execution_record": _normalise_mapping(turn_record),
+        "applied_prompt_snapshot": _normalise_mapping(applied_prompt_snapshot),
         "selected_llm_debug": selected_llm_debug,
         "aux_llm_calls": aux_llm_calls or None,
         "tool_ledger": tool_ledger,
@@ -1822,6 +1865,7 @@ def build_episode_critic_evidence_bundle(
     for section_id, value in observed_evidence_raw.items():
         source_system = {
             "turn_execution_record": "mongo.turn_execution_records",
+            "applied_prompt_snapshot": applied_prompt_snapshot_source,
             "selected_llm_debug": "mongo.chat_history",
             "aux_llm_calls": "mongo.chat_history",
             "tool_ledger": "mongo.turn_execution_records",

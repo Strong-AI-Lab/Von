@@ -11,9 +11,10 @@ This module keeps the logic small and testable.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import logging
 import os
 
@@ -153,6 +154,57 @@ def serialise_applied_prompt_snapshot(snapshot: Dict[str, Any]) -> str:
     return _canonical_json(snapshot)
 
 
+def normalise_applied_prompt_snapshot(
+    value: Any,
+    *,
+    expected_user_concept_id: str | None = None,
+    expected_namespace: str | None = None,
+) -> Dict[str, Any] | None:
+    """Validate and copy an exact turn-applied prompt snapshot.
+
+    Persisted telemetry may carry the snapshot beyond the request that built it,
+    so consumers must verify both its integrity hash and, when supplied, its
+    actor scope before treating it as historical prompt evidence.
+    """
+
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            snapshot = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, Mapping):
+        snapshot = copy.deepcopy(dict(value))
+    else:
+        return None
+    if snapshot.get("schema_version") != APPLIED_PROMPT_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    supplied_snapshot_sha256 = snapshot.get("snapshot_sha256")
+    unsigned_snapshot = dict(snapshot)
+    unsigned_snapshot.pop("snapshot_sha256", None)
+    expected_snapshot_sha256 = _sha256_text(_canonical_json(unsigned_snapshot))
+    if supplied_snapshot_sha256 != expected_snapshot_sha256:
+        return None
+    actor = snapshot.get("actor")
+    prompts = snapshot.get("prompts")
+    if not isinstance(actor, dict) or not isinstance(prompts, list):
+        return None
+    if (
+        isinstance(expected_user_concept_id, str)
+        and expected_user_concept_id.strip()
+        and actor.get("user_concept_id") != expected_user_concept_id.strip()
+    ):
+        return None
+    if (
+        isinstance(expected_namespace, str)
+        and expected_namespace.strip()
+        and actor.get("namespace") != expected_namespace.strip()
+    ):
+        return None
+    return snapshot
+
+
 def build_applied_prompt_manifest_message(snapshot: Dict[str, Any]) -> str | None:
     prompts = snapshot.get("prompts")
     if not isinstance(prompts, list) or not prompts:
@@ -192,24 +244,13 @@ def render_applied_prompt_context(
 
     if not isinstance(snapshot_json, str) or not snapshot_json.strip():
         raise ValueError("trusted applied-prompt snapshot is required")
-    try:
-        snapshot = json.loads(snapshot_json)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("trusted applied-prompt snapshot is invalid") from exc
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != (
-        APPLIED_PROMPT_SNAPSHOT_SCHEMA_VERSION
-    ):
-        raise ValueError("trusted applied-prompt snapshot has an unsupported schema")
-    supplied_snapshot_sha256 = snapshot.get("snapshot_sha256")
-    unsigned_snapshot = dict(snapshot)
-    unsigned_snapshot.pop("snapshot_sha256", None)
-    expected_snapshot_sha256 = _sha256_text(_canonical_json(unsigned_snapshot))
-    if supplied_snapshot_sha256 != expected_snapshot_sha256:
-        raise ValueError("trusted applied-prompt snapshot integrity check failed")
+    snapshot = normalise_applied_prompt_snapshot(snapshot_json)
+    if snapshot is None:
+        raise ValueError("trusted applied-prompt snapshot is invalid or failed integrity checks")
     actor = snapshot.get("actor")
     prompts = snapshot.get("prompts")
-    if not isinstance(actor, dict) or not isinstance(prompts, list):
-        raise ValueError("trusted applied-prompt snapshot is incomplete")
+    assert isinstance(actor, dict)
+    assert isinstance(prompts, list)
 
     bounded_max_chars = max(0, min(int(max_chars), 50000))
     remaining = bounded_max_chars

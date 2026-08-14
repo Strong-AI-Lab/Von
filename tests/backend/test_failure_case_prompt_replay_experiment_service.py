@@ -132,6 +132,23 @@ def test_prepare_failure_case_prompt_replay_experiment_builds_spec_inputs() -> N
     }
 
 
+def test_replay_uses_target_turn_applied_prompt_before_generic_prompt_metadata() -> (
+    None
+):
+    intake = _sample_failure_case_intake()
+    intake["prompt_metadata"]["applied_prompt_ids"] = [
+        "#V#historically_applied_prompt"
+    ]
+    intake["prompt_metadata"]["prompt_variant_selections"] = []
+
+    payload = prepare_failure_case_prompt_replay_experiment(
+        failure_case_intake=intake,
+        prompt_variant_ids=["#V#candidate_variant"],
+    )
+
+    assert payload["base_prompt_id"] == "#V#historically_applied_prompt"
+
+
 def test_prompt_replay_prepare_action_uses_accumulated_failure_context() -> None:
     registry = ActionRegistry()
     register_failure_case_prompt_improvement_actions(registry)

@@ -16,6 +16,9 @@ from src.backend.services.represented_artefact_creation_workflow_vontology_servi
     _ensure_represented_artefact_creation_prompt_support,
     bootstrap_canonical_represented_artefact_creation_workflow,
 )
+from src.backend.services.workflow_repo_seed_bootstrap import (
+    bootstrap_repo_seed_workflow_bundle,
+)
 from src.backend.services.text_value_service import (
     get_texts_for_concept,
     upsert_singleton_text_relation,
@@ -114,6 +117,64 @@ def _workflow_step_id(workflow_id: str, state_id: str) -> str:
     )
 
 
+def _publish_exact_reviewed_v8_parent_authority(tmp_path: Path) -> None:
+    """Recreate the released v8 parent before exercising its v6 migration.
+
+    The current v9 seed adds launch/context fields.  Mutating only its lifecycle
+    and routing profile would produce a hybrid authority that was never reviewed
+    and must correctly be refused by the migration gate.
+    """
+
+    legacy_bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    legacy_bundle["seed_version"] = "8"
+    legacy_versions = legacy_bundle[
+        "known_legacy_authority_payload_sha256_by_seed_version"
+    ][REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID]
+    legacy_versions.pop("8", None)
+
+    parent = next(
+        row
+        for row in legacy_bundle["workflows"]
+        if row["workflow_id"] == REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID
+    )
+    parent["launch_input_contract"]["input_mappings"] = [
+        mapping
+        for mapping in parent["launch_input_contract"]["input_mappings"]
+        if mapping.get("target_context_key")
+        not in {"augmented_context", "conversation_situation"}
+    ]
+    for state in parent["publication_spec"]["steps"]:
+        llm_policy = state.get("llm_policy")
+        if not isinstance(llm_policy, dict):
+            continue
+        llm_policy.pop("context_messages_context_key", None)
+        llm_policy["context_fields"] = [
+            field
+            for field in llm_policy.get("context_fields") or []
+            if field.get("context_key") != "conversation_situation"
+        ]
+
+    legacy_path = tmp_path / "represented_artefact_creation_v8.json"
+    legacy_path.write_text(
+        json.dumps(legacy_bundle, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report = bootstrap_repo_seed_workflow_bundle(
+        asset_path=legacy_path,
+        force_republish=True,
+        target_workflow_ids=(REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,),
+    )
+    adjudication = (
+        ((report.get("publication") or {}).get("repo_seed_version_gate") or {}).get(
+            "authority_adjudication_by_workflow"
+        )
+        or {}
+    ).get(REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID) or {}
+    assert adjudication["target_authority_payload_sha256"] == (
+        _REVIEWED_V7_PARENT_AUTHORITY_SHA256
+    )
+
+
 def _seed_existing_represented_artefact(
     *,
     concept_id: str,
@@ -165,12 +226,13 @@ def test_represented_artefact_workflow_family_has_reviewed_parent_only_routing()
 ):
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
 
-    assert bundle["seed_version"] == "8"
+    assert bundle["seed_version"] == "9"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
         REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID: {
             "5": ["2061801c8da0d8437f021ef49dd3af40d405f98fdc5388752d0b831ce689bb48"],
             "6": [_REVIEWED_V6_PARENT_AUTHORITY_SHA256],
             "7": [_REVIEWED_V7_PARENT_AUTHORITY_SHA256],
+            "8": [_REVIEWED_V7_PARENT_AUTHORITY_SHA256],
         },
         REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID: {
             "5": ["cc17479ee5df029a7baed2b1d21a1f0c098979afcda730c91a2e7acce624771e"],
@@ -208,9 +270,27 @@ def test_represented_artefact_workflow_family_has_reviewed_parent_only_routing()
     assert item_lifecycle["review_state"] == "approved"
     assert item["publication_spec"]["initial_state"] == ("initialise_from_item_request")
 
+    parent_sources = {
+        mapping.get("source_expression")
+        for mapping in parent["launch_input_contract"]["input_mappings"]
+    }
+    assert "inputs.augmented_context" in parent_sources
+    assert "inputs.conversation_situation" in parent_sources
+    assert all(
+        "inputs.conversation_situation"
+        not in {
+            mapping.get("source_expression")
+            for mapping in row["launch_input_contract"]["input_mappings"]
+        }
+        for row in (item,)
+    )
 
-def test_normal_bootstrap_migrates_exact_reviewed_v6_parent_authority() -> None:
+
+def test_normal_bootstrap_migrates_exact_reviewed_v6_parent_authority(
+    tmp_path: Path,
+) -> None:
     bootstrap_canonical_represented_artefact_creation_workflow()
+    _publish_exact_reviewed_v8_parent_authority(tmp_path)
 
     upsert_singleton_text_relation(
         subject_concept_id=REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,

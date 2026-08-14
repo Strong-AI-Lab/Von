@@ -596,6 +596,45 @@ def _extract_prompt_metadata(*payloads: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_applied_prompt_snapshot(
+    *,
+    turn_record: Mapping[str, Any],
+    target_debug: Mapping[str, Any],
+    namespace: str | None,
+    user_concept_id: str | None,
+    max_text_chars: int,
+) -> dict[str, Any]:
+    """Project integrity-checked historical applied-prompt evidence."""
+
+    from .chat_auxiliary_prompt_service import normalise_applied_prompt_snapshot
+
+    snapshot = normalise_applied_prompt_snapshot(
+        turn_record.get("applied_prompt_snapshot"),
+        expected_user_concept_id=user_concept_id,
+        expected_namespace=namespace,
+    ) or normalise_applied_prompt_snapshot(
+        target_debug.get("applied_prompt_snapshot"),
+        expected_user_concept_id=user_concept_id,
+        expected_namespace=namespace,
+    )
+    if snapshot is None:
+        return {}
+    bounded = dict(snapshot)
+    bounded["source_snapshot_schema_version"] = snapshot.get("schema_version")
+    bounded["schema_version"] = "failure_case_applied_prompt_snapshot_projection.v1"
+    prompts: list[dict[str, Any]] = []
+    for raw_prompt in _mapping_list(snapshot.get("prompts")):
+        prompt = dict(raw_prompt)
+        content = _safe_str(prompt.get("content"))
+        if content is not None:
+            prompt["content"] = content[: max(0, int(max_text_chars))]
+            prompt["content_truncated"] = len(content) > max_text_chars
+        prompts.append(prompt)
+    bounded["prompts"] = prompts
+    bounded["source"] = "target_turn_applied_prompt_snapshot"
+    return bounded
+
+
 def _extract_model_summary(*payloads: Mapping[str, Any]) -> dict[str, Any]:
     candidates: list[str] = []
     for payload in payloads:
@@ -1445,6 +1484,22 @@ def collect_failure_case_intake(
         diagnostics_payload,
         turn_record,
     )
+    applied_prompt_snapshot = _extract_applied_prompt_snapshot(
+        turn_record=turn_record,
+        target_debug=target_debug,
+        namespace=namespace_value,
+        user_concept_id=_safe_str(user_concept_id),
+        max_text_chars=text_limit,
+    )
+    if applied_prompt_snapshot:
+        prompt_metadata["applied_prompt_snapshot_sha256"] = _safe_str(
+            applied_prompt_snapshot.get("snapshot_sha256")
+        )
+        prompt_metadata["applied_prompt_ids"] = [
+            concept_id
+            for item in _mapping_list(applied_prompt_snapshot.get("prompts"))
+            if (concept_id := _safe_str(item.get("concept_id")))
+        ]
     model_summary = _extract_model_summary(
         target_debug, diagnostics_payload, turn_record
     )
@@ -1508,6 +1563,14 @@ def collect_failure_case_intake(
         },
         "turn_execution_get": {
             "success": bool(turn_record_payload.get("success")),
+        },
+        "applied_prompt_snapshot": {
+            "present": bool(applied_prompt_snapshot),
+            "source": (
+                applied_prompt_snapshot.get("source")
+                if applied_prompt_snapshot
+                else None
+            ),
         },
         "turn_execution_list": {
             "attempted": bool(turn_list_payload),
@@ -1573,6 +1636,7 @@ def collect_failure_case_intake(
             "stage_id": _safe_str(stage_id),
         },
         "prompt_metadata": prompt_metadata,
+        "applied_prompt_snapshot": applied_prompt_snapshot or None,
         "tool_ledger": tool_ledger,
         "completion_gate": completion_gate,
         "critic": critic,

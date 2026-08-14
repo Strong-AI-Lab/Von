@@ -151,6 +151,81 @@ def _coerce_mapping_list(value: Any, *, max_items: int = 100) -> list[dict[str, 
     return rows
 
 
+def _current_prompt_concepts(prompt_context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the deduplicated current Vontology prompt concepts."""
+
+    concepts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in (
+        "behaviour_prompt_concepts",
+        "narration_prompt_concepts",
+        "screen_prompt_concepts",
+        "prompt_concepts",
+    ):
+        for item in _coerce_mapping_list(prompt_context.get(key), max_items=50):
+            concept_id = _normalise_text(item.get("concept_id"))
+            if not concept_id or concept_id in seen:
+                continue
+            seen.add(concept_id)
+            concepts.append(item)
+    return concepts
+
+
+def _applied_prompt_snapshot_from_turn_execution(
+    turn_execution: Mapping[str, Any],
+    *,
+    expected_namespace: str | None,
+) -> dict[str, Any]:
+    """Resolve and integrity-check the snapshot retained for the target turn."""
+
+    from ...services.chat_auxiliary_prompt_service import (
+        normalise_applied_prompt_snapshot,
+    )
+
+    candidates: list[Any] = [turn_execution.get("applied_prompt_snapshot")]
+    for container_key in ("item", "record", "turn_execution_record", "result"):
+        container = turn_execution.get(container_key)
+        if isinstance(container, Mapping):
+            candidates.append(container.get("applied_prompt_snapshot"))
+    for candidate in candidates:
+        snapshot = normalise_applied_prompt_snapshot(
+            candidate,
+            expected_namespace=expected_namespace,
+        )
+        if snapshot is not None:
+            return snapshot
+    return {}
+
+
+def _applied_prompt_concepts(
+    applied_prompt_snapshot: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    concepts: list[dict[str, Any]] = []
+    for item in _coerce_mapping_list(
+        applied_prompt_snapshot.get("prompts"),
+        max_items=50,
+    ):
+        concept_id = _normalise_text(item.get("concept_id"))
+        content = _normalise_text(item.get("content"))
+        if not concept_id or not content:
+            continue
+        concepts.append(
+            {
+                "concept_id": concept_id,
+                "content": content,
+                "content_sha256": _normalise_text(item.get("content_sha256")),
+                "application_kind": _normalise_text(
+                    item.get("application_kind")
+                ),
+                "application_surface": _normalise_text(
+                    item.get("application_surface")
+                ),
+                "application_order": item.get("application_order"),
+            }
+        )
+    return concepts
+
+
 def _append_trace_event(
     context: Mapping[str, Any],
     *,
@@ -888,6 +963,10 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
                 "request_id": request_id,
             },
         )
+    applied_prompt_snapshot = _applied_prompt_snapshot_from_turn_execution(
+        turn_execution,
+        expected_namespace=namespace,
+    )
 
     selected_workflow_id = _normalise_text(context.get("selected_workflow_id"))
     if not selected_workflow_id:
@@ -967,12 +1046,17 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             "github_error_count": len(github_evidence.get("errors", []))
             if isinstance(github_evidence.get("errors"), list)
             else 0,
+            "applied_prompt_snapshot_present": bool(applied_prompt_snapshot),
+            "applied_prompt_count": int(
+                applied_prompt_snapshot.get("prompt_count") or 0
+            ),
         },
     )
     maintenance_evidence = {
         "incident_text": _normalise_text(context.get("incident_text")),
         "workflow_definitions": workflow_definitions,
         "prompt_context": prompt_context,
+        "applied_prompt_snapshot": applied_prompt_snapshot,
         "episode_critique_memory": episode_critique_memory,
         "turn_execution": turn_execution,
         "workflow_concept": workflow_concept,
@@ -1000,7 +1084,20 @@ def _handle_diagnose_conflation(request: WorkflowActionRequest) -> WorkflowActio
         if isinstance(item, str) and item.strip()
     }
 
-    prompt_concepts = _coerce_mapping_list(prompt_context.get("behaviour_prompt_concepts"))
+    applied_prompt_snapshot = _coerce_mapping(
+        evidence.get("applied_prompt_snapshot")
+    )
+    applied_prompt_concepts = _applied_prompt_concepts(applied_prompt_snapshot)
+    prompt_concepts = (
+        applied_prompt_concepts
+        if applied_prompt_concepts
+        else _current_prompt_concepts(prompt_context)
+    )
+    prompt_evidence_source = (
+        "turn_applied_snapshot"
+        if applied_prompt_concepts
+        else "current_vontology_prompt_context"
+    )
     directives: list[dict[str, Any]] = []
     for concept in prompt_concepts:
         concept_id = _normalise_text(concept.get("concept_id"))
@@ -1170,6 +1267,10 @@ def _handle_diagnose_conflation(request: WorkflowActionRequest) -> WorkflowActio
         "selected_workflow_id": maintenance_context.get("selected_workflow_id"),
         "github_repository": github_evidence.get("repository"),
         "github_evidence_success": bool(github_evidence.get("success")),
+        "prompt_evidence_source": prompt_evidence_source,
+        "applied_prompt_snapshot_sha256": _normalise_text(
+            applied_prompt_snapshot.get("snapshot_sha256")
+        ),
     }
 
     trace = _append_trace_event(
@@ -1198,7 +1299,22 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
     diagnosis = _coerce_mapping(context.get("maintenance_diagnosis"))
     github_evidence = _coerce_mapping(evidence.get("github_evidence"))
     prompt_context = _coerce_mapping(evidence.get("prompt_context"))
-    prompt_concepts = _coerce_mapping_list(prompt_context.get("behaviour_prompt_concepts"))
+    current_prompt_concepts = _current_prompt_concepts(prompt_context)
+    current_prompt_by_id = {
+        concept_id: concept
+        for concept in current_prompt_concepts
+        if (concept_id := _normalise_text(concept.get("concept_id")))
+    }
+    applied_prompt_snapshot = _coerce_mapping(
+        evidence.get("applied_prompt_snapshot")
+    )
+    applied_prompt_concepts = _applied_prompt_concepts(applied_prompt_snapshot)
+    use_applied_prompt_evidence = bool(applied_prompt_concepts)
+    prompt_concepts = (
+        applied_prompt_concepts
+        if use_applied_prompt_evidence
+        else current_prompt_concepts
+    )
     directive_findings = _coerce_mapping_list(diagnosis.get("directive_findings"))
     implicated_prompt_ids = {
         str(item)
@@ -1207,6 +1323,7 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
     }
 
     operations: list[dict[str, Any]] = []
+    skipped_prompt_repairs: list[dict[str, Any]] = []
     for concept in prompt_concepts:
         concept_id = _normalise_text(concept.get("concept_id"))
         content = _normalise_text(concept.get("content"))
@@ -1221,6 +1338,35 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
         ]
         if not concept_findings:
             continue
+        if use_applied_prompt_evidence:
+            current_concept = current_prompt_by_id.get(concept_id)
+            current_content = _normalise_text(
+                current_concept.get("content")
+                if isinstance(current_concept, Mapping)
+                else None
+            )
+            if current_content != content:
+                skipped_prompt_repairs.append(
+                    {
+                        "concept_id": concept_id,
+                        "reason": (
+                            "current_prompt_missing"
+                            if current_content is None
+                            else "current_prompt_changed_since_target_turn"
+                        ),
+                        "applied_content_sha256": _normalise_text(
+                            concept.get("content_sha256")
+                        ),
+                        "current_content_sha256": (
+                            hashlib.sha256(
+                                current_content.encode("utf-8")
+                            ).hexdigest()
+                            if current_content is not None
+                            else None
+                        ),
+                    }
+                )
+                continue
         patched_text, patch_meta = _patch_prompt_content(
             original_content=content,
             findings=concept_findings,
@@ -1342,6 +1488,12 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
         "dry_run": bool(maintenance_context.get("dry_run", False)),
         "operation_count": len(operations),
         "operations": operations,
+        "prompt_evidence_source": (
+            "turn_applied_snapshot"
+            if use_applied_prompt_evidence
+            else "current_vontology_prompt_context"
+        ),
+        "skipped_prompt_repairs": skipped_prompt_repairs,
         "jira_remediation_skipped_reason": jira_remediation_skipped_reason,
     }
 

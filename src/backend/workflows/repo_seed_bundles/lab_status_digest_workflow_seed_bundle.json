@@ -2,7 +2,14 @@
   "family_id": "lab_status_digest_workflow_seed_bundle",
   "managed_by": "lab_status_digest_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "6",
+  "seed_version": "7",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#lab_project_status_digest_workflow": {
+      "6": [
+        "7c28a817e29e9e69188165cb42d89d3010516d360392a8492146df882de1c7d3"
+      ]
+    }
+  },
   "source_tag": "JVNAUTOSCI-2590",
   "supported_action_ids": [
     "workflow_mcp.invoke_tool",
@@ -30,6 +37,20 @@
             "extractor": "identity",
             "required": true,
             "description": "The requested status-digest scope and reporting window."
+          },
+          {
+            "target_context_key": "augmented_context",
+            "source_expression": "inputs.augmented_context",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry bounded prior-turn messages when the digest scope was established conversationally."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry the server-projected shared situation for project scope, obligations, and reporting-window continuity."
           }
         ]
       },
@@ -180,10 +201,15 @@
               "project_raw_response_to_final_response": true,
               "max_output_tokens": 4096,
               "response_contract_text": "Return status_digest_synthesis.v1 JSON with digest_markdown, work_product_id, evidence_window, and unavailable_source_classes. Use only the supplied prior-digest, Jira, and repository evidence. Every material claim must carry an issue key, commit, branch, or represented concept locator. Keep Jira Done, workflow completed, and capability passed distinct. Do not emit tool calls or claim persistence; represented deterministic states own persistence and read-back.",
+              "context_messages_context_key": "augmented_context",
               "context_fields": [
                 {
                   "context_key": "prompt",
                   "label": "Current status-digest request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Shared conversation situation: selected project scope, obligations, constraints, and unresolved questions"
                 },
                 {
                   "context_key": "user_concept_id",

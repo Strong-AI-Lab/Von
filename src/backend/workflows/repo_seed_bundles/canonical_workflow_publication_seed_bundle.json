@@ -1,11 +1,16 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "50",
+  "seed_version": "51",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#tool_calling_workflow": {
       "42": [
         "77e8896562063743a980c1700c43a5edf1d451b1a90c1e0b489f9c3838cc7b87"
+      ]
+    },
+    "#V#general_mail_review_workflow": {
+      "50": [
+        "3b1006be7892b4981511d7767b69f2de023c3c919da8883b050248ee4ae53674"
       ]
     }
   },
@@ -1860,6 +1865,20 @@
             "extractor": "identity",
             "required": false,
             "description": "Requested fields for each message row or item."
+          },
+          {
+            "target_context_key": "augmented_context",
+            "source_expression": "inputs.augmented_context",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry bounded prior-turn messages for deictic mail-review requests."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry the server-projected shared situation for prior mailbox scope, requested fields, and named profiles."
           }
         ]
       },
@@ -2202,6 +2221,7 @@
               ],
               "required_tools": [],
               "max_tool_invocations": 6,
+              "context_messages_context_key": "augmented_context",
               "tool_argument_defaults": {
                 "find_relations_with_argument": {
                   "argument_index": "subject",
@@ -2222,6 +2242,10 @@
                 {
                   "context_key": "prompt",
                   "label": "Current mail-review request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Shared conversation situation for prior mailbox scope, requested fields, and named profiles"
                 },
                 {
                   "context_key": "mail_review_profile_id",
@@ -2461,11 +2485,16 @@
               "allowed_tools": [],
               "required_tools": [],
               "max_tool_invocations": 0,
+              "context_messages_context_key": "augmented_context",
               "response_contract_text": "Return JSON with keys request_kind, requested_message_count, mail_query, label_ids, output_fields, include_body, and extraction_reason. Set request_kind to profile_status only when the user asks which Gmail/mail profile or account was used for a prior mail operation; otherwise set it to message_review. requested_message_count must be an integer from 1 to 25. Treat written number words from one through twenty-five as explicit counts. If the request says last 3, latest three, last four, or latest four, return 3 or 4 respectively. If no count is explicit and mail_review_limit is numeric, use that. Otherwise return 3. mail_query should be null unless the user explicitly supplied a Gmail search query or sender/topic filter. label_ids should be an empty array unless the user explicitly named Gmail labels. output_fields must be the compact per-message fields required to answer the user's requested output and may use only canonical Gmail result keys. Always include message_id for provenance. Canonicalise requests for received time, received date, or arrival time to the output key date; never emit received_date or received_time. Set include_body=true and include body and body_truncated in output_fields only when the user explicitly requests full message body text; otherwise set include_body=false and omit those fields. If the user explicitly requests fields such as subject and sender, return only message_id plus those requested canonical fields. If the request asks for a summary, digest, triage, comparison, or gist without naming fields, include message_id, subject, sender, date, and snippet.",
               "context_fields": [
                 {
                   "context_key": "prompt",
                   "label": "Current mail-review request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Shared conversation situation for prior mailbox scope, requested fields, and named profiles"
                 },
                 {
                   "context_key": "mail_review_limit",

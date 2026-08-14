@@ -7301,6 +7301,7 @@ def _finalise_llm_debug_info(
     actor_concept_id: str | None = None,
     user_id: str | None,
     org_id: str | None,
+    applied_prompt_snapshot: Mapping[str, Any] | str | None = None,
     **_legacy_controller_fields: Any,
 ) -> dict[str, Any]:
     """Finalise an observational ordinary-turn record.
@@ -7387,6 +7388,16 @@ def _finalise_llm_debug_info(
     if isinstance(resolved_actor_concept_id, str) and resolved_actor_concept_id.strip():
         llm_debug_info["actor_concept_id"] = resolved_actor_concept_id
 
+    from ...services.chat_auxiliary_prompt_service import (
+        normalise_applied_prompt_snapshot,
+    )
+
+    applied_prompt_snapshot_payload = normalise_applied_prompt_snapshot(
+        applied_prompt_snapshot,
+        expected_user_concept_id=(user_id or resolved_actor_concept_id),
+        expected_namespace=namespace,
+    )
+
     llm_interaction_payload = (
         llm_debug_info.get("llm_interaction")
         if isinstance(llm_debug_info.get("llm_interaction"), Mapping)
@@ -7463,6 +7474,7 @@ def _finalise_llm_debug_info(
                 else None
             ),
         },
+        "applied_prompt_snapshot": applied_prompt_snapshot_payload,
         "llm_calls": [dict(item) for item in llm_calls_payload if isinstance(item, Mapping)],
         "llm_usage_cost_summary": llm_usage_cost_summary,
         "tool_invocations": [
@@ -10019,6 +10031,7 @@ def _persist_terminal_failure_turn_record_best_effort(
             prompt_text=local_vars.get("prompt_text"),
             llm_debug_info=debug_payload,
             progress_snapshot=progress_snapshot,
+            applied_prompt_snapshot=local_vars.get("applied_prompt_snapshot"),
         )
     except Exception as exc:
         try:
@@ -10952,6 +10965,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         screen_prompt_text = None
         screen_prompt_fragments = []
         screen_prompt_source = None
+        applied_prompt_snapshot = None
         applied_prompt_snapshot_json = None
         applied_prompt_manifest_message = None
         user_prompt_debug = {
@@ -13312,6 +13326,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 actor_concept_id=user_concept_id,
                 user_id=user_concept_id,
                 org_id=org_concept_id,
+                applied_prompt_snapshot=applied_prompt_snapshot,
             )
 
         def _refresh_llm_debug_timing_payload(debug_payload: dict[str, Any]) -> None:

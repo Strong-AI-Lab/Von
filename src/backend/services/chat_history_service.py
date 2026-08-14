@@ -941,6 +941,11 @@ def _ensure_turn_execution_record_for_assistant_message(
                 if isinstance(llm_debug_data.get("aux_llm_calls"), list)
                 else []
             ),
+            applied_prompt_snapshot=(
+                llm_debug_data.get("applied_prompt_snapshot")
+                if isinstance(llm_debug_data.get("applied_prompt_snapshot"), dict)
+                else None
+            ),
         )
         if isinstance(rebuilt, dict):
             rebuilt["reconstruction"] = {

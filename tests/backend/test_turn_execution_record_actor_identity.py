@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from src.backend.services.chat_auxiliary_prompt_service import (
+    build_applied_prompt_snapshot,
+)
 from src.backend.services.turn_execution_record_service import build_turn_execution_record
 
 
@@ -49,3 +52,44 @@ def test_actor_identity_falls_back_to_namespace_user_component() -> None:
     assert record.get("actor_concept_id") == "#V#fallback_user"
     assert record.get("actor_identity_source") == "namespace_user_component"
 
+
+def test_turn_record_retains_integrity_checked_applied_prompt_snapshot() -> None:
+    snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#alice",
+        namespace="#V#alice@test_org",
+        organisation_concept_id="#V#test_org",
+        turn_id="turn-actor-1",
+        behaviour_fragments=[
+            {"concept_id": "#V#behaviour_prompt", "content": "Be precise."}
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
+
+    record = _build_record(
+        actor_concept_id="#V#assistant_instance",
+        applied_prompt_snapshot=snapshot,
+    )
+
+    assert record["applied_prompt_snapshot"] == snapshot
+    assert record["applied_prompt_snapshot"]["prompts"][0]["content"] == (
+        "Be precise."
+    )
+
+
+def test_turn_record_rejects_cross_actor_applied_prompt_snapshot() -> None:
+    snapshot = build_applied_prompt_snapshot(
+        user_concept_id="#V#bob",
+        namespace="#V#bob@test_org",
+        organisation_concept_id="#V#test_org",
+        turn_id="turn-bob-1",
+        behaviour_fragments=[
+            {"concept_id": "#V#bob_prompt", "content": "Private Bob prompt."}
+        ],
+        narration_fragments=[],
+        screen_fragments=[],
+    )
+
+    record = _build_record(applied_prompt_snapshot=snapshot)
+
+    assert record["applied_prompt_snapshot"] is None
