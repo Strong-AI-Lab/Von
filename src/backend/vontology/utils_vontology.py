@@ -1841,6 +1841,109 @@ def get_vontology_node_and_ancestor_instance_ids(
 
 
 # --- Function to get Vontology tree structure ---
+_VONTOLOGY_TREE_SANITISATION_BATCH_SIZE = 20_000
+_VONTOLOGY_TREE_DETAIL_QUERY_BATCH_SIZE = 10_000
+_VONTOLOGY_TREE_CURSOR_BATCH_SIZE = 10_000
+
+
+def _load_vontology_tree_type_documents() -> tuple[list[dict], int, int]:
+    """Load tree documents without repeatedly resolving relationship authority.
+
+    Structural fields must be sanitised before deciding whether a document is a
+    type.  In particular, an inaccessible relationship target is removed before
+    parent selection.  A large, tree-only sanitisation batch retains that
+    behaviour while collapsing the remote visibility-query fan-out.  Display
+    fields are fetched only for the documents that survive structural
+    classification.
+    """
+
+    structural_docs = list(
+        ConceptsRepository.find(
+            {},
+            {
+                "concept_id": 1,
+                "relationships.is_a_type_of": 1,
+                "relationships.most_salient_type": 1,
+                "relationships.is_an_instance_of": 1,
+                "_id": 0,
+            },
+            sanitisation_batch_size=_VONTOLOGY_TREE_SANITISATION_BATCH_SIZE,
+            cursor_batch_size=_VONTOLOGY_TREE_CURSOR_BATCH_SIZE,
+        )
+    )
+    existing_ids = {
+        doc.get("concept_id")
+        for doc in structural_docs
+        if isinstance(doc, dict) and isinstance(doc.get("concept_id"), str)
+    }
+
+    structural_types: list[dict] = []
+    skipped = 0
+    for doc in structural_docs:
+        if is_pure_instance(doc) and not is_predicate(doc):
+            skipped += 1
+            continue
+        if not isinstance(doc.get("concept_id"), str) or not doc["concept_id"]:
+            continue
+        structural_types.append(doc)
+
+    detail_by_id: dict[str, dict] = {}
+    type_ids = [doc["concept_id"] for doc in structural_types]
+    for offset in range(0, len(type_ids), _VONTOLOGY_TREE_DETAIL_QUERY_BATCH_SIZE):
+        detail_ids = type_ids[offset : offset + _VONTOLOGY_TREE_DETAIL_QUERY_BATCH_SIZE]
+        details = ConceptsRepository.find(
+            {"concept_id": {"$in": detail_ids}},
+            {
+                "concept_id": 1,
+                "name": 1,
+                "names": 1,
+                "path": 1,
+                "_id": 1,
+            },
+            sanitisation_batch_size=_VONTOLOGY_TREE_SANITISATION_BATCH_SIZE,
+            cursor_batch_size=_VONTOLOGY_TREE_CURSOR_BATCH_SIZE,
+        )
+        for detail in details:
+            concept_id = detail.get("concept_id") if isinstance(detail, dict) else None
+            if isinstance(concept_id, str) and concept_id:
+                detail_by_id[concept_id] = detail
+
+    types: list[dict] = []
+    for structural_doc in structural_types:
+        concept_id = structural_doc["concept_id"]
+        detail = detail_by_id.get(concept_id)
+        if detail is None:
+            # The concept disappeared or became inaccessible between the two
+            # reads.  Excluding it is safer than returning a stale projection.
+            continue
+        types.append({**structural_doc, **detail})
+
+    # Inject virtual code concepts so they can render in the tree even when not
+    # persisted as concept documents.  Existing IDs are calculated from the
+    # complete structural read, matching the previous all-document loader.
+    virtual_count = 0
+    try:
+        from .code_concepts_registry import (
+            build_virtual_concept_doc,
+            iter_code_concepts,
+        )
+
+        for code_concept in iter_code_concepts():
+            if code_concept.concept_id in existing_ids:
+                continue
+            virtual_doc = build_virtual_concept_doc(code_concept.concept_id)
+            if isinstance(virtual_doc, dict) and virtual_doc.get("concept_id"):
+                virtual_count += 1
+                if is_pure_instance(virtual_doc) and not is_predicate(virtual_doc):
+                    skipped += 1
+                    continue
+                types.append(virtual_doc)
+    except Exception:
+        pass
+
+    return types, len(structural_docs) + virtual_count, skipped
+
+
 def get_vontology_tree(root_concept: str = "Thing"):
     """Return a single-root ontology tree (root = Thing) with exactly one parent per non-root type.
 
@@ -1852,57 +1955,9 @@ def get_vontology_tree(root_concept: str = "Thing"):
     """
     logger.info(f"[get_vontology_tree] START (version={VONTOLOGY_UTILS_VERSION})")
     try:
-        docs = list(
-            ConceptsRepository.find(
-                {},
-                {
-                    "concept_id": 1,
-                    "name": 1,
-                    "names": 1,
-                    "relationships.is_a_type_of": 1,
-                    "relationships.most_salient_type": 1,
-                    "relationships.is_an_instance_of": 1,
-                    "path": 1,
-                    "_id": 1,
-                },
-            )
-        )
-        # Inject virtual code concepts so they can render in the tree even when not
-        # persisted as concept documents.
-        try:
-            from .code_concepts_registry import (
-                iter_code_concepts,
-                build_virtual_concept_doc,
-            )
-
-            existing_ids = {
-                d.get("concept_id")
-                for d in docs
-                if isinstance(d, dict) and isinstance(d.get("concept_id"), str)
-            }
-            for cc in iter_code_concepts():
-                if cc.concept_id in existing_ids:
-                    continue
-                vdoc = build_virtual_concept_doc(cc.concept_id)
-                if isinstance(vdoc, dict) and vdoc.get("concept_id"):
-                    docs.append(vdoc)
-        except Exception:
-            pass
-        total = len(docs)
+        types, total, skipped = _load_vontology_tree_type_documents()
         if not total:
             return {"tree": []}
-
-        # Separate out type docs
-        types: list[dict] = []
-        skipped = 0
-        for d in docs:
-            # Keep predicates in the tree even though they are often pure instances.
-            if is_pure_instance(d) and not is_predicate(d):
-                skipped += 1
-                continue
-            if not d.get("concept_id"):
-                continue
-            types.append(d)
         logger.info(
             f"[get_vontology_tree] Loaded {total} docs; types={len(types)}; skipped_pure_instances={skipped}"
         )
@@ -4560,9 +4615,9 @@ def invalidate_vontology_caches(
 
         # Clear tree cache
         try:
-            from ..server.routes.vontology_routes import _TREE_CACHE
+            from ..server.routes.vontology_routes import _invalidate_tree_cache
 
-            _TREE_CACHE.clear()
+            _invalidate_tree_cache()
             logger.info(f"Cleared tree cache for correlation_id {correlation_id}")
         except (ImportError, NameError):
             logger.debug("Tree cache not available for clearing")

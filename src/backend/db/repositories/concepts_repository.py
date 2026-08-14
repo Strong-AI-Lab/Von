@@ -68,10 +68,16 @@ class _AccessControlledCursor:
 
     _SANITISATION_BATCH_SIZE = 64
 
-    def __init__(self, cursor):
+    def __init__(self, cursor, *, sanitisation_batch_size: int | None = None):
         self._cursor = cursor
         self._buffer: Deque[Dict[str, Any]] = deque()
         self._exhausted = False
+        requested_batch_size = (
+            self._SANITISATION_BATCH_SIZE
+            if sanitisation_batch_size is None
+            else sanitisation_batch_size
+        )
+        self._sanitisation_batch_size = max(1, requested_batch_size)
 
     def __iter__(self):
         return self
@@ -81,7 +87,7 @@ class _AccessControlledCursor:
             if self._exhausted:
                 raise StopIteration
             batch: List[Dict[str, Any]] = []
-            for _ in range(self._SANITISATION_BATCH_SIZE):
+            for _ in range(self._sanitisation_batch_size):
                 try:
                     batch.append(next(self._cursor))
                 except StopIteration:
@@ -131,6 +137,8 @@ class ConceptsRepository:
         skip: int = 0,
         limit: int = 0,
         max_time_ms: Optional[int] = None,
+        sanitisation_batch_size: Optional[int] = None,
+        cursor_batch_size: Optional[int] = None,
     ):
         coll = ConceptsRepository.collection()
         if coll is None:
@@ -139,13 +147,18 @@ class ConceptsRepository:
         cursor = coll.find(query, projection)
         if max_time_ms and max_time_ms > 0:
             cursor = cursor.max_time_ms(max_time_ms)
+        if cursor_batch_size and cursor_batch_size > 0:
+            cursor = cursor.batch_size(cursor_batch_size)
         if sort:
             cursor = cursor.sort(sort)
         if skip:
             cursor = cursor.skip(skip)
         if limit:
             cursor = cursor.limit(limit)
-        return _AccessControlledCursor(cursor)
+        return _AccessControlledCursor(
+            cursor,
+            sanitisation_batch_size=sanitisation_batch_size,
+        )
 
     @staticmethod
     def insert_one(document: Dict[str, Any]):

@@ -77,6 +77,9 @@ def test_tree_includes_virtual_code_predicates_under_predicate_type(monkeypatch)
     ids = _flatten_tree_ids(root)
 
     assert "#V#hasContent" in ids
+    assert "#V#organisation_ontology_administrator" not in ids
+    assert "#V#global_ontology_administrator" not in ids
+    assert "#V#von_operational_administrator" not in ids
 
     # Also check the structural expectation: hasContent is placed somewhere under #V#predicate.
     # We do this by locating the predicate node and verifying it contains the child.

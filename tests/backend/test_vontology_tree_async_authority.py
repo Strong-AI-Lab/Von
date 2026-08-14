@@ -20,6 +20,7 @@ class _DeferredThread:
         target: Callable[..., Any],
         args: tuple[Any, ...] = (),
         daemon: bool | None = None,
+        **_kwargs: Any,
     ) -> None:
         self.target = target
         self.args = args
@@ -58,9 +59,13 @@ def _clear_tree_job_state():
     _DeferredThread.created.clear()
     with routes._TREE_BUILD_PROGRESS_LOCK:
         routes._TREE_BUILD_PROGRESS.clear()
+        routes._TREE_CACHE.clear()
+        routes._TREE_BUILDS_IN_FLIGHT.clear()
     yield
     with routes._TREE_BUILD_PROGRESS_LOCK:
         routes._TREE_BUILD_PROGRESS.clear()
+        routes._TREE_CACHE.clear()
+        routes._TREE_BUILDS_IN_FLIGHT.clear()
 
 
 @pytest.fixture
@@ -147,6 +152,7 @@ def _install_visible_tree(
 
     monkeypatch.setattr(routes.ConceptsRepository, "find", _find)
     monkeypatch.setattr(routes, "get_vontology_tree", _tree)
+    monkeypatch.setattr(routes, "record_tree_build_performance", lambda _secs: None)
     return observations
 
 
@@ -185,10 +191,7 @@ def test_authenticated_tree_worker_reapplies_exact_actor_scope(
         "#V#alice_private",
         "#V#org_a_private",
     }
-    assert observations == [
-        ("progress_scan", "#V#alice", "#V#org_a", True),
-        ("tree_build", "#V#alice", "#V#org_a", True),
-    ]
+    assert observations == [("tree_build", "#V#alice", "#V#org_a", True)]
     assert access_control.get_effective_user_concept_id() is None
     assert access_control.get_effective_organisation_concept_id() is None
     assert access_control.should_enforce_access_control() is False
@@ -206,16 +209,15 @@ def test_anonymous_tree_worker_discards_residual_org_and_is_global_only(
 
     assert created.status_code == 202
     job_id = created.get_json()["job_id"]
-    assert _DeferredThread.created[0].args == (job_id, None, None)
+    state = _DeferredThread.created[0].args[0]
+    assert state.job_id == job_id
+    assert (state.user_concept_id, state.organisation_concept_id) == (None, None)
     _run_route_worker()
     completed = client.get(f"/api/vontology/tree_progress/{job_id}")
 
     assert completed.status_code == 200
     assert _tree_ids(completed.get_json()) == {"#V#global"}
-    assert observations == [
-        ("progress_scan", None, None, True),
-        ("tree_build", None, None, True),
-    ]
+    assert observations == [("tree_build", None, None, True)]
 
 
 def test_route_preserves_scope_in_a_real_background_thread(monkeypatch) -> None:
@@ -249,10 +251,7 @@ def test_route_preserves_scope_in_a_real_background_thread(monkeypatch) -> None:
         "#V#alice_private",
         "#V#org_a_private",
     }
-    assert observations == [
-        ("progress_scan", "#V#alice", "#V#org_a", True),
-        ("tree_build", "#V#alice", "#V#org_a", True),
-    ]
+    assert observations == [("tree_build", "#V#alice", "#V#org_a", True)]
 
 
 def test_validated_legacy_read_header_remains_bound_to_its_job(
@@ -282,10 +281,7 @@ def test_validated_legacy_read_header_remains_bound_to_its_job(
         "#V#global",
         "#V#alice_private",
     }
-    assert observations == [
-        ("progress_scan", "#V#alice", None, True),
-        ("tree_build", "#V#alice", None, True),
-    ]
+    assert observations == [("tree_build", "#V#alice", None, True)]
     assert client.get(f"/api/vontology/tree_progress/{job_id}").status_code == 404
 
 
@@ -343,11 +339,6 @@ def test_tree_worker_failures_are_terminal(
     failure_mode: str,
 ) -> None:
     _, client = app_client
-    monkeypatch.setattr(
-        routes.ConceptsRepository,
-        "find",
-        lambda _query, _projection: [{"concept_id": "#V#global"}],
-    )
     if failure_mode == "returned":
         monkeypatch.setattr(
             routes,
@@ -370,7 +361,12 @@ def test_tree_worker_failures_are_terminal(
     assert completed.status_code == 200
     payload = completed.get_json()
     assert payload["done"] is True
-    assert failure_mode in payload["error"]
+    if failure_mode == "returned":
+        assert failure_mode in payload["error"]
+    else:
+        assert payload["error"] == (
+            "Failed to retrieve Vontology structure due to an internal server error."
+        )
     assert "result" not in payload
     with routes._TREE_BUILD_PROGRESS_LOCK:
         assert isinstance(

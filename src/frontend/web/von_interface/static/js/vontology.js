@@ -31,6 +31,7 @@ let __vontologyLatestEntityCounts = null;
 let __vontologyPreloadedTreeData = null;
 let __vontologyPreloadedEntityCounts = null;
 let __vontologyPreloadInFlight = null;
+let __vontologyPreloadGeneration = 0;
 // Global-ish busy indicator to signal heavy ontology operations (preload/build)
 if (typeof window !== 'undefined' && !window.__VONTOLOGY_BUSY) {
   window.__VONTOLOGY_BUSY = false;
@@ -738,8 +739,12 @@ export async function loadKeyConceptsForUser() {
   console.log('[loadKeyConceptsForUser] END - keyConceptIds Set size:', keyConceptIds.size);
 }
 
-export async function fetchAndRenderVontologyTree() {
+export async function fetchAndRenderVontologyTree({ forceRefresh = false } = {}) {
   console.log("[fetchAndRenderVontologyTree] Entered function.");
+
+  if (forceRefresh) {
+    retireVontologyPreload();
+  }
 
   // Load key concepts FIRST - this needs to happen regardless of tree rendering
   // Do this early so concept tabs that open can get the correct state
@@ -751,7 +756,7 @@ export async function fetchAndRenderVontologyTree() {
   const progressMgr = new ProgressManager((pct, text) => updateProgressBar(pct, text));
   // Determine whether to decouple counts from initial load based on global flag set during preload
   const decoupleCounts = !!(typeof window !== 'undefined' && window.__VONTOLOGY_DECOUPLE_COUNTS__);
-  if (__vontologyPreloadInFlight) {
+  if (!forceRefresh && __vontologyPreloadInFlight) {
     progressMgr.setPhase(ProgressPhase.FETCH);
     try {
       await __vontologyPreloadInFlight;
@@ -787,7 +792,7 @@ export async function fetchAndRenderVontologyTree() {
     let treeData;
     let entityCounts;
 
-    if (__vontologyPreloadedTreeData && (decoupleCounts || __vontologyPreloadedEntityCounts)) {
+    if (!forceRefresh && __vontologyPreloadedTreeData && (decoupleCounts || __vontologyPreloadedEntityCounts)) {
       // Fast path: use preloaded data, skip progress bar entirely (too fast to warrant one)
       treeData = __vontologyPreloadedTreeData;
       entityCounts = __vontologyPreloadedEntityCounts || {};
@@ -836,7 +841,10 @@ export async function fetchAndRenderVontologyTree() {
       let entityCountsResponseJson = null;
       const decouple = decoupleCounts;
       try {
-        const initResp = await vontologyFetch('/vontology/api/vontology/tree_async', { method: 'POST' });
+        const treeEndpoint = forceRefresh
+          ? '/vontology/api/vontology/tree_async?refresh=1'
+          : '/vontology/api/vontology/tree_async';
+        const initResp = await vontologyFetch(treeEndpoint, { method: 'POST' });
         if (!initResp.ok) throw new Error(`HTTP error! status: ${initResp.status}`);
         const { job_id } = await initResp.json();
 
@@ -4082,7 +4090,7 @@ async function handleRefreshTree() {
     setVontologyTreeData(null);
 
     // Force a fresh fetch and render
-    await fetchAndRenderVontologyTree();
+    await fetchAndRenderVontologyTree({ forceRefresh: true });
 
     console.log("[handleRefreshTree] Tree refresh completed");
 
@@ -4343,6 +4351,7 @@ export function preloadVontologyData() {
     return __vontologyPreloadInFlight;
   }
   console.log('[preloadVontologyData] Checking whether to preload Vontology tree...');
+  const preloadGeneration = __vontologyPreloadGeneration;
   __vontologyPreloadInFlight = (async () => {
     let preloadTask = null;
     try {
@@ -4393,8 +4402,17 @@ export function preloadVontologyData() {
         }
       }
       const tree = await treePromise;
-      __vontologyPreloadedTreeData = tree;
-      __vontologyPreloadedEntityCounts = countsJson?.entity_counts || null;
+      if (!publishVontologyPreload(preloadGeneration, tree, countsJson?.entity_counts || null)) {
+        console.log('[preloadVontologyData] Discarding a preload retired by an explicit refresh.');
+        if (preloadTask) {
+          finishBackgroundTask(preloadTask, {
+            status: 'success',
+            detail: 'Preload retired by explicit refresh'
+          });
+          preloadTask = null;
+        }
+        return null;
+      }
       // Also seed the global state so helpers that rely on stored tree can function sooner
       try { setVontologyTreeData(tree); } catch (_) { }
       console.log('[preloadVontologyData] Preload complete. counts_on_load=', fetchCountsOnLoad);
@@ -4425,6 +4443,21 @@ export function preloadVontologyData() {
 // Helper for other modules to query busy status without touching window directly
 export function isVontologyBusy() {
   try { return typeof window !== 'undefined' && !!window.__VONTOLOGY_BUSY; } catch (_) { return false; }
+}
+
+function retireVontologyPreload() {
+  __vontologyPreloadGeneration += 1;
+  __vontologyPreloadedTreeData = null;
+  __vontologyPreloadedEntityCounts = null;
+}
+
+function publishVontologyPreload(generation, tree, entityCounts) {
+  if (generation !== __vontologyPreloadGeneration) {
+    return false;
+  }
+  __vontologyPreloadedTreeData = tree;
+  __vontologyPreloadedEntityCounts = entityCounts;
+  return true;
 }
 
 function getCachedPreloadSetting() {
@@ -4779,6 +4812,21 @@ export function __test_setTreeReady(val) { if (typeof val === 'boolean') { __von
 export function __test_getPendingSelections() { return Array.isArray(__pendingTreeSelections) ? [...__pendingTreeSelections] : []; }
 // Export for testing
 export function __test_clearPendingSelections() { if (Array.isArray(__pendingTreeSelections)) { __pendingTreeSelections.length = 0; } }
+
+// Export for testing
+export function __test_getVontologyPreloadState() {
+  return {
+    generation: __vontologyPreloadGeneration,
+    tree: __vontologyPreloadedTreeData,
+    entityCounts: __vontologyPreloadedEntityCounts
+  };
+}
+// Export for testing
+export function __test_publishVontologyPreload(generation, tree, entityCounts) {
+  return publishVontologyPreload(generation, tree, entityCounts);
+}
+// Export for testing
+export function __test_retireVontologyPreload() { retireVontologyPreload(); }
 
 // Export for testing
 export function __test_selectSearchItem(item) { return selectSearchItem(item); }

@@ -13,6 +13,10 @@ class _FakeCursor:
         self.operations.append(("max_time_ms", value))
         return self
 
+    def batch_size(self, value: int) -> _FakeCursor:
+        self.operations.append(("batch_size", value))
+        return self
+
     def sort(self, value: list[tuple[str, int]]) -> _FakeCursor:
         self.operations.append(("sort", value))
         return self
@@ -61,6 +65,7 @@ def test_find_applies_server_deadline_before_cursor_options(monkeypatch) -> None
         skip=2,
         limit=3,
         max_time_ms=5_000,
+        cursor_batch_size=10_000,
     )
 
     assert collection.find_calls == [
@@ -74,8 +79,9 @@ def test_find_applies_server_deadline_before_cursor_options(monkeypatch) -> None
     ]
     assert cursor.operations == [
         ("max_time_ms", 5_000),
+        ("batch_size", 10_000),
         ("sort", [("concept_id", 1)]),
         ("skip", 2),
         ("limit", 3),
     ]
-    assert result._cursor is cursor
+    assert getattr(result, "_cursor") is cursor

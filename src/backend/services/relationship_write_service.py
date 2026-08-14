@@ -77,6 +77,16 @@ SUGGESTED_SUPERTYPES: List[str] = [
 CORE_RELATIONSHIP_TEXT_PREDICATES: frozenset[str] = frozenset(
     {"hasContent", "hasDescription", "hasName"}
 )
+TREE_PROJECTION_RELATIONSHIP_PREDICATES: frozenset[str] = frozenset(
+    {
+        "is_a_type_of",
+        "has_subtype",
+        "is_an_instance_of",
+        "has_instance",
+        "most_salient_type",
+        *VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL.values(),
+    }
+)
 
 
 def _emit_relationship_mutation_event(
@@ -170,6 +180,42 @@ def _invalidate_workflow_routing_projection_for_relationship_change(
         invalidate_workflow_discovery_executability_caches()
     except Exception:
         pass
+
+
+def _invalidate_vontology_projection_for_relationship_change(
+    *,
+    source_id: str,
+    predicate: str,
+    target_id: str,
+) -> None:
+    """Invalidate actor-scoped tree projections affected by an edge write."""
+
+    predicate_text = str(predicate or "").strip()
+    canonical_predicate = VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL.get(
+        predicate_text,
+        predicate_text,
+    )
+    if canonical_predicate not in TREE_PROJECTION_RELATIONSHIP_PREDICATES:
+        return
+
+    try:
+        from ..vontology.utils_vontology import invalidate_vontology_caches
+
+        invalidate_vontology_caches(
+            [source_id, target_id],
+            correlation_id=(
+                "relationship-add:"
+                f"{source_id}:{canonical_predicate}:{target_id}"
+            ),
+        )
+    except Exception:
+        _logger.warning(
+            "relationship_write_service: Vontology projection invalidation failed for %s %s %s",
+            source_id,
+            predicate,
+            target_id,
+            exc_info=True,
+        )
 
 
 def _sync_relationship_extent_index_for_sources(source_ids: List[str]) -> None:
@@ -753,7 +799,8 @@ def add_relationship(
 
     normalised = normalise_structural_predicate(predicate)
 
-    if normalised in get_relationship_kinds_set():
+    is_structural = normalised in get_relationship_kinds_set()
+    if is_structural:
         result = add_structural_relationship(source_id, normalised, target, repo=repo)
         predicate_for_invalidation = normalised
     else:
@@ -763,11 +810,17 @@ def add_relationship(
     if isinstance(result, Mapping) and bool(result.get("success")):
         modified = (
             bool(result.get("forward_modified"))
+            or bool(result.get("inverse_modified"))
             or bool(result.get("modified"))
             or bool(result.get("created"))
         )
         if modified:
             _invalidate_workflow_routing_projection_for_relationship_change(
+                source_id=source_id,
+                predicate=predicate_for_invalidation,
+                target_id=target,
+            )
+            _invalidate_vontology_projection_for_relationship_change(
                 source_id=source_id,
                 predicate=predicate_for_invalidation,
                 target_id=target,

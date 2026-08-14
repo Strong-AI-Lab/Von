@@ -208,6 +208,13 @@ def _invalidate_concept_mutation_caches() -> None:
         pass
 
     try:
+        from ..server.routes.vontology_routes import _invalidate_tree_cache
+
+        _invalidate_tree_cache()
+    except Exception:
+        pass
+
+    try:
         if get_workflow_discovery_cache_invalidation_enabled(default=True):
             from .workflow_discovery_service import (
                 invalidate_workflow_discovery_executability_caches,
