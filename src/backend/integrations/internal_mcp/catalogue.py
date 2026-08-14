@@ -31239,6 +31239,46 @@ def _jira_hygiene_emit_audit(**kwargs):
     )
 
 
+def _chat_get_applied_prompt_context(
+    *,
+    applied_prompt_snapshot_json: str | None = None,
+    include_content: bool = True,
+    max_chars: int | None = 20000,
+    **_kwargs,
+):
+    """Return the represented prompt fragments actually applied to this turn."""
+
+    if not isinstance(applied_prompt_snapshot_json, str) or not (
+        applied_prompt_snapshot_json.strip()
+    ):
+        return make_error_response(
+            "trusted_turn_snapshot_required",
+            "A server-bound applied-prompt snapshot is required.",
+        )
+    if not isinstance(include_content, bool):
+        include_content = True
+    try:
+        max_chars_int = 20000 if max_chars is None else int(max_chars)
+    except (TypeError, ValueError):
+        max_chars_int = 20000
+
+    from src.backend.services.chat_auxiliary_prompt_service import (
+        render_applied_prompt_context,
+    )
+
+    try:
+        return render_applied_prompt_context(
+            applied_prompt_snapshot_json,
+            include_content=include_content,
+            max_chars=max_chars_int,
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_trusted_turn_snapshot",
+            str(exc),
+        )
+
+
 def _chat_get_prompt_context(
     *,
     namespace: str | None = None,
@@ -36327,6 +36367,38 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "Get the browser-reported client capability snapshot for the current session (speech synthesis, "
                 "speech recognition, and basic audio hints). Use for debugging speech/narration behaviours without "
                 "collecting high-fidelity fingerprinting data."
+            ),
+        ),
+        MethodDefinition(
+            name="chat_get_applied_prompt_context",
+            handler=_chat_get_applied_prompt_context,
+            input_schema=Schema(
+                required={"applied_prompt_snapshot_json": str},
+                optional={
+                    "include_content": bool,
+                    "max_chars": (int, type(None)),
+                    # Compatibility only. The handler deliberately ignores a
+                    # model-supplied namespace and uses the server-bound snapshot.
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=False,
+                description=(
+                    "Return the actor-owned Vontology prompt concepts actually "
+                    "applied to this turn. The turn snapshot is supplied by the "
+                    "trusted server and cannot be selected by the model."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "applied_prompt_snapshot_json": "applied_prompt_snapshot",
+            },
+            description=(
+                "Inspect the behaviour, narration, and screen prompt concepts "
+                "actually applied to the current turn, including concept IDs, "
+                "application surfaces, content hashes, and bounded exact content. "
+                "Use this when the user asks which prompt is currently operative "
+                "or what represented instructions shaped the answer."
             ),
         ),
         MethodDefinition(

@@ -1120,6 +1120,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "internal",
         "display_template": None,
     },
+    "chat_get_applied_prompt_context": {
+        "salience": "none",
+        "category": "internal",
+        "display_template": None,
+    },
     "chat_introspect": {
         "salience": "none",
         "category": "internal",

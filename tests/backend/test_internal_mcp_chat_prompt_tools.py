@@ -5,6 +5,7 @@ basic handler behaviour.
 """
 
 from src.backend.integrations.internal_mcp.catalogue import (
+    _chat_get_applied_prompt_context,
     _chat_get_prompt_context,
     _chat_introspect,
     _settings_get_public,
@@ -12,6 +13,15 @@ from src.backend.integrations.internal_mcp.catalogue import (
 )
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+from src.backend.services.adaptive_turn_service import (
+    _model_visible_input_schema,
+    _trusted_tool_payload,
+    ordinary_turn_capability_delegation,
+)
+from src.backend.services.chat_auxiliary_prompt_service import (
+    build_applied_prompt_snapshot,
+    serialise_applied_prompt_snapshot,
+)
 
 _BEHAVIOUR_PROMPT_TYPES = (
     "#V#von_chat_behaviour_prompt",
@@ -65,8 +75,119 @@ def test_chat_prompt_tool_registered_in_catalogue():
     catalogue = build_default_catalogue()
     names = set(catalogue.list_methods())
     assert "chat_get_prompt_context" in names
+    assert "chat_get_applied_prompt_context" in names
     assert "chat_introspect" in names
     assert "settings_get_public" in names
+
+
+def _applied_prompt_snapshot_json(user_concept_id="#V#michael_witbrock"):
+    snapshot = build_applied_prompt_snapshot(
+        user_concept_id=user_concept_id,
+        namespace=f"{user_concept_id}@university_of_auckland_strong_ai_lab",
+        organisation_concept_id="#V#university_of_auckland_strong_ai_lab",
+        turn_id="turn-123",
+        behaviour_fragments=[
+            {"concept_id": "#V#behaviour_prompt", "content": "Be precise."},
+        ],
+        narration_fragments=[
+            {"concept_id": "#V#narration_prompt", "content": "Speak plainly."},
+        ],
+        screen_fragments=[
+            {"concept_id": "#V#screen_prompt", "content": "Use Markdown."},
+        ],
+    )
+    return serialise_applied_prompt_snapshot(snapshot)
+
+
+def test_chat_get_applied_prompt_context_returns_exact_turn_snapshot():
+    result = _chat_get_applied_prompt_context(
+        applied_prompt_snapshot_json=_applied_prompt_snapshot_json(),
+        include_content=True,
+        namespace="#V#attempted_other_user",
+    )
+
+    assert result["success"] is True
+    assert result["source"] == "server_bound_turn_snapshot"
+    assert result["turn_id"] == "turn-123"
+    assert result["actor"]["user_concept_id"] == "#V#michael_witbrock"
+    assert result["prompt_classes"] == ["behaviour", "narration", "screen"]
+    assert result["prompt_concept_ids"] == [
+        "#V#behaviour_prompt",
+        "#V#narration_prompt",
+        "#V#screen_prompt",
+    ]
+    assert [item["content"] for item in result["prompts"]] == [
+        "Be precise.",
+        "Speak plainly.",
+        "Use Markdown.",
+    ]
+    assert all(len(item["content_sha256"]) == 64 for item in result["prompts"])
+
+
+def test_chat_get_applied_prompt_context_requires_server_bound_snapshot():
+    result = _chat_get_applied_prompt_context(
+        applied_prompt_snapshot_json=None,
+        include_content=True,
+    )
+    assert result["success"] is False
+    assert result["error_code"] == "trusted_turn_snapshot_required"
+
+
+def test_chat_get_applied_prompt_context_rejects_modified_snapshot():
+    snapshot_json = _applied_prompt_snapshot_json().replace(
+        "Be precise.", "Read another user's prompt."
+    )
+    result = _chat_get_applied_prompt_context(
+        applied_prompt_snapshot_json=snapshot_json,
+        include_content=True,
+    )
+    assert result["success"] is False
+    assert result["error_code"] == "invalid_trusted_turn_snapshot"
+
+
+def test_applied_prompt_capability_is_delegated_only_with_trusted_snapshot():
+    gateway = _build_gateway()
+    definition = gateway.get_method_definition("chat_get_applied_prompt_context")
+    assert definition is not None
+    assert definition.ordinary_turn_excluded_reason is None
+    assert definition.ordinary_turn_trusted_argument_bindings == {
+        "applied_prompt_snapshot_json": "applied_prompt_snapshot"
+    }
+
+    without_snapshot = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#michael_witbrock",
+        trusted_argument_values=None,
+    )
+    assert "chat_get_applied_prompt_context" not in without_snapshot
+
+    trusted_snapshot = _applied_prompt_snapshot_json()
+    with_snapshot = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#michael_witbrock",
+        trusted_argument_values={"applied_prompt_snapshot": trusted_snapshot},
+    )
+    assert "chat_get_applied_prompt_context" in with_snapshot
+
+    visible_schema = _model_visible_input_schema(
+        definition,
+        {"applied_prompt_snapshot": trusted_snapshot},
+    )
+    assert "applied_prompt_snapshot_json" not in visible_schema["properties"]
+    assert "applied_prompt_snapshot_json" not in visible_schema.get("required", [])
+
+    payload = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="chat_get_applied_prompt_context",
+        model_payload={
+            "applied_prompt_snapshot_json": _applied_prompt_snapshot_json(
+                "#V#attempted_other_user"
+            ),
+            "include_content": False,
+        },
+        trusted_argument_values={"applied_prompt_snapshot": trusted_snapshot},
+    )
+    assert payload["applied_prompt_snapshot_json"] == trusted_snapshot
 
 
 def test_chat_get_prompt_context_requires_namespace():

@@ -10946,11 +10946,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # JVNAUTOSCI-797: user-specific system prompt from Vontology
         # ---------------------------------------------------------
         dynamic_instructions = None
+        behaviour_prompt_fragments = []
         narration_prompt_text = None
         narration_prompt_fragments = []
         screen_prompt_text = None
         screen_prompt_fragments = []
         screen_prompt_source = None
+        applied_prompt_snapshot_json = None
+        applied_prompt_manifest_message = None
         user_prompt_debug = {
             "effective_user_concept_id": user_concept_id,
             "loaded": False,
@@ -10961,6 +10964,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "screen_prompt_concept_ids": [],
             "screen_prompt_source": None,
             "screen_prompt_chars": 0,
+            "applied_prompt_snapshot_sha256": None,
         }
         if user_concept_id:
             _emit_context_setup_progress(
@@ -11116,6 +11120,42 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_prompt_debug["screen_prompt_source"] = screen_prompt_source
             user_prompt_debug["screen_prompt_chars"] = len(screen_prompt_text)
 
+        if user_concept_id:
+            from ...services.chat_auxiliary_prompt_service import (
+                build_applied_prompt_manifest_message,
+                build_applied_prompt_snapshot,
+                serialise_applied_prompt_snapshot,
+            )
+
+            applied_prompt_snapshot = build_applied_prompt_snapshot(
+                user_concept_id=user_concept_id,
+                namespace=(
+                    user_namespace
+                    if isinstance(user_namespace, str) and user_namespace.strip()
+                    else None
+                ),
+                organisation_concept_id=org_concept_id,
+                turn_id=request_id,
+                behaviour_fragments=behaviour_prompt_fragments,
+                narration_fragments=narration_prompt_fragments,
+                screen_fragments=screen_prompt_fragments,
+                screen_prompt_text=screen_prompt_text,
+                screen_prompt_concept_ids=_normalise_prompt_concept_ids(
+                    user_prompt_debug.get("screen_prompt_concept_ids")
+                ),
+                screen_prompt_source=screen_prompt_source,
+            )
+            if applied_prompt_snapshot.get("prompt_count"):
+                applied_prompt_snapshot_json = serialise_applied_prompt_snapshot(
+                    applied_prompt_snapshot
+                )
+                applied_prompt_manifest_message = build_applied_prompt_manifest_message(
+                    applied_prompt_snapshot
+                )
+                user_prompt_debug["applied_prompt_snapshot_sha256"] = (
+                    applied_prompt_snapshot.get("snapshot_sha256")
+                )
+
         authenticated_user_context_id = (
             user_concept_id.strip()
             if isinstance(user_concept_id, str) and user_concept_id.strip()
@@ -11195,6 +11235,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 enhanced_context.insert(0, user_prompt_message)
             else:
                 enhanced_context.insert(1, user_prompt_message)
+
+        if applied_prompt_manifest_message:
+            manifest_insert_index = 0
+            while manifest_insert_index < len(enhanced_context) and str(
+                enhanced_context[manifest_insert_index].get("role") or ""
+            ).strip().lower() in {"system", "developer"}:
+                manifest_insert_index += 1
+            enhanced_context.insert(
+                manifest_insert_index,
+                {
+                    "role": "system",
+                    "content": applied_prompt_manifest_message,
+                },
+            )
 
         if request_workflow_launch_inputs:
             enhanced_context.append(
@@ -11540,6 +11594,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         _check_background_cancellation("direct adaptive turn entry")
         adaptive_turn_started = time.perf_counter()
         adaptive_input_context = enhanced_context
+        trusted_turn_argument_values: dict[str, Any] = {}
+        if gmail_profile_trusted_binding is not None:
+            trusted_turn_argument_values["gmail_profile"] = (
+                gmail_profile_trusted_binding
+            )
+        if applied_prompt_snapshot_json is not None:
+            trusted_turn_argument_values["applied_prompt_snapshot"] = (
+                applied_prompt_snapshot_json
+            )
+
         adaptive_turn_result = execute_adaptive_turn(
             gateway=gateway,
             prompt=prompt_text,
@@ -11550,11 +11614,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_namespace=user_namespace,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
-            trusted_argument_values=(
-                {"gmail_profile": gmail_profile_trusted_binding}
-                if gmail_profile_trusted_binding is not None
-                else None
-            ),
+            trusted_argument_values=trusted_turn_argument_values or None,
             workflow_launch_inputs=request_workflow_launch_inputs,
             progress_tracker=progress_tracker,
             turn_id=request_id,
