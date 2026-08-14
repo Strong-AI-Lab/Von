@@ -157,7 +157,9 @@ export function updateHeaderOrgName() {
     }
   } catch { /* ignore */ }
 
-  headerOrgNameEl.textContent = orgName || 'Personal';
+  const displayName = orgName || 'Personal';
+  headerOrgNameEl.textContent = displayName;
+  headerOrgNameEl.title = displayName;
 }
 
 /**

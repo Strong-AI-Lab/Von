@@ -1,55 +1,56 @@
 <!-- Chat Tab Content -->
 <div id="chatTab" class="tab-content active">
   <div class="content-wrapper">
-    <!-- Header with Von intro -->
-    <div class="chat-header">
-      <h2 class="main-title">Talk to Von Neumarkt</h2>
-      <div class="chat-header-controls" role="group" aria-label="Conversation tools">
-        <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
-          title="Inspect this conversation's shared situation" aria-label="Inspect conversation situation"
-          aria-expanded="false" aria-controls="conversationSituationPanel" data-keep-title="true">
-          <span class="chat-situation-toggle-label">Situation</span>
-          <span id="conversationSituationBadge" class="chat-situation-badge hidden" aria-hidden="true"></span>
-        </button>
-        <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
-          title="Open tasks panel" aria-label="Tasks" data-keep-title="true">
-          <span class="btn-icon">📋</span>
-          <span id="taskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
-        </button>
-        <button id="inviteConversationBtn" class="chat-export-btn" type="button"
-          title="Invite people to this conversation" aria-label="Invite to conversation" data-keep-title="true">
-          <span class="btn-icon">👥</span>
-        </button>
-        <button id="incomingInvitesBtn" class="chat-export-btn" type="button"
-          title="View incoming conversation invites" aria-label="View conversation invites" data-keep-title="true">
-          <span class="btn-icon">📨</span>
-          <span id="incomingInvitesBadge" class="invite-badge hidden" aria-hidden="true"></span>
-        </button>
-        <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
-          title="Copy conversation transcript as Markdown" aria-label="Export conversation as Markdown"
-          data-keep-title="true">
-          <span class="btn-icon">MD</span>
-        </button>
-        <button id="copyConversationInfoJsonBtn" class="chat-export-btn" type="button"
-          title="Copy conversation info as JSON" aria-label="Copy conversation info as JSON"
-          data-keep-title="true" data-copy-json-role="copy-json" disabled>
-          <span class="btn-icon">ℹ</span>
-        </button>
-        <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
-          title="Save conversation info as JSON file" aria-label="Save conversation info as JSON"
-          data-keep-title="true">
-          <span class="btn-icon">{}</span>
-        </button>
+    <div id="conversationWorkspace" class="conversation-workspace" data-tabs-layout="horizontal"
+      data-effective-tabs-layout="horizontal">
+      <div class="chat-session-tabs-row" aria-label="Conversation sessions">
+        <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"
+          aria-orientation="horizontal"></div>
+        <div id="chatSessionCount" class="chat-session-count" aria-label="Conversation count" title="Conversations">—
+        </div>
       </div>
-    </div>
 
-    <div class="chat-session-tabs-row" aria-label="Conversation sessions">
-      <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"></div>
-      <div id="chatSessionCount" class="chat-session-count" aria-label="Conversation count" title="Conversations">—
-      </div>
-    </div>
-
-    <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
+      <div class="chat-conversation-main">
+        <div class="chat-conversation-masthead">
+          <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
+          <div class="chat-header-controls" role="group" aria-label="Conversation tools">
+            <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
+              title="Inspect this conversation's shared situation" aria-label="Inspect conversation situation"
+              aria-expanded="false" aria-controls="conversationSituationPanel" data-keep-title="true">
+              <span class="chat-situation-toggle-label">Situation</span>
+              <span id="conversationSituationBadge" class="chat-situation-badge hidden" aria-hidden="true"></span>
+            </button>
+            <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
+              title="Open tasks panel" aria-label="Tasks" data-keep-title="true">
+              <span class="btn-icon">📋</span>
+              <span id="taskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
+            </button>
+            <button id="inviteConversationBtn" class="chat-export-btn" type="button"
+              title="Invite people to this conversation" aria-label="Invite to conversation" data-keep-title="true">
+              <span class="btn-icon">👥</span>
+            </button>
+            <button id="incomingInvitesBtn" class="chat-export-btn" type="button"
+              title="View incoming conversation invites" aria-label="View conversation invites" data-keep-title="true">
+              <span class="btn-icon">📨</span>
+              <span id="incomingInvitesBadge" class="invite-badge hidden" aria-hidden="true"></span>
+            </button>
+            <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
+              title="Copy conversation transcript as Markdown" aria-label="Export conversation as Markdown"
+              data-keep-title="true">
+              <span class="btn-icon">MD</span>
+            </button>
+            <button id="copyConversationInfoJsonBtn" class="chat-export-btn" type="button"
+              title="Copy conversation info as JSON" aria-label="Copy conversation info as JSON"
+              data-keep-title="true" data-copy-json-role="copy-json" disabled>
+              <span class="btn-icon">ℹ</span>
+            </button>
+            <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
+              title="Save conversation info as JSON file" aria-label="Save conversation info as JSON"
+              data-keep-title="true">
+              <span class="btn-icon">{}</span>
+            </button>
+          </div>
+        </div>
 
     <section id="conversationSituationPanel" class="chat-situation-panel hidden" role="dialog"
       aria-modal="false" aria-labelledby="conversationSituationTitle" tabindex="-1">
@@ -221,6 +222,8 @@
             </label>
           </div>
         </details>
+      </div>
+    </div>
       </div>
     </div>
   </div>
