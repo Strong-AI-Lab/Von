@@ -413,6 +413,151 @@ def test_failed_create_readback_never_follows_an_existing_concept_id(
     assert readback["concepts"] == []
 
 
+def test_later_create_postcondition_reuses_the_original_immutable_intent(
+    monkeypatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    concept_id = "#V#nichola_raihani"
+    arguments = {
+        "instance_of_type": "#V#person",
+        "concepts": [
+            {
+                "concept_id": concept_id,
+                "name": "Nichola Raihani",
+                "description": "A behavioural scientist.",
+                "notes": "Represented from the conversation.",
+                "kind": "instance",
+            }
+        ],
+    }
+    governed_arguments = command.resolve_governed_ontology_arguments(
+        "create_concepts",
+        command.normalise_governed_ontology_arguments(
+            "create_concepts",
+            arguments,
+        ),
+    )
+    intent = authority.OntologyMutationIntent(
+        operation="concept.create",
+        publication_context=authority.PublicationContext.user("#V#person"),
+        target_concept_ids=(concept_id, "#V#person"),
+        tool_name="create_concepts",
+        delta={
+            "concepts": [
+                {
+                    "concept_id": concept_id,
+                    "name": "Nichola Raihani",
+                    "description": "A behavioural scientist.",
+                    "notes": "Represented from the conversation.",
+                    "kind": "instance",
+                    "instance_of_type": "#V#person",
+                    "vontology_path": None,
+                }
+            ],
+            "expected_concept_id": concept_id,
+            "parent_id": None,
+            "parent_concept_ids": [],
+            "instance_of_type": "#V#person",
+            "referenced_concept_ids": ["#V#person"],
+            "scope_mode": "user_only_default",
+            "stored_scope": {},
+            "maintain_parent_inverse": False,
+            "effect_arguments_sha256": command._effect_arguments_sha256(
+                governed_arguments
+            ),
+        },
+    )
+    canonical_state = {
+        "concepts": [
+            {
+                "concept_id": concept_id,
+                "exists": True,
+                "publication_context": authority.PublicationContext.user(
+                    "#V#person"
+                ).to_mapping(),
+                "forward_relationships": {
+                    "is_a_type_of": [],
+                    "is_an_instance_of": ["#V#person"],
+                    "linked_to": [],
+                },
+                "attributes": {},
+                "system_tags": [],
+                "user_tags": [],
+                "vontology_path": None,
+                "text_relations": [
+                    {
+                        "predicate": "hasName",
+                        "text": "Nichola Raihani",
+                        "context": {"name_type": "NL"},
+                    },
+                    {
+                        "predicate": "hasDescription",
+                        "text": "A behavioural scientist.",
+                        "context": {},
+                    },
+                    {
+                        "predicate": "hasNote",
+                        "text": "Represented from the conversation.",
+                        "context": {},
+                    },
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        command,
+        "canonical_read_back_for_method",
+        lambda **_kwargs: canonical_state,
+    )
+    monkeypatch.setattr(
+        command,
+        "reconcile_indeterminate_mutation_receipt",
+        lambda **kwargs: {
+            "receipt_id": kwargs["receipt_id"],
+            "status": "succeeded",
+        },
+    )
+    original_result = {
+        "success": False,
+        "effect_status": "indeterminate",
+        "changed": None,
+        "outcome_finality": "requires_canonical_reconciliation",
+        "created_concept_ids": [concept_id],
+        "authority_receipt": {
+            "receipt_id": "omr-nichola",
+            "status": "indeterminate",
+            "intent_fingerprint": intent.fingerprint,
+        },
+        "postcondition_reconciliation": (
+            command._postcondition_reconciliation_contract(
+                method_name="create_concepts",
+                intent=intent,
+            )
+        ),
+    }
+
+    reconciled = command.reconcile_governed_ontology_postcondition(
+        method_name="create_concepts",
+        arguments=arguments,
+        original_result=original_result,
+    )
+
+    assert reconciled["verified"] is True
+    assert reconciled["target_concept_ids"] == [concept_id, "#V#person"]
+    assert reconciled["authority_receipt"]["status"] == "succeeded"
+
+    changed_arguments = {**arguments, "instance_of_type": "#V#other_type"}
+    rejected = command.reconcile_governed_ontology_postcondition(
+        method_name="create_concepts",
+        arguments=changed_arguments,
+        original_result=original_result,
+    )
+    assert rejected["verified"] is False
+    assert rejected["error_code"] == "ontology_reconciliation_contract_invalid"
+
+
 def test_inaccessible_create_collision_is_non_disclosing(monkeypatch) -> None:
     from src.backend.services import ontology_mutation_command_service as command
     from src.backend.services import ontology_publication_authority_service as authority

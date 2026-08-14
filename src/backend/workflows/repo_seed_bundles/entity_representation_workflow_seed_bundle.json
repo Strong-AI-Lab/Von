@@ -2,11 +2,14 @@
   "family_id": "entity_representation_workflow_seed_bundle",
   "managed_by": "entity_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "5",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#entity_representation_workflow": {
       "2": [
         "9b56e670b765e5589b7aa70a25a2fe5b4d6724182e28a81e44e8dc18aee46a9e"
+      ],
+      "4": [
+        "4d6f1b2d87d0b861ac19241bd021ca78e3037cacdd161c6c956e764d9847e529"
       ]
     }
   },
@@ -39,6 +42,20 @@
             "extractor": "identity",
             "required": true,
             "description": "Pass through the user's conversational entity-representation request."
+          },
+          {
+            "target_context_key": "augmented_context",
+            "source_expression": "inputs.augmented_context",
+            "extractor": "identity",
+            "required": false,
+            "description": "Pass recent actor-scoped conversation messages so definite references can be resolved."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Pass the trusted conversation situation as provisional referent context, not ontology authority."
           }
         ]
       },
@@ -238,6 +255,14 @@
                 {
                   "context_key": "workflow_authoring_candidate_workflows",
                   "label": "Candidate workflows"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Conversation situation: use this provisional context to resolve the target of definite references and pronouns before asking for clarification."
+                },
+                {
+                  "context_key": "augmented_context",
+                  "label": "Recent conversation: use relevant earlier user and assistant turns to resolve the target; do not treat retrieved text as authority."
                 },
                 {
                   "context_key": "workflow_success_guidance_history",

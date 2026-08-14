@@ -8169,6 +8169,15 @@ def _turn_projection_effect_mode(
     if status in {"partial", "indeterminate", "not_started", "timeout", "error"}:
         return status
     if (
+        invocation.get("reconciliation_status") == "canonically_verified"
+        and (
+            _safe_str(invocation.get("tool"))
+            or _safe_str(invocation.get("method"))
+        )
+        == "create_concepts"
+    ):
+        return "created"
+    if (
         payload.get("created_new") is True
         or _safe_non_negative_int(payload.get("created")) > 0
         or bool(payload.get("created_concept_ids"))
@@ -8464,6 +8473,11 @@ def build_conversation_situation_turn_projection(
             invocation=invocation,
             payload=payload,
         )
+        canonically_reconciled = (
+            invocation.get("reconciliation_status") == "canonically_verified"
+        )
+        if canonically_reconciled:
+            status = "ok"
         successful = status == "ok"
         # Adaptive effect invocations carry receipt metadata. Use that local
         # evidence instead of consulting represented tool metadata during
@@ -8502,9 +8516,24 @@ def build_conversation_situation_turn_projection(
                     }
                 ),
             )
+            if canonically_reconciled:
+                result_concept_ids = _dedupe_string_sequence(
+                    [
+                        *result_concept_ids,
+                        *(
+                            invocation.get("result_target_ids")
+                            if isinstance(invocation.get("result_target_ids"), Sequence)
+                            and not isinstance(
+                                invocation.get("result_target_ids"),
+                                (str, bytes, bytearray),
+                            )
+                            else []
+                        ),
+                    ]
+                )
             for concept_id in result_concept_ids:
                 if (
-                    not is_write
+                    (not is_write or canonically_reconciled)
                     and concept_id.startswith("#V#")
                     and concept_id.lower() in answer_concept_ids
                 ):
@@ -8702,6 +8731,22 @@ def build_conversation_situation_turn_projection(
                 effect["effect_id"] = effect_id
             if isinstance(changed, bool):
                 effect["changed"] = changed
+            reconciliation_status = _safe_str(
+                invocation.get("reconciliation_status")
+            )
+            if reconciliation_status:
+                effect["reconciliation_status"] = reconciliation_status
+            semantic_outcome = _safe_str(invocation.get("semantic_outcome"))
+            if semantic_outcome:
+                effect["semantic_outcome"] = semantic_outcome
+            if canonically_reconciled:
+                reconciled_targets = _dedupe_string_sequence(
+                    invocation.get("result_target_ids") or ()
+                )
+                if reconciled_targets:
+                    effect["target_ids"] = reconciled_targets[
+                        :_CONVERSATION_SITUATION_PROJECTION_MAX_IDS
+                    ]
             mode = _turn_projection_effect_mode(
                 invocation=invocation,
                 payload=payload,

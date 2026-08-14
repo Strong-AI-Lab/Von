@@ -1702,6 +1702,87 @@ def finalise_mutation_receipt(
     return _receipt_public_projection(updated)
 
 
+def reconcile_indeterminate_mutation_receipt(
+    *,
+    receipt_id: str,
+    intent_fingerprint: str,
+    canonical_read_back: Any,
+    response_projection: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Finalise one indeterminate receipt after an exact later postcondition read.
+
+    This is an operational receipt transition, not a second ontology mutation.
+    The caller must have verified the original immutable intent against the
+    later canonical state.  Actor identity and the original intent fingerprint
+    are checked again here so a read-back for another actor or effect cannot be
+    attached to this receipt.
+    """
+
+    actor_id, actor_identity_source = get_effective_user_concept_id_with_source()
+    actor_id = _normalise_concept_id(actor_id)
+    clean_receipt_id = _clean_text(receipt_id)
+    clean_fingerprint = _clean_text(intent_fingerprint)
+    if (
+        not actor_id
+        or not clean_receipt_id
+        or not clean_fingerprint
+        or actor_identity_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
+    ):
+        return None
+
+    collection = _receipt_collection()
+    existing = collection.find_one(
+        {
+            "receipt_id": clean_receipt_id,
+            "actor_concept_id": actor_id,
+            "intent_fingerprint": clean_fingerprint,
+        }
+    )
+    if not isinstance(existing, Mapping):
+        return None
+    if _clean_text(existing.get("status")) == "succeeded":
+        return _receipt_public_projection(existing)
+    if _clean_text(existing.get("status")) != "indeterminate":
+        return None
+
+    now = _now()
+    bounded_response = _bounded_projection(response_projection)
+    updated = collection.find_one_and_update(
+        {
+            "receipt_id": clean_receipt_id,
+            "actor_concept_id": actor_id,
+            "intent_fingerprint": clean_fingerprint,
+            "status": "indeterminate",
+        },
+        {
+            "$set": {
+                "status": "succeeded",
+                "mutation_outcome": "succeeded",
+                "changed": True,
+                "canonical_read_back": _bounded_projection(canonical_read_back),
+                "canonical_read_back_sha256": _sha256_json(canonical_read_back),
+                "response_projection": bounded_response,
+                "response_projection_truncated": bool(
+                    isinstance(bounded_response, Mapping)
+                    and bounded_response.get("truncated")
+                ),
+                "response_success": True,
+                "response_effect_status": "succeeded",
+                "response_error_code": None,
+                "error_code": None,
+                "reconciled_from_status": "indeterminate",
+                "reconciled_at": now,
+                "updated_at": now,
+                "completed_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return (
+        _receipt_public_projection(updated) if isinstance(updated, Mapping) else None
+    )
+
+
 def get_mutation_receipt_for_actor(
     *,
     receipt_id: str,
@@ -2159,6 +2240,7 @@ __all__ = [
     "ontology_mutation_resource_lock",
     "parse_authority_role_storage_text",
     "publication_context_for_creation",
+    "reconcile_indeterminate_mutation_receipt",
     "resolve_delegation_principal",
     "resolve_live_semantic_roles",
     "revoke_agent_delegation",

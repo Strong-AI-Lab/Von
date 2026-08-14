@@ -3376,6 +3376,110 @@ def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     assert blocked["error_code"] == "prior_effect_outcome_indeterminate"
 
 
+def test_exact_terminal_reconciliation_preserves_recovered_ontology_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    concept_id = "#V#nichola_raihani"
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "reconcile_governed_ontology_postcondition",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "status": "verified",
+            "method_name": "create_concepts",
+            "receipt_id": "omr-nichola",
+            "intent_fingerprint": "intent-nichola",
+            "target_concept_ids": [concept_id],
+            "canonical_read_back": {"concepts": [{"concept_id": concept_id}]},
+        },
+    )
+
+    gateway = _effect_gateway(
+        lambda name, _arguments: (
+            {
+                "success": False,
+                "effect_status": "indeterminate",
+                "mutation_outcome": "unknown",
+                "outcome_finality": "requires_canonical_reconciliation",
+                "changed": None,
+                "error_code": "ontology_mutation_postcondition_failed",
+                "created_concept_ids": [concept_id],
+                "authority_receipt": {
+                    "receipt_id": "omr-nichola",
+                    "status": "indeterminate",
+                    "intent_fingerprint": "intent-nichola",
+                },
+                "postcondition_reconciliation": {
+                    "schema_version": (
+                        "ontology_mutation_postcondition_reconciliation.v1"
+                    )
+                },
+            }
+            if name == "create_concepts"
+            else {"success": True}
+        )
+    )
+    answer = f"I represented Nichola Raihani as {concept_id}."
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-nichola",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [
+                                {
+                                    "concept_id": concept_id,
+                                    "name": "Nichola Raihani",
+                                }
+                            ]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response=answer),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Represent her comprehensively.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-reconcile-nichola",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.effect_finality_fallback is False
+    assert result.response_text == answer
+    tool_messages = [
+        item
+        for item in client.calls[1]["context"]
+        if item.get("role") == "tool"
+    ]
+    model_receipt = json.loads(tool_messages[-1]["content"])
+    assert model_receipt["effect_status"] == "succeeded"
+    assert model_receipt["reconciliation_status"] == "canonically_verified"
+    assert model_receipt["result_target_ids"] == [concept_id]
+    invocation = result.tool_invocations[0]
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["initial_effect_status"] == "indeterminate"
+    assert invocation["reconciliation_status"] == "canonically_verified"
+    assert invocation["canonical_readback"]["verified"] is True
+    assert invocation["result_target_ids"] == [concept_id]
+
+
 def test_per_method_minimum_admits_sequential_effects_below_hard_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8436,6 +8540,9 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         user_concept_id="#V#real_user",
         org_concept_id="#V#real_org",
         workflow_launch_inputs={"authorised_record": "#V#request_record"},
+        conversation_situation=(
+            "The represented record currently under discussion is #V#record."
+        ),
         turn_id="turn-represented-workflow",
         turn_budget_seconds=20,
         final_synthesis_reserve_seconds=2,
@@ -8464,6 +8571,9 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert seen_arguments["inputs"]["user_concept_id"] == "#V#real_user"
     assert seen_arguments["inputs"]["record_id"] == "#V#record"
     assert seen_arguments["inputs"]["authorised_record"] == "#V#request_record"
+    assert seen_arguments["inputs"]["conversation_situation"] == (
+        "The represented record currently under discussion is #V#record."
+    )
     assert seen_arguments["source_event_type"] == "conversation_turn"
     assert seen_arguments["source_event_id"] == "turn-represented-workflow"
     assert seen_arguments["timeout_seconds"] == 90.0

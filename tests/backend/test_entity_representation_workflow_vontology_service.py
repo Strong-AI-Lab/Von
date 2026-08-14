@@ -79,6 +79,26 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     assert isinstance(launch_contract, dict)
     assert launch_source.startswith("text_relation:")
     assert launch_contract.get("required_inputs") == ["prompt"]
+    input_mappings = launch_contract.get("input_mappings") or []
+    assert {
+        mapping.get("target_context_key")
+        for mapping in input_mappings
+        if isinstance(mapping, dict)
+    } >= {"prompt", "augmented_context", "conversation_situation"}
+
+    preflight_state = next(
+        state
+        for state_id, state in definition.states.items()
+        if state_id.endswith("_decide_entity_path")
+    )
+    context_keys = {
+        item.get("context_key")
+        for item in (preflight_state.metadata.get("llm_policy") or {}).get(
+            "context_fields", []
+        )
+        if isinstance(item, dict)
+    }
+    assert {"augmented_context", "conversation_situation"}.issubset(context_keys)
 
     routing_profile, routing_source = resolve_workflow_routing_profile(
         ENTITY_REPRESENTATION_WORKFLOW_ID
