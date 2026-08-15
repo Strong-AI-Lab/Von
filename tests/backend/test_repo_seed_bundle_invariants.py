@@ -342,3 +342,41 @@ def test_explicit_workflow_experience_prelude_callers_keep_their_seed_definition
 
     assert callers
     assert prelude_id in canonical_workflow_ids
+
+
+def test_canonical_bundle_declares_reviewed_seed_43_migrations_without_claiming_shared_support_authority() -> (
+    None
+):
+    """Keep the live seed-43 recovery explicit and bounded.
+
+    The three digests are canonical read-backs of the reviewed live workflow
+    surfaces.  Shared model-policy concepts may be created on an empty
+    installation, but an existing represented concept has broader Vontology
+    authority and must not be rewritten merely to advance this workflow seed.
+    """
+
+    payload = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
+    assert payload["seed_version"] == "52"
+    reviewed_seed_43 = {
+        "#V#tool_calling_workflow": (
+            "696cdf1616304c533a448cf740cb97a94af7828be473de41c91793e627d52592"
+        ),
+        "#V#general_mail_review_workflow": (
+            "ff4639db4cfd620eede3ac9193feb537356b1f171a7ce386fa54dd99a413c008"
+        ),
+        "#V#gmail_message_detail_fetch_workflow": (
+            "09970a529b9734e8ec989658157de51bb57d00484bf7a52bf8e18a8d7d23d770"
+        ),
+    }
+    declared = payload[
+        "known_legacy_authority_payload_sha256_by_seed_version"
+    ]
+    for workflow_id, digest in reviewed_seed_43.items():
+        assert digest in declared[workflow_id]["43"]
+
+    support_concepts = payload["support_concepts"]
+    assert support_concepts
+    assert all(
+        support_concept.get("preserve_existing_authority") is True
+        for support_concept in support_concepts
+    )

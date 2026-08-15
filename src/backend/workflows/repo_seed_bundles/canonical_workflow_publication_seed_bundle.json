@@ -1,16 +1,27 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "51",
+  "seed_version": "52",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#tool_calling_workflow": {
       "42": [
         "77e8896562063743a980c1700c43a5edf1d451b1a90c1e0b489f9c3838cc7b87"
+      ],
+      "43": [
+        "696cdf1616304c533a448cf740cb97a94af7828be473de41c91793e627d52592"
       ]
     },
     "#V#general_mail_review_workflow": {
+      "43": [
+        "ff4639db4cfd620eede3ac9193feb537356b1f171a7ce386fa54dd99a413c008"
+      ],
       "50": [
         "3b1006be7892b4981511d7767b69f2de023c3c919da8883b050248ee4ae53674"
+      ]
+    },
+    "#V#gmail_message_detail_fetch_workflow": {
+      "43": [
+        "09970a529b9734e8ec989658157de51bb57d00484bf7a52bf8e18a8d7d23d770"
       ]
     }
   },
@@ -22,6 +33,7 @@
         "#V#workflow_model_policy"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Default stage-aware workflow model selection policy.",
       "system_tags": [
         "workflow-model-policy",
@@ -50,6 +62,7 @@
         "#V#workflow_stage"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Workflow model-policy stage for rendering grounded mail review answers.",
       "system_tags": [
         "workflow-model-policy",
@@ -71,6 +84,7 @@
         "#V#workflow_stage"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Workflow model-policy stage for planning executable tool calls.",
       "system_tags": [
         "workflow-model-policy",
@@ -92,6 +106,7 @@
         "#V#workflow_stage"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Workflow model-policy stage for retrying omitted executable tool calls.",
       "system_tags": [
         "workflow-model-policy",
@@ -113,6 +128,7 @@
         "#V#workflow_stage_configuration"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Default model-policy configuration for executable tool-call planning.",
       "system_tags": [
         "workflow-model-policy",
@@ -144,6 +160,7 @@
         "#V#workflow_stage_configuration"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Default model-policy configuration for retrying omitted executable tool calls.",
       "system_tags": [
         "workflow-model-policy",
@@ -175,6 +192,7 @@
         "#V#workflow_stage_configuration"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Default model-policy configuration for grounded mail review answer rendering.",
       "system_tags": [
         "workflow-model-policy",
