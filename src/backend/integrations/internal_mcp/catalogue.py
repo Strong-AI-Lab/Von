@@ -17096,6 +17096,7 @@ _DELEGATED_TELEMETRY_PAGE_CONTEXT_FIELDS = (
     "namespace",
     "access_mode",
     "identifier_binding",
+    "history_coverage",
 )
 
 
@@ -17356,6 +17357,22 @@ def _chat_history_get_segments(**kwargs):
             "omitted_count": 0,
             "retention_limit": chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS,
         }
+    history_truncated = bool(meta_mapping.get("history_truncated", False))
+    history_coverage = {
+        "schema_version": "conversation_history_coverage.v1",
+        "status": "truncated" if history_truncated else "complete",
+        "history_truncated": history_truncated,
+        "exhaustive_answer_supported": not history_truncated,
+        "continuation_required_for_exhaustive_answer": history_truncated,
+    }
+    if history_truncated:
+        history_coverage["recovery"] = {
+            "tool_name": "chat_history_get_segments",
+            "instruction": (
+                "Repeat the active-conversation read without history_tail_limit "
+                "before answering an exhaustive list or count request."
+            ),
+        }
     payload = {
         "success": True,
         "session_id": access.get("session_id"),
@@ -17367,7 +17384,8 @@ def _chat_history_get_segments(**kwargs):
         "identifier_binding": access.get("identifier_binding"),
         "segments": segments,
         "segment_count": len(segments) if isinstance(segments, list) else 0,
-        "history_truncated": bool(meta_mapping.get("history_truncated", False)),
+        "history_truncated": history_truncated,
+        "history_coverage": history_coverage,
         "conversation_situation": conversation_situation,
         "conversation_observations": conversation_observations,
         "conversation_observation_state": conversation_observation_state,
@@ -26814,19 +26832,23 @@ def _gmail_list_messages(**kwargs):
             max_results = kwargs.get("maxResults")
         if max_results is None:
             max_results = kwargs.get("limit")
-        result = gs.list_messages(
-            profile_id=profile,
-            query=caller_query,
-            label_ids=caller_label_ids,
-            max_results=max_results or 25,
-            include_metadata=kwargs.get("include_metadata"),
-            audit_context={
+        list_arguments: dict[str, Any] = {
+            "profile_id": profile,
+            "query": caller_query,
+            "label_ids": caller_label_ids,
+            "max_results": max_results or 25,
+            "include_metadata": kwargs.get("include_metadata"),
+            "audit_context": {
                 "namespace": profile_authority.audit_namespace,
                 "source": kwargs.get("_audit_source") or "internal_mcp_gateway",
                 "tool": "gmail_list_messages",
             },
-            bypass_profile_query_prefix=bypass_profile_query_prefix,
-        )
+            "bypass_profile_query_prefix": bypass_profile_query_prefix,
+        }
+        requested_page_token = kwargs.get("page_token") or kwargs.get("pageToken")
+        if isinstance(requested_page_token, str) and requested_page_token.strip():
+            list_arguments["page_token"] = requested_page_token.strip()
+        result = gs.list_messages(**list_arguments)
 
         # Resolve the profile to surface the effective query info to callers.
         try:
@@ -37276,6 +37298,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "label_ids": list,
             "max_results": (int, type(None)),
             "maxResults": (int, type(None)),
+            "page_token": (str, type(None)),
             "order_by": str,
             "order": str,
             "scope": str,
@@ -37303,7 +37326,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "up to one metadata read per returned row, so set max_results to the "
             "candidate cardinality the request actually needs. A narrow query plus "
             "max_results and include_metadata can normally identify candidate "
-            "messages in one tool call. The 'limit' alias maps to max_results; "
+            "messages in one tool call. Pass a returned nextPageToken as "
+            "page_token to continue the same Gmail result set. The 'limit' "
+            "alias maps to max_results; "
             "order/order_by/sort remain compatibility hints and are ignored."
         ),
         aliases={
@@ -37311,6 +37336,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "identity": "profile",
             "user_id": "profile",
             "q": "query",
+            "pageToken": "page_token",
             "limit": "max_results",
             "sort": "order_by",
             "sort_by": "order_by",
@@ -38941,7 +38967,10 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                 "session or supply a conversation reference. Direct diagnostic "
                 "callers may still use an authoritative conversation_ref and "
                 "history_location locators. Use offset/limit when a delegated "
-                "response is paged."
+                "response is paged. For exhaustive list or count questions, "
+                "inspect history_coverage: if it reports truncated, repeat the "
+                "active-conversation read without history_tail_limit before "
+                "answering, or state explicitly that only a lower bound is known."
             ),
         ),
         MethodDefinition(
@@ -41726,6 +41755,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "step_index": int,
                     "inputs": dict,
                     "outputs": (dict, type(None)),
+                    "workflow_data": dict,
                     "error": (str, type(None)),
                     "error_code": (str, type(None)),
                     "await_terminal": bool,
@@ -41738,7 +41768,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "hard_timeout_seconds": (int, float, type(None)),
                 },
                 allow_unknown=True,
-                description="Full workflow instance details.",
+                description=(
+                    "Full workflow instance details, including persisted workflow_data "
+                    "and any declared batch or item result projection."
+                ),
             ),
             category="read",
             timeout_sec=None,
@@ -41746,7 +41779,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             hard_timeout_enabled=False,
             description=(
                 "Get detailed status of a durable workflow instance including current state, "
-                "inputs, outputs, and any errors. Set await_terminal=true to make a "
+                "inputs, outputs, persisted workflow_data, declared batch/item results, "
+                "and any errors. Use workflow_data from a retained parent instance locator "
+                "for later exhaustive list or count follow-ups. Set await_terminal=true to make a "
                 "advisory observation wait on an existing instance; crossing returns its "
                 "current state to the model and never cancels or retries the workflow."
             ),

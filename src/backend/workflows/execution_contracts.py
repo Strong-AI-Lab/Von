@@ -427,16 +427,24 @@ def workflow_final_state_is_failure_like(final_state: Any) -> bool:
     text = str(final_state or "").strip().lower()
     if not text:
         return False
-    return text in {"failed", "failure", "error", "cancelled", "canceled"} or any(
-        text.endswith(suffix)
-        for suffix in (
-            "_failed",
-            "_failure",
-            "_error",
-            "_cancelled",
-            "_canceled",
-        )
+    exact_tokens = {"failed", "failure", "error", "cancelled", "canceled"}
+    failure_tokens = (
+        "failed",
+        "failure",
+        "error",
+        "cancelled",
+        "canceled",
     )
+    if text in exact_tokens:
+        return True
+
+    # Represented workflows may qualify a terminal failure on either side of
+    # the token (for example ``failed_unmarked`` or
+    # ``workflow_step_x_failed_gmail_state``).  Keep the match token-bounded so
+    # neutral states such as ``completed_with_errors`` retain their represented
+    # partial-success semantics.
+    parts = tuple(part for part in text.replace("#v#", "").split("_") if part)
+    return any(part in failure_tokens for part in parts)
 
 
 def build_arxiv_ingestion_completion_report(

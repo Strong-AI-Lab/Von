@@ -826,16 +826,20 @@ def _build_for_each_handler(
             and isinstance((result_payload := item.get("result")), Mapping)
             and result_payload
         ]
-        iteration_errors = [
-            {
+        iteration_errors: list[dict[str, Any]] = []
+        for item in iteration_results:
+            if item["completed"]:
+                continue
+            failure: dict[str, Any] = {
                 "index": item.get("index"),
                 "item": item.get("item"),
                 "final_state": item.get("final_state"),
                 "error": item.get("error"),
             }
-            for item in iteration_results
-            if not item["completed"]
-        ]
+            declared_failure_result = item.get("result")
+            if isinstance(declared_failure_result, Mapping) and declared_failure_result:
+                failure["result"] = dict(declared_failure_result)
+            iteration_errors.append(failure)
         final_state_counts: dict[str, int] = {}
         for item in iteration_results:
             final_state = _normalise_text(item.get("final_state")) or "unknown"
