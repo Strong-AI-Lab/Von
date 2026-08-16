@@ -353,15 +353,17 @@ def test_email_source_seed_requires_current_markers_before_verified_gmail_writes
     ]
     assert "message_processing_marker" in mark_done["writes_context_keys"]
     assert mark_done["next_state"] == "verify_done_marker"
-    assert mark_done["on_failure_state"] == "failed_unmarked"
+    assert mark_done["on_failure_state"] == "project_unmarked_result"
 
     verify_done_marker = steps["verify_done_marker"]
     assert verify_done_marker["static_input_bindings"][1] == [
         "tool_name",
         "get_source_processing_marker",
     ]
-    assert verify_done_marker["on_failure_state"] == "failed_unmarked"
-    assert verify_done_marker["next_state"] == "failed_unmarked"
+    assert verify_done_marker["on_failure_state"] == (
+        "project_unmarked_result"
+    )
+    assert verify_done_marker["next_state"] == "project_unmarked_result"
     assert verify_done_marker["conditional_transitions"][0]["condition_spec"] == {
         "expected": True,
         "key": "source_processing_current",
@@ -385,6 +387,11 @@ def test_email_source_seed_requires_current_markers_before_verified_gmail_writes
     ]
     assert gmail_arguments["remove_labels"] == ["INBOX"]
     assert gmail_arguments["verify_after"] is True
+    assert converge["conditional_transitions"][0]["to_state"] == (
+        "project_done_result"
+    )
+    assert converge["next_state"] == "project_gmail_unverified_result"
+    assert converge["on_failure_state"] == "project_gmail_unverified_result"
 
 
 def test_email_source_seed_dispositions_non_converging_mail_for_human_review() -> None:
@@ -576,7 +583,12 @@ def test_parent_batch_surfaces_human_review_disposition_count() -> None:
         for item in process["tool_output_mapping_specs"]
     }
     assert mappings["message_final_state_counts"] == "for_each_final_state_counts"
-    review_transition = process["conditional_transitions"][0]
+    project = next(
+        step
+        for step in parent["publication_spec"]["steps"]
+        if step.get("state_id") == "project_batch_result"
+    )
+    review_transition = project["conditional_transitions"][1]
     assert review_transition["to_state"] == "done_with_review_required"
     assert review_transition["condition_spec"]["conditions"][0]["key"] == (
         "message_final_state_counts.#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done_needs_review"
@@ -591,6 +603,227 @@ def test_parent_batch_surfaces_human_review_disposition_count() -> None:
         },
         condition_spec=review_transition["condition_spec"],
     )
+
+
+def test_parent_batch_preserves_all_22_item_results_and_one_retryable_failure() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[mod._REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID],
+    )[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
+    definition = replace(
+        definition,
+        initial_state="project_batch_result",
+        states={
+            state_id: definition.states[state_id]
+            for state_id in ("project_batch_result", "done_with_retryable_failures")
+        },
+        termination_states=(),
+    )
+
+    unique_arxiv_ids = [f"2606.{index:05d}" for index in range(1, 20)]
+    successful_arxiv_ids = [*unique_arxiv_ids, unique_arxiv_ids[0], unique_arxiv_ids[1]]
+    successful_items = [
+        {
+            "index": index,
+            "item": {"id": f"gmail-message-{index + 1}"},
+            "completed": True,
+            "final_state": "done",
+            "error": None,
+            "result": {
+                "result": {
+                    "schema_version": "gmail_arxiv_message_result.v1",
+                    "source_item_id": f"gmail-message-{index + 1}",
+                    "disposition": "represented",
+                    "arxiv_ids": [arxiv_id],
+                    "paper_concept_ids": [f"#V#paper_{arxiv_id.replace('.', '_')}"],
+                    "gmail_label_state_verified": True,
+                }
+            },
+        }
+        for index, arxiv_id in enumerate(successful_arxiv_ids)
+    ]
+    failed_item = {
+        "index": 21,
+        "item": {"id": "gmail-message-22"},
+        "completed": False,
+        "final_state": "failed_unmarked",
+        "error": "workflow_failed_terminal_state",
+        "result": {
+            "result": {
+                "schema_version": "gmail_arxiv_message_result.v1",
+                "source_item_id": "gmail-message-22",
+                "disposition": "failed_unmarked",
+                "arxiv_ids": ["2606.99999"],
+            }
+        },
+    }
+    iteration_results = [*successful_items, failed_item]
+    iteration_errors = [
+        {
+            "index": 21,
+            "item": {"id": "gmail-message-22"},
+            "final_state": "failed_unmarked",
+            "error": "workflow_failed_terminal_state",
+            "result": failed_item["result"],
+        }
+    ]
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    result = WorkflowExecutor(registry=registry, max_transitions=4).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "gmail_profile": "vonwitbrock-gmail",
+            "effective_gmail_query": "newer_than:30d arxiv",
+            "gmail_max_results": 100,
+            "gmail_result_size_estimate": 22,
+            "gmail_page_token": None,
+            "gmail_next_page_token": None,
+            "message_item_count": 22,
+            "message_selected_item_count": 22,
+            "message_unattempted_count": 0,
+            "message_success_count": 21,
+            "message_error_count": 1,
+            "message_partial_success": True,
+            "message_final_state_counts": {
+                "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done": 21,
+                "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_failed_unmarked": 1,
+            },
+            "message_iteration_results": iteration_results,
+            "message_iteration_errors": iteration_errors,
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done_with_retryable_failures"
+    batch_result = result.data["batch_result"]
+    assert batch_result["schema_version"] == "gmail_arxiv_batch_result.v1"
+    assert batch_result["discovered_message_count"] == 22
+    assert batch_result["page_token_used"] is None
+    assert batch_result["successful_message_count"] == 21
+    assert batch_result["failed_message_count"] == 1
+    assert batch_result["partial_success"] is True
+    assert batch_result["items"] == iteration_results
+    assert batch_result["failures"] == iteration_errors
+    represented_ids = {
+        arxiv_id
+        for item in batch_result["items"]
+        if item["completed"]
+        for arxiv_id in item["result"]["result"]["arxiv_ids"]
+    }
+    assert len(represented_ids) == 19
+    assert batch_result["items"][-1]["result"]["result"]["disposition"] == (
+        "failed_unmarked"
+    )
+
+
+def test_parent_batch_passes_prior_continuation_token_to_gmail_listing() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[mod._REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID],
+    )[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
+    definition = replace(
+        definition,
+        initial_state="list_messages",
+        states={
+            state_id: definition.states[state_id]
+            for state_id in ("list_messages", "decide_messages", "done_no_messages")
+        },
+        termination_states=(),
+    )
+    observed_arguments: dict[str, object] = {}
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        assert request.inputs["tool_name"] == "gmail_list_messages"
+        observed_arguments.update(request.inputs["tool_arguments"])
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "messages": [],
+                    "profile": "vonwitbrock-gmail",
+                    "effective_query": {"effective_query_string": "arxiv.org"},
+                    "nextPageToken": None,
+                    "resultSizeEstimate": 22,
+                }
+            },
+        )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    registry.register(ActionSpec(action_id="workflow_mcp.invoke_tool", handler=handler))
+    result = WorkflowExecutor(registry=registry, max_transitions=4).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "gmail_profile": "vonwitbrock-gmail",
+            "gmail_query": "arxiv.org",
+            "gmail_max_results": 100,
+            "gmail_page_token": "gmail-page-2",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done_no_messages"
+    assert observed_arguments["page_token"] == "gmail-page-2"
+
+
+def test_parent_batch_result_is_lossless_across_durable_checkpoints() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.durable.checkpoint_context_projection import (
+        project_workflow_context_for_checkpoint,
+    )
+    from src.backend.workflows.durable.durable_executor import (
+        _execution_required_checkpoint_context_keys,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[mod._REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID],
+    )[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
+    lossless_keys = _execution_required_checkpoint_context_keys(definition)
+    assert "batch_result" in lossless_keys
+
+    batch_result = {
+        "schema_version": "gmail_arxiv_batch_result.v1",
+        "items": [
+            {
+                "index": index,
+                "source_item_id": f"gmail-message-{index + 1}",
+                "paper_concept_ids": [f"#V#paper_{index + 1}"],
+                "evidence": "x" * 200,
+            }
+            for index in range(100)
+        ],
+    }
+    projected = project_workflow_context_for_checkpoint(
+        {"batch_result": batch_result},
+        max_value_bson_bytes=512,
+        lossless_keys=lossless_keys,
+    )
+
+    assert projected["batch_result"] == batch_result
+    assert len(projected["batch_result"]["items"]) == 100
 
 
 def test_email_source_seed_routes_exact_message_unit_and_explicit_batch() -> None:
@@ -624,8 +857,8 @@ def test_email_source_seed_routes_exact_message_unit_and_explicit_batch() -> Non
 
     assert parent_lifecycle["routing_eligible"] is True
     assert parent_routing["routing_eligible"] is True
-    assert parent_routing["explicit_workflow_context_required"] is True
-    assert parent_routing["prefer_existing_capability"] is False
+    assert parent_routing["explicit_workflow_context_required"] is False
+    assert parent_routing["prefer_existing_capability"] is True
 
     assert child_lifecycle["routing_eligible"] is True
     assert child_lifecycle["postconditions_verified"] is True
@@ -699,6 +932,7 @@ def _exact_message_definition(*state_ids: str, initial_state: str):
 
 def _run_exact_message_slice(definition, handler):
     registry = ActionRegistry()
+    register_control_flow_actions(registry)
     registry.register(ActionSpec(action_id="workflow_mcp.invoke_tool", handler=handler))
     return WorkflowExecutor(registry=registry, max_transitions=8).run(
         definition,
@@ -732,8 +966,11 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
                         "message_processing_marker": "#V#marker_1",
                         "processed_message_id": "gmail-message-1",
                         "paper_concept_id": "#V#paper_2606_12345",
+                        "paper_concept_ids": ["#V#paper_2606_12345"],
                         "file_copy_concept_id": "#V#file_2606_12345",
+                        "file_copy_concept_ids": ["#V#file_2606_12345"],
                         "arxiv_id": "2606.12345",
+                        "arxiv_ids": ["2606.12345"],
                     }
                 },
             )
@@ -757,8 +994,11 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
                     "message_processing_marker": "#V#marker_1",
                     "processed_message_id": "gmail-message-1",
                     "paper_concept_id": "#V#paper_2606_12345",
+                    "paper_concept_ids": ["#V#paper_2606_12345"],
                     "file_copy_concept_id": "#V#file_2606_12345",
+                    "file_copy_concept_ids": ["#V#file_2606_12345"],
                     "arxiv_id": "2606.12345",
+                    "arxiv_ids": ["2606.12345"],
                     "source_processing_current": True,
                     "represented_artifacts_exist": True,
                 }
@@ -769,6 +1009,9 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
         "mark_done",
         "verify_done_marker",
         "converge_gmail_labels",
+        "project_done_result",
+        "project_unmarked_result",
+        "project_gmail_unverified_result",
         "done",
         "failed_unmarked",
         "failed_gmail_state",
@@ -785,6 +1028,12 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
     ]
     assert result.data["source_processing_marker_exists"] is True
     assert result.data["message_processing_marker"] == "#V#marker_1"
+    assert result.data["result"]["disposition"] == "represented"
+    assert result.data["result"]["paper_concept_id"] == (
+        "#V#paper_2606_12345"
+    )
+    assert result.data["result"]["arxiv_id"] == "2606.12345"
+    assert result.data["result"]["gmail_label_state_verified"] is True
 
 
 @pytest.mark.parametrize("failure_mode", ["write_failed", "readback_missing"])
@@ -806,8 +1055,11 @@ def test_exact_message_workflow_never_claims_success_without_verified_marker(
                         "message_processing_marker": "#V#marker_1",
                         "processed_message_id": "gmail-message-1",
                         "paper_concept_id": "#V#paper_2606_12345",
+                        "paper_concept_ids": ["#V#paper_2606_12345"],
                         "file_copy_concept_id": "#V#file_2606_12345",
+                        "file_copy_concept_ids": ["#V#file_2606_12345"],
                         "arxiv_id": "2606.12345",
+                        "arxiv_ids": ["2606.12345"],
                     }
                 },
             )
@@ -820,8 +1072,11 @@ def test_exact_message_workflow_never_claims_success_without_verified_marker(
                     "message_processing_marker": None,
                     "processed_message_id": None,
                     "paper_concept_id": None,
+                    "paper_concept_ids": [],
                     "file_copy_concept_id": None,
+                    "file_copy_concept_ids": [],
                     "arxiv_id": None,
+                    "arxiv_ids": [],
                     "source_processing_current": False,
                     "represented_artifacts_exist": False,
                 }
@@ -831,14 +1086,16 @@ def test_exact_message_workflow_never_claims_success_without_verified_marker(
     definition = _exact_message_definition(
         "mark_done",
         "verify_done_marker",
+        "project_unmarked_result",
         "done",
         "failed_unmarked",
         initial_state="mark_done",
     )
     result = _run_exact_message_slice(definition, handler)
 
-    assert result.completed is True
+    assert result.completed is False
     assert result.final_state == "failed_unmarked"
+    assert result.data["result"]["disposition"] == "failed_unmarked"
     assert calls == (
         ["record_source_processing_marker", "record_source_processing_marker"]
         if failure_mode == "write_failed"
@@ -886,6 +1143,8 @@ def test_exact_message_workflow_reuses_current_marker_then_converges_gmail() -> 
     definition = _exact_message_definition(
         "check_processed_marker",
         "converge_gmail_labels",
+        "project_done_result",
+        "project_gmail_unverified_result",
         "done",
         "failed_gmail_state",
         "failed",
@@ -948,6 +1207,9 @@ def test_exact_message_workflow_upgrades_legacy_marker_before_gmail() -> None:
         "upgrade_legacy_marker",
         "verify_done_marker",
         "converge_gmail_labels",
+        "project_done_result",
+        "project_unmarked_result",
+        "project_gmail_unverified_result",
         "done",
         "failed",
         "failed_unmarked",
@@ -975,14 +1237,18 @@ def test_exact_message_workflow_does_not_succeed_when_gmail_readback_fails() -> 
 
     definition = _exact_message_definition(
         "converge_gmail_labels",
+        "project_gmail_unverified_result",
         "done",
         "failed_gmail_state",
         initial_state="converge_gmail_labels",
     )
     result = _run_exact_message_slice(definition, handler)
 
-    assert result.completed is True
+    assert result.completed is False
     assert result.final_state == "failed_gmail_state"
+    assert result.data["result"]["disposition"] == (
+        "represented_gmail_unverified"
+    )
     assert calls == ["gmail_modify_labels", "gmail_modify_labels"]
 
 
@@ -1001,6 +1267,9 @@ def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() ->
                 "for_each_partial_success": False,
                 "for_each_success_count": 0,
                 "iteration_results": [{"status": "failed"}],
+                "iteration_errors": [
+                    {"item_index": 0, "error": "paper representation failed"}
+                ],
             },
         )
 
@@ -1011,6 +1280,7 @@ def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() ->
         "ingest_arxiv_resources",
         "mark_done",
         "verify_done_marker",
+        "project_unmarked_result",
         "done",
         "failed_unmarked",
         initial_state="ingest_arxiv_resources",
@@ -1019,6 +1289,7 @@ def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() ->
     registry.register(
         ActionSpec(action_id="workflow_control.for_each", handler=failed_ingestion)
     )
+    register_control_flow_actions(registry)
     registry.register(
         ActionSpec(action_id="workflow_mcp.invoke_tool", handler=marker_must_not_run)
     )
@@ -1028,7 +1299,7 @@ def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() ->
         data={"arxiv_resource_references": [{"identifier": "2606.12345"}]},
     )
 
-    assert result.completed is True
+    assert result.completed is False
     assert result.final_state == "failed_unmarked"
     assert calls == ["workflow_control.for_each"]
 
@@ -1049,12 +1320,16 @@ def test_zhan_seed_launch_contract_can_narrow_from_prior_arxiv_evidence() -> Non
     resolution = resolve_workflow_launch_inputs(
         workflow_id=mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID,
         contract=workflow["launch_input_contract"],
-        inputs={"arxiv_id": "2606.30544"},
+        inputs={
+            "arxiv_id": "2606.30544",
+            "next_page_token": "gmail-page-2",
+        },
         contract_source="repo_seed_test",
     )
 
     assert resolution.resolved_inputs["base_gmail_query"] == "2606.30544"
     assert resolution.resolved_inputs["arxiv_id"] == "2606.30544"
+    assert resolution.resolved_inputs["gmail_page_token"] == "gmail-page-2"
     assert resolution.diagnostics["status"] == "resolved"
 
 

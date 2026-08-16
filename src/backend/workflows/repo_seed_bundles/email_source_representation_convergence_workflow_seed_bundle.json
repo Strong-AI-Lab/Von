@@ -2,8 +2,8 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "14",
-  "source_tag": "JVNAUTOSCI-2335",
+  "seed_version": "15",
+  "source_tag": "JVNAUTOSCI-2635",
   "supported_action_ids": [
     "arxiv.inspect_existing_state",
     "extract_signals_from_tool_result",
@@ -19,11 +19,11 @@
     {
       "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
       "display_name": "Zhan Gmail Arxiv Ingestion Workflow",
-      "description": "Explicit batch workflow for recurring Gmail-to-arXiv paper representation convergence. It selects newest Inbox messages that are neither represented nor dispositioned, represents each supported arXiv reference, records current source-processing evidence, then atomically applies the represented label and removes INBOX with canonical Gmail read-back. Messages with no supported reference instead receive one actor-scoped review task and VON/PAPER/NEEDS_REVIEW while remaining in Inbox.",
+      "description": "Explicit batch workflow for recurring Gmail-to-arXiv paper representation convergence. It selects newest Inbox messages that are neither represented nor dispositioned, represents each supported arXiv reference, records current source-processing evidence, then atomically applies the represented label and removes INBOX with canonical Gmail read-back. Messages with no supported reference instead receive one actor-scoped review task and VON/PAPER/NEEDS_REVIEW while remaining in Inbox. The parent instance preserves one complete result row for every message discovered in its bounded page and completes with retryable failure details when some independently useful items fail.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Keep scanning Gmail for arXiv paper links, represent every returned unrepresented paper, label each verified source message VON/PAPER/REPRESENTED, and remove it from Inbox.\", \"Run the recurring email-to-representation convergence workflow for arXiv paper notifications.\"], \"keywords\": [\"batch email messages about arxiv papers\", \"represent arxiv papers from email\", \"gmail arxiv paper representation\", \"source email to paper representation convergence\", \"represented source processing marker\", \"recurring arxiv gmail ingestion workflow\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\", \"messages\", \"mailbox\", \"inbox\", \"sender\", \"label\"], \"excluded_query_cues\": [\"which gmail profile\", \"what gmail profile\", \"profile did you use\", \"which mail profile\", \"what mail profile\", \"account did you use\"], \"routing_notes\": [\"This is an explicit batch convergence workflow: every Gmail message returned up to gmail_max_results, and every supported arXiv reference in each message, may produce representation and message-level Gmail label effects.\", \"Do not route a singular newest or best request here; discover and select the exact source item read-only, then invoke its matching representation capability.\", \"Do not choose this workflow for a question about which Gmail profile or account was used by a prior mail operation.\", \"Do not choose this workflow for source-neutral paper references or conversation-context paper lookups unless an email/Gmail/mail source cue is present.\", \"Only label and archive a source message after current represented-marker and artefact read-back succeeds.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"examples\": [\"Keep scanning Gmail for arXiv paper links, represent every returned unrepresented paper, label each verified source message VON/PAPER/REPRESENTED, and remove it from Inbox.\", \"Represent recent papers from email messages and report every paper or failure discovered in the bounded batch.\", \"Run the recurring email-to-representation convergence workflow for arXiv paper notifications.\"], \"keywords\": [\"batch email messages about arxiv papers\", \"represent recent papers from email messages\", \"represent arxiv papers from email\", \"gmail arxiv paper representation\", \"source email to paper representation convergence\", \"represented source processing marker\", \"recurring arxiv gmail ingestion workflow\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\", \"messages\", \"mailbox\", \"inbox\", \"sender\", \"label\"], \"excluded_query_cues\": [\"which gmail profile\", \"what gmail profile\", \"profile did you use\", \"which mail profile\", \"what mail profile\", \"account did you use\"], \"routing_notes\": [\"This is the reusable batch convergence workflow for broad email-paper representation requests: every Gmail message returned up to gmail_max_results, and every supported arXiv reference in each message, may produce representation and message-level Gmail label effects.\", \"Use one parent instance rather than independently launching the exact-message child for each discovered message; the parent result is the durable locator for later list and count questions.\", \"One item failure does not invalidate independently verified successes: preserve the failed row and retry evidence and complete the parent with retryable failures.\", \"Do not route a singular newest or best request here; discover and select the exact source item read-only, then invoke its matching representation capability.\", \"Do not choose this workflow for a question about which Gmail profile or account was used by a prior mail operation.\", \"Do not choose this workflow for source-neutral paper references or conversation-context paper lookups unless an email/Gmail/mail source cue is present.\", \"Only label and archive a source message after current represented-marker and artefact read-back succeeds.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -33,7 +33,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": true, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -85,6 +85,20 @@
             "required": false,
             "source_expression": "inputs.max_results",
             "target_context_key": "gmail_max_results"
+          },
+          {
+            "description": "Optional continuation token returned by a prior parent batch.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.gmail_page_token",
+            "target_context_key": "gmail_page_token"
+          },
+          {
+            "description": "Alias for callers that pass the prior batch next_page_token directly.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.next_page_token",
+            "target_context_key": "gmail_page_token"
           }
         ],
         "required_inputs": [],
@@ -266,6 +280,9 @@
                   "profile": {
                     "$context_key": "gmail_profile"
                   },
+                  "page_token": {
+                    "$context_key": "gmail_page_token"
+                  },
                   "query": {
                     "$context_key": "gmail_query"
                   }
@@ -296,13 +313,25 @@
                 "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_list_messages_result_profile_to_gmail_profile",
                 "context_key": "gmail_profile",
                 "tool_output_field": "result.profile"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_list_messages_result_next_page_token_to_gmail_next_page_token",
+                "context_key": "gmail_next_page_token",
+                "tool_output_field": "result.nextPageToken"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_list_messages_result_size_estimate_to_gmail_result_size_estimate",
+                "context_key": "gmail_result_size_estimate",
+                "tool_output_field": "result.resultSizeEstimate"
               }
             ],
             "writes_context_keys": [
               "list_result",
               "messages",
               "effective_gmail_query",
-              "gmail_profile"
+              "gmail_profile",
+              "gmail_next_page_token",
+              "gmail_result_size_estimate"
             ]
           },
           {
@@ -337,67 +366,6 @@
           },
           {
             "action_id": "workflow_control.for_each",
-            "conditional_transitions": [
-              {
-                "condition_spec": {
-                  "conditions": [
-                    {
-                      "key": "message_final_state_counts.#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done_needs_review",
-                      "kind": "context_compare",
-                      "operator": "gt",
-                      "value": 0
-                    },
-                    {
-                      "key": "message_error_count",
-                      "kind": "context_compare",
-                      "operator": "eq",
-                      "value": 0
-                    }
-                  ],
-                  "kind": "all"
-                },
-                "reason": "batch_completed_with_human_review_dispositions",
-                "to_state": "done_with_review_required"
-              },
-              {
-                "condition_spec": {
-                  "conditions": [
-                    {
-                      "key": "message_success_count",
-                      "kind": "context_compare",
-                      "operator": "gt",
-                      "value": 0
-                    },
-                    {
-                      "key": "message_error_count",
-                      "kind": "context_compare",
-                      "operator": "eq",
-                      "value": 0
-                    }
-                  ],
-                  "kind": "all"
-                },
-                "reason": "all_messages_succeeded",
-                "to_state": "done"
-              },
-              {
-                "condition_spec": {
-                  "key": "message_error_count",
-                  "kind": "context_compare",
-                  "operator": "gt",
-                  "value": 0
-                },
-                "reason": "message_batch_had_failures_for_retry",
-                "to_state": "failed"
-              },
-              {
-                "condition_spec": {
-                  "kind": "always"
-                },
-                "reason": "message_batch_produced_no_success",
-                "to_state": "failed"
-              }
-            ],
             "context_input_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_zhan_gmail_arxiv_ingestion_workflow_process_messages_gmail_max_results_to_max_items_parameter",
@@ -407,6 +375,8 @@
               }
             ],
             "execution_mode": "deterministic",
+            "next_state": "project_batch_result",
+            "on_failure_state": "failed",
             "state_id": "process_messages",
             "static_input_bindings": [
               [
@@ -464,6 +434,21 @@
                 "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_process_messages_for_each_final_state_counts_to_message_final_state_counts",
                 "context_key": "message_final_state_counts",
                 "tool_output_field": "for_each_final_state_counts"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_process_messages_for_each_selected_item_count_to_message_selected_item_count",
+                "context_key": "message_selected_item_count",
+                "tool_output_field": "for_each_selected_item_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_process_messages_for_each_unattempted_count_to_message_unattempted_count",
+                "context_key": "message_unattempted_count",
+                "tool_output_field": "for_each_unattempted_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_process_messages_iteration_errors_to_message_iteration_errors",
+                "context_key": "message_iteration_errors",
+                "tool_output_field": "iteration_errors"
               }
             ],
             "writes_context_keys": [
@@ -472,19 +457,210 @@
               "message_success_count",
               "message_error_count",
               "message_partial_success",
-              "message_item_count"
+              "message_item_count",
+              "message_selected_item_count",
+              "message_unattempted_count",
+              "message_iteration_errors"
             ]
           },
           {
+            "action_id": "workflow_control.context_project",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "message_success_count",
+                      "kind": "context_compare",
+                      "operator": "gt",
+                      "value": 0
+                    },
+                    {
+                      "key": "message_error_count",
+                      "kind": "context_compare",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "batch_completed_with_retryable_item_failures",
+                "to_state": "done_with_retryable_failures"
+              },
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "message_final_state_counts.#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done_needs_review",
+                      "kind": "context_compare",
+                      "operator": "gt",
+                      "value": 0
+                    },
+                    {
+                      "key": "message_error_count",
+                      "kind": "context_compare",
+                      "operator": "eq",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "batch_completed_with_human_review_dispositions",
+                "to_state": "done_with_review_required"
+              },
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "message_success_count",
+                      "kind": "context_compare",
+                      "operator": "gt",
+                      "value": 0
+                    },
+                    {
+                      "key": "message_error_count",
+                      "kind": "context_compare",
+                      "operator": "eq",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "all_messages_succeeded",
+                "to_state": "done"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "message_batch_produced_no_success",
+                "to_state": "failed"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "failed",
+            "state_id": "project_batch_result",
+            "static_input_bindings": [
+              [
+                "field_sources",
+                {
+                  "schema_version": "gmail_arxiv_batch_result.v1",
+                  "source_system": "gmail",
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "effective_query": {
+                    "$context_key": "effective_gmail_query"
+                  },
+                  "requested_max_items": {
+                    "$context_key": "gmail_max_results"
+                  },
+                  "result_size_estimate": {
+                    "$context_key": "gmail_result_size_estimate"
+                  },
+                  "page_token_used": {
+                    "$context_key": "gmail_page_token"
+                  },
+                  "next_page_token": {
+                    "$context_key": "gmail_next_page_token"
+                  },
+                  "discovered_message_count": {
+                    "$context_key": "message_item_count"
+                  },
+                  "selected_message_count": {
+                    "$context_key": "message_selected_item_count"
+                  },
+                  "unattempted_message_count": {
+                    "$context_key": "message_unattempted_count"
+                  },
+                  "successful_message_count": {
+                    "$context_key": "message_success_count"
+                  },
+                  "failed_message_count": {
+                    "$context_key": "message_error_count"
+                  },
+                  "partial_success": {
+                    "$context_key": "message_partial_success"
+                  },
+                  "final_state_counts": {
+                    "$context_key": "message_final_state_counts"
+                  },
+                  "items": {
+                    "$context_key": "message_iteration_results"
+                  },
+                  "failures": {
+                    "$context_key": "message_iteration_errors"
+                  }
+                }
+              ],
+              [
+                "required_fields",
+                [
+                  "schema_version",
+                  "source_system",
+                  "source_profile",
+                  "effective_query",
+                  "requested_max_items",
+                  "result_size_estimate",
+                  "page_token_used",
+                  "next_page_token",
+                  "discovered_message_count",
+                  "selected_message_count",
+                  "unattempted_message_count",
+                  "successful_message_count",
+                  "failed_message_count",
+                  "partial_success",
+                  "final_state_counts",
+                  "items",
+                  "failures"
+                ]
+              ],
+              [
+                "include_empty_fields",
+                true
+              ],
+              [
+                "include_missing_fields",
+                true
+              ],
+              [
+                "include_null_fields",
+                true
+              ],
+              [
+                "target_key",
+                "batch_result"
+              ]
+            ],
+            "writes_context_keys": [
+              "batch_result"
+            ]
+          },
+          {
+            "reads_context_keys": [
+              "batch_result"
+            ],
             "state_id": "done"
           },
           {
+            "reads_context_keys": [
+              "batch_result"
+            ],
+            "state_id": "done_with_retryable_failures"
+          },
+          {
+            "reads_context_keys": [
+              "batch_result"
+            ],
             "state_id": "done_with_review_required"
           },
           {
             "state_id": "done_no_messages"
           },
           {
+            "reads_context_keys": [
+              "batch_result"
+            ],
             "state_id": "failed"
           }
         ]
@@ -878,7 +1054,7 @@
               "schema_version": "workflow_step_mutation_authority.v1"
             },
             "next_state": "verify_done_marker",
-            "on_failure_state": "failed_unmarked",
+            "on_failure_state": "project_unmarked_result",
             "state_id": "upgrade_legacy_marker",
             "static_input_bindings": [
               [
@@ -1377,14 +1553,14 @@
                   "value": 0
                 },
                 "reason": "arxiv_ingestion_had_failures_keep_message_unmarked",
-                "to_state": "failed_unmarked"
+                "to_state": "project_unmarked_result"
               },
               {
                 "condition_spec": {
                   "kind": "always"
                 },
                 "reason": "arxiv_ingestion_produced_no_success_keep_message_unmarked",
-                "to_state": "failed_unmarked"
+                "to_state": "project_unmarked_result"
               }
             ],
             "execution_mode": "deterministic",
@@ -1444,6 +1620,11 @@
                 "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_ingest_arxiv_resources_iteration_results_to_arxiv_iteration_results",
                 "context_key": "arxiv_iteration_results",
                 "tool_output_field": "iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_ingest_arxiv_resources_iteration_errors_to_arxiv_iteration_errors",
+                "context_key": "arxiv_iteration_errors",
+                "tool_output_field": "iteration_errors"
               }
             ],
             "writes_context_keys": [
@@ -1451,7 +1632,8 @@
               "arxiv_success_count",
               "arxiv_error_count",
               "arxiv_partial_success",
-              "arxiv_item_count"
+              "arxiv_item_count",
+              "arxiv_iteration_errors"
             ]
           },
           {
@@ -1463,7 +1645,7 @@
               "schema_version": "workflow_step_mutation_authority.v1"
             },
             "next_state": "verify_done_marker",
-            "on_failure_state": "failed_unmarked",
+            "on_failure_state": "project_unmarked_result",
             "retry_policy": {
               "backoff_policy": "fixed",
               "initial_delay_ms": 1000,
@@ -1533,6 +1715,21 @@
                 "tool_output_field": "result.arxiv_id"
               },
               {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_paper_concept_ids_to_paper_concept_ids",
+                "context_key": "paper_concept_ids",
+                "tool_output_field": "result.paper_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_file_copy_concept_ids_to_file_copy_concept_ids",
+                "context_key": "file_copy_concept_ids",
+                "tool_output_field": "result.file_copy_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_arxiv_ids_to_arxiv_ids",
+                "context_key": "arxiv_ids",
+                "tool_output_field": "result.arxiv_ids"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_to_mark_done_result",
                 "context_key": "mark_done_result",
                 "tool_output_field": "result"
@@ -1542,8 +1739,11 @@
               "message_processing_marker",
               "processed_message_id",
               "paper_concept_id",
+              "paper_concept_ids",
               "file_copy_concept_id",
+              "file_copy_concept_ids",
               "arxiv_id",
+              "arxiv_ids",
               "mark_done_result"
             ]
           },
@@ -1561,8 +1761,8 @@
               }
             ],
             "execution_mode": "deterministic",
-            "next_state": "failed_unmarked",
-            "on_failure_state": "failed_unmarked",
+            "next_state": "project_unmarked_result",
+            "on_failure_state": "project_unmarked_result",
             "state_id": "verify_done_marker",
             "static_input_bindings": [
               [
@@ -1621,6 +1821,21 @@
                 "tool_output_field": "result.arxiv_id"
               },
               {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_paper_concept_ids_to_paper_concept_ids",
+                "context_key": "paper_concept_ids",
+                "tool_output_field": "result.paper_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_file_copy_concept_ids_to_file_copy_concept_ids",
+                "context_key": "file_copy_concept_ids",
+                "tool_output_field": "result.file_copy_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_arxiv_ids_to_arxiv_ids",
+                "context_key": "arxiv_ids",
+                "tool_output_field": "result.arxiv_ids"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_source_processing_current_to_source_processing_current",
                 "context_key": "source_processing_current",
                 "tool_output_field": "result.source_processing_current"
@@ -1636,8 +1851,11 @@
               "message_processing_marker",
               "processed_message_id",
               "paper_concept_id",
+              "paper_concept_ids",
               "file_copy_concept_id",
+              "file_copy_concept_ids",
               "arxiv_id",
+              "arxiv_ids",
               "source_processing_current",
               "represented_artifacts_exist"
             ]
@@ -1652,7 +1870,7 @@
                   "kind": "context_flag"
                 },
                 "reason": "represented_label_present_and_inbox_absent",
-                "to_state": "done"
+                "to_state": "project_done_result"
               }
             ],
             "execution_mode": "deterministic",
@@ -1661,8 +1879,8 @@
               "reason_code": "verified_represented_message_label_and_archive",
               "schema_version": "workflow_step_mutation_authority.v1"
             },
-            "next_state": "failed_gmail_state",
-            "on_failure_state": "failed_gmail_state",
+            "next_state": "project_gmail_unverified_result",
+            "on_failure_state": "project_gmail_unverified_result",
             "retry_policy": {
               "backoff_policy": "fixed",
               "initial_delay_ms": 1000,
@@ -1723,6 +1941,336 @@
               "gmail_label_state_verified",
               "gmail_readback_label_ids",
               "gmail_modify_reconciled_after_error"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "next_state": "done",
+            "on_failure_state": "failed",
+            "state_id": "project_done_result",
+            "static_input_bindings": [
+              [
+                "field_sources",
+                {
+                  "schema_version": "gmail_arxiv_message_result.v1",
+                  "source_item_id": {
+                    "$context_key": "message_id"
+                  },
+                  "source_subject": {
+                    "$context_key": "message_subject"
+                  },
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "disposition": "represented",
+                  "message_processing_marker": {
+                    "$context_key": "message_processing_marker"
+                  },
+                  "paper_concept_id": {
+                    "$context_key": "paper_concept_id"
+                  },
+                  "paper_concept_ids": {
+                    "$context_key": "paper_concept_ids"
+                  },
+                  "file_copy_concept_id": {
+                    "$context_key": "file_copy_concept_id"
+                  },
+                  "file_copy_concept_ids": {
+                    "$context_key": "file_copy_concept_ids"
+                  },
+                  "arxiv_id": {
+                    "$context_key": "arxiv_id"
+                  },
+                  "arxiv_ids": {
+                    "$context_key": "arxiv_ids"
+                  },
+                  "represented_artifacts_exist": {
+                    "$context_key": "represented_artifacts_exist"
+                  },
+                  "source_processing_current": {
+                    "$context_key": "source_processing_current"
+                  },
+                  "gmail_label_state_verified": {
+                    "$context_key": "gmail_label_state_verified"
+                  },
+                  "gmail_readback_label_ids": {
+                    "$context_key": "gmail_readback_label_ids"
+                  },
+                  "gmail_modify_reconciled_after_error": {
+                    "$context_key": "gmail_modify_reconciled_after_error"
+                  },
+                  "arxiv_iteration_results": {
+                    "$context_key": "arxiv_iteration_results"
+                  }
+                }
+              ],
+              [
+                "required_fields",
+                [
+                  "schema_version",
+                  "source_item_id",
+                  "source_subject",
+                  "source_profile",
+                  "disposition",
+                  "message_processing_marker",
+                  "paper_concept_id",
+                  "paper_concept_ids",
+                  "file_copy_concept_id",
+                  "file_copy_concept_ids",
+                  "arxiv_id",
+                  "arxiv_ids",
+                  "represented_artifacts_exist",
+                  "source_processing_current",
+                  "gmail_label_state_verified",
+                  "gmail_readback_label_ids",
+                  "gmail_modify_reconciled_after_error",
+                  "arxiv_iteration_results"
+                ]
+              ],
+              [
+                "include_empty_fields",
+                true
+              ],
+              [
+                "include_missing_fields",
+                true
+              ],
+              [
+                "include_null_fields",
+                true
+              ],
+              [
+                "target_key",
+                "result"
+              ]
+            ],
+            "writes_context_keys": [
+              "result"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "next_state": "failed_unmarked",
+            "on_failure_state": "failed_unmarked",
+            "state_id": "project_unmarked_result",
+            "static_input_bindings": [
+              [
+                "field_sources",
+                {
+                  "schema_version": "gmail_arxiv_message_result.v1",
+                  "source_item_id": {
+                    "$context_key": "message_id"
+                  },
+                  "source_subject": {
+                    "$context_key": "message_subject"
+                  },
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "disposition": "failed_unmarked",
+                  "message_processing_marker": {
+                    "$context_key": "message_processing_marker"
+                  },
+                  "paper_concept_id": {
+                    "$context_key": "paper_concept_id"
+                  },
+                  "paper_concept_ids": {
+                    "$context_key": "paper_concept_ids"
+                  },
+                  "file_copy_concept_id": {
+                    "$context_key": "file_copy_concept_id"
+                  },
+                  "file_copy_concept_ids": {
+                    "$context_key": "file_copy_concept_ids"
+                  },
+                  "arxiv_id": {
+                    "$context_key": "arxiv_id"
+                  },
+                  "arxiv_ids": {
+                    "$context_key": "arxiv_ids"
+                  },
+                  "represented_artifacts_exist": {
+                    "$context_key": "represented_artifacts_exist"
+                  },
+                  "source_processing_current": {
+                    "$context_key": "source_processing_current"
+                  },
+                  "arxiv_success_count": {
+                    "$context_key": "arxiv_success_count"
+                  },
+                  "arxiv_error_count": {
+                    "$context_key": "arxiv_error_count"
+                  },
+                  "arxiv_iteration_results": {
+                    "$context_key": "arxiv_iteration_results"
+                  },
+                  "arxiv_iteration_errors": {
+                    "$context_key": "arxiv_iteration_errors"
+                  },
+                  "failure_action_id": {
+                    "$context_key": "last_action_id"
+                  },
+                  "failure_reason": {
+                    "$context_key": "last_action_error"
+                  }
+                }
+              ],
+              [
+                "required_fields",
+                [
+                  "schema_version",
+                  "source_item_id",
+                  "source_subject",
+                  "source_profile",
+                  "disposition",
+                  "message_processing_marker",
+                  "paper_concept_id",
+                  "paper_concept_ids",
+                  "file_copy_concept_id",
+                  "file_copy_concept_ids",
+                  "arxiv_id",
+                  "arxiv_ids",
+                  "represented_artifacts_exist",
+                  "source_processing_current",
+                  "arxiv_success_count",
+                  "arxiv_error_count",
+                  "arxiv_iteration_results",
+                  "arxiv_iteration_errors",
+                  "failure_action_id",
+                  "failure_reason"
+                ]
+              ],
+              [
+                "include_empty_fields",
+                true
+              ],
+              [
+                "include_missing_fields",
+                true
+              ],
+              [
+                "include_null_fields",
+                true
+              ],
+              [
+                "target_key",
+                "result"
+              ]
+            ],
+            "writes_context_keys": [
+              "result"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "next_state": "failed_gmail_state",
+            "on_failure_state": "failed_gmail_state",
+            "state_id": "project_gmail_unverified_result",
+            "static_input_bindings": [
+              [
+                "field_sources",
+                {
+                  "schema_version": "gmail_arxiv_message_result.v1",
+                  "source_item_id": {
+                    "$context_key": "message_id"
+                  },
+                  "source_subject": {
+                    "$context_key": "message_subject"
+                  },
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "disposition": "represented_gmail_unverified",
+                  "message_processing_marker": {
+                    "$context_key": "message_processing_marker"
+                  },
+                  "paper_concept_id": {
+                    "$context_key": "paper_concept_id"
+                  },
+                  "paper_concept_ids": {
+                    "$context_key": "paper_concept_ids"
+                  },
+                  "file_copy_concept_id": {
+                    "$context_key": "file_copy_concept_id"
+                  },
+                  "file_copy_concept_ids": {
+                    "$context_key": "file_copy_concept_ids"
+                  },
+                  "arxiv_id": {
+                    "$context_key": "arxiv_id"
+                  },
+                  "arxiv_ids": {
+                    "$context_key": "arxiv_ids"
+                  },
+                  "represented_artifacts_exist": {
+                    "$context_key": "represented_artifacts_exist"
+                  },
+                  "source_processing_current": {
+                    "$context_key": "source_processing_current"
+                  },
+                  "gmail_label_state_verified": {
+                    "$context_key": "gmail_label_state_verified"
+                  },
+                  "gmail_readback_label_ids": {
+                    "$context_key": "gmail_readback_label_ids"
+                  },
+                  "gmail_modify_reconciled_after_error": {
+                    "$context_key": "gmail_modify_reconciled_after_error"
+                  },
+                  "failure_action_id": {
+                    "$context_key": "last_action_id"
+                  },
+                  "failure_reason": {
+                    "$context_key": "last_action_error"
+                  }
+                }
+              ],
+              [
+                "required_fields",
+                [
+                  "schema_version",
+                  "source_item_id",
+                  "source_subject",
+                  "source_profile",
+                  "disposition",
+                  "message_processing_marker",
+                  "paper_concept_id",
+                  "paper_concept_ids",
+                  "file_copy_concept_id",
+                  "file_copy_concept_ids",
+                  "arxiv_id",
+                  "arxiv_ids",
+                  "represented_artifacts_exist",
+                  "source_processing_current",
+                  "gmail_label_state_verified",
+                  "gmail_readback_label_ids",
+                  "gmail_modify_reconciled_after_error",
+                  "failure_action_id",
+                  "failure_reason"
+                ]
+              ],
+              [
+                "include_empty_fields",
+                true
+              ],
+              [
+                "include_missing_fields",
+                true
+              ],
+              [
+                "include_null_fields",
+                true
+              ],
+              [
+                "target_key",
+                "result"
+              ]
+            ],
+            "writes_context_keys": [
+              "result"
             ]
           },
           {

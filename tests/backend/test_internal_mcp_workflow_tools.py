@@ -1441,6 +1441,43 @@ def test_workflow_get_instance_exposes_failed_outputs(monkeypatch):
     }
 
 
+def test_workflow_get_instance_exposes_persisted_batch_result(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    manager = _StubWorkflowManager()
+    instance_id = manager.create_instance(
+        "#V#zhan_gmail_arxiv_ingestion_workflow",
+        user_id="#V#user",
+        org_id="#V#org",
+        namespace="#V#user@org",
+    )
+    instance = manager.get_instance(instance_id)
+    assert instance is not None
+    instance.workflow_data["batch_result"] = {
+        "schema_version": "gmail_arxiv_batch_result.v1",
+        "successful_message_count": 21,
+        "failed_message_count": 1,
+    }
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        catalogue_module,
+        "_workflow_persisted_record_matches_internal_actor",
+        lambda _record: True,
+    )
+
+    detail = catalogue_module._workflow_get_instance(instance_id=instance_id)
+
+    assert detail["success"] is True
+    assert detail["workflow_data"]["batch_result"] == {
+        "schema_version": "gmail_arxiv_batch_result.v1",
+        "successful_message_count": 21,
+        "failed_message_count": 1,
+    }
+
+
 def test_workflow_instance_tools_are_exactly_scoped_to_preexisting_actor(
     monkeypatch,
 ):

@@ -270,6 +270,8 @@ def test_workflow_instance_await_is_a_model_visible_soft_checkpoint():
     assert definition.hard_timeout_enabled is False
     assert definition.resolved_timeout(InternalMCPTransport()) is None
     assert "await_terminal" in definition.input_schema.optional
+    assert "workflow_data" in definition.output_schema.optional
+    assert "exhaustive list or count" in definition.description
     assert "never cancels or retries" in definition.description
 
 
@@ -757,6 +759,12 @@ def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
     )
     assert ok, errors
 
+    ok, errors = validate_payload(
+        method.input_schema,
+        {"profile": "zhan-gmail", "page_token": "page-2"},
+    )
+    assert ok, errors
+
     assert method.output_schema is not None
     assert "gmail_get_message" in (method.description or "")
     assert "message_id" in (method.description or "")
@@ -1160,7 +1168,10 @@ def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
     monkeypatch.setattr(gs, "list_messages", fake_list_messages)
     monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
 
-    payload = catalogue_module._gmail_list_messages(profile="vonwitbrock-gmail")
+    payload = catalogue_module._gmail_list_messages(
+        profile="vonwitbrock-gmail",
+        page_token="gmail-page-2",
+    )
 
     assert "effective_query" in payload
     eq = payload["effective_query"]
@@ -1178,6 +1189,7 @@ def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
 
     # The handler did not pass bypass through unless asked.
     assert captured_kwargs.get("bypass_profile_query_prefix") is False
+    assert captured_kwargs["page_token"] == "gmail-page-2"
 
 
 def test_gmail_list_messages_reports_grouped_profile_and_caller_query(

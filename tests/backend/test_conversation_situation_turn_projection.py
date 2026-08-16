@@ -353,6 +353,51 @@ def test_mixed_partial_turn_preserves_stable_receipt_and_workflow_status_only() 
     assert "verified_concept_ids" not in projection
 
 
+def test_parent_batch_projects_one_durable_locator_for_all_item_results() -> None:
+    item_results = [
+        {
+            "source_item_id": f"gmail-message-{index + 1}",
+            "disposition": "represented" if index < 21 else "failed_unmarked",
+        }
+        for index in range(22)
+    ]
+    projection = build_conversation_situation_turn_projection(
+        request_id="turn-paper-batch",
+        terminal_status="completed",
+        response_text="Represented 21 messages; one can be retried.",
+        tool_invocations=[
+            {
+                "tool": "workflow_execute",
+                "status": "ok",
+                "effect_id": "effect-paper-batch",
+                "effect_status": "succeeded",
+                "changed": True,
+                "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                "instance_id": "workflow-paper-batch-123",
+                "effective_payload": {
+                    "success": True,
+                    "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "instance_id": "workflow-paper-batch-123",
+                    "status": "completed",
+                    "batch_result": {
+                        "schema_version": "gmail_arxiv_batch_result.v1",
+                        "items": item_results,
+                    },
+                },
+            }
+        ],
+    )
+
+    assert projection is not None
+    assert projection["workflow_instances"] == [
+        {
+            "instance_id": "workflow-paper-batch-123",
+            "status": "completed",
+            "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+        }
+    ]
+
+
 def test_simple_chat_without_tool_records_does_not_create_runtime_situation() -> None:
     projection = build_conversation_situation_turn_projection(
         request_id="turn-simple-chat",

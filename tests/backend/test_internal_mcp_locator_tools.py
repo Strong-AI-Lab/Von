@@ -103,11 +103,64 @@ def test_chat_history_get_segments_returns_provenanced_payload(monkeypatch):
     assert result["chat_session_id"] == "chat-1"
     assert result["segment_count"] == 1
     assert result["history_truncated"] is False
+    assert result["history_coverage"] == {
+        "schema_version": "conversation_history_coverage.v1",
+        "status": "complete",
+        "history_truncated": False,
+        "exhaustive_answer_supported": True,
+        "continuation_required_for_exhaustive_answer": False,
+    }
     assert result["conversation_situation"] == situation
     assert result["conversation_observations"] == observations
     assert result["conversation_observation_state"] == observation_state
     assert result["identifier_binding"]["mode"] == "raw_parameters"
     assert result["provenance"]["item_kind"] == "chat_history_segments"
+
+
+def test_chat_history_get_segments_marks_truncation_as_non_exhaustive(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        cat,
+        "_resolve_chat_history_read_target",
+        lambda _kwargs: {
+            "success": True,
+            "session_id": "chat-1",
+            "chat_session_id": "chat-1",
+            "read_user_id": "#V#user",
+            "requested_user_id": "#V#user",
+            "read_namespace": "#V#user@org",
+            "access_mode": "owner",
+            "identifier_binding": {"mode": "raw_parameters"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        lambda *_args, **_kwargs: (
+            [{"segment_index": 0, "history": [{"role": "user", "content": "tail"}]}],
+            {"history_truncated": True},
+        ),
+    )
+
+    result = cat._chat_history_get_segments(
+        session_id="chat-1",
+        namespace="#V#user@org",
+        history_tail_limit=50,
+    )
+
+    assert result["history_truncated"] is True
+    assert result["history_coverage"]["status"] == "truncated"
+    assert result["history_coverage"]["exhaustive_answer_supported"] is False
+    assert (
+        result["history_coverage"]["continuation_required_for_exhaustive_answer"]
+        is True
+    )
+    assert result["history_coverage"]["recovery"]["tool_name"] == (
+        "chat_history_get_segments"
+    )
+    assert "without history_tail_limit" in result["history_coverage"]["recovery"][
+        "instruction"
+    ]
 
 
 def test_chat_history_get_debug_entry_returns_history_location(monkeypatch):

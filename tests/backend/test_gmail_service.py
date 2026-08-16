@@ -293,6 +293,43 @@ def test_list_and_get_message(mock_get_profile, mock_get_service):
 
 @patch("src.backend.integrations.google.gmail_service.get_service")
 @patch("src.backend.integrations.google.gmail_service.get_profile")
+def test_list_messages_passes_continuation_token_to_gmail(
+    mock_get_profile, mock_get_service
+):
+    mock_get_profile.return_value = SimpleNamespace(
+        profile_id="test",
+        user_id="me",
+        label_filter=None,
+        query_prefix=None,
+    )
+    messages_mock = MagicMock()
+    mock_get_service.return_value.users.return_value.messages.return_value = (
+        messages_mock
+    )
+    messages_mock.list.return_value.execute.return_value = {
+        "messages": [{"id": "message-26"}],
+        "nextPageToken": "page-3",
+    }
+
+    result = gs.list_messages(
+        "test",
+        query="arxiv.org",
+        max_results=25,
+        page_token=" page-2 ",
+    )
+
+    assert result["nextPageToken"] == "page-3"
+    messages_mock.list.assert_called_once_with(
+        userId="me",
+        q="arxiv.org",
+        labelIds=None,
+        maxResults=25,
+        pageToken="page-2",
+    )
+
+
+@patch("src.backend.integrations.google.gmail_service.get_service")
+@patch("src.backend.integrations.google.gmail_service.get_profile")
 def test_list_messages_projects_requested_metadata_without_body(
     mock_get_profile, mock_get_service
 ):

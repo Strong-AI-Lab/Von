@@ -723,6 +723,7 @@ def list_messages(
     query: Optional[str] = None,
     label_ids: Optional[List[str]] = None,
     max_results: int = 25,
+    page_token: Optional[str] = None,
     include_metadata: Optional[List[str]] = None,
     profiles: Optional[Dict[str, GmailProfile]] = None,
     audit_context: Optional[Mapping[str, object]] = None,
@@ -740,6 +741,9 @@ def list_messages(
     ``include_metadata`` is an opt-in list-row projection. It performs at most
     one Gmail ``format=metadata`` read for each row returned by the list call
     and never requests or returns the message body or MIME payload.
+
+    ``page_token`` continues a prior Gmail listing without changing its query,
+    label, or profile scope.
     """
 
     profile = get_profile(profile_id, profiles)
@@ -761,12 +765,15 @@ def list_messages(
         composed_query = _compose_query(profile, query)
 
     messages_resource = service.users().messages()
-    request = messages_resource.list(
-        userId=profile.user_id,
-        q=composed_query,
-        labelIds=effective_label_ids,
-        maxResults=max_results,
-    )
+    list_arguments: Dict[str, object] = {
+        "userId": profile.user_id,
+        "q": composed_query,
+        "labelIds": effective_label_ids,
+        "maxResults": max_results,
+    }
+    if isinstance(page_token, str) and page_token.strip():
+        list_arguments["pageToken"] = page_token.strip()
+    request = messages_resource.list(**list_arguments)
     result = request.execute() or {}
 
     requested_fields = _normalise_list_message_metadata_fields(include_metadata)

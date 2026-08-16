@@ -43,7 +43,7 @@ _GMAIL_COMPLETION_HINT_SEED_ASSET_PATH = (
     / "gmail_get_message_terminal_completion_hint_seed.json"
 )
 _MANAGED_BY = "email_source_representation_convergence_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-2335"
+_SOURCE_TAG = "JVNAUTOSCI-2635"
 
 
 def _load_gmail_completion_hint_seed() -> dict[str, Any]:

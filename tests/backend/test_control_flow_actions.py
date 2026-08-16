@@ -460,7 +460,11 @@ def test_for_each_action_respects_partial_success_policy() -> None:
 
     def _conditionally_fail(request):
         if request.data.get("current_item") == "bad":
-            return WorkflowActionResult(status="failed", error="child_failed")
+            return WorkflowActionResult(
+                status="failed",
+                error="child_failed",
+                outputs={"failure_reason": "source read-back failed"},
+            )
         return WorkflowActionResult(outputs={"item_value": request.data.get("current_item")})
 
     registry.register(
@@ -500,6 +504,7 @@ def test_for_each_action_respects_partial_success_policy() -> None:
             "item": "bad",
             "final_state": "start",
             "error": "child_failed",
+            "result": {"failure_reason": "source read-back failed"},
         }
     ]
 

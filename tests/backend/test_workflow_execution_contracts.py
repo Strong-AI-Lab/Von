@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -15,6 +17,25 @@ from src.backend.workflows.engine import (
     WorkflowTransitionSpec,
     resolve_action_inputs_from_context,
 )
+from src.backend.workflows.execution_contracts import (
+    workflow_final_state_is_failure_like,
+)
+
+
+@pytest.mark.parametrize(
+    ("final_state", "expected"),
+    [
+        ("failed_unmarked", True),
+        ("failed_gmail_state", True),
+        ("#V#workflow_step_email_ingestion_failed_unmarked", True),
+        ("done_with_retryable_failures", False),
+        ("completed_with_errors", False),
+    ],
+)
+def test_workflow_failure_like_terminal_states_are_token_bounded(
+    final_state: str, expected: bool
+) -> None:
+    assert workflow_final_state_is_failure_like(final_state) is expected
 
 
 def test_static_context_bindings_resolve_shared_dotted_paths() -> None:
