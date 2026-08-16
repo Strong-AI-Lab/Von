@@ -783,6 +783,60 @@ def test_parent_batch_passes_prior_continuation_token_to_gmail_listing() -> None
     assert observed_arguments["page_token"] == "gmail-page-2"
 
 
+def test_parent_batch_allows_gmail_to_omit_optional_pagination_metadata() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[mod._REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID],
+    )[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
+    definition = replace(
+        definition,
+        initial_state="list_messages",
+        states={
+            state_id: definition.states[state_id]
+            for state_id in ("list_messages", "decide_messages", "done_no_messages")
+        },
+        termination_states=(),
+    )
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        assert request.inputs["tool_name"] == "gmail_list_messages"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "messages": [],
+                    "profile": "vonwitbrock-gmail",
+                    "effective_query": {"effective_query_string": "arxiv.org"},
+                }
+            },
+        )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    registry.register(ActionSpec(action_id="workflow_mcp.invoke_tool", handler=handler))
+    result = WorkflowExecutor(registry=registry, max_transitions=4).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "gmail_profile": "vonwitbrock-gmail",
+            "gmail_query": "arxiv.org",
+            "gmail_max_results": 100,
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done_no_messages"
+    assert "gmail_next_page_token" not in result.data
+    assert "gmail_result_size_estimate" not in result.data
+
+
 def test_parent_batch_result_is_lossless_across_durable_checkpoints() -> None:
     from src.backend.services import (
         email_source_representation_convergence_workflow_vontology_service as mod,
