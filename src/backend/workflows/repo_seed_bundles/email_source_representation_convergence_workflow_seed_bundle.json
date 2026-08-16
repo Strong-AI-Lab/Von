@@ -2,7 +2,7 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "16",
+  "seed_version": "17",
   "source_tag": "JVNAUTOSCI-2635",
   "supported_action_ids": [
     "arxiv.inspect_existing_state",
@@ -537,6 +537,20 @@
             ],
             "execution_mode": "deterministic",
             "on_failure_state": "failed",
+            "reads_context_keys": [
+              "gmail_profile",
+              "effective_gmail_query",
+              "gmail_max_results",
+              "message_item_count",
+              "message_selected_item_count",
+              "message_unattempted_count",
+              "message_success_count",
+              "message_error_count",
+              "message_partial_success",
+              "message_final_state_counts",
+              "message_iteration_results",
+              "message_iteration_errors"
+            ],
             "state_id": "project_batch_result",
             "static_input_bindings": [
               [

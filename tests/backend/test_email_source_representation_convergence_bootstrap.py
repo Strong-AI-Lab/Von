@@ -857,27 +857,42 @@ def test_parent_batch_result_is_lossless_across_durable_checkpoints() -> None:
     )[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
     lossless_keys = _execution_required_checkpoint_context_keys(definition)
     assert "batch_result" in lossless_keys
+    assert "message_iteration_results" in lossless_keys
+    assert "message_iteration_errors" in lossless_keys
 
-    batch_result = {
-        "schema_version": "gmail_arxiv_batch_result.v1",
-        "items": [
-            {
-                "index": index,
-                "source_item_id": f"gmail-message-{index + 1}",
-                "paper_concept_ids": [f"#V#paper_{index + 1}"],
-                "evidence": "x" * 200,
-            }
-            for index in range(100)
-        ],
-    }
+    iteration_results = [
+        {
+            "index": index,
+            "source_item_id": f"gmail-message-{index + 1}",
+            "paper_concept_ids": [f"#V#paper_{index + 1}"],
+            "evidence": "x" * 200,
+        }
+        for index in range(100)
+    ]
+    iteration_errors = [
+        {
+            "index": 99,
+            "source_item_id": "gmail-message-100",
+            "error": "file_copy_type_not_visible_to_actor",
+            "details": {"stage": "file_copy_typing", "retryable": True},
+        }
+    ]
     projected = project_workflow_context_for_checkpoint(
-        {"batch_result": batch_result},
+        {
+            "message_iteration_results": iteration_results,
+            "message_iteration_errors": iteration_errors,
+        },
         max_value_bson_bytes=512,
+        max_total_bson_bytes=512,
         lossless_keys=lossless_keys,
     )
 
-    assert projected["batch_result"] == batch_result
-    assert len(projected["batch_result"]["items"]) == 100
+    assert projected["message_iteration_results"] == iteration_results
+    assert len(projected["message_iteration_results"]) == 100
+    assert projected["message_iteration_errors"] == iteration_errors
+    assert projected["message_iteration_errors"][0]["error"] == (
+        "file_copy_type_not_visible_to_actor"
+    )
 
 
 def test_email_source_seed_routes_exact_message_unit_and_explicit_batch() -> None:
