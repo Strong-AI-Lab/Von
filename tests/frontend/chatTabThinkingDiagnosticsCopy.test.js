@@ -62,7 +62,11 @@ describe('chat thinking diagnostics copy control', () => {
         const chatTab = require(chatTabModulePath);
         const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const button = document.getElementById('copyThinkingDiagnosticsButton');
-        global.fetch = jest.fn();
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: false,
+            status: 404,
+            json: async () => ({ error: 'not_available_in_test' })
+        });
         fetchWithTimeout.mockResolvedValue({
             ok: true,
             json: async () => ({
