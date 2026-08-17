@@ -12,6 +12,9 @@ def test_mcp_stdio_server_has_turn_execution_diagnostics_handler() -> None:
     assert "chat_history_get_segments" in mcp_stdio_server._TOOL_HANDLERS
     assert "chat_history_get_debug_entry" in mcp_stdio_server._TOOL_HANDLERS
     assert "conversation_telemetry_get_locator" in mcp_stdio_server._TOOL_HANDLERS
+    assert "conversation_list" in mcp_stdio_server._TOOL_HANDLERS
+    assert "conversation_get" in mcp_stdio_server._TOOL_HANDLERS
+    assert "conversation_manage" in mcp_stdio_server._TOOL_HANDLERS
     assert "turn_execution_get_live_progress" in mcp_stdio_server._TOOL_HANDLERS
     assert "workflow_list_use_episodes" in mcp_stdio_server._TOOL_HANDLERS
     assert "mongo_query_diagnostics_report" in mcp_stdio_server._TOOL_HANDLERS
@@ -54,6 +57,9 @@ def test_vontology_mcp_manifest_includes_turn_execution_diagnostics_tool() -> No
     assert "chat_history_get_segments" in names
     assert "chat_history_get_debug_entry" in names
     assert "conversation_telemetry_get_locator" in names
+    assert "conversation_list" in names
+    assert "conversation_get" in names
+    assert "conversation_manage" in names
     assert "turn_execution_get_live_progress" in names
     assert "workflow_list_use_episodes" in names
     assert "mongo_query_diagnostics_report" in names

@@ -1283,6 +1283,51 @@ function savePinnedChatSessionIds() {
     }
 }
 
+function reconcileServerConversationPreferences(sessions) {
+    let hiddenChanged = false;
+    let pinnedChanged = false;
+    (Array.isArray(sessions) ? sessions : []).forEach((session) => {
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        const preference = session?.conversation_preference;
+        if (!sid || !preference || preference.preference_present !== true) {
+            return;
+        }
+        const shouldHide = preference.hidden === true;
+        const shouldPin = preference.pinned === true;
+        if (shouldHide !== hiddenChatSessionIds.has(sid)) {
+            hiddenChanged = true;
+            if (shouldHide) hiddenChatSessionIds.add(sid); else hiddenChatSessionIds.delete(sid);
+        }
+        if (shouldPin !== pinnedChatSessionIds.has(sid)) {
+            pinnedChanged = true;
+            if (shouldPin) pinnedChatSessionIds.add(sid); else pinnedChatSessionIds.delete(sid);
+        }
+    });
+    if (hiddenChanged) saveHiddenChatSessionIds();
+    if (pinnedChanged) savePinnedChatSessionIds();
+}
+
+async function persistConversationPreferenceAction(sessionId, action) {
+    const sid = (typeof sessionId === 'string') ? sessionId.trim() : '';
+    if (!sid) return false;
+    try {
+        const response = await fetch('/von/api/session/conversation_preference', {
+            method: 'POST',
+            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ session_id: sid, action })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data?.error || `Unable to ${action} conversation.`);
+        }
+        return true;
+    } catch (error) {
+        console.warn('[chatTab] Conversation preference saved in this browser only:', error);
+        showToast('Saved in this browser only; server sync failed.', 'info');
+        return false;
+    }
+}
+
 function loadAgentCreatedSessionsVisibilityPreference() {
     const storageKey = getAgentCreatedSessionsVisibleStorageKey();
     _agentCreatedSessionsVisibleUserKey = storageKey;
@@ -1517,6 +1562,7 @@ function hideConversation(sessionId) {
     if (Array.isArray(sessionTabsCache)) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
     }
+    void persistConversationPreferenceAction(sessionId, 'hide');
 }
 
 function unhideConversation(sessionId) {
@@ -1527,6 +1573,7 @@ function unhideConversation(sessionId) {
     if (Array.isArray(sessionTabsCache)) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
     }
+    void persistConversationPreferenceAction(sessionId, 'unhide');
 }
 
 function isConversationHidden(sessionId) {
@@ -1544,6 +1591,7 @@ function pinConversation(sessionId) {
     if (Array.isArray(sessionTabsCache)) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
     }
+    void persistConversationPreferenceAction(sessionId, 'pin');
 }
 
 function unpinConversation(sessionId) {
@@ -1553,6 +1601,7 @@ function unpinConversation(sessionId) {
     if (Array.isArray(sessionTabsCache)) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
     }
+    void persistConversationPreferenceAction(sessionId, 'unpin');
 }
 
 function toggleConversationPinned(sessionId) {
@@ -25317,6 +25366,7 @@ async function refreshChatSessionTabs() {
         }
 
         const normalisedSessions = normaliseConversationSessionViewModels(sessions);
+        reconcileServerConversationPreferences(normalisedSessions);
 
         // If the server temporarily reports no sessions (e.g. after creating a new chat
         // while history is still updating), keep the existing UI rather than hiding it.

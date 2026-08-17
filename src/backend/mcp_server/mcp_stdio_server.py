@@ -116,6 +116,9 @@ if TYPE_CHECKING:
         _testing_theory_rollback_local_writes,
         _chat_history_get_debug_entry,
         _chat_history_get_segments,
+        _conversation_get,
+        _conversation_list,
+        _conversation_manage,
         _conversation_telemetry_get_locator,
         _mongo_query_diagnostics_report,
         _testing_verify_arxiv_paper_ingestion_result,
@@ -373,6 +376,9 @@ _bind_imports(
         "_testing_theory_rollback_local_writes",
         "_chat_history_get_debug_entry",
         "_chat_history_get_segments",
+        "_conversation_get",
+        "_conversation_list",
+        "_conversation_manage",
         "_conversation_telemetry_get_locator",
         "_mongo_query_diagnostics_report",
         "_turn_execution_get",
@@ -993,6 +999,14 @@ _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS = frozenset(
     }
 )
 
+_TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS = frozenset(
+    {
+        "conversation_list",
+        "conversation_get",
+        "conversation_manage",
+    }
+)
+
 _STDIO_GOVERNED_ONTOLOGY_METHODS = {
     "create_concepts": "create_concepts",
     "upsert_text_relation": "upsert_text_relation",
@@ -1167,11 +1181,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                     }
                 )
             ]
-        if name in _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS:
+        if name in (
+            _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS
+            | _TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS
+        ):
             # This stdio server is the deliberately local coding/operator
-            # surface.  Bind that provenance only around its direct Gmail
-            # handlers; chat/workflow proxy calls must retain their own actor
-            # provenance and cannot inherit operator authority from stdio.
+            # surface. Bind that provenance only around explicitly listed
+            # actor-scoped handlers; generic chat/workflow proxy calls retain
+            # their own provenance and cannot inherit operator authority.
             with bind_internal_mcp_actor_context_source(
                 internal_mcp_gateway_module.INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
             ):
@@ -3843,6 +3860,36 @@ async def _handle_chat_history_get_debug_entry(
     )
 
 
+async def _handle_conversation_list(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _conversation_list,
+        arguments,
+        tool_family_label="Conversation",
+    )
+
+
+async def _handle_conversation_get(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _conversation_get,
+        arguments,
+        tool_family_label="Conversation",
+    )
+
+
+async def _handle_conversation_manage(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _conversation_manage,
+        arguments,
+        tool_family_label="Conversation",
+    )
+
+
 async def _handle_conversation_telemetry_get_locator(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4544,6 +4591,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "testing_cleanup_arxiv_paper_ingestion_artifacts": _handle_testing_cleanup_arxiv_paper_ingestion_artifacts,
     "chat_history_get_segments": _handle_chat_history_get_segments,
     "chat_history_get_debug_entry": _handle_chat_history_get_debug_entry,
+    "conversation_list": _handle_conversation_list,
+    "conversation_get": _handle_conversation_get,
+    "conversation_manage": _handle_conversation_manage,
     "conversation_telemetry_get_locator": _handle_conversation_telemetry_get_locator,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,

@@ -377,6 +377,21 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "conversation",
         "display_template": "Invite {action}: {invite_id}",
     },
+    "conversation_list": {
+        "salience": "medium",
+        "category": "conversation",
+        "display_template": "{count} conversations",
+    },
+    "conversation_get": {
+        "salience": "medium",
+        "category": "conversation",
+        "display_template": "Read conversation: {session_id}",
+    },
+    "conversation_manage": {
+        "salience": "high",
+        "category": "conversation",
+        "display_template": "Conversation {action}: {session_id}",
+    },
     # Jira tools (HIGH salience)
     "jira_create_issue": {
         "salience": "high",
@@ -1241,6 +1256,9 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "chat_history_get_segments",
     "chat_history_get_debug_entry",
     "conversation_telemetry_get_locator",
+    "conversation_list",
+    "conversation_get",
+    "conversation_manage",
     "testing_prepare_experiment_spec",
     "testing_prepare_meeting_invitation_spec",
     "testing_prepare_arxiv_paper_ingestion_fixture",
@@ -1326,6 +1344,7 @@ _DEFAULT_WRITE_TOOL_NAMES = {
     "create_pull_request",
     "create_repository",
     "create_task",
+    "conversation_manage",
     "delete_concept",
     "delete_file",
     "delete_text_relation",
