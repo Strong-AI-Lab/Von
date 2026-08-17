@@ -1100,6 +1100,68 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
                         "private_detail": "not projected",
                     },
                 },
+                "canonical_reconciliation": {
+                    "schema_version": (
+                        "ontology_mutation_canonical_reconciliation.v1"
+                    ),
+                    "phase": "canonical_reconciliation",
+                    "status": "verified",
+                    "verified": True,
+                    "effect_status": "succeeded",
+                    "changed": False,
+                    "method_name": "add_relationship",
+                    "receipt_id": "canonical-receipt-9",
+                    "intent_fingerprint": "canonical-intent-9",
+                    "target_concept_ids": ["#V#target_9"],
+                    "evidence_id": "canonical-evidence-9",
+                    "recorded_at_utc": "2026-02-19T01:00:03Z",
+                    "private_detail": "not projected",
+                },
+            },
+            "effect_weak_then_late": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_weak_then_late",
+                    "call_id": "call-weak-then-late",
+                    "capability_name": "create_concepts",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "indeterminate",
+                    "changed": None,
+                    "recorded_at_utc": "2026-02-19T02:00:01Z",
+                    "transport": {
+                        "execution_id": "mcp-weak-then-late",
+                        "outcome": "timed_out",
+                    },
+                    "receipt": {"mutation_outcome": "unknown"},
+                },
+                "current_state_observation": {
+                    "phase": "current_state_observation",
+                    "effect_status": "indeterminate",
+                    "changed": None,
+                    "initial_effect_status": "indeterminate",
+                    "current_outcome_status": "target_observed",
+                    "outcome_resolved": True,
+                    "reconciliation_basis": "later_exact_current_state_read",
+                    "observation_identity_sha256": "weak-observation-identity",
+                    "target_concept_ids": ["#V#weakly_observed_target"],
+                    "evidence_id": "weak-observation-evidence",
+                    "recorded_at_utc": "2026-02-19T02:00:02Z",
+                },
+                "late_terminal": {
+                    "phase": "late_terminal",
+                    "outcome": "late_success",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "recorded_at_utc": "2026-02-19T02:00:03Z",
+                    "payload": {
+                        "success": True,
+                        "effect_status": "succeeded",
+                        "changed": True,
+                        "mutation_outcome": "succeeded",
+                    },
+                },
             },
             "effect_unresolved": {
                 "identity": {
@@ -1191,13 +1253,44 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
             },
         }
     ]
-    assert result["effect_observation_journal_count"] == 4
+    assert result["effect_observation_journal_count"] == 5
     assert result["effect_observation_journal_truncated"] is False
     journal_by_id = {
         item["effect_id"]: item
         for item in result["effect_observation_journal"]
     }
-    assert journal_by_id["effect_2"]["latest_phase"] == "late_terminal"
+    assert (
+        journal_by_id["effect_2"]["latest_phase"]
+        == "canonical_reconciliation"
+    )
+    assert journal_by_id["effect_2"]["historical_phases"] == [
+        "dispatch_intent",
+        "turn_terminal",
+        "late_terminal",
+        "canonical_reconciliation",
+    ]
+    assert (
+        journal_by_id["effect_2"]["turn_terminal"]["effect_status"]
+        == "indeterminate"
+    )
+    assert (
+        journal_by_id["effect_2"]["late_terminal"]["effect_status"]
+        == "succeeded"
+    )
+    assert journal_by_id["effect_2"]["current_outcome"] == {
+        "schema_version": "ontology_mutation_canonical_reconciliation.v1",
+        "phase": "canonical_reconciliation",
+        "recorded_at_utc": "2026-02-19T01:00:03Z",
+        "status": "verified",
+        "verified": True,
+        "effect_status": "succeeded",
+        "changed": False,
+        "method_name": "add_relationship",
+        "receipt_id": "canonical-receipt-9",
+        "intent_fingerprint": "canonical-intent-9",
+        "target_concept_ids": ["#V#target_9"],
+        "evidence_id": "canonical-evidence-9",
+    }
     assert journal_by_id["effect_2"]["outcome_resolved"] is True
     assert journal_by_id["effect_2"]["late_terminal"]["receipt"] == {
         "success": True,
@@ -1205,6 +1298,41 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
         "changed": True,
     }
     assert "private_detail" not in json.dumps(journal_by_id["effect_2"])
+    weak_then_late = journal_by_id["effect_weak_then_late"]
+    assert weak_then_late["historical_phases"] == [
+        "turn_terminal",
+        "current_state_observation",
+        "late_terminal",
+    ]
+    assert weak_then_late["latest_phase"] == "late_terminal"
+    assert weak_then_late["current_outcome"] == {
+        "phase": "late_terminal",
+        "recorded_at_utc": "2026-02-19T02:00:03Z",
+        "outcome": "late_success",
+        "effect_status": "succeeded",
+        "changed": True,
+        "receipt": {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "mutation_outcome": "succeeded",
+        },
+    }
+    assert weak_then_late["outcome_resolved"] is True
+    assert weak_then_late["turn_terminal"]["effect_status"] == "indeterminate"
+    assert weak_then_late["current_state_observation"] == {
+        "phase": "current_state_observation",
+        "recorded_at_utc": "2026-02-19T02:00:02Z",
+        "effect_status": "indeterminate",
+        "changed": None,
+        "initial_effect_status": "indeterminate",
+        "current_outcome_status": "target_observed",
+        "outcome_resolved": True,
+        "reconciliation_basis": "later_exact_current_state_read",
+        "observation_identity_sha256": "weak-observation-identity",
+        "target_concept_ids": ["#V#weakly_observed_target"],
+        "evidence_id": "weak-observation-evidence",
+    }
     assert journal_by_id["effect_unresolved"]["outcome_resolved"] is False
     assert (
         journal_by_id["effect_missing_late_payload"]["outcome_resolved"]

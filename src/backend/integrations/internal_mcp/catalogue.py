@@ -13267,7 +13267,9 @@ def _summarise_effect_observation_journal(
         for phase_name in (
             "dispatch_intent",
             "turn_terminal",
+            "current_state_observation",
             "late_terminal",
+            "canonical_reconciliation",
         ):
             raw_phase = raw_entry.get(phase_name)
             if not isinstance(raw_phase, Mapping):
@@ -13276,13 +13278,29 @@ def _summarise_effect_observation_journal(
             phase_projection = {
                 key: raw_phase.get(key)
                 for key in (
+                    "schema_version",
                     "phase",
                     "recorded_at_utc",
                     "dispatch_state",
                     "execution_id",
                     "outcome",
+                    "status",
+                    "verified",
                     "effect_status",
                     "changed",
+                    "initial_effect_status",
+                    "current_outcome_status",
+                    "outcome_resolved",
+                    "reconciliation_basis",
+                    "observation_identity_sha256",
+                    "method_name",
+                    "read_method_name",
+                    "read_call_id",
+                    "receipt_id",
+                    "intent_fingerprint",
+                    "target_concept_ids",
+                    "canonical_scope",
+                    "evidence_id",
                     "output_schema_validation",
                     "output_schema_valid",
                     "payload_truncated",
@@ -13326,27 +13344,78 @@ def _summarise_effect_observation_journal(
                     if key in receipt
                 }
             entry[phase_name] = phase_projection
+        entry["historical_phases"] = list(available_phases)
         entry["available_phases"] = available_phases
-        entry["latest_phase"] = available_phases[-1] if available_phases else None
-        late_terminal = raw_entry.get("late_terminal")
-        turn_terminal = raw_entry.get("turn_terminal")
+        recorded_phases = [
+            phase_name
+            for phase_name in available_phases
+            if str(raw_entry.get(phase_name, {}).get("recorded_at_utc") or "")
+        ]
+        entry["latest_phase"] = (
+            max(
+                recorded_phases,
+                key=lambda phase_name: str(
+                    raw_entry.get(phase_name, {}).get("recorded_at_utc") or ""
+                ),
+            )
+            if recorded_phases
+            else (available_phases[-1] if available_phases else None)
+        )
+        # Keep each immutable receipt visible above.  Current outcome is only a
+        # derived actor-safe projection, with exact canonical read-back taking
+        # precedence over earlier transport and turn-terminal observations.
+        current_phase = next(
+            (
+                phase_name
+                for phase_name in (
+                    "canonical_reconciliation",
+                    "late_terminal",
+                    "current_state_observation",
+                    "turn_terminal",
+                )
+                if isinstance(raw_entry.get(phase_name), Mapping)
+            ),
+            None,
+        )
+        current_raw = raw_entry.get(current_phase) if current_phase else None
+        current_projection = entry.get(current_phase) if current_phase else None
+        entry["current_outcome"] = (
+            dict(current_projection)
+            if isinstance(current_projection, Mapping)
+            else None
+        )
         outcome_resolved = False
-        if isinstance(late_terminal, Mapping):
-            late_payload = late_terminal.get("payload")
+        if current_phase in {
+            "canonical_reconciliation",
+            "current_state_observation",
+        } and isinstance(
+            current_raw, Mapping
+        ):
+            outcome_resolved = (
+                current_raw.get("outcome_resolved")
+                if isinstance(current_raw.get("outcome_resolved"), bool)
+                else bool(
+                    current_raw.get("effect_status")
+                    not in {None, "indeterminate", "unknown"}
+                    and isinstance(current_raw.get("changed"), bool)
+                )
+            )
+        elif current_phase == "late_terminal" and isinstance(current_raw, Mapping):
+            late_payload = current_raw.get("payload")
             outcome_resolved = bool(
-                late_terminal.get("outcome") == "late_success"
-                and late_terminal.get("effect_status")
+                current_raw.get("outcome") == "late_success"
+                and current_raw.get("effect_status")
                 not in {None, "indeterminate", "unknown"}
                 and isinstance(late_payload, Mapping)
                 and late_payload.get("mutation_outcome") != "unknown"
             )
-        elif isinstance(turn_terminal, Mapping):
-            transport = turn_terminal.get("transport")
-            receipt = turn_terminal.get("receipt")
+        elif current_phase == "turn_terminal" and isinstance(current_raw, Mapping):
+            transport = current_raw.get("transport")
+            receipt = current_raw.get("receipt")
             outcome_resolved = bool(
                 isinstance(transport, Mapping)
                 and transport.get("outcome") not in {None, "timed_out"}
-                and turn_terminal.get("effect_status")
+                and current_raw.get("effect_status")
                 not in {None, "indeterminate", "unknown"}
                 and isinstance(receipt, Mapping)
                 and receipt.get("mutation_outcome") != "unknown"

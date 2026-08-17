@@ -145,6 +145,7 @@ from ...workflows.execution_contracts import (
     WORKFLOW_RESULT_ENVELOPE_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
     derive_workflow_terminal_status,
+    normalise_workflow_termination_code,
 )
 from ...workflows.mcp_tool_bridge import (
     apply_namespace_to_mcp_payload,
@@ -27490,14 +27491,6 @@ class InternalMCPChatOrchestrator:
             finalise_episode_fn = None
             build_episode_key_fn = None
 
-        def _normalise_error_code(error_value: Any) -> str:
-            if not isinstance(error_value, str) or not error_value.strip():
-                return "terminated"
-            cleaned_error = error_value.strip()
-            if ":" in cleaned_error:
-                return cleaned_error.split(":", 1)[0].strip().lower() or "terminated"
-            return "terminated"
-
         def _record_episode_telemetry(
             *,
             completed: bool,
@@ -27718,7 +27711,10 @@ class InternalMCPChatOrchestrator:
                 termination_code = "completed"
                 termination_detail = None
             elif error_value:
-                termination_code = _normalise_error_code(error_value)
+                termination_code = normalise_workflow_termination_code(
+                    error_value,
+                    default="terminated",
+                )
                 termination_detail = explicit_failure_detail or error_value
             elif _workflow_final_state_is_failure_like(final_state):
                 termination_code = "failed_terminal_state"

@@ -519,6 +519,89 @@ def test_execute_workflow_marks_failure_like_terminal_state_as_failed(
     )
 
 
+@pytest.mark.parametrize(
+    ("error", "final_state", "expected_code", "expected_detail"),
+    [
+        (
+            "paper_reference_ingestion_no_items_succeeded",
+            "failed",
+            "paper_reference_ingestion_no_items_succeeded",
+            "paper_reference_ingestion_no_items_succeeded",
+        ),
+        (
+            "tool_timeout:Workflow step timed out",
+            "failed",
+            "tool_timeout",
+            "tool_timeout:Workflow step timed out",
+        ),
+        (
+            "Unexpected workflow error while downloading",
+            "failed",
+            "terminated",
+            "Unexpected workflow error while downloading",
+        ),
+        ("", "stopped", "terminated", None),
+    ],
+)
+def test_execute_workflow_records_only_machine_failure_codes_in_episode_telemetry(
+    monkeypatch,
+    error: str,
+    final_state: str,
+    expected_code: str,
+    expected_detail: str | None,
+) -> None:
+    orchestrator = _build_orchestrator()
+    workflow_id = "#V#machine_failure_code_workflow"
+    _register_test_workflow(orchestrator, workflow_id=workflow_id)
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            completed=False,
+            final_state=final_state,
+            error=error,
+            data={},
+        ),
+    )
+    input_data = {
+        "prompt": "Exercise failure telemetry.",
+        "user_concept_id": "#V#user",
+        "org_concept_id": "#V#org",
+        "conversation_session_id": "chat-failure-code",
+        "turn_id": "turn-failure-code",
+        "aux_llm_calls": [],
+    }
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data=input_data,
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-failure-code",
+        turn_id="turn-failure-code",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    episode_entries = [
+        entry
+        for entry in input_data["aux_llm_calls"]
+        if isinstance(entry, dict) and entry.get("type") == "workflow_use_episode"
+    ]
+    assert len(episode_entries) == 1
+    assert episode_entries[0]["termination_reason"] == {
+        "code": expected_code,
+        "detail": expected_detail,
+    }
+
+
 def test_execute_workflow_uses_explicit_failure_detail_for_failure_like_terminal_state(
     monkeypatch,
 ) -> None:

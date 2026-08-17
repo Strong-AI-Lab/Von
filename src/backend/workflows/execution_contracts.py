@@ -7,6 +7,7 @@ and durable executors remain behaviourally aligned.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Dict, Mapping, MutableMapping
 
@@ -116,9 +117,36 @@ LAST_CONTROL_SIGNAL_RETURN_KEY = "last_control_signal_return"
 LAST_CONTROL_SIGNAL_ERROR_KEY = "last_control_signal_error"
 WORKFLOW_RETURN_PAYLOAD_KEY = "workflow_return_payload"
 
+_WORKFLOW_TERMINATION_CODE_MAX_CHARS = 128
+_WORKFLOW_TERMINATION_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+
 
 def _normalise_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def normalise_workflow_termination_code(
+    value: Any,
+    *,
+    default: str,
+) -> str:
+    """Return a bounded machine error code without promoting prose to a code.
+
+    Workflow failures may carry either a bare snake-case code or
+    ``code: detail``.  Only the machine-code portion belongs in episode
+    telemetry; arbitrary error prose remains the termination detail.
+    """
+
+    if not isinstance(value, str):
+        return default
+    candidate = value.strip().split(":", 1)[0].strip().lower()
+    if (
+        not candidate
+        or len(candidate) > _WORKFLOW_TERMINATION_CODE_MAX_CHARS
+        or _WORKFLOW_TERMINATION_CODE_PATTERN.fullmatch(candidate) is None
+    ):
+        return default
+    return candidate
 
 
 def normalise_control_signal(
