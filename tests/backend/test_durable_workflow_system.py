@@ -1781,10 +1781,30 @@ class TestWorkflowInstanceManager:
         assert workers[0]["active_instance_ids"] == ["instance-a"]
         assert workers[0]["build"]["git_short_commit"] == "abcdef123456"
 
+    @pytest.mark.parametrize(
+        ("error", "expected_code"),
+        [
+            (
+                "paper_reference_ingestion_no_items_succeeded",
+                "paper_reference_ingestion_no_items_succeeded",
+            ),
+            ("tool_timeout:Workflow step timed out", "tool_timeout"),
+            ("Unexpected workflow error while downloading", "failed"),
+            ("", "failed"),
+        ],
+    )
     def test_claim_and_terminal_updates_record_workflow_episodes(
-        self, monkeypatch
+        self,
+        monkeypatch,
+        error: str,
+        expected_code: str,
     ) -> None:
         """Durable lifecycle should emit one start + one final episode record."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv(
+            "VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT",
+            raising=False,
+        )
         manager = WorkflowInstanceManager()
         started: list[dict[str, Any]] = []
         finalised: list[dict[str, Any]] = []
@@ -1814,7 +1834,7 @@ class TestWorkflowInstanceManager:
 
         success = manager.mark_failed(
             instance_id,
-            error="tool_timeout:Workflow step timed out",
+            error=error,
             error_step="tool_execution",
             worker_id="worker-episode-test",
             claim_token=claimed.claim_token,
@@ -1824,7 +1844,8 @@ class TestWorkflowInstanceManager:
         assert finalised[0]["workflow_id"] == "#V#test_workflow"
         assert finalised[0]["completed"] is False
         assert finalised[0]["terminal_stage"] == "tool_execution"
-        assert finalised[0]["termination_code"] == "tool_timeout"
+        assert finalised[0]["termination_code"] == expected_code
+        assert finalised[0]["termination_detail"] == error
 
     def test_find_and_claim_prioritises_active_conversation_workflows(self) -> None:
         """Active user work is prioritised without reviving the retired controller."""

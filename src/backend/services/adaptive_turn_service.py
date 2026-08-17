@@ -115,7 +115,7 @@ class AdaptiveTurnResult:
     render_plan: Mapping[str, Any] | None = None
     terminal_status: str = "completed"
     evidence_index: Sequence[Mapping[str, Any]] = ()
-    effect_finality_fallback: bool = False
+    response_authority: str = "model"
     conversation_situation: str | None = None
 
 
@@ -3450,8 +3450,10 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
         "existing_concept_id",
         "file_copy_concept_id",
         "instance_id",
+        "marker_concept_id",
         "message_id",
         "object_id",
+        "paper_concept_id",
         "relation_id",
         "source_concept_id",
         "source_id",
@@ -3464,7 +3466,10 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
     sequence_fields = {
         "concept_ids",
         "created_concept_ids",
+        "paper_concept_ids",
         "relation_ids",
+        "represented_artefact_concept_ids",
+        "represented_artifact_concept_ids",
         "source_ids",
         "target_ids",
     }
@@ -3659,6 +3664,7 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
             "predicate",
             "target",
             "relationship_present",
+            "relation_present",
             "inverse_predicate",
             "inverse_relationship_present",
             "publication_context",
@@ -4013,53 +4019,6 @@ def _cited_ontology_mutation_claim_conflicts(
     return conflicts
 
 
-def _cited_ontology_mutation_conflict_response(
-    conflicts: Sequence[Mapping[str, Any]],
-) -> str:
-    lines = [
-        (
-            "I cannot safely present the drafted ontology completion claim because "
-            "it contradicts the cited durable mutation evidence."
-        ),
-        "",
-        "The following cited mutation is not canonically verified:",
-    ]
-    for conflict in conflicts:
-        source_id = str(conflict.get("source_id") or "").strip()
-        predicate = str(conflict.get("predicate") or "").strip()
-        target = str(conflict.get("target") or "").strip()
-        relation = (
-            f"`{source_id} --{predicate}--> {target}`"
-            if source_id and predicate and target
-            else f"`{conflict.get('method') or 'ontology mutation'}`"
-        )
-        status = str(conflict.get("effect_status") or "unknown")
-        changed = conflict.get("changed")
-        evidence_id = str(conflict.get("evidence_id") or "").strip()
-        effect_id = str(conflict.get("effect_id") or "").strip()
-        reason = str(conflict.get("reason") or "")
-        if reason == "canonical_relation_not_verified":
-            detail = (
-                f"handler status `{status}`, but the exact canonical relation "
-                "read-back is absent or negative"
-            )
-        else:
-            detail = f"effect status `{status}` and changed `{str(changed).lower()}`"
-        handle = evidence_id or effect_id
-        lines.append(f"- {relation}: {detail}; evidence `{handle}`.")
-    lines.extend(
-        (
-            "",
-            (
-                "The turn remains partial. Sibling mutations must be assessed from "
-                "their own terminal receipts and exact canonical read-backs; this "
-                "response does not infer a successful batch count."
-            ),
-        )
-    )
-    return "\n".join(lines)
-
-
 def _canonically_verified_material_effect_ids(
     tool_invocations: Sequence[Mapping[str, Any]],
     effect_snapshot: Mapping[str, Mapping[str, Any]],
@@ -4138,6 +4097,462 @@ def _canonically_verified_material_effect_ids(
             verified_effect_ids.add(effect_id)
 
     return material_effect_ids, verified_effect_ids
+
+
+def _bounded_outcome_text(value: Any, *, limit: int = 500) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split()).strip()
+    cleaned = cleaned.replace("`", "'").replace("<", "‹").replace(">", "›")
+    if not cleaned:
+        return None
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: max(0, limit - 3)].rstrip()}..."
+
+
+def _nested_mapping_value(value: Any, path: Sequence[str]) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _typed_effect_failure_fact(
+    payload: Any,
+    *,
+    workflow_event: Mapping[str, Any] | None = None,
+) -> dict[str, str] | None:
+    """Project only declared failure fields, never an arbitrary payload walk."""
+
+    receipt = payload if isinstance(payload, Mapping) else {}
+    event = workflow_event if isinstance(workflow_event, Mapping) else {}
+    error_code = _bounded_outcome_text(
+        event.get("error_code") or receipt.get("error_code"),
+        limit=160,
+    )
+    error = _bounded_outcome_text(
+        event.get("error")
+        or receipt.get("failure_reason")
+        or receipt.get("error")
+    )
+    if not error_code and not error:
+        return None
+    return {
+        **({"error_code": error_code} if error_code else {}),
+        **({"error": error} if error else {}),
+    }
+
+
+def _effect_failure_fact(state: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Return the bounded typed cause projected at the capability boundary."""
+
+    failure_fact = state.get("failure_fact")
+    if not isinstance(failure_fact, Mapping):
+        return None, None
+    return (
+        _bounded_outcome_text(failure_fact.get("error_code"), limit=160),
+        _bounded_outcome_text(failure_fact.get("error")),
+    )
+
+
+def _effect_scope_fact(
+    state: Mapping[str, Any],
+    *,
+    trusted_scope: TrustedTurnScope,
+) -> dict[str, str] | None:
+    canonical_scope = state.get("canonical_scope")
+    if isinstance(canonical_scope, Mapping):
+        mode = str(canonical_scope.get("mode") or "").strip().lower()
+        concept_id = str(canonical_scope.get("concept_id") or "").strip()
+        if mode in {"user", "organisation", "global"} and (
+            concept_id or mode == "global"
+        ):
+            return {"mode": mode, "concept_id": concept_id}
+
+    readback = state.get("canonical_readback")
+    publication_context = (
+        readback.get("publication_context")
+        if isinstance(readback, Mapping)
+        else None
+    )
+    if isinstance(publication_context, Mapping):
+        mode = str(publication_context.get("kind") or "").strip().lower()
+        concept_id = str(publication_context.get("concept_id") or "").strip()
+        if mode in {"user", "organisation", "global"} and (
+            concept_id or mode == "global"
+        ):
+            return {"mode": mode, "concept_id": concept_id}
+
+    if isinstance(readback, Mapping):
+        scope_mode = str(readback.get("scope_mode") or "").strip().lower()
+        if readback.get("trusted_scope_identity_sha256") and scope_mode == "user":
+            concept_id = str(trusted_scope.user_concept_id or "").strip()
+            return {"mode": "user", "concept_id": concept_id} if concept_id else None
+        if (
+            readback.get("trusted_scope_identity_sha256")
+            and scope_mode == "organisation"
+        ):
+            concept_id = str(trusted_scope.organisation_concept_id or "").strip()
+            return (
+                {"mode": "organisation", "concept_id": concept_id}
+                if concept_id
+                else None
+            )
+
+    return None
+
+
+def _build_effect_outcome_report(
+    *,
+    terminal_status: str,
+    effect_snapshot: Mapping[str, Mapping[str, Any]],
+    tool_invocations: Sequence[Mapping[str, Any]],
+    trusted_scope: TrustedTurnScope,
+) -> tuple[str, dict[str, Any]]:
+    """Render acknowledged effect facts without asking another answer author."""
+
+    invocation_by_effect_id = {
+        str(invocation.get("effect_id")): invocation
+        for invocation in tool_invocations
+        if isinstance(invocation.get("effect_id"), str)
+        and str(invocation.get("effect_id")).strip()
+    }
+    facts: list[dict[str, Any]] = []
+    scope_facts: list[dict[str, str]] = []
+    for effect_id, state in effect_snapshot.items():
+        if state.get("turn_finality_required") is False:
+            continue
+        invocation = invocation_by_effect_id.get(effect_id, {})
+        effect_status = str(state.get("effect_status") or "unknown").strip()
+        if not (
+            effect_status in {"failed", "partial", "indeterminate", "not_started"}
+            or state.get("changed") is True
+            or (effect_status == "succeeded" and state.get("changed") is None)
+            or state.get("outcome_resolved") is True
+        ):
+            continue
+        tool_name = str(
+            invocation.get("capability_display_name")
+            or state.get("workflow_id")
+            or invocation.get("tool")
+            or state.get("execution_method")
+            or "effect"
+        ).strip()
+        target_ids = [
+            str(item).strip()
+            for item in (
+                state.get("result_target_ids")
+                or invocation.get("result_target_ids")
+                or ()
+            )
+            if isinstance(item, str) and item.strip()
+        ][:8]
+        evidence = invocation.get("evidence")
+        evidence_id = (
+            str(evidence.get("evidence_id") or "").strip()
+            if isinstance(evidence, Mapping)
+            else ""
+        )
+        error_code, error_detail = _effect_failure_fact(state)
+        if not error_code:
+            error_code = _bounded_outcome_text(invocation.get("error_code"), limit=160)
+        canonical_readback = state.get("canonical_readback")
+        execution_method = str(
+            invocation.get("execution_method")
+            or invocation.get("tool")
+            or state.get("execution_method")
+            or ""
+        ).strip()
+        if execution_method in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+            canonical_readback_verified = (
+                _canonical_relation_readback_matches_invocation(
+                    invocation,
+                    canonical_readback,
+                )
+            )
+        elif execution_method == "upsert_scoped_assertion":
+            canonical_readback_verified = (
+                _canonical_scoped_assertion_readback_matches_invocation(
+                    invocation,
+                    canonical_readback,
+                )
+            )
+        else:
+            canonical_readback_verified = bool(
+                isinstance(canonical_readback, Mapping)
+                and (
+                    canonical_readback.get("verified") is True
+                    or str(canonical_readback.get("status") or "")
+                    .strip()
+                    .lower()
+                    == "verified"
+                    or canonical_readback.get("assertion_present") is True
+                )
+            )
+        effective_arguments = state.get("effective_arguments")
+        argument_identity: dict[str, str] = {}
+        if isinstance(effective_arguments, Mapping):
+            for field in ("concept_id", "source_id", "predicate", "target"):
+                bounded = _bounded_outcome_text(
+                    effective_arguments.get(field),
+                    limit=240,
+                )
+                if bounded:
+                    argument_identity[field] = bounded
+        fact = {
+            "effect_id": effect_id,
+            "tool": tool_name,
+            "effect_status": effect_status,
+            "changed": state.get("changed") if isinstance(state.get("changed"), bool) else None,
+            "initial_effect_status": state.get("initial_effect_status"),
+            "current_outcome_status": state.get("current_outcome_status"),
+            "outcome_resolved": state.get("outcome_resolved") is True,
+            "reconciliation_status": state.get("reconciliation_status"),
+            "canonical_readback_present": isinstance(
+                canonical_readback, Mapping
+            ),
+            "canonical_readback_verified": canonical_readback_verified,
+            "workflow_id": state.get("workflow_id"),
+            "instance_id": state.get("instance_id"),
+            "target_ids": target_ids,
+            "evidence_id": evidence_id or state.get("reconciliation_evidence_id"),
+            "error_code": error_code,
+            "error": error_detail,
+            "recovered_by_effect_id": state.get("recovered_by_effect_id"),
+            "argument_identity": argument_identity or None,
+        }
+        facts.append({key: value for key, value in fact.items() if value is not None})
+        scope_fact = _effect_scope_fact(state, trusted_scope=trusted_scope)
+        if scope_fact and scope_fact not in scope_facts:
+            scope_facts.append(scope_fact)
+
+    heading = {
+        "effect_partially_completed": "This turn completed only partially.",
+        "effect_outcome_indeterminate": (
+            "This turn has at least one unresolved effect outcome."
+        ),
+        "effect_failed": "This turn did not complete all requested effects.",
+        "effect_not_started": "At least one requested effect was not started.",
+        "model_error": "The model did not produce a reliable final answer.",
+        "model_non_answer": "The model did not produce a usable final answer.",
+    }.get(terminal_status, "This turn did not finish cleanly.")
+    lines = ["## Effect outcome report", "", heading]
+    confirmed = [
+        fact
+        for fact in facts
+        if fact.get("effect_status") == "succeeded"
+        or fact.get("outcome_resolved") is True
+        or fact.get("recovered_by_effect_id")
+    ]
+    unresolved = [fact for fact in facts if fact not in confirmed]
+
+    if confirmed:
+        lines.extend(
+            (
+                "",
+                "### Verified, observed, recovered, or handler-reported",
+            )
+        )
+        for fact in confirmed:
+            label = f"`{fact['tool']}`"
+            status = str(fact.get("effect_status") or "unknown")
+            if fact.get("outcome_resolved") and status != "succeeded":
+                if fact.get("current_outcome_status") == "target_absent":
+                    detail = (
+                        "exact read-back found the target absent; the original "
+                        f"attempt receipt remains `{status}`"
+                    )
+                else:
+                    detail = (
+                        "the current target was read back exactly; the original "
+                        f"attempt receipt remains `{status}`"
+                    )
+                if fact.get("error_code"):
+                    detail += f" (`{fact['error_code']}`)"
+                if fact.get("recovered_by_effect_id"):
+                    detail += (
+                        "; a later exact retry succeeded as effect "
+                        f"`{fact['recovered_by_effect_id']}`"
+                    )
+            elif fact.get("reconciliation_status") == "canonically_verified":
+                detail = "succeeded after exact canonical reconciliation"
+            elif fact.get("effect_status") == "succeeded":
+                if fact.get("canonical_readback_verified"):
+                    detail = "succeeded with canonical read-back"
+                elif fact.get("canonical_readback_present"):
+                    detail = (
+                        "the handler reported `succeeded`, but the embedded "
+                        "canonical read-back did not verify the outcome"
+                    )
+                else:
+                    detail = "reported `succeeded`"
+            else:
+                detail = f"receipt `{status}` was recovered by a later effect"
+            handles = []
+            if fact.get("instance_id"):
+                handles.append(f"instance `{fact['instance_id']}`")
+            if fact.get("target_ids"):
+                handles.append(
+                    "target" + ("s" if len(fact["target_ids"]) != 1 else "")
+                    + " "
+                    + ", ".join(f"`{item}`" for item in fact["target_ids"])
+                )
+            if fact.get("evidence_id"):
+                handles.append(f"evidence `{fact['evidence_id']}`")
+            if fact.get("error"):
+                handles.append(f"cause: {fact['error']}")
+            suffix = f"; {'; '.join(handles)}" if handles else ""
+            lines.append(f"- {label}: {detail}{suffix}.")
+
+    if unresolved:
+        lines.extend(("", "### Unsuccessful or unresolved"))
+        for fact in unresolved:
+            label = f"`{fact['tool']}`"
+            status = str(fact.get("effect_status") or "unknown")
+            details = [f"status `{status}`"]
+            if fact.get("changed") is False:
+                details.append("reported no change")
+            elif fact.get("changed") is True:
+                details.append("reported a possible or partial change")
+            if fact.get("error_code"):
+                details.append(f"error code `{fact['error_code']}`")
+            if fact.get("error"):
+                details.append(str(fact["error"]))
+            argument_identity = fact.get("argument_identity")
+            if isinstance(argument_identity, Mapping):
+                relation_parts = [
+                    f"{key} `{value}`"
+                    for key, value in argument_identity.items()
+                ]
+                if relation_parts:
+                    details.append(", ".join(relation_parts))
+            if fact.get("instance_id"):
+                details.append(f"instance `{fact['instance_id']}`")
+            if fact.get("evidence_id"):
+                details.append(f"evidence `{fact['evidence_id']}`")
+            lines.append(f"- {label}: {'; '.join(details)}.")
+
+    if scope_facts:
+        lines.extend(("", "### Canonical scope"))
+        for scope_fact in scope_facts:
+            mode = scope_fact["mode"]
+            concept_id = scope_fact.get("concept_id") or ""
+            if mode == "user":
+                lines.append(
+                    f"- User scope `{concept_id}`. The organisation-qualified "
+                    f"namespace `{trusted_scope.namespace}` is execution context, "
+                    "not organisation publication."
+                )
+            elif mode == "organisation":
+                lines.append(f"- Organisation scope `{concept_id}`.")
+            else:
+                lines.append("- Global publication scope.")
+
+    if any(
+        fact.get("effect_status") in {"partial", "indeterminate"}
+        and not fact.get("outcome_resolved")
+        for fact in facts
+    ):
+        lines.extend(
+            (
+                "",
+                "Inspect the named current state before retrying an unresolved effect.",
+            )
+        )
+    report = {
+        "schema_version": "adaptive_turn_effect_outcome_report.v1",
+        "terminal_status": terminal_status,
+        "facts": facts,
+        "canonical_scopes": scope_facts,
+    }
+    return "\n".join(lines), report
+
+
+def _canonical_scope_from_exact_concept_read(
+    raw_payload: Any,
+    *,
+    trusted_scope: TrustedTurnScope,
+) -> dict[str, str] | None:
+    """Project actor scope only when the exact concept read proves it."""
+
+    if not isinstance(raw_payload, Mapping):
+        return None
+    publication_context = raw_payload.get("publication_context")
+    if isinstance(publication_context, Mapping):
+        mode = str(publication_context.get("kind") or "").strip().lower()
+        concept_id = str(publication_context.get("concept_id") or "").strip()
+        if mode == "user" and concept_id == trusted_scope.user_concept_id:
+            return {"mode": "user", "concept_id": concept_id}
+        if (
+            mode == "organisation"
+            and concept_id == trusted_scope.organisation_concept_id
+        ):
+            return {"mode": "organisation", "concept_id": concept_id}
+
+    relationships = raw_payload.get("relationships")
+    if not isinstance(relationships, Mapping):
+        return None
+    user_targets = relationships.get("#V#specific_to_user")
+    if not isinstance(user_targets, Sequence) or isinstance(
+        user_targets, (str, bytes, bytearray)
+    ):
+        user_targets = relationships.get("specific_to_user")
+    if isinstance(user_targets, Sequence) and not isinstance(
+        user_targets, (str, bytes, bytearray)
+    ):
+        clean_targets = {
+            str(item).strip() for item in user_targets if str(item).strip()
+        }
+        if trusted_scope.user_concept_id in clean_targets:
+            return {
+                "mode": "user",
+                "concept_id": trusted_scope.user_concept_id,
+            }
+    return None
+
+
+def _canonical_reconciliation_observation_identity(
+    *,
+    effect_id: str,
+    basis: str,
+    method_name: str,
+    target_ids: Sequence[str],
+    receipt_id: Any = None,
+    intent_fingerprint: Any = None,
+    read_call_id: Any = None,
+    canonical_scope: Mapping[str, Any] | None = None,
+    terminal_status: Any = None,
+) -> str:
+    """Identify one exact immutable reconciliation independently of timestamps."""
+
+    return hashlib.sha256(
+        _json_bytes(
+            {
+                "effect_id": effect_id,
+                "basis": basis,
+                "method_name": method_name,
+                "target_ids": sorted(
+                    str(item).strip()
+                    for item in target_ids
+                    if isinstance(item, str) and item.strip()
+                ),
+                "receipt_id": str(receipt_id or "").strip() or None,
+                "intent_fingerprint": (
+                    str(intent_fingerprint or "").strip() or None
+                ),
+                "read_call_id": str(read_call_id or "").strip() or None,
+                "canonical_scope": (
+                    dict(canonical_scope)
+                    if isinstance(canonical_scope, Mapping)
+                    else None
+                ),
+                "terminal_status": str(terminal_status or "").strip() or None,
+            }
+        )
+    ).hexdigest()
 
 
 def _effect_status(
@@ -4485,6 +4900,13 @@ def _build_represented_workflow_execution_event(
     latest_step = dict(latest_step_raw) if isinstance(latest_step_raw, Mapping) else {}
     diagnostics_raw = latest_step.get("diagnostics")
     diagnostics = dict(diagnostics_raw) if isinstance(diagnostics_raw, Mapping) else {}
+    nested_mcp_result = _nested_mapping_value(
+        latest_step,
+        ("output_payload", "mcp_result"),
+    )
+    nested_mcp_result = (
+        nested_mcp_result if isinstance(nested_mcp_result, Mapping) else {}
+    )
 
     progress_evidence = project_nested_workflow_progress_evidence(receipt)
     progress_facts = (
@@ -4524,14 +4946,25 @@ def _build_represented_workflow_execution_event(
     else:
         event_status = "workflow_execution_failed"
 
+    error_code = (
+        _bounded_outcome_text(nested_mcp_result.get("error_code"), limit=160)
+        or _bounded_outcome_text(latest_step.get("error_code"), limit=160)
+        or _bounded_outcome_text(
+            workflow_execution.get("error_code"), limit=160
+        )
+        or _bounded_outcome_text(receipt.get("error_code"), limit=160)
+    )
     error = (
-        _bounded_workflow_progress_text(
+        _bounded_outcome_text(nested_mcp_result.get("error"), limit=320)
+        or _bounded_outcome_text(
+            nested_mcp_result.get("failure_reason"), limit=320
+        )
+        or _bounded_outcome_text(
             workflow_execution.get("failure_reason"), limit=320
         )
-        or _bounded_workflow_progress_text(receipt.get("failure_reason"), limit=320)
-        or _bounded_workflow_progress_text(diagnostics.get("error"), limit=320)
-        or _bounded_workflow_progress_text(workflow_execution.get("error"), limit=320)
-        or _bounded_workflow_progress_text(receipt.get("error_code"), limit=160)
+        or _bounded_outcome_text(receipt.get("failure_reason"), limit=320)
+        or _bounded_outcome_text(diagnostics.get("error"), limit=320)
+        or _bounded_outcome_text(workflow_execution.get("error"), limit=320)
     )
     recovery_affordances = receipt.get("recovery_affordances")
     next_action = None
@@ -4566,6 +4999,7 @@ def _build_represented_workflow_execution_event(
         "final_state": workflow_execution.get("current_state")
         or workflow_instance.get("current_state"),
         "error": error,
+        "error_code": error_code,
         "effect_status": effect_status,
         "mutation_outcome": receipt.get("mutation_outcome"),
         "outcome_finality": receipt.get("outcome_finality"),
@@ -4611,44 +5045,6 @@ def _usage_add(
     for key, value in usage.items():
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             totals[str(key)] = totals.get(str(key), 0.0) + float(value)
-
-
-def _can_preserve_pending_durable_response(
-    text: str,
-    effects: Sequence[Mapping[str, Any]],
-) -> bool:
-    """Return whether a useful, honest pending-workflow answer can be shown."""
-
-    cleaned = text.strip()
-    if not cleaned or not effects:
-        return False
-    lowered = cleaned.lower()
-    if not any(
-        marker in lowered
-        for marker in (
-            "pending",
-            "queued",
-            "running",
-            "paused",
-            "partial",
-            "not yet",
-            "not complete",
-            "not finished",
-            "still processing",
-            "in progress",
-        )
-    ):
-        return False
-
-    for effect in effects:
-        if effect.get("capability_kind") != "represented_workflow":
-            return False
-        if effect.get("effect_status") != "partial":
-            return False
-        instance_id = str(effect.get("instance_id") or "").strip()
-        if not instance_id or instance_id not in cleaned:
-            return False
-    return True
 
 
 def execute_adaptive_turn(
@@ -4886,10 +5282,13 @@ def execute_adaptive_turn(
     seen_evidence_view_digests: set[str] = set()
     effect_state_lock = threading.RLock()
     effect_states: dict[str, dict[str, Any]] = {}
+    exact_read_observations: list[dict[str, Any]] = []
     effect_state_generation = 0
     last_partial_effect_generation = 0
     successful_effect_mutation_generation = 0
     terminal_failed_effect_requests: dict[str, tuple[int, str | None]] = {}
+    indeterminate_effect_requests: dict[str, tuple[str, str | None]] = {}
+    exact_absence_effect_requests: dict[str, str] = {}
     recoverable_effect_ids: dict[str, list[str]] = {}
 
     def scoped_assertion_recovery_key(
@@ -5031,6 +5430,34 @@ def execute_adaptive_turn(
             failed_state["recovery_status"] = "succeeded"
             effect_state_generation += 1
 
+    def reconcile_successful_exact_absence_retry(
+        *,
+        recovery_effect_id: str,
+        request_signature: str | None,
+        effect_status: str,
+    ) -> None:
+        nonlocal effect_state_generation
+        if effect_status != "succeeded" or not request_signature:
+            return
+        prior_effect_id = exact_absence_effect_requests.pop(
+            request_signature,
+            None,
+        )
+        if prior_effect_id is None:
+            return
+        with effect_state_lock:
+            prior_state = effect_states.get(prior_effect_id)
+            if (
+                prior_state is None
+                or prior_state.get("effect_status") != "indeterminate"
+                or prior_state.get("outcome_resolved") is not True
+                or prior_state.get("current_outcome_status") != "target_absent"
+            ):
+                return
+            prior_state["recovered_by_effect_id"] = recovery_effect_id
+            prior_state["recovery_status"] = "succeeded"
+            effect_state_generation += 1
+
     def remember_effect_state(
         effect_id: str,
         *,
@@ -5048,7 +5475,10 @@ def execute_adaptive_turn(
         execution_method: str | None = None,
         effective_arguments: Mapping[str, Any] | None = None,
         original_result: Mapping[str, Any] | None = None,
+        failure_fact: Mapping[str, Any] | None = None,
+        effect_request_signature: str | None = None,
         result_target_ids: Sequence[str] | None = None,
+        observation_order: int | None = None,
     ) -> None:
         nonlocal effect_state_generation
         with effect_state_lock:
@@ -5066,11 +5496,15 @@ def execute_adaptive_turn(
                 "workflow_id": workflow_id,
                 "evidence_id": evidence_id,
                 "execution_method": execution_method,
+                "effect_request_signature": effect_request_signature,
+                "observation_order": observation_order,
             }
             if effective_arguments is not None:
                 state["effective_arguments"] = dict(effective_arguments)
             if original_result is not None:
                 state["original_result"] = dict(original_result)
+            if failure_fact is not None:
+                state["failure_fact"] = dict(failure_fact)
             if result_target_ids:
                 state["result_target_ids"] = [
                     str(item).strip()
@@ -5105,7 +5539,10 @@ def execute_adaptive_turn(
                     "execution_method",
                     "effective_arguments",
                     "original_result",
+                    "failure_fact",
+                    "effect_request_signature",
                     "result_target_ids",
+                    "observation_order",
                 ):
                     if not state.get(identity_field) and existing.get(identity_field):
                         state[identity_field] = existing[identity_field]
@@ -5119,8 +5556,116 @@ def execute_adaptive_turn(
             effect_states[effect_id] = state
             effect_state_generation += 1
 
+    def _record_reconciliation_persistence_failure(
+        *,
+        effect_id: str,
+        reason: Any,
+        phase: str = "canonical_reconciliation",
+    ) -> None:
+        aux_calls.append(
+            {
+                "type": "effect_observation_persistence_failure",
+                "schema_version": "effect_observation_persistence_failure.v1",
+                "effect_id": effect_id,
+                "phase": phase,
+                "reason": str(reason or "not_acknowledged"),
+            }
+        )
+
+    def _matching_exact_current_state_observation(
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if str(candidate.get("execution_method") or "").strip() != "create_concepts":
+            return None
+        candidate_targets = {
+            str(item).strip()
+            for item in candidate.get("result_target_ids") or ()
+            if isinstance(item, str) and item.strip()
+        }
+        targets_derived_from_arguments = False
+        if not candidate_targets:
+            arguments = candidate.get("effective_arguments")
+            concepts = (
+                arguments.get("concepts")
+                if isinstance(arguments, Mapping)
+                else None
+            )
+            if isinstance(concepts, Sequence) and not isinstance(
+                concepts,
+                (str, bytes, bytearray),
+            ) and len(concepts) == 1:
+                concept = concepts[0]
+                concept_id = (
+                    str(concept.get("concept_id") or "").strip()
+                    if isinstance(concept, Mapping)
+                    else ""
+                )
+                if concept_id:
+                    candidate_targets = {concept_id}
+                    targets_derived_from_arguments = True
+        candidate_order = candidate.get("observation_order")
+        if not candidate_targets or not isinstance(candidate_order, int):
+            return None
+        arguments = candidate.get("effective_arguments")
+        expected_scope_mode = (
+            str(arguments.get("scope_mode") or "").strip().lower()
+            if isinstance(arguments, Mapping)
+            else ""
+        )
+        if expected_scope_mode not in {"", "user", "user_only_default"}:
+            return None
+        with effect_state_lock:
+            observations = [dict(item) for item in exact_read_observations]
+        for observation in sorted(
+            observations,
+            key=lambda item: int(item.get("observation_order") or -1),
+        ):
+            if observation.get("capability_name") != "fetch_concept":
+                continue
+            observation_order = observation.get("observation_order")
+            if not isinstance(observation_order, int) or observation_order <= candidate_order:
+                continue
+            observed_targets = {
+                str(item).strip()
+                for item in observation.get("result_target_ids") or ()
+                if isinstance(item, str) and item.strip()
+            }
+            exact_requested_targets = {
+                str(item).strip()
+                for item in observation.get("requested_target_ids") or ()
+                if isinstance(item, str) and item.strip()
+            }
+            matched_targets = candidate_targets.intersection(
+                observed_targets,
+                exact_requested_targets,
+            )
+            target_state = str(
+                observation.get("target_state") or "present"
+            ).strip().lower()
+            canonical_scope = observation.get("canonical_scope")
+            if len(candidate_targets) != 1:
+                continue
+            if target_state == "absent":
+                if candidate_targets != exact_requested_targets:
+                    continue
+                matched_targets = set(candidate_targets)
+            else:
+                if targets_derived_from_arguments:
+                    continue
+                if matched_targets != candidate_targets or not (
+                    isinstance(canonical_scope, Mapping)
+                    and canonical_scope.get("mode") == "user"
+                    and canonical_scope.get("concept_id") == scope.user_concept_id
+                ):
+                    continue
+            return {
+                **observation,
+                "matched_target_ids": sorted(matched_targets),
+            }
+        return None
+
     def reconcile_indeterminate_ontology_effects() -> None:
-        """Resolve exact ontology postconditions once more before terminal output."""
+        """Resolve current state only after its actor-scoped journal write acks."""
 
         nonlocal effect_state_generation
         with effect_state_lock:
@@ -5128,18 +5673,26 @@ def execute_adaptive_turn(
                 (effect_id, dict(state))
                 for effect_id, state in effect_states.items()
                 if state.get("effect_status") == "indeterminate"
+                and state.get("outcome_resolved") is not True
                 and state.get("turn_finality_required") is not False
                 and isinstance(state.get("original_result"), Mapping)
-                and state["original_result"].get("outcome_finality")
-                == "requires_canonical_reconciliation"
-                and isinstance(
-                    state["original_result"].get("postcondition_reconciliation"),
-                    Mapping,
+                and (
+                    state.get("execution_method") == "create_concepts"
+                    or (
+                        state["original_result"].get("outcome_finality")
+                        == "requires_canonical_reconciliation"
+                        and isinstance(
+                            state["original_result"].get(
+                                "postcondition_reconciliation"
+                            ),
+                            Mapping,
+                        )
+                        and state["original_result"][
+                            "postcondition_reconciliation"
+                        ].get("schema_version")
+                        == "ontology_mutation_postcondition_reconciliation.v1"
+                    )
                 )
-                and state["original_result"]["postcondition_reconciliation"].get(
-                    "schema_version"
-                )
-                == "ontology_mutation_postcondition_reconciliation.v1"
             ]
         if not candidates:
             return
@@ -5155,74 +5708,258 @@ def execute_adaptive_turn(
                 original_result, Mapping
             ):
                 continue
-            try:
-                with override_current_actor(
-                    scope.user_concept_id,
-                    scope.organisation_concept_id,
-                ):
-                    reconciliation = reconcile_governed_ontology_postcondition(
-                        method_name=method_name,
-                        arguments=arguments,
-                        original_result=original_result,
-                    )
-            except Exception as exc:  # noqa: BLE001 - unresolved remains indeterminate
-                reconciliation = {
-                    "success": False,
-                    "verified": False,
-                    "error_code": "ontology_reconciliation_unavailable",
-                    "exception_type": type(exc).__name__,
-                }
+            postcondition = original_result.get("postcondition_reconciliation")
+            governed_reconciliation_available = bool(
+                original_result.get("outcome_finality")
+                == "requires_canonical_reconciliation"
+                and isinstance(postcondition, Mapping)
+                and postcondition.get("schema_version")
+                == "ontology_mutation_postcondition_reconciliation.v1"
+            )
+            reconciliation: Mapping[str, Any] = {}
+            if governed_reconciliation_available:
+                try:
+                    with override_current_actor(
+                        scope.user_concept_id,
+                        scope.organisation_concept_id,
+                    ):
+                        reconciliation = reconcile_governed_ontology_postcondition(
+                            method_name=method_name,
+                            arguments=arguments,
+                            original_result=original_result,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    reconciliation = {
+                        "success": False,
+                        "verified": False,
+                        "error_code": "ontology_reconciliation_unavailable",
+                        "exception_type": type(exc).__name__,
+                    }
             verified = reconciliation.get("verified") is True
-            aux_calls.append(
-                {
-                    "type": "adaptive_turn_ontology_postcondition_reconciliation",
+            if governed_reconciliation_available:
+                aux_calls.append(
+                    {
+                        "type": (
+                            "adaptive_turn_ontology_postcondition_reconciliation"
+                        ),
+                        "schema_version": (
+                            "adaptive_turn_ontology_postcondition_reconciliation.v1"
+                        ),
+                        "effect_id": effect_id,
+                        "method_name": method_name,
+                        "verified": verified,
+                        "receipt_id": reconciliation.get("receipt_id"),
+                        "error_code": reconciliation.get("error_code"),
+                    }
+                )
+            if verified:
+                envelope = evidence_store.record(
+                    f"{method_name}_canonical_reconciliation",
+                    f"{effect_id}:canonical_reconciliation",
+                    reconciliation,
+                    provenance={
+                        "namespace": scope.namespace,
+                        "user_concept_id": scope.user_concept_id,
+                        "organisation_concept_id": scope.organisation_concept_id,
+                        "effect_id": effect_id,
+                        "effect_status": "succeeded",
+                        "reconciliation": True,
+                    },
+                    status="succeeded",
+                )
+                target_ids = [
+                    str(item).strip()
+                    for item in reconciliation.get("target_concept_ids") or ()
+                    if isinstance(item, str) and str(item).strip()
+                ]
+                identity = _canonical_reconciliation_observation_identity(
+                    effect_id=effect_id,
+                    basis="governed_postcondition",
+                    method_name=method_name,
+                    target_ids=target_ids,
+                    receipt_id=reconciliation.get("receipt_id"),
+                    intent_fingerprint=reconciliation.get("intent_fingerprint"),
+                )
+                observation = {
                     "schema_version": (
-                        "adaptive_turn_ontology_postcondition_reconciliation.v1"
+                        "ontology_mutation_canonical_reconciliation.v1"
                     ),
-                    "effect_id": effect_id,
-                    "method_name": method_name,
-                    "verified": verified,
-                    "receipt_id": reconciliation.get("receipt_id"),
-                    "error_code": reconciliation.get("error_code"),
-                }
-            )
-            if not verified:
-                continue
-            envelope = evidence_store.record(
-                f"{method_name}_canonical_reconciliation",
-                f"{effect_id}:canonical_reconciliation",
-                reconciliation,
-                provenance={
-                    "namespace": scope.namespace,
-                    "user_concept_id": scope.user_concept_id,
-                    "organisation_concept_id": scope.organisation_concept_id,
-                    "effect_id": effect_id,
                     "effect_status": "succeeded",
-                    "reconciliation": True,
-                },
-                status="succeeded",
+                    "changed": True,
+                    "current_outcome_status": "succeeded",
+                    "outcome_resolved": True,
+                    "reconciliation_basis": "governed_postcondition",
+                    "observation_identity_sha256": identity,
+                    "method_name": method_name,
+                    "receipt_id": reconciliation.get("receipt_id"),
+                    "intent_fingerprint": reconciliation.get(
+                        "intent_fingerprint"
+                    ),
+                    "target_concept_ids": target_ids,
+                    "evidence_id": envelope.evidence_id,
+                }
+                try:
+                    phase_outcome = persist_effect_observation_phase(
+                        effect_id=effect_id,
+                        phase="canonical_reconciliation",
+                        observation=observation,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _record_reconciliation_persistence_failure(
+                        effect_id=effect_id,
+                        reason=type(exc).__name__,
+                    )
+                    continue
+                if not _effect_phase_acknowledged(
+                    phase_outcome,
+                    expected_identity=identity,
+                ):
+                    _record_reconciliation_persistence_failure(
+                        effect_id=effect_id,
+                        reason=phase_outcome.get("reason"),
+                    )
+                    continue
+                stored_phase = phase_outcome.get("stored_phase")
+                stored_evidence_id = (
+                    stored_phase.get("evidence_id")
+                    if isinstance(stored_phase, Mapping)
+                    else None
+                )
+                canonical_projection = {
+                    "schema_version": (
+                        "ontology_mutation_canonical_reconciliation.v1"
+                    ),
+                    "status": "verified",
+                    "verified": True,
+                    "method_name": method_name,
+                    "receipt_id": reconciliation.get("receipt_id"),
+                    "intent_fingerprint": reconciliation.get(
+                        "intent_fingerprint"
+                    ),
+                    "target_concept_ids": target_ids,
+                    "evidence_id": stored_evidence_id or envelope.evidence_id,
+                }
+                with effect_state_lock:
+                    current = effect_states.get(effect_id)
+                    if (
+                        current is None
+                        or current.get("effect_status") != "indeterminate"
+                        or int(current.get("phase") or 0) > 2
+                    ):
+                        continue
+                    current.update(
+                        {
+                            "phase": 2,
+                            "initial_effect_status": "indeterminate",
+                            "initial_changed": current.get("changed"),
+                            "effect_status": "succeeded",
+                            "changed": True,
+                            "current_outcome_status": "succeeded",
+                            "outcome_resolved": True,
+                            "recovery_status": "succeeded",
+                            "reconciliation_status": "canonically_verified",
+                            "reconciliation_basis": "governed_postcondition",
+                            "reconciliation_evidence_id": (
+                                stored_evidence_id or envelope.evidence_id
+                            ),
+                            "canonical_readback": canonical_projection,
+                            "result_target_ids": target_ids
+                            or list(current.get("result_target_ids") or ()),
+                        }
+                    )
+                    effect_state_generation += 1
+                continue
+
+            exact_observation = _matching_exact_current_state_observation(candidate)
+            if exact_observation is None:
+                continue
+            target_ids = list(exact_observation["matched_target_ids"])
+            target_state = str(
+                exact_observation.get("target_state") or "present"
+            ).strip().lower()
+            raw_canonical_scope = exact_observation.get("canonical_scope")
+            canonical_scope = (
+                dict(raw_canonical_scope)
+                if isinstance(raw_canonical_scope, Mapping)
+                else None
             )
-            target_ids = [
-                str(item).strip()
-                for item in reconciliation.get("target_concept_ids") or ()
-                if isinstance(item, str) and str(item).strip()
-            ]
+            identity = _canonical_reconciliation_observation_identity(
+                effect_id=effect_id,
+                basis="later_exact_current_state_read",
+                method_name=method_name,
+                target_ids=target_ids,
+                read_call_id=exact_observation.get("call_id"),
+                canonical_scope=canonical_scope,
+            )
+            observation = {
+                "schema_version": "ontology_mutation_current_state_observation.v1",
+                "effect_status": "indeterminate",
+                "changed": candidate.get("changed"),
+                "initial_effect_status": "indeterminate",
+                "current_outcome_status": (
+                    "target_absent" if target_state == "absent" else "target_observed"
+                ),
+                "outcome_resolved": True,
+                "reconciliation_basis": "later_exact_current_state_read",
+                "observation_identity_sha256": identity,
+                "method_name": method_name,
+                "read_method_name": exact_observation.get("capability_name"),
+                "read_call_id": exact_observation.get("call_id"),
+                "target_concept_ids": target_ids,
+                "evidence_id": exact_observation.get("evidence_id"),
+            }
+            if canonical_scope is not None:
+                observation["canonical_scope"] = canonical_scope
+            try:
+                phase_outcome = persist_effect_observation_phase(
+                    effect_id=effect_id,
+                    phase="current_state_observation",
+                    observation=observation,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _record_reconciliation_persistence_failure(
+                    effect_id=effect_id,
+                    reason=type(exc).__name__,
+                    phase="current_state_observation",
+                )
+                continue
+            if not _effect_phase_acknowledged(
+                phase_outcome,
+                expected_identity=identity,
+            ):
+                _record_reconciliation_persistence_failure(
+                    effect_id=effect_id,
+                    reason=phase_outcome.get("reason"),
+                    phase="current_state_observation",
+                )
+                continue
+            stored_phase = phase_outcome.get("stored_phase")
+            stored_evidence_id = (
+                stored_phase.get("evidence_id")
+                if isinstance(stored_phase, Mapping)
+                else None
+            )
             canonical_projection = {
-                "schema_version": "ontology_mutation_canonical_reconciliation.v1",
-                "status": "verified",
+                "schema_version": "ontology_mutation_current_state_observation.v1",
+                "status": (
+                    "target_absent" if target_state == "absent" else "target_observed"
+                ),
                 "verified": True,
                 "method_name": method_name,
-                "receipt_id": reconciliation.get("receipt_id"),
-                "intent_fingerprint": reconciliation.get("intent_fingerprint"),
+                "read_method_name": exact_observation.get("capability_name"),
+                "read_call_id": exact_observation.get("call_id"),
                 "target_concept_ids": target_ids,
-                "evidence_id": envelope.evidence_id,
+                "evidence_id": stored_evidence_id
+                or exact_observation.get("evidence_id"),
             }
+            if canonical_scope is not None:
+                canonical_projection["canonical_scope"] = canonical_scope
             with effect_state_lock:
                 current = effect_states.get(effect_id)
                 if (
                     current is None
                     or current.get("effect_status") != "indeterminate"
-                    or int(current.get("phase") or 0) > 2
+                    or current.get("outcome_resolved") is True
                 ):
                     continue
                 current.update(
@@ -5230,53 +5967,40 @@ def execute_adaptive_turn(
                         "phase": 2,
                         "initial_effect_status": "indeterminate",
                         "initial_changed": current.get("changed"),
-                        "effect_status": "succeeded",
-                        "changed": True,
-                        "recovery_status": "succeeded",
-                        "reconciliation_status": "canonically_verified",
-                        "reconciliation_evidence_id": envelope.evidence_id,
+                        "current_outcome_status": (
+                            "target_absent"
+                            if target_state == "absent"
+                            else "target_observed"
+                        ),
+                        "outcome_resolved": True,
+                        "reconciliation_status": "current_state_observed",
+                        "reconciliation_basis": (
+                            "later_exact_current_state_read"
+                        ),
+                        "reconciliation_evidence_id": (
+                            stored_evidence_id
+                            or exact_observation.get("evidence_id")
+                        ),
                         "canonical_readback": canonical_projection,
-                        "result_target_ids": target_ids
-                        or list(current.get("result_target_ids") or ()),
+                        "result_target_ids": target_ids,
                     }
                 )
+                if canonical_scope is not None:
+                    current["canonical_scope"] = canonical_scope
                 effect_state_generation += 1
-            try:
-                persist_effect_observation_phase(
-                    effect_id=effect_id,
-                    phase="canonical_reconciliation",
-                    observation={
-                        "schema_version": (
-                            "ontology_mutation_canonical_reconciliation.v1"
-                        ),
-                        "effect_status": "succeeded",
-                        "changed": True,
-                        "method_name": method_name,
-                        "receipt_id": reconciliation.get("receipt_id"),
-                        "intent_fingerprint": reconciliation.get(
-                            "intent_fingerprint"
-                        ),
-                        "target_concept_ids": target_ids,
-                        "evidence_id": envelope.evidence_id,
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001 - receipt is already durable
-                aux_calls.append(
-                    {
-                        "type": "effect_observation_persistence_failure",
-                        "schema_version": (
-                            "effect_observation_persistence_failure.v1"
-                        ),
-                        "effect_id": effect_id,
-                        "phase": "canonical_reconciliation",
-                        "reason": type(exc).__name__,
-                    }
-                )
+            if target_state == "absent":
+                request_signature = str(
+                    candidate.get("effect_request_signature") or ""
+                ).strip()
+                if request_signature:
+                    indeterminate_effect_requests.pop(request_signature, None)
+                    exact_absence_effect_requests[request_signature] = effect_id
 
     def reconcile_workflow_instance_readback(
         *,
         capability_name: str,
         payload: Any,
+        call_id: str,
         evidence_id: str | None,
     ) -> None:
         """Resolve an earlier workflow effect from an exact canonical instance read."""
@@ -5307,27 +6031,90 @@ def execute_adaptive_turn(
             else "failed"
         )
         with effect_state_lock:
-            for state in effect_states.values():
-                if state.get("capability_kind") != "represented_workflow":
+            candidates = [
+                (effect_id, dict(state))
+                for effect_id, state in effect_states.items()
+                if state.get("capability_kind") == "represented_workflow"
+                and state.get("instance_id") == instance_id
+            ]
+        for effect_id, candidate in candidates:
+            state_workflow_id = str(candidate.get("workflow_id") or "").strip()
+            if (
+                workflow_id
+                and state_workflow_id
+                and workflow_id != state_workflow_id
+            ):
+                continue
+            if (
+                candidate.get("effect_status") == reconciled_status
+                and int(candidate.get("phase") or 0) >= 2
+                and candidate.get("outcome_resolved") is True
+            ):
+                continue
+            identity = _canonical_reconciliation_observation_identity(
+                effect_id=effect_id,
+                basis="workflow_instance_terminal_read",
+                method_name="workflow_get_instance",
+                target_ids=[instance_id],
+                read_call_id=call_id,
+                terminal_status=terminal_status,
+            )
+            observation = {
+                "schema_version": "workflow_instance_canonical_reconciliation.v1",
+                "effect_status": reconciled_status,
+                "changed": candidate.get("changed"),
+                "initial_effect_status": candidate.get("effect_status"),
+                "current_outcome_status": reconciled_status,
+                "outcome_resolved": True,
+                "reconciliation_basis": "workflow_instance_terminal_read",
+                "observation_identity_sha256": identity,
+                "method_name": "workflow_get_instance",
+                "read_call_id": call_id,
+                "instance_id": instance_id,
+                "workflow_id": workflow_id or state_workflow_id or None,
+                "terminal_status": terminal_status,
+                "evidence_id": evidence_id,
+            }
+            try:
+                phase_outcome = persist_effect_observation_phase(
+                    effect_id=effect_id,
+                    phase="canonical_reconciliation",
+                    observation=observation,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _record_reconciliation_persistence_failure(
+                    effect_id=effect_id,
+                    reason=type(exc).__name__,
+                )
+                continue
+            if not _effect_phase_acknowledged(
+                phase_outcome,
+                expected_identity=identity,
+            ):
+                _record_reconciliation_persistence_failure(
+                    effect_id=effect_id,
+                    reason=phase_outcome.get("reason"),
+                )
+                continue
+            with effect_state_lock:
+                state = effect_states.get(effect_id)
+                if state is None:
                     continue
-                if state.get("instance_id") != instance_id:
-                    continue
-                state_workflow_id = str(state.get("workflow_id") or "").strip()
-                if (
-                    workflow_id
-                    and state_workflow_id
-                    and workflow_id != state_workflow_id
-                ):
-                    continue
-                if (
-                    state.get("effect_status") == reconciled_status
-                    and int(state.get("phase") or 0) >= 2
-                ):
-                    continue
+                initial_status = state.get("effect_status")
+                initial_changed = state.get("changed")
                 state.update(
                     {
                         "phase": 2,
+                        "initial_effect_status": initial_status,
+                        "initial_changed": initial_changed,
                         "effect_status": reconciled_status,
+                        "current_outcome_status": reconciled_status,
+                        "outcome_resolved": True,
+                        "reconciliation_status": "canonically_verified",
+                        "reconciliation_basis": (
+                            "workflow_instance_terminal_read"
+                        ),
+                        "reconciliation_evidence_id": evidence_id,
                         "canonical_readback": {
                             "capability": capability_name,
                             "instance_id": instance_id,
@@ -5368,8 +6155,30 @@ def execute_adaptive_turn(
             history_namespace=conversation_history_namespace,
         )
 
-    def _effect_phase_acknowledged(outcome: Mapping[str, Any]) -> bool:
-        return bool(outcome.get("updated") or outcome.get("duplicate"))
+    def _effect_phase_acknowledged(
+        outcome: Mapping[str, Any],
+        *,
+        expected_identity: str | None = None,
+    ) -> bool:
+        if outcome.get("updated"):
+            if expected_identity is None:
+                return True
+            stored_phase = outcome.get("stored_phase")
+            return bool(
+                isinstance(stored_phase, Mapping)
+                and stored_phase.get("observation_identity_sha256")
+                == expected_identity
+            )
+        if not outcome.get("duplicate"):
+            return False
+        if expected_identity is None:
+            return True
+        stored_phase = outcome.get("stored_phase")
+        return bool(
+            isinstance(stored_phase, Mapping)
+            and stored_phase.get("observation_identity_sha256")
+            == expected_identity
+        )
 
     def late_effect_observer(
         *,
@@ -5519,6 +6328,18 @@ def execute_adaptive_turn(
                 and state.get("recovery_status") == "succeeded"
                 and state.get("recovered_by_effect_id")
             )
+            and not (
+                state.get("effect_status") == "indeterminate"
+                and state.get("current_outcome_status") == "target_absent"
+                and state.get("outcome_resolved") is True
+                and state.get("recovery_status") == "succeeded"
+                and state.get("recovered_by_effect_id")
+            )
+        ]
+        unresolved_incomplete_effects = [
+            state
+            for state in incomplete_effects
+            if state.get("outcome_resolved") is not True
         ]
         succeeded_effects = [
             state
@@ -5527,57 +6348,65 @@ def execute_adaptive_turn(
             and state.get("turn_finality_required") is not False
         ]
         (
-            material_succeeded_effect_ids,
+            _material_succeeded_effect_ids,
             canonically_verified_effect_ids,
         ) = _canonically_verified_material_effect_ids(
             tool_invocations,
             effect_snapshot,
         )
         all_material_successes_verified = bool(
-            material_succeeded_effect_ids
-        ) and material_succeeded_effect_ids.issubset(canonically_verified_effect_ids)
-        mixed_no_change_failures = bool(
-            incomplete_effects and succeeded_effects
-        ) and all(
-            state.get("effect_status") in {"failed", "not_started"}
-            and state.get("changed") is False
-            and state.get("recovery_status") != "mismatched"
+            _material_succeeded_effect_ids
+        ) and _material_succeeded_effect_ids.issubset(
+            canonically_verified_effect_ids
+        )
+        bounded_incomplete_effects = all(
+            state.get("recovery_status") != "mismatched"
+            and (
+                state.get("outcome_resolved") is True
+                or (
+                    state.get("effect_status") in {"failed", "not_started"}
+                    and state.get("changed") is False
+                )
+            )
             for state in incomplete_effects
         )
-        mixed_verified_workflow_fallback = bool(
-            incomplete_effects and succeeded_effects and all_material_successes_verified
-        ) and all(
-            state.get("effect_status") == "failed"
-            and state.get("capability_kind") == "represented_workflow"
-            and bool(state.get("instance_id"))
-            and isinstance(state.get("canonical_readback"), Mapping)
-            and str(state["canonical_readback"].get("status") or "").strip().lower()
-            in {"failed", "cancelled", "canceled"}
-            and state.get("recovery_status") != "mismatched"
-            for state in incomplete_effects
+        changed_non_success_present = any(
+            state.get("changed") is True for state in incomplete_effects
         )
-        preservable_mixed_failures = (
-            mixed_no_change_failures or mixed_verified_workflow_fallback
+        current_state_observation_present = any(
+            state.get("reconciliation_status") == "current_state_observed"
+            for state in incomplete_effects
         )
         if status == "completed" and incomplete_effects:
+            all_incomplete_statuses = {
+                str(state.get("effect_status") or "")
+                for state in incomplete_effects
+            }
             incomplete_statuses = {
-                str(state.get("effect_status") or "") for state in incomplete_effects
+                str(state.get("effect_status") or "")
+                for state in unresolved_incomplete_effects
             }
             if "indeterminate" in incomplete_statuses:
                 status = "effect_outcome_indeterminate"
             elif "partial" in incomplete_statuses:
                 status = "effect_partially_completed"
-            elif preservable_mixed_failures:
-                # A rejected or otherwise known-no-change attempt must not erase a
-                # useful answer about sibling effects that did complete. A failed
-                # durable workflow may also coexist with later material effects
-                # when its own terminal state and every later changed target were
-                # read back exactly. The turn remains honestly partial.
+            elif current_state_observation_present:
                 status = "effect_partially_completed"
-            elif "failed" in incomplete_statuses:
+            elif (
+                succeeded_effects
+                and bounded_incomplete_effects
+                and (
+                    not changed_non_success_present
+                    or all_material_successes_verified
+                )
+            ):
+                status = "effect_partially_completed"
+            elif "failed" in all_incomplete_statuses:
                 status = "effect_failed"
-            else:
+            elif "not_started" in all_incomplete_statuses:
                 status = "effect_not_started"
+            else:
+                status = "effect_partially_completed"
         reconciled_invocations: list[dict[str, Any]] = []
         for raw_invocation in tool_invocations:
             invocation = dict(raw_invocation)
@@ -5609,12 +6438,19 @@ def execute_adaptive_turn(
                     invocation["reconciliation_status"] = state.get(
                         "reconciliation_status"
                     )
-                    invocation["status"] = "ok"
-                    invocation["mutation_outcome"] = "succeeded"
-                    invocation["outcome_finality"] = "terminal_for_turn"
-                    if invocation.get("error_code"):
-                        invocation["initial_error_code"] = invocation.get("error_code")
-                        invocation.pop("error_code", None)
+                    if (
+                        state.get("reconciliation_status")
+                        == "canonically_verified"
+                        and state.get("effect_status") == "succeeded"
+                    ):
+                        invocation["status"] = "ok"
+                        invocation["mutation_outcome"] = "succeeded"
+                        invocation["outcome_finality"] = "terminal_for_turn"
+                        if invocation.get("error_code"):
+                            invocation["initial_error_code"] = invocation.get(
+                                "error_code"
+                            )
+                            invocation.pop("error_code", None)
                 if state.get("initial_effect_status"):
                     invocation["initial_effect_status"] = state.get(
                         "initial_effect_status"
@@ -5624,6 +6460,17 @@ def execute_adaptive_turn(
                     invocation["reconciliation_evidence_id"] = state.get(
                         "reconciliation_evidence_id"
                     )
+                for outcome_field in (
+                    "current_outcome_status",
+                    "outcome_resolved",
+                    "reconciliation_basis",
+                    "canonical_scope",
+                ):
+                    if state.get(outcome_field) is not None:
+                        value = state.get(outcome_field)
+                        invocation[outcome_field] = (
+                            dict(value) if isinstance(value, Mapping) else value
+                        )
                 if state.get("result_target_ids"):
                     invocation["result_target_ids"] = list(
                         state.get("result_target_ids") or ()
@@ -5662,92 +6509,8 @@ def execute_adaptive_turn(
         )
         if cited_ontology_mutation_claim_conflicts and status == "completed":
             status = "effect_partially_completed"
-        preserve_pending_durable_response = (
-            model_answer_completed
-            and status == "effect_partially_completed"
-            and _can_preserve_pending_durable_response(text, relevant_effects)
-            and not cited_ontology_mutation_claim_conflicts
-        )
-        preserve_mixed_effect_response = (
-            model_answer_completed
-            and status == "effect_partially_completed"
-            and preservable_mixed_failures
-            and not cited_ontology_mutation_claim_conflicts
-        )
-        effect_finality_fallback = bool(cited_ontology_mutation_claim_conflicts) or (
-            status != "completed"
-            and bool(relevant_effects)
-            and not preserve_pending_durable_response
-            and not preserve_mixed_effect_response
-        )
-        if preserve_pending_durable_response:
-            aux_calls.append(
-                {
-                    "type": "adaptive_turn_pending_effect_response_preserved",
-                    "schema_version": (
-                        "adaptive_turn_pending_effect_response_preserved.v1"
-                    ),
-                    "terminal_status": status,
-                    "effect_count": len(relevant_effects),
-                    "instance_ids": [
-                        state.get("instance_id") for state in relevant_effects
-                    ],
-                }
-            )
-        if preserve_mixed_effect_response:
-            failed_count = len(incomplete_effects)
-            succeeded_count = len(succeeded_effects)
-            if mixed_verified_workflow_fallback:
-                workflow_attempt_label = "attempt" if failed_count == 1 else "attempts"
-                workflow_failure_label = (
-                    "workflow failure" if failed_count == 1 else "workflow failures"
-                )
-                qualification = (
-                    f"Effect receipts also report {succeeded_count} succeeded and "
-                    f"{failed_count} failed represented-workflow "
-                    f"{workflow_attempt_label}. The {workflow_failure_label} and "
-                    "the later changed targets were read back "
-                    "exactly, so the verified successful result is preserved while "
-                    "the turn remains partial."
-                )
-            else:
-                qualification = (
-                    f"Effect receipts also report {succeeded_count} succeeded and "
-                    f"{failed_count} failed or not started with no reported change. "
-                    "The successful result is preserved; the unsuccessful attempts "
-                    "can be inspected or retried independently."
-                )
-            text = (
-                f"{text.rstrip()}\n\n{qualification}" if text.strip() else qualification
-            )
-            aux_calls.append(
-                {
-                    "type": "adaptive_turn_mixed_effect_response_preserved",
-                    "schema_version": (
-                        "adaptive_turn_mixed_effect_response_preserved.v1"
-                    ),
-                    "terminal_status": status,
-                    "succeeded_count": succeeded_count,
-                    "known_no_change_count": (
-                        failed_count if mixed_no_change_failures else 0
-                    ),
-                    "failed_workflow_count": (
-                        failed_count if mixed_verified_workflow_fallback else 0
-                    ),
-                    "canonically_verified_succeeded_count": len(
-                        canonically_verified_effect_ids
-                    ),
-                    "preservation_basis": (
-                        "failed_workflow_and_material_successes_exactly_read_back"
-                        if mixed_verified_workflow_fallback
-                        else "known_no_change_failures"
-                    ),
-                }
-            )
+        response_authority = "model"
         if cited_ontology_mutation_claim_conflicts:
-            text = _cited_ontology_mutation_conflict_response(
-                cited_ontology_mutation_claim_conflicts
-            )
             aux_calls.append(
                 {
                     "type": "adaptive_turn_cited_ontology_mutation_claim_rejected",
@@ -5761,74 +6524,35 @@ def execute_adaptive_turn(
                     ],
                 }
             )
-        elif effect_finality_fallback:
-            status_counts = {
-                effect_status: sum(
-                    1
-                    for state in relevant_effects
-                    if state.get("effect_status") == effect_status
-                )
-                for effect_status in (
-                    "succeeded",
-                    "partial",
-                    "failed",
-                    "indeterminate",
-                    "not_started",
-                )
-            }
-            count_text = ", ".join(
-                f"{count} {effect_status}"
-                for effect_status, count in status_counts.items()
-                if count
+        if bool(relevant_effects) and (
+            status != "completed" or cited_ontology_mutation_claim_conflicts
+        ):
+            model_draft, _ = _extract_conversation_situation_sidecar(
+                text,
+                current_situation=conversation_situation,
             )
-            if not count_text:
-                count_text = (
-                    f"{len(relevant_effects)} receipt"
-                    f"{'s' if len(relevant_effects) != 1 else ''} "
-                    "with unresolved status"
+            text, outcome_report = _build_effect_outcome_report(
+                terminal_status=status,
+                effect_snapshot=effect_snapshot,
+                tool_invocations=reconciled_invocations,
+                trusted_scope=scope,
+            )
+            if model_answer_completed and model_draft.strip():
+                quoted_draft = "\n".join(
+                    f"> {line}" if line else ">"
+                    for line in model_draft.strip().splitlines()
                 )
-            unknown_change_effects = [
-                state
-                for state in relevant_effects
-                if state.get("effect_status") in {"partial", "indeterminate"}
-                or state.get("changed") is True
-                or (
-                    state.get("effect_status") == "succeeded"
-                    and state.get("changed") is None
-                )
-            ]
-            if unknown_change_effects:
                 text = (
-                    "That turn did not finish cleanly. Its effect receipts currently "
-                    f"report {count_text}. A handler receipt is not canonical "
-                    "read-back, so I will not claim that nothing changed. Inspect "
-                    "the represented state before retrying any effect whose outcome "
-                    "is unknown."
+                    f"{text}\n\n### Model draft (non-authoritative)\n\n"
+                    "This draft is retained for useful context, but its effect, "
+                    "scope, and success claims do not override the report above."
+                    f"\n\n{quoted_draft}"
                 )
-            elif status_counts["not_started"]:
-                text = (
-                    "That turn did not finish cleanly. Its effect receipts currently "
-                    f"report {count_text}. The not-started effect"
-                    f"{'s were' if status_counts['not_started'] != 1 else ' was'} "
-                    "not dispatched and "
-                    f"{'report' if status_counts['not_started'] != 1 else 'reports'} "
-                    "no change; "
-                    f"{'they can' if status_counts['not_started'] != 1 else 'it can'} "
-                    "be retried in a new turn."
-                )
-            else:
-                text = (
-                    "That turn did not finish cleanly. Its effect receipts currently "
-                    f"report {count_text} and report no change. Inspect the failure "
-                    "receipt before retrying."
-                )
+            response_authority = "canonical_outcome"
             aux_calls.append(
                 {
-                    "type": "adaptive_turn_effect_finality_fallback",
-                    "schema_version": ("adaptive_turn_effect_finality_fallback.v1"),
-                    "terminal_status": status,
-                    "effect_count": len(relevant_effects),
-                    "status_counts": status_counts,
+                    "type": "adaptive_turn_effect_outcome_report",
+                    **outcome_report,
                 }
             )
         evidence_index = _compact_evidence_index(evidence_store.index())
@@ -5868,7 +6592,7 @@ def execute_adaptive_turn(
             duration_ms=max(0.0, (clock() - started) * 1000.0),
             terminal_status=status,
             evidence_index=tuple(evidence_index),
-            effect_finality_fallback=effect_finality_fallback,
+            response_authority=response_authority,
             conversation_situation=updated_conversation_situation,
         )
 
@@ -7018,6 +7742,49 @@ def execute_adaptive_turn(
                 if effect_request_signature is not None
                 else None
             )
+            prior_indeterminate_request = (
+                indeterminate_effect_requests.get(effect_request_signature)
+                if effect_request_signature is not None
+                and item.capability_kind != "represented_workflow"
+                else None
+            )
+            if prior_indeterminate_request is not None:
+                prior_effect_id, prior_error_code = prior_indeterminate_request
+                with effect_state_lock:
+                    prior_effect_state = effect_states.get(prior_effect_id) or {}
+                    current_state_observed = (
+                        prior_effect_state.get("outcome_resolved") is True
+                    )
+                return index, contained(
+                    {
+                        **_error_payload(
+                            (
+                                "effect_request_current_state_already_observed"
+                                if current_state_observed
+                                else "effect_request_reconciliation_required"
+                            ),
+                            (
+                                "This exact effect request was not repeated because "
+                                "its earlier outcome requires canonical inspection."
+                                if not current_state_observed
+                                else (
+                                    "This exact effect request was not repeated "
+                                    "because its target state was already read back."
+                                )
+                            ),
+                        ),
+                        "status": "not_started",
+                        "mutation_outcome": "not_started",
+                        "outcome_finality": "terminal_for_turn",
+                        "prior_effect_id": prior_effect_id,
+                        "prior_error_code": prior_error_code,
+                        "changed": False,
+                        "recovery_affordances": [
+                            {"action_type": "inspect_canonical_state_before_retry"},
+                            {"action_type": "use_typed_recovery"},
+                        ],
+                    }
+                )
             if (
                 prior_terminal_failure is not None
                 and prior_terminal_failure[0] == successful_effect_mutation_generation
@@ -7330,6 +8097,27 @@ def execute_adaptive_turn(
                     (
                         str(raw_payload.get("error_code")).strip()
                         if raw_payload.get("error_code")
+                        else None
+                    ),
+                )
+            elif (
+                is_effect
+                and effect_request_signature is not None
+                and terminal_effect_status == "indeterminate"
+                and item.capability_kind != "represented_workflow"
+                and effect_identifier is not None
+                and execution_method_name == "create_concepts"
+                and (
+                    not isinstance(raw_payload, Mapping)
+                    or raw_payload.get("retryable") is not True
+                )
+            ):
+                indeterminate_effect_requests[effect_request_signature] = (
+                    effect_identifier,
+                    (
+                        str(raw_payload.get("error_code")).strip()
+                        if isinstance(raw_payload, Mapping)
+                        and raw_payload.get("error_code")
                         else None
                     ),
                 )
@@ -7653,6 +8441,14 @@ def execute_adaptive_turn(
                         canonical_effect_readback
                     )
                 if is_effect:
+                    failure_fact = _typed_effect_failure_fact(
+                        raw_payload,
+                        workflow_event=selected_workflow_execution_event,
+                    )
+                    current_effect_request_signature = _effect_request_signature(
+                        canonical_name,
+                        arguments,
+                    )
                     remember_effect_state(
                         effect_identifier,
                         phase=0,
@@ -7687,7 +8483,10 @@ def execute_adaptive_turn(
                         original_result=(
                             raw_payload if isinstance(raw_payload, Mapping) else None
                         ),
+                        failure_fact=failure_fact,
+                        effect_request_signature=current_effect_request_signature,
                         result_target_ids=result_target_ids,
+                        observation_order=len(tool_invocations),
                     )
                     remember_recovery_affordance(
                         effect_id=effect_identifier,
@@ -7697,6 +8496,11 @@ def execute_adaptive_turn(
                         recovery_effect_id=effect_identifier,
                         capability_name=canonical_name,
                         arguments=arguments,
+                        effect_status=effect_status,
+                    )
+                    reconcile_successful_exact_absence_retry(
+                        recovery_effect_id=effect_identifier,
+                        request_signature=current_effect_request_signature,
                         effect_status=effect_status,
                     )
                     envelope_payload.update(
@@ -7723,10 +8527,67 @@ def execute_adaptive_turn(
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
                                 envelope_payload[receipt_key] = receipt_value
+                    if failure_fact is not None:
+                        envelope_payload["failure_fact"] = dict(failure_fact)
                 else:
+                    requested_target_ids = {
+                        str(arguments.get(field)).strip()
+                        for field in _EXACT_READBACK_ARGUMENT_FIELDS
+                        if isinstance(arguments.get(field), str)
+                        and str(arguments.get(field)).strip()
+                    }
+                    exact_target_ids = requested_target_ids.intersection(
+                        result_target_ids
+                    )
+                    negative_exact_target = None
+                    if (
+                        canonical_name == "fetch_concept"
+                        and isinstance(raw_payload, Mapping)
+                        and raw_payload.get("success") is False
+                        and raw_payload.get("error_code") == "concept_not_found"
+                        and len(requested_target_ids) == 1
+                    ):
+                        error_details = raw_payload.get("error_details")
+                        missing_concept_id = (
+                            str(error_details.get("concept_id") or "").strip()
+                            if isinstance(error_details, Mapping)
+                            else ""
+                        )
+                        requested_concept_id = next(iter(requested_target_ids))
+                        if missing_concept_id == requested_concept_id:
+                            negative_exact_target = requested_concept_id
+                    if (status == "ok" and exact_target_ids) or negative_exact_target:
+                        canonical_scope = (
+                            _canonical_scope_from_exact_concept_read(
+                                raw_payload,
+                                trusted_scope=scope,
+                            )
+                            if canonical_name == "fetch_concept"
+                            else None
+                        )
+                        with effect_state_lock:
+                            exact_read_observations.append(
+                                {
+                                    "observation_order": len(tool_invocations),
+                                    "capability_name": canonical_name,
+                                    "call_id": call.call_id,
+                                    "evidence_id": envelope.evidence_id,
+                                    "requested_target_ids": sorted(
+                                        requested_target_ids
+                                    ),
+                                    "result_target_ids": list(result_target_ids),
+                                    "canonical_scope": canonical_scope,
+                                    "target_state": (
+                                        "absent"
+                                        if negative_exact_target
+                                        else "present"
+                                    ),
+                                }
+                            )
                     reconcile_workflow_instance_readback(
                         capability_name=canonical_name,
                         payload=raw_payload,
+                        call_id=call.call_id,
                         evidence_id=envelope.evidence_id,
                     )
                 batch_results[index] = ToolResult(
@@ -7828,6 +8689,12 @@ def execute_adaptive_turn(
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
                                 invocation[receipt_key] = receipt_value
+                    failure_fact = _typed_effect_failure_fact(
+                        raw_payload,
+                        workflow_event=selected_workflow_execution_event,
+                    )
+                    if failure_fact is not None:
+                        invocation["failure_fact"] = dict(failure_fact)
                     if canonical_effect_readback is not None:
                         invocation["canonical_readback"] = dict(
                             canonical_effect_readback
@@ -7978,7 +8845,7 @@ def execute_adaptive_turn(
             reconciled_states = {
                 effect_id: dict(state)
                 for effect_id, state in effect_states.items()
-                if state.get("reconciliation_status") == "canonically_verified"
+                if state.get("reconciliation_status")
             }
         reconciled_results: list[ToolResult] = []
         for result in correlated_results:
@@ -7993,16 +8860,27 @@ def execute_adaptive_turn(
                 reconciled_results.append(result)
                 continue
             output = dict(result.output)
-            if output.get("error_code"):
-                output["initial_error_code"] = output.get("error_code")
-                output.pop("error_code", None)
+            reconciled_status = str(state.get("reconciliation_status") or "")
+            if reconciled_status == "canonically_verified":
+                if output.get("error_code"):
+                    output["initial_error_code"] = output.get("error_code")
+                    output.pop("error_code", None)
+                output.update(
+                    {
+                        "effect_status": "succeeded",
+                        "changed": True,
+                        "mutation_outcome": "succeeded",
+                        "outcome_finality": "terminal_for_turn",
+                    }
+                )
             output.update(
                 {
-                    "effect_status": "succeeded",
-                    "changed": True,
-                    "mutation_outcome": "succeeded",
-                    "outcome_finality": "terminal_for_turn",
-                    "reconciliation_status": "canonically_verified",
+                    "reconciliation_status": reconciled_status,
+                    "reconciliation_basis": state.get("reconciliation_basis"),
+                    "current_outcome_status": state.get(
+                        "current_outcome_status"
+                    ),
+                    "outcome_resolved": state.get("outcome_resolved") is True,
                     "reconciliation_evidence_id": state.get(
                         "reconciliation_evidence_id"
                     ),
@@ -8019,7 +8897,11 @@ def execute_adaptive_turn(
                     call_id=result.call_id,
                     tool_name=result.tool_name,
                     output=output,
-                    status="ok",
+                    status=(
+                        "ok"
+                        if reconciled_status == "canonically_verified"
+                        else result.status
+                    ),
                 )
             )
         correlated_results = reconciled_results

@@ -77,6 +77,7 @@ def _acknowledge_effect_observation_journal(
             "updated": True,
             "duplicate": False,
             "phase": kwargs.get("phase"),
+            "stored_phase": dict(kwargs.get("observation") or {}),
         },
     )
 
@@ -2452,7 +2453,7 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
     assert result.tool_invocations[0]["changed"] is True
 
 
-def test_finality_fallback_rejects_pre_reconciliation_situation(
+def test_canonical_outcome_rejects_pre_reconciliation_situation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_same_turn_ontology_delegation(monkeypatch)
@@ -2504,8 +2505,9 @@ def test_finality_fallback_rejects_pre_reconciliation_situation(
     )
 
     assert result.terminal_status == "model_error"
-    assert result.effect_finality_fallback is True
-    assert "will not claim that nothing changed" in result.response_text
+    assert result.response_authority == "canonical_outcome"
+    assert "## Effect outcome report" in result.response_text
+    assert "`create_concepts`" in result.response_text
     assert "I have not changed anything" not in result.response_text
     assert "von_conversation_situation" not in result.response_text
     assert result.conversation_situation == current_situation
@@ -2612,8 +2614,9 @@ def test_post_handler_output_validation_failure_is_indeterminate(
 
     assert committed == ["#V#committed_before_invalid_receipt"]
     assert result.terminal_status == "model_error"
-    assert result.effect_finality_fallback is True
-    assert "will not claim that nothing changed" in result.response_text
+    assert result.response_authority == "canonical_outcome"
+    assert "## Effect outcome report" in result.response_text
+    assert "`create_concepts`" in result.response_text
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
     assert result.tool_invocations[0]["changed"] is None
 
@@ -2760,9 +2763,9 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
         final_synthesis_reserve_seconds=2,
     )
 
-    assert result.effect_finality_fallback is True
+    assert result.response_authority == "canonical_outcome"
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
-    assert "1 indeterminate" in result.response_text
+    assert "status `indeterminate`" in result.response_text
 
     release_handler.set()
     assert observation_persisted.wait(timeout=1.0)
@@ -3030,13 +3033,11 @@ def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
     )
 
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is False
+    assert result.response_authority == "canonical_outcome"
     assert "The valid effect completed." in result.response_text
-    assert "1 succeeded and 1 failed or not started" in result.response_text
-    assert any(
-        call.get("type") == "adaptive_turn_mixed_effect_response_preserved"
-        for call in result.aux_llm_calls
-    )
+    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "visibility_effect_not_delegated" in result.response_text
+    assert "`create_concepts`" in result.response_text
     assert invoked == ["create_concepts"]
     assert len(result.tool_invocations) == 2
     assert len({item["effect_id"] for item in result.tool_invocations}) == 2
@@ -3154,10 +3155,21 @@ def test_cited_non_succeeded_ontology_effect_replaces_false_success_claim(
     )
 
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is True
-    assert drafted_claim not in result.response_text
-    assert "#V#gael_gendron --is_an_instance_of--> #V#student" in result.response_text
-    assert "effect status `not_started` and changed `false`" in result.response_text
+    assert result.response_authority == "canonical_outcome"
+    assert good_effect_id in result.response_text
+    assert failed_effect_id in result.response_text
+    assert "Added; forward and inverse verified" in result.response_text
+    assert result.response_text.index("### Unsuccessful or unresolved") < (
+        result.response_text.index("### Model draft (non-authoritative)")
+    )
+    assert "source_id `#V#gael_gendron`" in result.response_text
+    assert "predicate `is_an_instance_of`" in result.response_text
+    assert "target `#V#student`" in result.response_text
+    assert "status `not_started`" in result.response_text
+    assert "reported no change" in result.response_text
+    assert "error code `ontology_mutation_target_not_accessible`" in (
+        result.response_text
+    )
     rejection = next(
         item
         for item in result.aux_llm_calls
@@ -3252,10 +3264,11 @@ def test_cited_ontology_success_without_relation_readback_is_rejected(
     )
 
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is True
-    assert "Added and canonically verified" not in result.response_text
-    assert "handler status `succeeded`" in result.response_text
-    assert "canonical relation read-back is absent or negative" in (
+    assert result.response_authority == "canonical_outcome"
+    assert "Added and canonically verified" in result.response_text
+    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "handler reported `succeeded`" in result.response_text
+    assert "canonical read-back did not verify the outcome" in (
         result.response_text
     )
     rejection = next(
@@ -3363,9 +3376,10 @@ def test_indeterminate_effect_stops_later_effect_but_allows_readback(
 
     assert invoked == ["create_concepts", "general_read"]
     assert result.terminal_status == "effect_outcome_indeterminate"
-    assert result.effect_finality_fallback is True
+    assert result.response_authority == "canonical_outcome"
     assert "indeterminate" in result.response_text
-    assert "The first effect needs canonical inspection." not in result.response_text
+    assert "The first effect needs canonical inspection." in result.response_text
+    assert "### Model draft (non-authoritative)" in result.response_text
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
     assert result.tool_invocations[1]["result_target_ids"] == ["#V#created_if_present"]
     blocked = result.tool_invocations[2]
@@ -3461,7 +3475,7 @@ def test_exact_terminal_reconciliation_preserves_recovered_ontology_answer(
     )
 
     assert result.terminal_status == "completed"
-    assert result.effect_finality_fallback is False
+    assert result.response_authority == "model"
     assert result.response_text == answer
     tool_messages = [
         item
@@ -3478,6 +3492,516 @@ def test_exact_terminal_reconciliation_preserves_recovered_ontology_answer(
     assert invocation["reconciliation_status"] == "canonically_verified"
     assert invocation["canonical_readback"]["verified"] is True
     assert invocation["result_target_ids"] == [concept_id]
+
+
+@pytest.mark.parametrize("marker_succeeds", [True, False])
+def test_exact_current_readback_renders_truthful_paper_partial_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    marker_succeeds: bool,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    concept_id = "#V#paper_2512_23333"
+    marker_id = "#V#paper_2512_23333_processing_marker"
+    invoked: list[str] = []
+    persisted: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "reconcile_governed_ontology_postcondition",
+        lambda **_kwargs: {
+            "success": False,
+            "verified": False,
+            "method_name": "create_concepts",
+        },
+    )
+
+    from src.backend.services import turn_execution_record_service
+
+    def persist_phase(**kwargs: Any) -> dict[str, Any]:
+        persisted.append(dict(kwargs))
+        return {
+            "updated": True,
+            "duplicate": False,
+            "phase": kwargs.get("phase"),
+            "stored_phase": dict(kwargs.get("observation") or {}),
+        }
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "record_effect_observation_phase",
+        persist_phase,
+    )
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        if name == "download_paper":
+            return {
+                "success": False,
+                "effect_status": "failed",
+                "changed": False,
+                "error_code": "arxiv_acquisition_unavailable",
+                "error": (
+                    "RuntimeError: asyncio lock is bound to a different event loop"
+                ),
+            }
+        if name == "create_concepts":
+            return {
+                "success": False,
+                "effect_status": "indeterminate",
+                "changed": None,
+                "mutation_outcome": "unknown",
+                "outcome_finality": "requires_canonical_reconciliation",
+                "error_code": "ontology_mutation_postcondition_failed",
+                "created_concept_ids": [concept_id],
+                "postcondition_reconciliation": {
+                    "schema_version": (
+                        "ontology_mutation_postcondition_reconciliation.v1"
+                    )
+                },
+            }
+        if name == "record_source_processing_marker":
+            if not marker_succeeds:
+                return {
+                    "success": False,
+                    "effect_status": "failed",
+                    "changed": False,
+                    "error_code": "processing_marker_write_failed",
+                }
+            return {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "marker_concept_id": marker_id,
+            }
+        raise AssertionError(name)
+
+    gateway = _effect_gateway(handler)
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="download_paper",
+            handler=lambda **kwargs: handler("download_paper", kwargs),
+            input_schema=Schema(allow_unknown=True),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="write",
+            ordinary_turn_effect=True,
+        )
+    )
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="fetch_concept",
+            handler=lambda concept_id: {
+                "success": True,
+                "concept_id": concept_id,
+                "publication_context": {
+                    "kind": "user",
+                    "concept_id": "#V#michael_witbrock",
+                },
+                "relationships": {
+                    "#V#specific_to_user": ["#V#michael_witbrock"]
+                },
+            },
+            input_schema=Schema(required={"concept_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="record_source_processing_marker",
+            handler=lambda **kwargs: handler(
+                "record_source_processing_marker",
+                kwargs,
+            ),
+            input_schema=Schema(allow_unknown=True),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="write",
+            ordinary_turn_effect=True,
+        )
+    )
+    for method_name in (
+        "download_paper",
+        "fetch_concept",
+        "record_source_processing_marker",
+    ):
+        gateway.register_metrics_if_missing(method_name)
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="download-paper",
+                    payload={
+                        "name": "download_paper",
+                        "arguments": {"arxiv_id": "2512.23333"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-paper-concept",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [
+                                {
+                                    "concept_id": concept_id,
+                                    "name": "A represented arXiv paper",
+                                }
+                            ]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="fetch-paper-concept",
+                    payload={
+                        "name": "fetch_concept",
+                        "arguments": {"concept_id": concept_id},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="mark-paper-processed",
+                    payload={
+                        "name": "record_source_processing_marker",
+                        "arguments": {
+                            "source_system": "arxiv",
+                            "source_item_id": "2512.23333",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The paper and PDF were represented in the University of "
+                "Auckland Strong AI Lab organisation namespace."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Represent this arXiv paper and report what actually persisted.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#michael_witbrock@uoasail",
+        user_concept_id="#V#michael_witbrock",
+        org_concept_id="#V#uoasail",
+        turn_id="paper-partial-current-state-readback",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == [
+        "download_paper",
+        "create_concepts",
+        "record_source_processing_marker",
+    ]
+    assert len(client.calls) == 5
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.response_authority == "canonical_outcome"
+    assert concept_id in result.response_text
+    if marker_succeeds:
+        assert marker_id in result.response_text
+    else:
+        assert marker_id not in result.response_text
+        assert "processing_marker_write_failed" in result.response_text
+    assert "arxiv_acquisition_unavailable" in result.response_text
+    assert "asyncio lock is bound to a different event loop" in result.response_text
+    assert "User scope `#V#michael_witbrock`" in result.response_text
+    assert "organisation namespace" in result.response_text
+    assert result.response_text.index("User scope `#V#michael_witbrock`") < (
+        result.response_text.index("organisation namespace")
+    )
+    assert "### Model draft (non-authoritative)" in result.response_text
+    create_invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "create_concepts"
+    )
+    assert create_invocation["effect_status"] == "indeterminate"
+    assert create_invocation["initial_effect_status"] == "indeterminate"
+    assert create_invocation["current_outcome_status"] == "target_observed"
+    assert create_invocation["outcome_resolved"] is True
+    current_state_phases = [
+        item
+        for item in persisted
+        if item.get("phase") == "current_state_observation"
+    ]
+    assert len(current_state_phases) == 1
+    assert current_state_phases[0]["observation"]["target_concept_ids"] == [
+        concept_id
+    ]
+
+
+def test_one_exact_read_does_not_resolve_multi_target_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    target_ids = ["#V#multi_target_a", "#V#multi_target_b"]
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "reconcile_governed_ontology_postcondition",
+        lambda **_kwargs: {"success": False, "verified": False},
+    )
+
+    from src.backend.services import turn_execution_record_service
+
+    def persist_phase(**kwargs: Any) -> dict[str, Any]:
+        persisted.append(dict(kwargs))
+        return {"updated": True, "duplicate": False}
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "record_effect_observation_phase",
+        persist_phase,
+    )
+
+    gateway = _effect_gateway(
+        lambda name, _arguments: (
+            {
+                "success": False,
+                "effect_status": "indeterminate",
+                "changed": None,
+                "mutation_outcome": "unknown",
+                "outcome_finality": "requires_canonical_reconciliation",
+                "error_code": "ontology_mutation_postcondition_failed",
+                "created_concept_ids": target_ids,
+                "postcondition_reconciliation": {
+                    "schema_version": (
+                        "ontology_mutation_postcondition_reconciliation.v1"
+                    )
+                },
+            }
+            if name == "create_concepts"
+            else {"success": True}
+        )
+    )
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="fetch_concept",
+            handler=lambda concept_id: {
+                "success": True,
+                "concept_id": concept_id,
+                "publication_context": {
+                    "kind": "user",
+                    "concept_id": "#V#user",
+                },
+            },
+            input_schema=Schema(required={"concept_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway.register_metrics_if_missing("fetch_concept")
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-multiple-targets",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [
+                                {"concept_id": target_id, "name": target_id}
+                                for target_id in target_ids
+                            ]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-only-one-target",
+                    payload={
+                        "name": "fetch_concept",
+                        "arguments": {"concept_id": target_ids[0]},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Both targets were created."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create both targets and verify them.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="turn-partial-multi-target-readback",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "create_concepts"
+    )
+    assert result.terminal_status == "effect_outcome_indeterminate"
+    assert invocation["effect_status"] == "indeterminate"
+    assert "current_outcome_status" not in invocation
+    assert not any(
+        item.get("phase") == "current_state_observation" for item in persisted
+    )
+
+
+def test_unacknowledged_current_state_observation_does_not_resolve_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    concept_id = "#V#unacknowledged_current_state"
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "reconcile_governed_ontology_postcondition",
+        lambda **_kwargs: {"success": False, "verified": False},
+    )
+
+    from src.backend.services import turn_execution_record_service
+
+    def persist_phase(**kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("phase") == "current_state_observation":
+            return {
+                "updated": False,
+                "duplicate": False,
+                "reason": "collection_unavailable",
+            }
+        return {"updated": True, "duplicate": False}
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "record_effect_observation_phase",
+        persist_phase,
+    )
+    gateway = _effect_gateway(
+        lambda name, _arguments: (
+            {
+                "success": False,
+                "effect_status": "indeterminate",
+                "changed": None,
+                "mutation_outcome": "unknown",
+                "outcome_finality": "requires_canonical_reconciliation",
+                "error_code": "ontology_mutation_postcondition_failed",
+                "created_concept_ids": [concept_id],
+                "postcondition_reconciliation": {
+                    "schema_version": (
+                        "ontology_mutation_postcondition_reconciliation.v1"
+                    )
+                },
+            }
+            if name == "create_concepts"
+            else {"success": True}
+        )
+    )
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="fetch_concept",
+            handler=lambda concept_id: {
+                "success": True,
+                "concept_id": concept_id,
+                "publication_context": {
+                    "kind": "user",
+                    "concept_id": "#V#user",
+                },
+            },
+            input_schema=Schema(required={"concept_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway.register_metrics_if_missing("fetch_concept")
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-before-unacknowledged-read",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [
+                                {"concept_id": concept_id, "name": "Unacknowledged"}
+                            ]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-current-without-journal-ack",
+                    payload={
+                        "name": "fetch_concept",
+                        "arguments": {"concept_id": concept_id},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The concept exists."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create and inspect this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="turn-unacknowledged-current-state",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "create_concepts"
+    )
+    assert result.terminal_status == "effect_outcome_indeterminate"
+    assert invocation["effect_status"] == "indeterminate"
+    assert "current_outcome_status" not in invocation
+    failure = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "effect_observation_persistence_failure"
+        and item.get("phase") == "current_state_observation"
+    )
+    assert failure["reason"] == "collection_unavailable"
 
 
 def test_per_method_minimum_admits_sequential_effects_below_hard_cap(
@@ -3605,8 +4129,8 @@ def test_effect_is_not_dispatched_when_durable_intent_is_unavailable(
 
     assert invoked == []
     assert result.terminal_status == "effect_not_started"
-    assert "1 not_started" in result.response_text
-    assert "was not dispatched and reports no change" in result.response_text
+    assert "status `not_started`" in result.response_text
+    assert "effect_observation_unavailable" in result.response_text
     assert result.tool_invocations[0]["effect_status"] == "not_started"
     assert result.tool_invocations[0]["changed"] is False
     preview = result.tool_invocations[0]["evidence"]["preview"]
@@ -6873,8 +7397,9 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout(
 
     assert seen_cases == ["succeeded", "partial", "failed", "timeout"]
     assert result.terminal_status == "effect_outcome_indeterminate"
-    assert result.effect_finality_fallback is True
-    assert "The bounded effects were reported truthfully." not in result.response_text
+    assert result.response_authority == "canonical_outcome"
+    assert "The bounded effects were reported truthfully." in result.response_text
+    assert "### Model draft (non-authoritative)" in result.response_text
     assert [item["effect_status"] for item in result.tool_invocations] == [
         "succeeded",
         "partial",
@@ -6949,9 +7474,11 @@ def test_partial_effect_downgrades_nominal_model_completion(
     )
 
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is True
-    assert "1 partial" in result.response_text
-    assert "Everything was created." not in result.response_text
+    assert result.response_authority == "canonical_outcome"
+    assert "status `partial`" in result.response_text
+    assert "derived_relation_failed" in result.response_text
+    assert "Everything was created." in result.response_text
+    assert "### Model draft (non-authoritative)" in result.response_text
 
 
 def test_identity_shaped_targets_are_not_globally_rewritten() -> None:
@@ -8743,6 +9270,41 @@ def test_represented_workflow_failure_progress_is_actionable() -> None:
     assert progress_evidence["facts"][0]["value"] == ("research-description.pdf")
 
 
+def test_represented_workflow_failure_projects_typed_nested_cause() -> None:
+    from src.backend.services.adaptive_turn_service import (
+        _build_represented_workflow_execution_event,
+    )
+
+    event, _ = _build_represented_workflow_execution_event(
+        payload={
+            "final_status": "failed",
+            "effect_status": "failed",
+            "workflow_execution": {
+                "latest_step_result_envelope": {
+                    "output_payload": {
+                        "mcp_result": {
+                            "error_code": "arxiv_acquisition_unavailable",
+                            "error": (
+                                "RuntimeError: asyncio lock is bound to a "
+                                "different event loop"
+                            ),
+                            "private_payload": "must not be projected",
+                        }
+                    }
+                }
+            },
+        },
+        workflow_id="#V#arxiv_paper_representation_workflow",
+        workflow_name="ArXiv paper representation workflow",
+    )
+
+    assert event["error_code"] == "arxiv_acquisition_unavailable"
+    assert event["error"] == (
+        "RuntimeError: asyncio lock is bound to a different event loop"
+    )
+    assert "private_payload" not in event
+
+
 def test_represented_workflow_nonfinite_wait_is_typed_not_started_feedback(
     monkeypatch,
 ) -> None:
@@ -9052,9 +9614,11 @@ def test_workflow_instance_readback_reconciles_only_exact_terminal_effect(
     else:
         assert "canonical_readback" not in workflow_invocation
     assert result.terminal_status == expected_terminal_status
-    assert result.effect_finality_fallback is expected_fallback
-    if expected_fallback:
+    expected_authority = "canonical_outcome" if expected_fallback else "model"
+    assert result.response_authority == expected_authority
+    if expected_authority == "canonical_outcome":
         assert result.response_text != "The durable work product was verified."
+        assert "workflow-instance-readback-1" in result.response_text
     else:
         assert result.response_text == "The durable work product was verified."
 
@@ -9307,7 +9871,7 @@ def test_failed_workflow_and_later_direct_trip_effects_preserve_only_verified_an
     )
 
     assert result.terminal_status == expected_status
-    assert result.effect_finality_fallback is expected_fallback
+    assert result.response_authority == "canonical_outcome"
     workflow_invocation = next(
         item
         for item in result.tool_invocations
@@ -9316,21 +9880,11 @@ def test_failed_workflow_and_later_direct_trip_effects_preserve_only_verified_an
     assert workflow_invocation["effect_status"] == "failed"
     assert workflow_invocation["changed"] is True
     assert workflow_invocation["canonical_readback"]["status"] == "failed"
-    if read_back_trip:
-        assert useful_answer in result.response_text
-        preservation = next(
-            item
-            for item in result.aux_llm_calls
-            if item.get("type") == "adaptive_turn_mixed_effect_response_preserved"
-        )
-        assert preservation["preservation_basis"] == (
-            "failed_workflow_and_material_successes_exactly_read_back"
-        )
-        assert preservation["canonically_verified_succeeded_count"] == 4
-        assert preservation["failed_workflow_count"] == 1
-        assert preservation["known_no_change_count"] == 0
-    else:
-        assert useful_answer not in result.response_text
+    assert useful_answer in result.response_text
+    assert "### Model draft (non-authoritative)" in result.response_text
+    assert trip_id in result.response_text
+    assert instance_id in result.response_text
+    assert "metadata validation failed before domain mutation" in result.response_text
 
 
 def test_failed_workflows_and_recovered_denials_preserve_verified_scoped_results(
@@ -9640,9 +10194,11 @@ def test_failed_workflows_and_recovered_denials_preserve_verified_scoped_results
         for call in delegation_calls
     )
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is False
-    assert "Both research descriptions were durably read back" in (result.response_text)
-    assert "2 failed represented-workflow attempts" in result.response_text
+    assert result.response_authority == "canonical_outcome"
+    assert "Both research descriptions were durably read back" in (
+        result.response_text
+    )
+    assert "### Canonical scope" in result.response_text
     effects = [
         invocation
         for invocation in result.tool_invocations
@@ -9683,19 +10239,17 @@ def test_failed_workflows_and_recovered_denials_preserve_verified_scoped_results
         invocation["canonical_readback"]["scope_mode"] == "organisation"
         for invocation in recoveries
     )
-    preservation = next(
+    reports = [
         item
         for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_mixed_effect_response_preserved"
-    )
-    assert preservation["preservation_basis"] == (
-        "failed_workflow_and_material_successes_exactly_read_back"
-    )
-    assert preservation["failed_workflow_count"] == 2
-    assert preservation["canonically_verified_succeeded_count"] == 2
+        if item.get("type") == "adaptive_turn_effect_outcome_report"
+    ]
+    assert len(reports) == 1
 
 
-def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) -> None:
+def test_pending_durable_response_uses_canonical_report_with_exact_handle(
+    monkeypatch,
+) -> None:
     from src.backend.services.workflow_turn_capability_service import (
         WorkflowTurnCapability,
     )
@@ -9821,13 +10375,12 @@ def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) ->
 
     assert instance_reads == [{"instance_id": instance_id, "await_terminal": False}]
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is False
-    assert result.response_text == final_text
-    assert any(
-        call.get("schema_version")
-        == "adaptive_turn_pending_effect_response_preserved.v1"
-        for call in result.aux_llm_calls
-    )
+    assert result.response_authority == "canonical_outcome"
+    assert result.response_text != final_text
+    assert final_text in result.response_text
+    assert "### Model draft (non-authoritative)" in result.response_text
+    assert instance_id in result.response_text
+    assert "status `partial`" in result.response_text
 
 
 def test_workflow_instance_readback_does_not_reconcile_unrelated_effect(
@@ -9915,7 +10468,7 @@ def test_workflow_instance_readback_does_not_reconcile_unrelated_effect(
     assert effect_invocation["effect_status"] == "partial"
     assert "canonical_readback" not in effect_invocation
     assert result.terminal_status == "effect_partially_completed"
-    assert result.effect_finality_fallback is True
+    assert result.response_authority == "canonical_outcome"
     assert result.response_text != "Everything completed."
 
 
@@ -10020,7 +10573,7 @@ def test_read_only_workflow_not_started_preserves_successful_direct_recovery(
 
     assert result.response_text == ("The recent messages were summarised successfully.")
     assert result.terminal_status == "completed"
-    assert result.effect_finality_fallback is False
+    assert result.response_authority == "model"
     workflow_invocation = next(
         item
         for item in result.tool_invocations
@@ -10244,6 +10797,295 @@ def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
     )
     assert result.tool_invocations[1]["effect_status"] == "not_started"
     assert result.tool_invocations[1]["changed"] is False
+
+
+@pytest.mark.parametrize(
+    ("inspection_target", "concepts"),
+    [
+        (
+            None,
+            [{"concept_id": "#V#unknown_create", "name": "Unknown"}],
+        ),
+        (
+            "#V#wrong_target_create",
+            [{"concept_id": "#V#unknown_create", "name": "Unknown"}],
+        ),
+        (
+            "#V#unknown_create",
+            [
+                {"concept_id": "#V#unknown_create", "name": "Unknown"},
+                {"name": "Possibly created without an explicit ID"},
+            ],
+        ),
+    ],
+)
+def test_unchanged_indeterminate_create_requires_exact_inspection_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    inspection_target: str | None,
+    concepts: list[dict[str, str]],
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    handler_calls: list[dict[str, Any]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "create_concepts"
+        handler_calls.append(arguments)
+        return {
+            "success": False,
+            "effect_status": "indeterminate",
+            "changed": None,
+            "error_code": "tool_timeout_outcome_unknown",
+            "mutation_outcome": "unknown",
+        }
+
+    effect_arguments = {"concepts": concepts}
+    responses = [
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="unknown-create-1",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": effect_arguments,
+                    },
+                )
+            ],
+        ),
+    ]
+    if inspection_target is not None:
+        responses.append(
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="inspect-wrong-create-target",
+                        payload={
+                            "name": "fetch_concept",
+                            "arguments": {"concept_id": inspection_target},
+                        },
+                    )
+                ],
+            )
+        )
+    responses.extend(
+        [
+            LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="unknown-create-2",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": effect_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The create outcome still needs inspection."),
+        ]
+    )
+
+    gateway = _effect_gateway(handler)
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="fetch_concept",
+            handler=lambda concept_id: {
+                "success": False,
+                "error_code": "concept_not_found",
+                "error_details": {
+                    "concept_id": concept_id,
+                    "status": "not_found",
+                },
+            },
+            input_schema=Schema(required={"concept_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway.register_metrics_if_missing("fetch_concept")
+    client = _SequenceClient(*responses)
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create this concept once.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="turn-repeat-indeterminate-create",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(handler_calls) == 1
+    assert len(result.tool_invocations) == (3 if inspection_target else 2)
+    assert result.tool_invocations[0]["effect_status"] == "indeterminate"
+    assert "current_outcome_status" not in result.tool_invocations[0]
+    blocked_invocation = result.tool_invocations[-1]
+    assert blocked_invocation["error_code"] == (
+        "effect_request_reconciliation_required"
+    )
+    assert blocked_invocation["effect_status"] == "not_started"
+
+
+@pytest.mark.parametrize("rich_receipt", [True, False])
+def test_exact_absence_allows_retry_of_indeterminate_create(
+    monkeypatch: pytest.MonkeyPatch,
+    rich_receipt: bool,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    concept_id = "#V#absent_then_created"
+    create_calls = 0
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "reconcile_governed_ontology_postcondition",
+        lambda **_kwargs: {"success": False, "verified": False},
+    )
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal create_calls
+        assert name == "create_concepts"
+        create_calls += 1
+        if create_calls == 1:
+            failure = {
+                "success": False,
+                "effect_status": "indeterminate",
+                "changed": None,
+                "error_code": (
+                    "tool_timeout_outcome_unknown"
+                    if rich_receipt
+                    else "effect_outcome_unknown"
+                ),
+                "mutation_outcome": "unknown",
+            }
+            if rich_receipt:
+                failure.update(
+                    {
+                        "outcome_finality": "requires_canonical_reconciliation",
+                        "created_concept_ids": [concept_id],
+                        "postcondition_reconciliation": {
+                            "schema_version": (
+                                "ontology_mutation_postcondition_reconciliation.v1"
+                            )
+                        },
+                    }
+                )
+            return failure
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_concept_ids": [concept_id],
+        }
+
+    gateway = _effect_gateway(handler)
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="fetch_concept",
+            handler=lambda concept_id: {
+                "success": False,
+                "error_code": "concept_not_found",
+                "error": f"Concept {concept_id} was not found.",
+                "error_details": {
+                    "concept_id": concept_id,
+                    "status": "not_found",
+                },
+            },
+            input_schema=Schema(required={"concept_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway.register_metrics_if_missing("fetch_concept")
+    effect_arguments = {
+        "concepts": [{"concept_id": concept_id, "name": "Absent then created"}]
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-before-absence-read",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": effect_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-exact-absence",
+                    payload={
+                        "name": "fetch_concept",
+                        "arguments": {"concept_id": concept_id},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-after-absence-read",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": effect_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response=f"The concept {concept_id} now exists."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create this concept, inspecting an unknown outcome before retry.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="turn-retry-after-exact-absence",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert create_calls == 2
+    create_invocations = [
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "create_concepts"
+    ]
+    assert [item["effect_status"] for item in create_invocations] == [
+        "indeterminate",
+        "succeeded",
+    ]
+    assert create_invocations[0]["current_outcome_status"] == "target_absent"
+    assert create_invocations[0]["outcome_resolved"] is True
+    assert create_invocations[0]["initial_effect_status"] == "indeterminate"
+    assert create_invocations[0]["recovery_status"] == "succeeded"
+    assert create_invocations[0]["recovered_by_effect_id"] == _effect_id(
+        turn_id="turn-retry-after-exact-absence",
+        call_id="create-after-absence-read",
+        capability_name="create_concepts",
+    )
+    assert result.terminal_status == "completed"
+    assert result.response_authority == "model"
+    assert result.response_text == f"The concept {concept_id} now exists."
 
 
 def test_model_call_progress_reports_cumulative_usage_cost_and_exact_identity() -> None:

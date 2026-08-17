@@ -27,7 +27,7 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
         "extra_messages": (),
         "tool_invocations": (),
         "terminal_status": "completed",
-        "effect_finality_fallback": False,
+        "response_authority": "model",
     }
 
     def _execute_adaptive_turn(**kwargs: Any) -> AdaptiveTurnResult:
@@ -48,9 +48,7 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
             duration_ms=2.0,
             render_plan=adaptive_state["render_plan"],
             terminal_status=adaptive_state["terminal_status"],
-            effect_finality_fallback=adaptive_state[
-                "effect_finality_fallback"
-            ],
+            response_authority=adaptive_state["response_authority"],
         )
 
     def _retired_outer_controller_called(*_args: Any, **_kwargs: Any) -> None:
@@ -578,7 +576,7 @@ def test_presenter_mode_recovers_unclosed_terminal_screen_block(app: Flask) -> N
     assert payload["llm_debug"]["screen_backfill_second_pass_attempted"] is False
 
 
-def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
+def test_canonical_outcome_report_is_presented_literally_without_model_backfill(
     app: Flask,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -591,10 +589,10 @@ def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
     adaptive_state = app.config["_ADAPTIVE_TURN_STATE"]
     adaptive_state["response_text"] = fallback
     adaptive_state["terminal_status"] = "model_error"
-    adaptive_state["effect_finality_fallback"] = True
+    adaptive_state["response_authority"] = "canonical_outcome"
 
     def _unexpected_backfill(*_args: Any, **_kwargs: Any) -> str:
-        raise AssertionError("effect-finality fallback must remain literal")
+        raise AssertionError("canonical outcome report must remain literal")
 
     monkeypatch.setattr(
         von_routes,
@@ -619,7 +617,7 @@ def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
     assert payload["response_channels"] == {
         "spoken": fallback,
         "screen": fallback,
-        "format": "effect_finality_fallback_v1",
+        "format": "effect_outcome_report_v1",
     }
     assert (
         payload["llm_debug"]["screen_backfill_second_pass_attempted"] is False
@@ -627,6 +625,17 @@ def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
     assert (
         payload["llm_debug"]["spoken_backfill_second_pass_attempted"] is False
     )
+    transformations = payload["llm_debug"]["response_transformations"][
+        "transformations"
+    ]
+    for transform_name in ("screen_backfill", "spoken_backfill"):
+        event = next(
+            item
+            for item in transformations
+            if item.get("transform_name") == transform_name
+        )
+        assert event["status"] == "skipped"
+        assert event["suppression_reason"] == "canonical_outcome_report"
 
 
 def test_pending_effect_answer_reaches_presenter_channels(app: Flask) -> None:
@@ -638,7 +647,7 @@ def test_pending_effect_answer_reaches_presenter_channels(app: Flask) -> None:
         f"{instance_id}.</screen>"
     )
     adaptive_state["terminal_status"] = "effect_partially_completed"
-    adaptive_state["effect_finality_fallback"] = False
+    adaptive_state["response_authority"] = "model"
 
     response = app.test_client().post(
         "/von/generate",

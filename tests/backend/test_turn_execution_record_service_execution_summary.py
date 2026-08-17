@@ -1004,6 +1004,23 @@ def test_effect_observation_journal_is_actor_scoped_idempotent_and_survives_upse
         },
         **scope,
     )
+    current_state_observation = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="current_state_observation",
+        observation={
+            "effect_status": "indeterminate",
+            "changed": None,
+            "initial_effect_status": "indeterminate",
+            "current_outcome_status": "target_observed",
+            "outcome_resolved": True,
+            "reconciliation_basis": "later_exact_current_state_read",
+            "observation_identity_sha256": "weak-current-state-identity",
+            "target_concept_ids": ["#V#canonical_target"],
+            "evidence_id": "weak-current-state-evidence",
+        },
+        **scope,
+    )
     late = record_effect_observation_phase(
         request_id="req-effect-journal",
         effect_id="effect_abc123",
@@ -1015,6 +1032,33 @@ def test_effect_observation_journal_is_actor_scoped_idempotent_and_survives_upse
             "effect_status": "succeeded",
             "changed": True,
             "payload": {"success": True, "changed": True},
+        },
+        **scope,
+    )
+    reconciliation = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="canonical_reconciliation",
+        observation={
+            "schema_version": "ontology_mutation_canonical_reconciliation.v1",
+            "effect_status": "succeeded",
+            "changed": True,
+            "receipt_id": "receipt-canonical-1",
+            "intent_fingerprint": "intent-fingerprint-1",
+            "target_concept_ids": ["#V#canonical_target"],
+            "evidence_id": "evidence-canonical-1",
+        },
+        **scope,
+    )
+    duplicate_reconciliation = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="canonical_reconciliation",
+        observation={
+            "schema_version": "ontology_mutation_canonical_reconciliation.v1",
+            "effect_status": "failed",
+            "changed": False,
+            "receipt_id": "different-receipt-must-not-replace",
         },
         **scope,
     )
@@ -1031,7 +1075,16 @@ def test_effect_observation_journal_is_actor_scoped_idempotent_and_survives_upse
     )
 
     assert terminal["updated"] is True
+    assert current_state_observation["updated"] is True
     assert late["updated"] is True
+    assert reconciliation["updated"] is True
+    assert reconciliation["stored_phase"]["receipt_id"] == "receipt-canonical-1"
+    assert duplicate_reconciliation["updated"] is False
+    assert duplicate_reconciliation["duplicate"] is True
+    assert (
+        duplicate_reconciliation["stored_phase"]["receipt_id"]
+        == "receipt-canonical-1"
+    )
     assert duplicate_late["updated"] is False
     assert duplicate_late["duplicate"] is True
     stored = collection.find_one({"request_id": "req-effect-journal"})
@@ -1039,7 +1092,18 @@ def test_effect_observation_journal_is_actor_scoped_idempotent_and_survives_upse
     assert journal["identity"] == identity
     assert journal["identity"]["call_id"] == "call-1"
     assert journal["identity"]["capability_name"] == "upsert_text_relation"
+    assert journal["turn_terminal"]["effect_status"] == "indeterminate"
+    assert (
+        journal["current_state_observation"]["current_outcome_status"]
+        == "target_observed"
+    )
     assert journal["late_terminal"]["effect_status"] == "succeeded"
+    assert journal["canonical_reconciliation"]["effect_status"] == "succeeded"
+    assert reconciliation["stored_phase"] == journal["canonical_reconciliation"]
+    assert (
+        duplicate_reconciliation["stored_phase"]
+        == journal["canonical_reconciliation"]
+    )
 
     full_record = build_turn_execution_record(
         request_id="req-effect-journal",

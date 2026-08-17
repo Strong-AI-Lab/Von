@@ -31,6 +31,7 @@ from ...services.workflow_payload_store import (
     hydrate_workflow_payload_blob_refs,
     is_workflow_payload_blob_ref,
 )
+from ..execution_contracts import normalise_workflow_termination_code
 from .authority_snapshot_attestation import (
     DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD,
     DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION,
@@ -2313,16 +2314,15 @@ class WorkflowInstanceManager:
             logger.warning(
                 "[durable_workflow] Instance %s failed: %s", instance_id, error
             )
-            reason_code = (
-                error.split(":", 1)[0].strip().lower()
-                if isinstance(error, str) and ":" in error
-                else "failed"
+            reason_code = normalise_workflow_termination_code(
+                error,
+                default="failed",
             )
             self._record_durable_episode_final(
                 instance=instance_before,
                 completed=False,
                 terminal_stage=error_step or instance_before.current_state or "failed",
-                termination_code=reason_code or "failed",
+                termination_code=reason_code,
                 termination_detail=error,
                 final_state=instance_before.current_state,
             )

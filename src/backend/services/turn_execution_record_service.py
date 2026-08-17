@@ -129,6 +129,8 @@ _EFFECT_OBSERVATION_PHASES = frozenset(
         "dispatch_intent",
         "turn_terminal",
         "late_terminal",
+        "current_state_observation",
+        "canonical_reconciliation",
         "conversation_projection",
     }
 )
@@ -12397,6 +12399,7 @@ def record_effect_observation_phase(
                 if isinstance(effect_entry, Mapping) and isinstance(
                     effect_entry.get(clean_phase), Mapping
                 ):
+                    stored_phase = dict(effect_entry[clean_phase])
                     return {
                         "updated": False,
                         "duplicate": True,
@@ -12405,6 +12408,7 @@ def record_effect_observation_phase(
                         "request_id": clean_request_id,
                         "effect_id": clean_effect_id,
                         "phase": clean_phase,
+                        "stored_phase": stored_phase,
                     }
             if existing is None:
                 request_id_collision = _turn_execution_find_one(
@@ -12468,6 +12472,7 @@ def record_effect_observation_phase(
             "request_id": clean_request_id,
             "effect_id": clean_effect_id,
             "phase": clean_phase,
+            "stored_phase": dict(phase_entry),
         }
     except DuplicateKeyError:
         return {
