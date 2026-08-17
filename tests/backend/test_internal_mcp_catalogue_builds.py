@@ -588,7 +588,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "github_list_tools",
         "gmail_list_profiles",
         "jira_search",
-        "linkedin_get_messages",
+        "linkedin_search_messages",
         "list_recent_screenshots",
         "mongo_cost_guardrails_report",
         "mongo_query_diagnostics_report",
