@@ -88,7 +88,7 @@ def normalise_workflow_terminal_success_contract(
             "completed",
         ]
 
-    return {
+    contract = {
         "schema_version": WORKFLOW_TERMINAL_SUCCESS_CONTRACT_SCHEMA_VERSION,
         "success_statuses": success_statuses,
         "required_summary_fields": required_summary_fields,
@@ -109,6 +109,35 @@ def normalise_workflow_terminal_success_contract(
             default=False,
         ),
     }
+    if "failed_terminal_error_code" in value:
+        failed_terminal_error_code_value = value.get("failed_terminal_error_code")
+        if not isinstance(failed_terminal_error_code_value, str):
+            raise ValueError(
+                "workflow_terminal_success_contract_failed_terminal_error_code_invalid"
+            )
+        failed_terminal_error_code = failed_terminal_error_code_value.strip()
+        if not failed_terminal_error_code:
+            raise ValueError(
+                "workflow_terminal_success_contract_failed_terminal_error_code_invalid"
+            )
+        contract["failed_terminal_error_code"] = failed_terminal_error_code
+    return contract
+
+
+def resolve_workflow_failed_terminal_error(
+    *,
+    contract: Mapping[str, Any] | None,
+    fallback: str = "workflow_failed_terminal_state",
+) -> str:
+    """Resolve the workflow-authored code for an already-proven failed terminal."""
+
+    if isinstance(contract, Mapping) and isinstance(
+        contract.get("failed_terminal_error_code"), str
+    ):
+        error_code = contract["failed_terminal_error_code"].strip()
+        if error_code:
+            return error_code
+    return _normalise_text(fallback) or "workflow_failed_terminal_state"
 
 
 def _summary_field_present(summary: Mapping[str, Any], field_name: str) -> bool:
@@ -222,4 +251,5 @@ __all__ = [
     "WORKFLOW_TERMINAL_SUCCESS_EVALUATION_SCHEMA_VERSION",
     "evaluate_workflow_terminal_success_contract",
     "normalise_workflow_terminal_success_contract",
+    "resolve_workflow_failed_terminal_error",
 ]

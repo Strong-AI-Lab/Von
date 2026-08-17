@@ -150,6 +150,57 @@ def test_durable_executor_reports_explicit_failed_terminal_as_failure() -> None:
     )
 
 
+def test_durable_executor_uses_authored_failed_terminal_error_code() -> None:
+    failed_state = "#V#workflow_step_example_workflow_failed"
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_failed_terminal_probe",
+        initial_state=failed_state,
+        states={
+            failed_state: WorkflowStateSpec(state_id=failed_state, terminal=True),
+        },
+        termination_states=(failed_state,),
+        metadata={
+            "terminal_success_contract": {
+                "failed_terminal_error_code": "example_workflow_no_items_succeeded"
+            }
+        },
+    )
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(
+        registry=ActionRegistry(),
+        instance_manager=manager,
+    )
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is False
+    assert result.error == "example_workflow_no_items_succeeded"
+    assert result.data[WORKFLOW_RESULT_ENVELOPE_KEY]["diagnostics"]["error"] == (
+        "example_workflow_no_items_succeeded"
+    )
+    assert manager.checkpoint.call_args_list[-1].kwargs["error"] == (
+        "example_workflow_no_items_succeeded"
+    )
+
+
 def test_durable_executor_atomically_pauses_at_successor_checkpoint() -> None:
     registry = ActionRegistry()
     register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)

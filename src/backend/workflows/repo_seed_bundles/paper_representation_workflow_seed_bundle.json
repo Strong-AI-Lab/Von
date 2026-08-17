@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "22",
+  "seed_version": "24",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -10,11 +10,25 @@
       ],
       "21": [
         "73d2d1570351c56cfb98fbecb409a8dfc306cade830ff73b40c5d916868a6cb9"
+      ],
+      "22": [
+        "3e60cdfac1882da2b3d226d9e08df7e1cb92ef668e40d7191b73c5a4e5301e4c"
+      ],
+      "23": [
+        "af03d9242cd12fb0a463091a2cbb95629da3c4075ce9202f005036f3b52af981",
+        "c7579667b7fe62cdff7f7c77efa1270612509ed1851a0967bd7c45f6c960e81c"
       ]
     },
     "#V#source_neutral_paper_reference_ingestion_workflow": {
       "19": [
         "c87c88b27cc9c78a7313822784890d7afba4ef57bdf5581d3c51aad8995dbbc0"
+      ],
+      "22": [
+        "40b7b1d2649f3ac7e4f6339822858e63daccbab6a137b490d51ecebdd6411eb9"
+      ],
+      "23": [
+        "7940a52c0bd65dcffd0838c6aefff7b2d538665e40ae7b1527cbc320172f679c",
+        "85b5a8a7700645f21b322a6258861be251f8a37fba87910089b102afa7dcaf31"
       ]
     }
   },
@@ -1622,7 +1636,7 @@
       "workflow_id": "#V#arxiv_paper_representation_workflow",
       "display_name": "Arxiv Paper Representation Workflow",
       "description": "Canonical arXiv wrapper workflow that normalises an arXiv source, fetches authoritative arXiv metadata, acquires or finalises the paper artefact when available, delegates to the scholarly-paper workflow, and fails closed on incomplete metadata representation.",
-      "content": "Represent an arXiv paper by extracting a canonical arXiv identifier, fetching authoritative arXiv metadata, deciding whether acquisition is required, invoking download_paper when needed, trying a direct PDF URL import as optional enrichment after provider failure, then delegating to the general scholarly-paper workflow with arXiv verification even when external PDF acquisition is skipped.",
+      "content": "Represent an arXiv paper by extracting a canonical arXiv identifier, fetching authoritative arXiv metadata, deciding whether acquisition is required, invoking download_paper when needed, trying a direct PDF URL import as optional enrichment when primary acquisition is unavailable or fails, then delegating to the general scholarly-paper workflow with arXiv verification even when the PDF remains unavailable.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -1641,7 +1655,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"contract_id\":\"arxiv_paper_representation_readback\",\"required_effects\":[{\"description\":\"Require verified paper concept read-back for each arXiv target supplied to the workflow turn; source/PDF artefact acquisition is optional enrichment when external providers fail.\",\"effect_id\":\"arxiv_paper_representation\",\"effect_type\":\"scholarly_representation\",\"failed_failure_code\":\"arxiv_paper_representation_failed\",\"missing_failure_code\":\"arxiv_paper_representation_not_executed\",\"not_executed_reason\":\"No verified arXiv paper representation read-back was observed for this target.\",\"not_satisfied_reason\":\"ArXiv paper representation read-back did not verify for this target.\",\"required_payload_fields\":[\"paper_concept_id\"],\"required_tools\":[\"scholarly_paper.verify_representation\"],\"targets_extractor\":\"arxiv_id_list\",\"targets_source_expressions\":[\"selected_workflow_trace.expected_outcome_contract_state.fields.summary\",\"completion_report.turn_expected_outcome_contract_state.fields.summary\",\"workflow_discovery_result.discovery_query_input\"],\"wrong_target_failure_code\":\"arxiv_paper_representation_wrong_target\"}],\"schema_version\":\"workflow_required_effects_contract.v1\"}",
+          "text": "{\"contract_id\":\"arxiv_paper_representation_readback\",\"required_effects\":[{\"description\":\"Require verified paper concept read-back for each arXiv target supplied to the workflow turn; source/PDF artefact acquisition is optional enrichment when primary acquisition is unavailable or fails.\",\"effect_id\":\"arxiv_paper_representation\",\"effect_type\":\"scholarly_representation\",\"failed_failure_code\":\"arxiv_paper_representation_failed\",\"missing_failure_code\":\"arxiv_paper_representation_not_executed\",\"not_executed_reason\":\"No verified arXiv paper representation read-back was observed for this target.\",\"not_satisfied_reason\":\"ArXiv paper representation read-back did not verify for this target.\",\"required_payload_fields\":[\"paper_concept_id\"],\"required_tools\":[\"scholarly_paper.verify_representation\"],\"targets_extractor\":\"arxiv_id_list\",\"targets_source_expressions\":[\"selected_workflow_trace.expected_outcome_contract_state.fields.summary\",\"completion_report.turn_expected_outcome_contract_state.fields.summary\",\"workflow_discovery_result.discovery_query_input\"],\"wrong_target_failure_code\":\"arxiv_paper_representation_wrong_target\"}],\"schema_version\":\"workflow_required_effects_contract.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -2281,14 +2295,12 @@
                       "expected": true
                     },
                     {
-                      "key": "last_action_outputs.result.error_details.provider",
-                      "kind": "context_value_equals",
-                      "value": "external_third_party"
-                    },
-                    {
-                      "key": "last_action_outputs.result.error_details.external_provider",
-                      "kind": "context_value_equals",
-                      "value": "arxiv-mcp-server"
+                      "key": "last_action_outputs.result.error_details.recommended_recovery_action",
+                      "kind": "context_value_in",
+                      "values": [
+                        "download_from_source",
+                        "reacquire_pdf_from_source"
+                      ]
                     }
                   ],
                   "kind": "all"
@@ -2334,11 +2346,6 @@
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_computer_file_copy_concept_id_to_file_copy_concept_id",
                 "context_key": "file_copy_concept_id",
                 "tool_output_field": "result.computer_file_copy_concept_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_error_details_to_arxiv_mcp_failure_details",
-                "context_key": "arxiv_mcp_failure_details",
-                "tool_output_field": "result.error_details"
               }
             ],
             "writes_context_keys": [
@@ -2378,8 +2385,11 @@
                     "template": "{failure_kind}",
                     "variables": {
                       "failure_kind": {
-                        "default": "external_arxiv_mcp_failed",
-                        "value_from_context": "last_action_outputs.result.error_details.external_provider_failure_kind"
+                        "default": "paper_acquisition_failed",
+                        "value_from_context_options": [
+                          "last_action_outputs.result.error_code",
+                          "last_action_outputs.result.error_details.external_provider_failure_kind"
+                        ]
                       }
                     }
                   }
@@ -2471,7 +2481,7 @@
                 [
                   {
                     "key": "pdf_acquisition_status",
-                    "value": "skipped"
+                    "value": "unavailable"
                   },
                   {
                     "key": "pdf_acquisition_optional",
@@ -2718,7 +2728,7 @@
       "workflow_id": "#V#source_neutral_paper_reference_ingestion_workflow",
       "display_name": "Source Neutral Paper Reference Ingestion Workflow",
       "description": "Canonical source-neutral entry workflow for ingesting scholarly paper references supplied as arXiv identifiers or URLs, DOI/source URLs, uploaded/file-copy concepts, pasted metadata, or mixed reference sets without assuming a mail source, sender profile, or English prompt wording.",
-      "content": "Normalise caller-supplied scholarly paper references into paper_reference_set.v1, preserve source/provenance context, optionally preview the list without mutation, then fan out each item to the represented item-ingestion workflow with allow-partial outcomes. Source-specific representation remains delegated to existing arXiv, scholarly metadata, and file-copy paper workflows.",
+      "content": "Normalise caller-supplied scholarly paper references into paper_reference_set.v1, preserve source/provenance context, optionally preview the list without mutation, then fan out each item to the represented item-ingestion workflow. A non-preview run completes only when at least one item succeeds; mixed results preserve item-level failures. Source-specific representation remains delegated to existing arXiv, scholarly metadata, and file-copy paper workflows.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -2732,12 +2742,12 @@
         },
         {
           "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
-          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"require_completed_true\":true,\"require_final_state\":true,\"require_terminal_status\":true,\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\",\"paper_reference_item_count\",\"for_each_success_count\",\"for_each_error_count\"]}",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"require_completed_true\":true,\"require_final_state\":true,\"require_terminal_status\":true,\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\",\"paper_reference_item_count\",\"for_each_success_count\",\"for_each_error_count\"],\"failed_terminal_error_code\":\"paper_reference_ingestion_no_items_succeeded\"}",
           "lang": "en-NZ"
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"source_neutral_paper_reference_ingestion\",\"required_effects\":[{\"effect_id\":\"normalised_paper_reference_set\",\"effect_type\":\"workflow_context_projection\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Normalise the request into paper_reference_set.v1 while preserving source_context provenance fields.\",\"required_payload_fields\":[\"normalised_paper_reference_set\",\"paper_reference_items\"],\"missing_failure_code\":\"paper_reference_set_not_normalised\",\"failed_failure_code\":\"paper_reference_set_normalisation_failed\",\"required_tools\":[\"paper_reference.normalise_reference_set\"]},{\"effect_id\":\"paper_reference_item_delegation\",\"effect_type\":\"workflow_delegation\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Delegate each non-preview item to the represented source-specific paper workflow for its reference kind.\",\"required_payload_fields\":[\"iteration_results\"],\"required_tools\":[\"workflow_control.for_each\",\"workflow_invoke_subworkflow\"],\"missing_failure_code\":\"paper_reference_items_not_dispatched\",\"failed_failure_code\":\"paper_reference_item_dispatch_failed\"},{\"effect_id\":\"paper_reference_item_outcomes\",\"effect_type\":\"workflow_result_projection\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Return per-item outcomes, preserving partial success and typed failures.\",\"required_payload_fields\":[\"for_each_success_count\",\"for_each_error_count\",\"iteration_results\"],\"missing_failure_code\":\"paper_reference_item_outcomes_missing\",\"failed_failure_code\":\"paper_reference_item_outcomes_failed\",\"required_tools\":[\"workflow_control.for_each\"]}]}",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"source_neutral_paper_reference_ingestion\",\"required_effects\":[{\"effect_id\":\"normalised_paper_reference_set\",\"effect_type\":\"workflow_context_projection\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Normalise the request into paper_reference_set.v1 while preserving source_context provenance fields.\",\"required_payload_fields\":[\"normalised_paper_reference_set\",\"paper_reference_items\"],\"missing_failure_code\":\"paper_reference_set_not_normalised\",\"failed_failure_code\":\"paper_reference_set_normalisation_failed\",\"required_tools\":[\"paper_reference.normalise_reference_set\"]},{\"effect_id\":\"paper_reference_item_delegation\",\"effect_type\":\"workflow_delegation\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Attempt represented source-specific execution for each non-preview item and retain every item outcome.\",\"required_payload_fields\":[\"iteration_results\"],\"required_tools\":[\"workflow_control.for_each\",\"workflow_invoke_subworkflow\"],\"missing_failure_code\":\"paper_reference_items_not_dispatched\",\"failed_failure_code\":\"paper_reference_item_dispatch_failed\"},{\"effect_id\":\"paper_reference_item_outcomes\",\"effect_type\":\"workflow_result_projection\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Return per-item outcomes, preserving partial success and typed failures; a non-empty execution with zero successful items is a failed ingestion outcome.\",\"required_payload_fields\":[\"for_each_success_count\",\"for_each_error_count\",\"iteration_results\"],\"missing_failure_code\":\"paper_reference_item_outcomes_missing\",\"failed_failure_code\":\"paper_reference_item_outcomes_failed\",\"required_tools\":[\"workflow_control.for_each\"]}]}",
           "lang": "en-NZ"
         },
         {
@@ -2915,7 +2925,25 @@
             "state_id": "dispatch_reference_items",
             "action_id": "workflow_control.for_each",
             "execution_mode": "deterministic",
-            "next_state": "completed",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "for_each_success_count",
+                  "kind": "context_compare",
+                  "operator": "gt",
+                  "value": 0
+                },
+                "reason": "paper_reference_items_produced_success",
+                "to_state": "completed"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "paper_reference_items_produced_no_success",
+                "to_state": "failed"
+              }
+            ],
             "static_input_bindings": [
               [
                 "workflow_id",

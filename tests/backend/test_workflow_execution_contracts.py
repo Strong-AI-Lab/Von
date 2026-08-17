@@ -202,6 +202,62 @@ def test_workflow_executor_does_not_complete_explicit_failed_concept_state() -> 
     assert result.result_envelope["terminal_status"] == "failed"
 
 
+def test_workflow_executor_uses_authored_failed_terminal_error_code() -> None:
+    failed_state = "#V#workflow_step_example_workflow_failed"
+    definition = WorkflowDefinition(
+        workflow_id="#V#example_workflow",
+        initial_state=failed_state,
+        states={
+            failed_state: WorkflowStateSpec(state_id=failed_state, terminal=True),
+        },
+        termination_states=(failed_state,),
+        metadata={
+            "terminal_success_contract": {
+                "failed_terminal_error_code": "example_workflow_no_items_succeeded"
+            }
+        },
+    )
+
+    result = WorkflowExecutor(registry=ActionRegistry(), max_transitions=3).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.error == "example_workflow_no_items_succeeded"
+    assert result.result_envelope is not None
+    assert result.result_envelope["diagnostics"]["error"] == (
+        "example_workflow_no_items_succeeded"
+    )
+
+
+def test_workflow_executor_ignores_malformed_failed_terminal_error_code() -> None:
+    failed_state = "#V#workflow_step_example_workflow_failed"
+    definition = WorkflowDefinition(
+        workflow_id="#V#example_workflow",
+        initial_state=failed_state,
+        states={
+            failed_state: WorkflowStateSpec(state_id=failed_state, terminal=True),
+        },
+        termination_states=(failed_state,),
+        metadata={
+            "terminal_success_contract": {
+                "failed_terminal_error_code": {"not": "a string"}
+            }
+        },
+    )
+
+    result = WorkflowExecutor(registry=ActionRegistry(), max_transitions=3).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.error == "workflow_failed_terminal_state"
+
+
 def test_failed_terminal_state_takes_precedence_over_return_signal() -> None:
     failed_state = "#V#workflow_step_returning_workflow_failed"
     definition = WorkflowDefinition(

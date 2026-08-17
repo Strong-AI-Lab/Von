@@ -888,6 +888,7 @@ terminal-success contracts, or typed route maps.
 - plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
 - completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied;
 - terminal-success contracts MAY declare which terminal statuses count as success for a workflow boundary and which execution-summary fields MUST be present before a parent turn or workflow may treat the child workflow as successful;
+- a terminal-success contract MAY declare one `failed_terminal_error_code` for failure-like terminal states when the workflow has a stable aggregate non-success reason; runtimes MUST otherwise retain the generic `workflow_failed_terminal_state` fallback;
 - when a workflow declares a terminal-success contract, runtimes and parent completion gates MUST fail closed if terminal status or other contracted summary fields are absent or violate the contract;
 - launch input contracts MAY map invocation-context values into workflow context keys before the initial state executes;
 - launch input contracts MUST remain declarative, so reusable extractors such as quoted-text extraction or workflow-ID list extraction are configured in metadata rather than hard-coded for specific workflow IDs.
