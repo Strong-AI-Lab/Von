@@ -354,6 +354,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "gmail_import_attachment",
         "gmail_send_message",
         "message_send_direct",
+        "conversation_manage",
         "task_create",
         "task_update_status",
         "task_add_comment",
@@ -361,6 +362,9 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     assert not {
         name for name in public_reads if catalogue.get(name).category == "write"
     }
+    assert {"conversation_list", "conversation_get", "conversation_manage"} <= (
+        actor_mail_reads
+    )
 
     message_send_definition = catalogue.get("message_send_direct")
     assert message_send_definition.ordinary_turn_effect is True

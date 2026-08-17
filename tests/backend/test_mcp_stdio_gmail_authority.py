@@ -7,7 +7,7 @@ from typing import cast
 from mcp.types import TextContent
 
 
-def test_stdio_binds_operator_provenance_only_for_direct_gmail_tools(monkeypatch):
+def test_stdio_binds_operator_provenance_only_for_explicit_operator_tools(monkeypatch):
     from src.backend.integrations.internal_mcp.gateway import (
         get_internal_mcp_actor_context_source,
     )
@@ -28,6 +28,11 @@ def test_stdio_binds_operator_provenance_only_for_direct_gmail_tools(monkeypatch
     )
     monkeypatch.setitem(
         mcp_stdio_server._TOOL_HANDLERS,
+        "conversation_list",
+        _probe,
+    )
+    monkeypatch.setitem(
+        mcp_stdio_server._TOOL_HANDLERS,
         "search_concepts",
         _probe,
     )
@@ -38,6 +43,10 @@ def test_stdio_binds_operator_provenance_only_for_direct_gmail_tools(monkeypatch
             {"probe": "gmail"},
         )
         await mcp_stdio_server.call_tool(
+            "conversation_list",
+            {"probe": "conversation"},
+        )
+        await mcp_stdio_server.call_tool(
             "search_concepts",
             {"probe": "other"},
         )
@@ -46,6 +55,7 @@ def test_stdio_binds_operator_provenance_only_for_direct_gmail_tools(monkeypatch
 
     assert observed == [
         ("gmail", "trusted_operator_payload_fallback"),
+        ("conversation", "trusted_operator_payload_fallback"),
         ("other", None),
     ]
 

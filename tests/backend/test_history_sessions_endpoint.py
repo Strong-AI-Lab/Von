@@ -130,6 +130,64 @@ def test_history_sessions_passes_agent_visibility_and_returns_counts(
     assert payload["newest_visible_agent_created_session_id"] == "agent-new"
 
 
+def test_history_sessions_projects_server_conversation_preferences(
+    monkeypatch, app_client
+):
+    _, client = app_client
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#u",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {
+            "user_id": "#V#u",
+            "organisation_id": "#V#org",
+            "namespace": "#V#u@org",
+            "chat_session_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_summaries_result",
+        lambda *args, **kwargs: _session_result(
+            [{"session_id": "session-1", "session_name": "Stored name"}]
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.list_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.list_outgoing_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        von_routes.conversation_management_service,
+        "apply_conversation_preferences",
+        lambda *, actor_user_id, conversations: [
+            {
+                **conversations[0],
+                "hidden": True,
+                "pinned": False,
+                "conversation_preference": {
+                    "preference_present": True,
+                    "hidden": True,
+                    "pinned": False,
+                },
+            }
+        ],
+    )
+
+    response = client.get("/von/history/sessions?limit=50&summary=light")
+
+    assert response.status_code == 200
+    row = response.get_json()["sessions"][0]
+    assert row["hidden"] is True
+    assert row["conversation_preference"]["preference_present"] is True
+
+
 def test_history_sessions_tolerates_shared_invite_lookup_failure(
     monkeypatch, app_client
 ):

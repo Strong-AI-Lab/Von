@@ -52,6 +52,7 @@ from ...services.request_progress_service import (
 )
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
+from ...services import conversation_management_service
 from ...services.adaptive_turn_service import (
     execute_adaptive_turn,
 )
@@ -15326,6 +15327,18 @@ def history_sessions():
             for session_row in (sessions + shared_sessions)
             if isinstance(session_row, dict)
         ]
+        try:
+            combined = conversation_management_service.apply_conversation_preferences(
+                actor_user_id=user_concept_id,
+                conversations=combined,
+            )
+        except conversation_management_service.ConversationManagementError as exc:
+            current_app.logger.warning(
+                "history_sessions: conversation preferences unavailable for %s: %s",
+                user_concept_id,
+                exc,
+            )
+            warnings.append("conversation_preferences_unavailable")
         combined.sort(
             key=lambda s: (
                 chat_history_service._coerce_datetime(
@@ -16627,7 +16640,37 @@ def rename_chat_session():
         )
 
         if not result.get("matched"):
-            return jsonify({"error": "Session not found"}), 404
+            from ...services.shared_conversation_service import (
+                get_accepted_invite_for_user_session,
+            )
+
+            accepted_invite = get_accepted_invite_for_user_session(
+                user_concept_id=user_concept_id,
+                session_id=session_id,
+            )
+            if not isinstance(accepted_invite, dict):
+                return jsonify({"error": "Session not found"}), 404
+            preference_result = (
+                conversation_management_service.set_conversation_preference(
+                    actor_user_id=user_concept_id,
+                    session_id=session_id,
+                    session_name_override=session_name,
+                    update_session_name_override=True,
+                )
+            )
+            preference = preference_result.get("preference") or {}
+            return (
+                jsonify(
+                    {
+                        "status": "updated",
+                        "session_id": session_id,
+                        "session_name": preference.get("session_name_override"),
+                        "changed": preference_result.get("changed") is True,
+                        "access_mode": "invitee",
+                    }
+                ),
+                200,
+            )
 
         return (
             jsonify(
@@ -16642,6 +16685,84 @@ def rename_chat_session():
     except Exception as e:
         print(f"Error renaming chat session: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/conversation_preference", methods=["POST"])
+def set_conversation_preference():
+    """Persist one reversible conversation-list preference for the current user."""
+
+    user_concept_id = session.get("user_concept_id")
+    if not user_concept_id:
+        return jsonify({"error": "Not authenticated"}), 401
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return jsonify({"error": "session_id required"}), 400
+    session_id = session_id.strip()
+    action = data.get("action")
+    if not isinstance(action, str) or action.strip().lower() not in {
+        "hide",
+        "unhide",
+        "pin",
+        "unpin",
+    }:
+        return jsonify({"error": "action must be hide, unhide, pin, or unpin"}), 400
+    action = action.strip().lower()
+
+    window_session_id = request.headers.get("X-Von-Window-Session")
+    effective = get_effective_context(window_session_id, dict(session), user_concept_id)
+    namespace = effective.get(
+        "namespace"
+    ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+    try:
+        authorised = chat_history_service.has_chat_history_session(
+            user_concept_id,
+            session_id,
+            namespace=namespace,
+            include_legacy=True,
+        )
+        if not authorised:
+            from ...services.shared_conversation_service import (
+                get_accepted_invite_for_user_session,
+            )
+
+            authorised = isinstance(
+                get_accepted_invite_for_user_session(
+                    user_concept_id=user_concept_id,
+                    session_id=session_id,
+                ),
+                dict,
+            )
+        if not authorised:
+            return jsonify({"error": "Conversation not found"}), 404
+
+        preference_kwargs: dict[str, Any]
+        if action in {"hide", "unhide"}:
+            preference_kwargs = {"hidden": action == "hide"}
+        else:
+            preference_kwargs = {"pinned": action == "pin"}
+        result = conversation_management_service.set_conversation_preference(
+            actor_user_id=user_concept_id,
+            session_id=session_id,
+            **preference_kwargs,
+        )
+        return jsonify(
+            {
+                "status": "updated",
+                "session_id": session_id,
+                "action": action,
+                "changed": result.get("changed") is True,
+                "conversation_preference": result.get("preference"),
+            }
+        )
+    except (
+        chat_history_service.ChatHistoryServiceError,
+        conversation_management_service.ConversationManagementError,
+    ) as exc:
+        current_app.logger.warning(
+            "conversation preference update failed for %s: %s", session_id, exc
+        )
+        return jsonify({"error": str(exc)}), 503
 
 
 @von_bp.route("/api/session/delete_chat_session", methods=["POST"])

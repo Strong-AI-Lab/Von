@@ -138,4 +138,85 @@ describe('chat session pinning', () => {
 
         expect(document.querySelector('#chatSessionTabs .chat-session-tab-group-badge')).toBeNull();
     });
+
+    test('server preferences override stale browser state and UI actions sync back', async () => {
+        localStorage.setItem(
+            'von:pinnedChatSessionIds:#V#pin_user',
+            JSON.stringify(['s1'])
+        );
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (String(url).startsWith('/von/api/session/context')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        user_id: '#V#pin_user',
+                        organisation_id: '#V#test_org',
+                        namespace: '#V#pin_user@test_org',
+                    })
+                };
+            }
+            if (String(url).startsWith('/von/history/sessions')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: null,
+                        sessions: [
+                            {
+                                session_id: 's1',
+                                session_name: 'Recent session',
+                                last_message_at: new Date().toISOString(),
+                                conversation_preference: {
+                                    preference_present: true,
+                                    hidden: false,
+                                    pinned: false,
+                                },
+                            },
+                            {
+                                session_id: 's2',
+                                session_name: 'Priority session',
+                                last_message_at: new Date(Date.now() - 1000).toISOString(),
+                                conversation_preference: {
+                                    preference_present: true,
+                                    hidden: false,
+                                    pinned: true,
+                                },
+                            },
+                        ],
+                    })
+                };
+            }
+            if (String(url) === '/von/api/session/conversation_preference') {
+                return {
+                    ok: true,
+                    json: async () => ({ status: 'updated' }),
+                };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        require(chatTabModulePath);
+        await window.refreshChatSessionTabsForOrgSwitch();
+
+        expect(JSON.parse(
+            localStorage.getItem('von:pinnedChatSessionIds:#V#pin_user') || '[]'
+        )).toEqual(['s2']);
+
+        const unpinButton = document.querySelector(
+            '#chatSessionTabs .chat-session-tab[data-session-id="s2"] .chat-session-tab-pin-toggle'
+        );
+        unpinButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const preferenceCall = global.fetch.mock.calls.find(
+            ([url]) => String(url) === '/von/api/session/conversation_preference'
+        );
+        expect(preferenceCall).toBeTruthy();
+        expect(JSON.parse(preferenceCall[1].body)).toEqual({
+            session_id: 's2',
+            action: 'unpin',
+        });
+    });
 });

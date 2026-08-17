@@ -230,6 +230,10 @@ def _infer_tool_family(tool_name: str) -> str:
         return "task"
     if tool_name.startswith("coding_agent_"):
         return "internal"
+    if tool_name.startswith("conversation_") or tool_name.startswith(
+        "shared_conversation_"
+    ):
+        return "conversation"
     if tool_name.startswith("chat_") or tool_name.startswith("settings_"):
         return "internal"
     if tool_name in {"list_recent_screenshots"}:
