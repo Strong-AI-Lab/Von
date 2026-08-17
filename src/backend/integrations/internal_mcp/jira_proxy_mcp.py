@@ -7,10 +7,10 @@ logic.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, cast
@@ -318,14 +318,15 @@ def _build_jira_config() -> JiraProxyConfig:
 
 # Singleton instance
 _proxy_instance: Optional[JiraMCPProxy] = None
-_proxy_lock = asyncio.Lock()
+# Catalogue calls can run on fresh event loops, so construction is loop-neutral.
+_proxy_lock = threading.Lock()
 
 
 async def get_jira_proxy() -> JiraMCPProxy:
     """Get or create the global Jira MCP proxy instance."""
     global _proxy_instance
 
-    async with _proxy_lock:
+    with _proxy_lock:
         if _proxy_instance is None:
             config = _build_jira_config()
             _proxy_instance = JiraMCPProxy(config)

@@ -6,11 +6,11 @@ invoke GitHub tools through a single managed stdio client.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import shlex
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -207,14 +207,15 @@ def _build_github_config() -> GitHubProxyConfig:
 
 
 _proxy_instance: Optional[GitHubMCPProxy] = None
-_proxy_lock = asyncio.Lock()
+# Catalogue calls can run on fresh event loops, so construction is loop-neutral.
+_proxy_lock = threading.Lock()
 
 
 async def get_github_proxy() -> GitHubMCPProxy:
     """Get or create the global GitHub MCP proxy instance."""
     global _proxy_instance
 
-    async with _proxy_lock:
+    with _proxy_lock:
         if _proxy_instance is None:
             config = _build_github_config()
             _proxy_instance = GitHubMCPProxy(config)

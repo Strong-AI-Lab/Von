@@ -1,6 +1,14 @@
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_blob_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(tmp_path / "blob_store"))
+
 
 def test_download_paper_prefers_finalise_when_cached_and_authenticated(
     monkeypatch, tmp_path

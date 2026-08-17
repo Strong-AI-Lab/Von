@@ -5,10 +5,10 @@ Manages subprocess communication with external arxiv-mcp-server using the MCP pr
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -952,14 +952,15 @@ def inspect_cached_arxiv_artifacts(
 
 # Singleton instance
 _proxy_instance: Optional[ArxivMCPProxy] = None
-_proxy_lock = asyncio.Lock()
+# Catalogue calls can run on fresh event loops, so construction is loop-neutral.
+_proxy_lock = threading.Lock()
 
 
 async def get_arxiv_proxy() -> ArxivMCPProxy:
     """Get or create the global arXiv proxy instance."""
     global _proxy_instance
 
-    async with _proxy_lock:
+    with _proxy_lock:
         if _proxy_instance is None:
             storage_path = resolve_arxiv_cache_root()
             config = ArxivProxyConfig(storage_path=storage_path)
