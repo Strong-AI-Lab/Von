@@ -205,7 +205,11 @@ describe('chat conversation info copy control', () => {
             }
         };
 
-        global.fetch = jest.fn();
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: false,
+            status: 404,
+            json: async () => ({ error: 'not_available_in_test' })
+        });
         fetchWithTimeout.mockResolvedValue({
             ok: true,
             json: async () => ({

@@ -225,6 +225,101 @@ def test_generate_error_debug_preserves_paid_calls_before_route_failure(
         result["turn_execution_record"]["llm_usage_cost_summary"]
         == result["llm_usage_cost_summary"]
     )
+    capsule = result["turn_failure_capsule"]
+    assert capsule["terminal_status"] == "model_error"
+    assert capsule["response_authority"] == "not_recorded"
+    assert capsule["effects"] == []
+    assert capsule["turn_error"]["preview"]["text"] == (
+        "route finalisation failed"
+    )
+
+
+def test_finalise_persists_inline_turn_failure_capsule_from_outcome_report(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    version = {
+        "version": "v20260818_backend+gabc123",
+        "git_commit": "abc123abc123abc123abc123abc123abc123abcd",
+    }
+    monkeypatch.setattr(von_routes, "get_runtime_code_version_info", lambda: version)
+    monkeypatch.setattr(von_routes, "get_model_registry_snapshot", lambda: None)
+    outcome_report = {
+        "type": "adaptive_turn_effect_outcome_report",
+        "schema_version": "adaptive_turn_effect_outcome_report.v1",
+        "terminal_status": "effect_partially_completed",
+        "response_authority": "canonical_outcome",
+        "model_draft": {
+            "authority": "non_authoritative",
+            "preview": (
+                "I represented it in #V#person@org for session-paper-lock."
+            ),
+        },
+        "canonical_scopes": [{"mode": "user", "concept_id": "#V#person"}],
+        "facts": [
+            {
+                "effect_id": "effect-download",
+                "tool": "download_paper",
+                "effect_status": "failed",
+                "initial_effect_status": "failed",
+                "changed": False,
+                "outcome_resolved": False,
+                "canonical_readback_present": False,
+                "error_code": "arxiv_acquisition_unavailable",
+                "error": (
+                    "RuntimeError: asyncio lock is bound to a different event loop"
+                ),
+            }
+        ],
+    }
+
+    result = von_routes._finalise_llm_debug_info(
+        llm_debug_info={
+            "request_id": "req-paper-lock",
+            "interaction_timestamp_utc": "2026-08-18T00:00:00Z",
+            "response": (
+                "User scope #V#person in session-paper-lock; "
+                "the paper download failed."
+            ),
+            "llm_interaction": {
+                "calls": [],
+            },
+            "tool_invocations": [],
+            "turn_execution_record_tool_invocations": [],
+            "turn_execution_diagnostics": {},
+            "aux_llm_calls": [outcome_report],
+        },
+        prompt_text="Represent the paper.",
+        response_text=(
+            "User scope #V#person in session-paper-lock; "
+            "the paper download failed."
+        ),
+        session_id="session-paper-lock",
+        namespace="#V#person@org",
+        user_id="#V#person",
+        org_id="#V#org",
+    )
+
+    capsule = result["turn_failure_capsule"]
+    assert capsule["schema_version"] == "turn_failure_capsule.v1"
+    assert capsule["request_id"] == "req-paper-lock"
+    assert capsule["terminal_status"] == "effect_partially_completed"
+    assert capsule["response_authority"] == "canonical_outcome"
+    assert capsule["producer"] == {
+        "code_version": version["version"],
+        "git_commit": version["git_commit"],
+    }
+    assert capsule["effects"][0]["error"]["code"] == (
+        "arxiv_acquisition_unavailable"
+    )
+    assert capsule["pre_presentation_draft"]["authority"] == (
+        "non_authoritative"
+    )
+    assert "#V#person" not in capsule["visible_response"]["text"]
+    assert "session-paper-lock" not in capsule["visible_response"]["text"]
+    assert "session-paper-lock" not in capsule["pre_presentation_draft"]["text"]
+    assert result["code_version_details"] == version
 
 
 def test_finalise_reuses_turn_pricing_snapshot_summary(monkeypatch) -> None:
@@ -287,6 +382,12 @@ def test_finalise_reuses_turn_pricing_snapshot_summary(monkeypatch) -> None:
 
     assert result["llm_usage_cost_summary"] == supplied_summary
     assert result["turn_execution_record"]["llm_usage_cost_summary"] == supplied_summary
+    capsule = result["turn_failure_capsule"]
+    assert capsule["terminal_status"] == "completed"
+    assert capsule["response_authority"] == "not_recorded"
+    assert capsule["visible_response"]["text"] == "Done."
+    assert capsule["effects"] == []
+    assert "turn_error" not in capsule
 
 
 def test_finalise_llm_debug_info_preserves_bounded_evidence_envelope(

@@ -6549,10 +6549,27 @@ def execute_adaptive_turn(
                     f"\n\n{quoted_draft}"
                 )
             response_authority = "canonical_outcome"
+            bounded_model_draft = _bounded_outcome_text(model_draft, limit=2_000)
             aux_calls.append(
                 {
                     "type": "adaptive_turn_effect_outcome_report",
                     **outcome_report,
+                    "response_authority": response_authority,
+                    **(
+                        {
+                            "model_draft": {
+                                "authority": "non_authoritative",
+                                "preview": bounded_model_draft,
+                                "char_count": len(model_draft),
+                                "preview_truncated": (
+                                    bounded_model_draft is not None
+                                    and len(bounded_model_draft) < len(model_draft)
+                                ),
+                            }
+                        }
+                        if bounded_model_draft is not None
+                        else {}
+                    ),
                 }
             )
         evidence_index = _compact_evidence_index(evidence_store.index())

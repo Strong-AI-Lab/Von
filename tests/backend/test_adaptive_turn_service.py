@@ -3750,6 +3750,16 @@ def test_exact_current_readback_renders_truthful_paper_partial_outcome(
     assert current_state_phases[0]["observation"]["target_concept_ids"] == [
         concept_id
     ]
+    outcome_report = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_effect_outcome_report"
+    )
+    assert outcome_report["response_authority"] == "canonical_outcome"
+    assert outcome_report["model_draft"]["authority"] == "non_authoritative"
+    assert outcome_report["model_draft"]["preview"].startswith(
+        "The paper and PDF were represented"
+    )
 
 
 def test_one_exact_read_does_not_resolve_multi_target_create(

@@ -116,6 +116,13 @@ from ...services.turn_output_health_service import (
     build_turn_output_health,
     turn_output_health_issue_messages,
 )
+from ...services.turn_failure_capsule_service import (
+    TURN_FAILURE_CAPSULE_MAX_BYTES,
+    TURN_FAILURE_CAPSULE_SCHEMA_VERSION,
+    build_turn_failure_capsule,
+    project_stored_turn_failure_capsule,
+    turn_failure_capsule_size_bytes,
+)
 from ...services.response_transformation_telemetry import (
     build_response_transformation_event,
     build_response_transformation_telemetry_payload,
@@ -7451,6 +7458,74 @@ def _finalise_llm_debug_info(
     terminal_status = _progress_str(
         llm_interaction_payload.get("ordinary_turn_terminal_status")
     ) or "not_reported"
+    outcome_report: Mapping[str, Any] | None = None
+    outcome_report_sources: list[Any] = [*aux_llm_calls_payload]
+    if isinstance(diagnostics_payload, Mapping):
+        diagnostic_aux = diagnostics_payload.get("aux_llm_calls")
+        if isinstance(diagnostic_aux, list):
+            outcome_report_sources.extend(diagnostic_aux)
+    for entry in reversed(outcome_report_sources):
+        if not isinstance(entry, Mapping):
+            continue
+        if (
+            entry.get("type") == "adaptive_turn_effect_outcome_report"
+            and entry.get("schema_version")
+            == "adaptive_turn_effect_outcome_report.v1"
+        ):
+            outcome_report = entry
+            break
+
+    if terminal_status == "not_reported" and isinstance(outcome_report, Mapping):
+        terminal_status = (
+            _progress_str(outcome_report.get("terminal_status")) or terminal_status
+        )
+
+    response_authority = _progress_str(llm_debug_info.get("response_authority"))
+    if response_authority is None and isinstance(outcome_report, Mapping):
+        response_authority = _progress_str(
+            outcome_report.get("response_authority")
+        )
+    report_facts = (
+        outcome_report.get("facts")
+        if isinstance(outcome_report, Mapping)
+        and isinstance(outcome_report.get("facts"), list)
+        else []
+    )
+    turn_failure_capsule = build_turn_failure_capsule(
+        request_id=llm_debug_info.get("request_id"),
+        terminal_status=terminal_status,
+        response_authority=response_authority,
+        visible_response=final_response_text,
+        outcome_report=outcome_report,
+        turn_error_code=(
+            (
+                llm_debug_info.get("error_code")
+                or (
+                    terminal_status
+                    if llm_debug_info.get("error") is not None
+                    and terminal_status not in {"completed", "not_reported"}
+                    else None
+                )
+            )
+            if not report_facts
+            else None
+        ),
+        turn_error_text=(llm_debug_info.get("error") if not report_facts else None),
+        code_version=code_version_details.get("version"),
+        git_commit=code_version_details.get("git_commit"),
+        sensitive_identity_values=tuple(
+            value
+            for value in (
+                namespace,
+                session_id,
+                resolved_actor_concept_id,
+                user_id,
+                org_id,
+            )
+            if isinstance(value, str) and value.strip()
+        ),
+    )
+    llm_debug_info["turn_failure_capsule"] = turn_failure_capsule
     turn_execution_record: dict[str, Any] = {
         "schema_version": "turn_execution_record.observational.v1",
         "record_kind": "observational",
@@ -13280,6 +13355,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             },
             "messages": current_turn_messages,
             "response": response_text,
+            "response_authority": response_authority,
             "presenter_channels": presenter_channels,
             "screen_backfill_second_pass_attempted": screen_backfill_second_pass_attempted,
             "screen_backfill_second_pass_reason": screen_backfill_second_pass_reason,
@@ -14351,6 +14427,122 @@ def history_telemetry_locator():
             )
         print(f"Error retrieving history telemetry locator: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/turn_failure_capsule", methods=["GET"])
+def history_turn_failure_capsule():
+    """Return one stored, bounded turn projection after exact auth checks."""
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+    user_concept_id = _normalise_concept_id(user_concept_id)
+    if not user_concept_id:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    request_id = _progress_str(request.args.get("request_id"))
+    session_id = _progress_str(
+        request.args.get("session_id") or session.get("session_id")
+    )
+    history_index = request.args.get("history_index", type=int)
+    if not request_id:
+        return jsonify({"error": "request_id required"}), 400
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    if history_index is None or history_index < 0:
+        return jsonify({"error": "history_index required"}), 400
+
+    window_session_id = request.headers.get("X-Von-Window-Session")
+    effective = get_effective_context(
+        window_session_id, dict(session), user_concept_id
+    )
+    actor_namespace, organisation_concept_id = _resolve_history_request_scope_hints(
+        user_concept_id=user_concept_id,
+        effective_context=effective,
+    )
+
+    owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+        user_concept_id=user_concept_id,
+        session_id=session_id,
+    )
+    if not owner_user_id:
+        if not chat_history_service.has_chat_history_session(
+            user_concept_id,
+            session_id,
+            namespace=actor_namespace,
+        ) and not chat_history_service.has_chat_history_session(
+            user_concept_id,
+            session_id,
+            namespace=None,
+        ):
+            return jsonify({"error": "Not authorised for conversation"}), 403
+        owner_user_id = user_concept_id
+
+    shared_org_id = (
+        _normalise_concept_id(shared_invite.get("organisation_concept_id"))
+        if isinstance(shared_invite, Mapping)
+        else None
+    )
+    organisation_concept_id = shared_org_id or organisation_concept_id
+    owner_namespace = (
+        _derive_namespace_for_user_org(owner_user_id, organisation_concept_id)
+        or actor_namespace
+        or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+    )
+
+    try:
+        compact_debug = chat_history_service.get_chat_history_debug_entry(
+            user_id=owner_user_id,
+            session_id=session_id,
+            history_index=history_index,
+            namespace=owner_namespace,
+            include_legacy=True,
+            hydrate_blob_refs=False,
+        )
+        if not compact_debug and owner_namespace is not None:
+            compact_debug = chat_history_service.get_chat_history_debug_entry(
+                user_id=owner_user_id,
+                session_id=session_id,
+                history_index=history_index,
+                namespace=None,
+                include_legacy=True,
+                hydrate_blob_refs=False,
+            )
+    except Exception as exc:
+        current_app.logger.warning(
+            "Stored turn failure capsule lookup failed: %s",
+            type(exc).__name__,
+        )
+        if chat_history_service.is_transient_chat_history_error(exc):
+            return (
+                jsonify({"error": "failure_capsule_temporarily_unavailable"}),
+                503,
+            )
+        return jsonify({"error": "failure_capsule_lookup_failed"}), 500
+
+    if not isinstance(compact_debug, Mapping):
+        return jsonify({"error": "failure_capsule_not_available"}), 404
+    stored_request_id = _progress_str(compact_debug.get("request_id"))
+    if stored_request_id and stored_request_id != request_id:
+        return jsonify({"error": "request_id does not belong to history_index"}), 403
+    if stored_request_id != request_id:
+        return jsonify({"error": "failure_capsule_not_available"}), 404
+
+    capsule = compact_debug.get("turn_failure_capsule")
+    projected_capsule = project_stored_turn_failure_capsule(capsule)
+    if (
+        not isinstance(projected_capsule, Mapping)
+        or projected_capsule.get("schema_version")
+        != TURN_FAILURE_CAPSULE_SCHEMA_VERSION
+        or _progress_str(projected_capsule.get("request_id")) != request_id
+        or turn_failure_capsule_size_bytes(projected_capsule)
+        > TURN_FAILURE_CAPSULE_MAX_BYTES
+    ):
+        return jsonify({"error": "failure_capsule_not_available"}), 404
+    return jsonify(dict(projected_capsule)), 200
 
 
 @von_bp.route("/history/turn_telemetry_access", methods=["GET"])

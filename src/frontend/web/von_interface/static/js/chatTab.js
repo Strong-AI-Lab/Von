@@ -117,6 +117,9 @@ const CONVERSATION_SITUATION_EXPORT_SCHEMA_VERSION = 'conversation_situation_exp
 const CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS = 4000;
 const TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION = 'turn_telemetry_mcp_access.v1';
 const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
+const TURN_FAILURE_CAPSULE_SCHEMA_VERSION = 'turn_failure_capsule.v1';
+const TURN_FAILURE_CAPSULE_CLIPBOARD_MAX_UTF8_BYTES = 16 * 1024;
+const TURN_FAILURE_CAPSULE_MAX_EFFECTS = 16;
 const TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION = 'turn_live_progress_locator.v1';
 const WORKFLOW_USE_EPISODES_LOCATOR_SCHEMA_VERSION = 'workflow_use_episodes_locator.v1';
 const WORKFLOW_DEFINITION_LOCATOR_SCHEMA_VERSION = 'workflow_definition_locator.v1';
@@ -34521,8 +34524,8 @@ function setLlmDebugButtonCopyState(button, state) {
         button.textContent = 'Copied';
         button.dataset.copyFeedback = 'Copied';
         button.classList.add(LLM_DEBUG_BUTTON_COPIED_CLASS);
-        button.setAttribute('title', 'Copied LLM reference JSON to clipboard. Shift-click to open details.');
-        button.setAttribute('aria-label', 'LLM reference JSON copied. Shift-click to open details.');
+        button.setAttribute('title', 'Copied bounded turn capsule JSON. Shift-click to open details.');
+        button.setAttribute('aria-label', 'Bounded turn capsule JSON copied. Shift-click to open details.');
         return;
     }
     if (state === 'failed') {
@@ -34530,14 +34533,14 @@ function setLlmDebugButtonCopyState(button, state) {
         button.dataset.copyFeedback = 'Copy failed';
         button.classList.add(LLM_DEBUG_BUTTON_COPY_FAILED_CLASS);
         button.setAttribute('title', 'Copy failed. Shift-click to open LLM details.');
-        button.setAttribute('aria-label', 'Copy LLM reference JSON failed. Shift-click to open details.');
+        button.setAttribute('aria-label', 'Copy bounded turn capsule JSON failed. Shift-click to open details.');
         return;
     }
 
     button.textContent = defaultLabel;
     button.classList.add(LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS);
-    button.setAttribute('title', 'Copy LLM reference JSON. Shift-click to open details.');
-    button.setAttribute('aria-label', 'Copy LLM reference JSON. Shift-click to open details.');
+    button.setAttribute('title', 'Copy bounded turn capsule JSON. Shift-click to open details.');
+    button.setAttribute('aria-label', 'Copy bounded turn capsule JSON. Shift-click to open details.');
 }
 
 // Initialize LLM debug popup handlers
@@ -34837,6 +34840,7 @@ function hasLlmDebugPayload(debugData) {
         || (Array.isArray(debugData.aux_llm_calls) && debugData.aux_llm_calls.length > 0)
         || debugData.llm_interaction
         || debugData.context_stats
+        || resolveStoredTurnFailureCapsule(debugData)
         || extractThinkingCriticOutput(debugData)
     );
 }
@@ -34958,7 +34962,525 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
     return fetchPromise;
 }
 
+function utf8ByteLength(value) {
+    let byteLength = 0;
+    for (const character of String(value ?? '')) {
+        const codePoint = character.codePointAt(0);
+        if (codePoint <= 0x7f) {
+            byteLength += 1;
+        } else if (codePoint <= 0x7ff) {
+            byteLength += 2;
+        } else if (codePoint <= 0xffff) {
+            byteLength += 3;
+        } else {
+            byteLength += 4;
+        }
+    }
+    return byteLength;
+}
+
+function truncateUtf8Text(value, maxBytes) {
+    const text = String(value ?? '');
+    if (utf8ByteLength(text) <= maxBytes) {
+        return { text, truncated: false };
+    }
+
+    let result = '';
+    let byteLength = 0;
+    for (const character of text) {
+        const characterBytes = utf8ByteLength(character);
+        if (byteLength + characterBytes > maxBytes) {
+            break;
+        }
+        result += character;
+        byteLength += characterBytes;
+    }
+    return { text: result, truncated: true };
+}
+
+function unicodeCharacterCount(value) {
+    let count = 0;
+    for (const _character of String(value ?? '')) {
+        count += 1;
+    }
+    return count;
+}
+
+function redactCredentialLikeText(value) {
+    let text = String(value ?? '');
+    let redactedCount = 0;
+    const replace = (pattern, replacement) => {
+        text = text.replace(pattern, (...args) => {
+            redactedCount += 1;
+            return typeof replacement === 'function'
+                ? replacement(...args)
+                : replacement;
+        });
+    };
+
+    replace(/\b(?:Authorization\s*[:=]\s*)?(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, '[REDACTED-AUTHORIZATION]');
+    replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]');
+    replace(/\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]');
+    replace(
+        /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|secret|client[_-]?secret|cookie|session[_-]?token|signature|nonce)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)/gi,
+        (_match, label, separator) => `${label}${separator}[REDACTED]`
+    );
+    replace(
+        /\b((?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis):\/\/)[^@\s/]+@/gi,
+        (_match, scheme) => `${scheme}[REDACTED]@`
+    );
+    replace(
+        /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/gi,
+        '[REDACTED-PRIVATE-KEY]'
+    );
+    return { text, redactedCount };
+}
+
+function projectCapsuleToken(value, { maxBytes = 256, pattern = null } = {}) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const redacted = redactCredentialLikeText(value);
+    if (redacted.redactedCount > 0) {
+        return null;
+    }
+    const token = redacted.text.trim();
+    if (!token || utf8ByteLength(token) > maxBytes) {
+        return null;
+    }
+    if (pattern && !pattern.test(token)) {
+        return null;
+    }
+    return token;
+}
+
+function projectCapsuleTextSurface(value, { maxBytes, requireNonAuthoritative = false } = {}) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.text !== 'string') {
+        return null;
+    }
+    if (requireNonAuthoritative && value.authority !== 'non_authoritative') {
+        return null;
+    }
+
+    const redacted = redactCredentialLikeText(value.text);
+    const bounded = truncateUtf8Text(redacted.text, maxBytes);
+    const locallyChanged = redacted.redactedCount > 0 || bounded.truncated;
+    const projected = {
+        text: bounded.text
+    };
+    if (locallyChanged) {
+        projected.char_count = unicodeCharacterCount(bounded.text);
+    } else if (Number.isSafeInteger(value.char_count) && value.char_count >= 0) {
+        projected.char_count = value.char_count;
+    }
+    if (
+        !locallyChanged
+        && typeof value.sha256 === 'string'
+        && /^[a-f0-9]{64}$/i.test(value.sha256.trim())
+    ) {
+        projected.sha256 = value.sha256.trim().toLowerCase();
+    }
+    if (typeof value.truncated === 'boolean' || bounded.truncated) {
+        projected.truncated = Boolean(value.truncated || bounded.truncated);
+    }
+    if (requireNonAuthoritative) {
+        projected.authority = 'non_authoritative';
+    }
+    return {
+        projected,
+        redactedCount: redacted.redactedCount,
+        truncated: bounded.truncated
+    };
+}
+
+function projectCapsuleError(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    const code = projectCapsuleToken(value.code, {
+        maxBytes: 160,
+        pattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
+    });
+    const projected = {};
+    if (code) {
+        projected.code = code;
+    }
+    let redactedCount = 0;
+    let truncated = false;
+    const preview = projectCapsuleTextSurface(value.preview, { maxBytes: 600 });
+    if (preview) {
+        projected.preview = preview.projected;
+        redactedCount += preview.redactedCount;
+        truncated = preview.truncated;
+    }
+    if (Object.keys(projected).length === 0) {
+        return null;
+    }
+    return { projected, redactedCount, truncated };
+}
+
+function projectCapsuleEffect(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    const projected = {};
+    const identifierFields = [
+        'effect_id',
+        'recovered_by_effect_id',
+        'workflow_id',
+        'instance_id',
+        'evidence_id'
+    ];
+    identifierFields.forEach((fieldName) => {
+        const projectedValue = projectCapsuleToken(value[fieldName], { maxBytes: 256 });
+        if (projectedValue) {
+            projected[fieldName] = projectedValue;
+        }
+    });
+    const name = projectCapsuleToken(value.name, { maxBytes: 320 });
+    if (name) {
+        projected.name = name;
+    }
+    [
+        'initial_status',
+        'status',
+        'current_outcome_status',
+        'reconciliation_status',
+        'canonical_readback_verdict'
+    ].forEach((fieldName) => {
+        const projectedValue = projectCapsuleToken(value[fieldName], {
+            maxBytes: 128,
+            pattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
+        });
+        if (projectedValue) {
+            projected[fieldName] = projectedValue;
+        }
+    });
+    ['changed', 'outcome_resolved'].forEach((fieldName) => {
+        if (typeof value[fieldName] === 'boolean') {
+            projected[fieldName] = value[fieldName];
+        }
+    });
+
+    let redactedCount = 0;
+    let truncated = false;
+    const error = projectCapsuleError(value.error);
+    if (error) {
+        projected.error = error.projected;
+        redactedCount += error.redactedCount;
+        truncated = error.truncated;
+    }
+    if (Object.keys(projected).length === 0) {
+        return null;
+    }
+    return { projected, redactedCount, truncated };
+}
+
+function projectTurnFailureCapsule(value, { expectedRequestId = null } = {}) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    if (value.schema_version !== TURN_FAILURE_CAPSULE_SCHEMA_VERSION) {
+        return null;
+    }
+
+    const requestId = projectCapsuleToken(value.request_id, { maxBytes: 256 });
+    const terminalStatus = projectCapsuleToken(value.terminal_status, {
+        maxBytes: 128,
+        pattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
+    });
+    const responseAuthority = projectCapsuleToken(value.response_authority, {
+        maxBytes: 128,
+        pattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
+    });
+    const cleanExpectedRequestId = typeof expectedRequestId === 'string'
+        ? expectedRequestId.trim()
+        : '';
+    if (
+        !requestId
+        || !terminalStatus
+        || !responseAuthority
+        || (cleanExpectedRequestId && requestId !== cleanExpectedRequestId)
+    ) {
+        return null;
+    }
+
+    const projected = {
+        schema_version: TURN_FAILURE_CAPSULE_SCHEMA_VERSION
+    };
+    const generatedAtUtc = projectCapsuleToken(value.generated_at_utc, { maxBytes: 64 });
+    if (generatedAtUtc && Number.isFinite(Date.parse(generatedAtUtc))) {
+        projected.generated_at_utc = generatedAtUtc;
+    }
+    projected.request_id = requestId;
+    projected.terminal_status = terminalStatus;
+    projected.response_authority = responseAuthority;
+
+    if (value.producer && typeof value.producer === 'object' && !Array.isArray(value.producer)) {
+        const producer = {};
+        ['code_version', 'git_commit'].forEach((fieldName) => {
+            const projectedValue = projectCapsuleToken(value.producer[fieldName], { maxBytes: 256 });
+            if (projectedValue) {
+                producer[fieldName] = projectedValue;
+            }
+        });
+        if (Object.keys(producer).length > 0) {
+            projected.producer = producer;
+        }
+    }
+
+    let frontendRedactedCount = 0;
+    let frontendTruncated = false;
+    const visibleResponse = projectCapsuleTextSurface(value.visible_response, { maxBytes: 4000 });
+    if (visibleResponse) {
+        projected.visible_response = visibleResponse.projected;
+        frontendRedactedCount += visibleResponse.redactedCount;
+        frontendTruncated = frontendTruncated || visibleResponse.truncated;
+    }
+    const draft = projectCapsuleTextSurface(value.pre_presentation_draft, {
+        maxBytes: 4000,
+        requireNonAuthoritative: true
+    });
+    if (draft) {
+        projected.pre_presentation_draft = draft.projected;
+        frontendRedactedCount += draft.redactedCount;
+        frontendTruncated = frontendTruncated || draft.truncated;
+    }
+
+    const sourceEffects = Array.isArray(value.effects) ? value.effects : null;
+    if (sourceEffects) {
+        const projectedEffects = [];
+        sourceEffects.slice(0, TURN_FAILURE_CAPSULE_MAX_EFFECTS).forEach((effect) => {
+            const projectedEffect = projectCapsuleEffect(effect);
+            if (!projectedEffect) {
+                return;
+            }
+            projectedEffects.push(projectedEffect.projected);
+            frontendRedactedCount += projectedEffect.redactedCount;
+            frontendTruncated = frontendTruncated || projectedEffect.truncated;
+        });
+        projected.effects = projectedEffects;
+        frontendTruncated = frontendTruncated || sourceEffects.length > TURN_FAILURE_CAPSULE_MAX_EFFECTS;
+    }
+
+    if (value.effect_summary && typeof value.effect_summary === 'object' && !Array.isArray(value.effect_summary)) {
+        const effectSummary = {};
+        ['total_count', 'included_count', 'omitted_count'].forEach((fieldName) => {
+            if (Number.isSafeInteger(value.effect_summary[fieldName]) && value.effect_summary[fieldName] >= 0) {
+                effectSummary[fieldName] = value.effect_summary[fieldName];
+            }
+        });
+        if (Object.keys(effectSummary).length > 0) {
+            projected.effect_summary = effectSummary;
+        }
+    }
+
+    if (Array.isArray(value.canonical_scope_modes)) {
+        const allowedModes = new Set(['user', 'organisation', 'global']);
+        projected.canonical_scope_modes = Array.from(new Set(
+            value.canonical_scope_modes.filter((mode) => allowedModes.has(mode))
+        )).slice(0, 3);
+    }
+
+    const turnError = projectCapsuleError(value.turn_error);
+    if (turnError) {
+        projected.turn_error = turnError.projected;
+        frontendRedactedCount += turnError.redactedCount;
+        frontendTruncated = frontendTruncated || turnError.truncated;
+    }
+
+    if (value.redaction && typeof value.redaction === 'object' && !Array.isArray(value.redaction)) {
+        const redaction = {};
+        ['applied', 'truncated'].forEach((fieldName) => {
+            if (typeof value.redaction[fieldName] === 'boolean') {
+                redaction[fieldName] = value.redaction[fieldName];
+            }
+        });
+        if (Number.isSafeInteger(value.redaction.redacted_count) && value.redaction.redacted_count >= 0) {
+            redaction.redacted_count = value.redaction.redacted_count;
+        }
+        if (Object.keys(redaction).length > 0) {
+            projected.redaction = redaction;
+        }
+    }
+
+    if (frontendRedactedCount > 0 || frontendTruncated) {
+        const existingRedaction = projected.redaction || {};
+        projected.redaction = {
+            ...existingRedaction,
+            applied: Boolean(existingRedaction.applied || frontendRedactedCount > 0),
+            redacted_count: (Number.isSafeInteger(existingRedaction.redacted_count)
+                ? existingRedaction.redacted_count
+                : 0) + frontendRedactedCount,
+            truncated: Boolean(existingRedaction.truncated || frontendTruncated)
+        };
+    }
+    return projected;
+}
+
+function serialisePrettyJsonWithinUtf8Limit(value) {
+    const jsonText = JSON.stringify(value, null, 2);
+    return utf8ByteLength(jsonText) <= TURN_FAILURE_CAPSULE_CLIPBOARD_MAX_UTF8_BYTES
+        ? jsonText
+        : null;
+}
+
+function markCapsuleFrontendTruncated(capsule) {
+    const redaction = capsule.redaction && typeof capsule.redaction === 'object'
+        ? capsule.redaction
+        : {};
+    capsule.redaction = {
+        ...redaction,
+        applied: Boolean(redaction.applied),
+        redacted_count: Number.isSafeInteger(redaction.redacted_count)
+            ? redaction.redacted_count
+            : 0,
+        truncated: true
+    };
+}
+
+function compactCapsuleTextSurface(surface, maxBytes) {
+    if (!surface || typeof surface !== 'object' || typeof surface.text !== 'string') {
+        return;
+    }
+    const bounded = truncateUtf8Text(surface.text, maxBytes);
+    surface.text = bounded.text;
+    if (bounded.truncated) {
+        surface.char_count = unicodeCharacterCount(bounded.text);
+        delete surface.sha256;
+        surface.truncated = true;
+    }
+}
+
+function stringifyBoundedTurnFailureCapsule(projectedCapsule) {
+    let jsonText = serialisePrettyJsonWithinUtf8Limit(projectedCapsule);
+    if (jsonText) {
+        return jsonText;
+    }
+
+    const capsule = JSON.parse(JSON.stringify(projectedCapsule));
+    markCapsuleFrontendTruncated(capsule);
+    delete capsule.effect_summary;
+    delete capsule.canonical_scope_modes;
+    compactCapsuleTextSurface(capsule.visible_response, 1024);
+    compactCapsuleTextSurface(capsule.pre_presentation_draft, 1024);
+    compactCapsuleTextSurface(capsule.turn_error?.preview, 256);
+    if (Array.isArray(capsule.effects)) {
+        capsule.effects.forEach((effect) => compactCapsuleTextSurface(effect?.error?.preview, 256));
+    }
+    jsonText = serialisePrettyJsonWithinUtf8Limit(capsule);
+    if (jsonText) {
+        return jsonText;
+    }
+
+    if (Array.isArray(capsule.effects)) {
+        capsule.effects.forEach((effect) => {
+            delete effect.initial_status;
+            delete effect.changed;
+            delete effect.current_outcome_status;
+            delete effect.outcome_resolved;
+            delete effect.reconciliation_status;
+            delete effect.canonical_readback_verdict;
+            delete effect.recovered_by_effect_id;
+            delete effect.workflow_id;
+            delete effect.instance_id;
+            delete effect.evidence_id;
+        });
+        const failedEffects = capsule.effects.filter((effect) => effect?.error?.code);
+        const otherEffects = capsule.effects.filter((effect) => !effect?.error?.code);
+        capsule.effects = [...failedEffects, ...otherEffects];
+    }
+    delete capsule.producer;
+    jsonText = serialisePrettyJsonWithinUtf8Limit(capsule);
+    if (jsonText) {
+        return jsonText;
+    }
+
+    delete capsule.pre_presentation_draft;
+    delete capsule.visible_response;
+    if (capsule.turn_error?.preview) {
+        delete capsule.turn_error.preview;
+    }
+    if (Array.isArray(capsule.effects)) {
+        capsule.effects.forEach((effect) => {
+            if (effect?.error?.preview) {
+                delete effect.error.preview;
+            }
+        });
+        while (capsule.effects.length > 0) {
+            jsonText = serialisePrettyJsonWithinUtf8Limit(capsule);
+            if (jsonText) {
+                return jsonText;
+            }
+            capsule.effects.pop();
+        }
+    }
+    return serialisePrettyJsonWithinUtf8Limit(capsule);
+}
+
+function resolveStoredTurnFailureCapsule(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+    const candidates = [
+        debugData.failure_capsule,
+        debugData.turn_failure_capsule,
+        debugData.turn_execution_diagnostics?.failure_capsule,
+        debugData.turn_execution_record?.failure_capsule
+    ];
+    return candidates.find((candidate) => (
+        candidate
+        && typeof candidate === 'object'
+        && candidate.schema_version === TURN_FAILURE_CAPSULE_SCHEMA_VERSION
+    )) || null;
+}
+
 async function buildLlmDebugClipboardJsonForTurn(turnId) {
+    const debugData = llmDebugData.get(turnId);
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    const storedCapsule = resolveStoredTurnFailureCapsule(debugData);
+    const storedProjection = projectTurnFailureCapsule(storedCapsule);
+    const requestId = resolveConversationTelemetryRequestId(debugData)
+        || storedProjection?.request_id
+        || '';
+    const historyLocation = cloneConversationHistoryLocation(
+        debugData?.turn_execution_diagnostics?.history_location
+        || debugData?.history_location
+    );
+    const hasExactHistoryLocation = Boolean(
+        typeof historyLocation?.session_id === 'string'
+        && historyLocation.session_id.trim()
+        && Number.isInteger(historyLocation.history_index)
+        && historyLocation.history_index >= 0
+    );
+    const fetchedCapsule = requestId && hasExactHistoryLocation
+        ? await fetchTurnFailureCapsule({
+            requestId,
+            sessionId: historyLocation?.session_id || null,
+            historyIndex: Number.isInteger(historyLocation?.history_index)
+                ? historyLocation.history_index
+                : null
+        })
+        : null;
+    const capsule = fetchedCapsule || projectTurnFailureCapsule(storedCapsule, {
+        expectedRequestId: requestId || null
+    });
+    if (!capsule) {
+        return null;
+    }
+    if (fetchedCapsule && typeof turnId === 'string' && turnId.trim()) {
+        setLlmDebugDataEntry(turnId, {
+            ...debugData,
+            turn_failure_capsule: fetchedCapsule
+        });
+    }
+    return stringifyBoundedTurnFailureCapsule(capsule);
+}
+
+async function buildLlmDebugDeepInspectionJsonForTurn(turnId) {
     let debugDataRaw = llmDebugData.get(turnId);
     if (!hasLlmDebugLocatorReference(debugDataRaw)) {
         return null;
@@ -35010,14 +35532,14 @@ async function copyLlmDebugJsonForTurn(turnId, button) {
     const jsonText = await buildLlmDebugClipboardJsonForTurn(turnId, { button });
     if (!jsonText) {
         setLlmDebugButtonCopyState(button, 'failed');
-        showToast('No LLM debug data stored for this turn.');
+        showToast('No bounded turn capsule is available for this turn.');
         return false;
     }
 
     const copied = await copyTextWithClipboardFallback(jsonText);
     setLlmDebugButtonCopyState(button, copied ? 'copied' : 'failed');
     if (!copied) {
-        showToast('Unable to copy LLM reference JSON.');
+        showToast('Unable to copy bounded turn capsule JSON.');
     }
     return copied;
 }
@@ -35220,7 +35742,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 
     // Prefer turn_execution_diagnostics for parity with active-turn diagnostic references.
-    popup.dataset.currentDebugData = await buildLlmDebugClipboardJsonForTurn(turnId, options) || '';
+    popup.dataset.currentDebugData = await buildLlmDebugDeepInspectionJsonForTurn(turnId, options) || '';
 
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
     popup.setAttribute('aria-hidden', 'false');
@@ -36028,6 +36550,43 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
         } else {
             console.warn('[chatTab] Failed to fetch server conversation telemetry locator:', error);
         }
+        return null;
+    }
+}
+
+async function fetchTurnFailureCapsule({
+    requestId,
+    sessionId = null,
+    historyIndex = null
+} = {}) {
+    const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+    if (!cleanRequestId) {
+        return null;
+    }
+
+    try {
+        const params = new URLSearchParams({ request_id: cleanRequestId });
+        const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+        if (cleanSessionId) {
+            params.set('session_id', cleanSessionId);
+        }
+        if (Number.isInteger(historyIndex) && historyIndex >= 0) {
+            params.set('history_index', String(historyIndex));
+        }
+        const response = await fetchWithTimeout(
+            `/von/history/turn_failure_capsule?${params.toString()}`,
+            {
+                headers: buildChatFetchHeaders(),
+                timeoutMs: CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS
+            }
+        );
+        const body = await response.json();
+        if (!response.ok || !body || typeof body !== 'object') {
+            return null;
+        }
+        return projectTurnFailureCapsule(body, { expectedRequestId: cleanRequestId });
+    } catch (error) {
+        console.warn('[chatTab] Failed to fetch bounded turn failure capsule:', error);
         return null;
     }
 }
