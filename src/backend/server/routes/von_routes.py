@@ -10436,6 +10436,19 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     _check_background_cancellation("authentication context")
 
+    linkedin_resource_trusted_binding: str | None = None
+    if user_concept_id:
+        from ...integrations.internal_mcp.linkedin_proxy_mcp import (
+            linkedin_resource_binding_for_user,
+        )
+
+        # The body, conversation, and model cannot select a private LinkedIn
+        # resource. Only the authenticated request actor can acquire this
+        # hidden selector, and every handler rechecks the owner binding.
+        linkedin_resource_trusted_binding = linkedin_resource_binding_for_user(
+            user_concept_id
+        )
+
     authorised_gmail_profile: str | None = None
     gmail_profile_trusted_binding: Mapping[str, Any] | str | None = None
     if not user_concept_id and request_gmail_profile:
@@ -11610,6 +11623,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         adaptive_turn_started = time.perf_counter()
         adaptive_input_context = enhanced_context
         trusted_turn_argument_values: dict[str, Any] = {}
+        if linkedin_resource_trusted_binding is not None:
+            trusted_turn_argument_values["linkedin_resource_id"] = (
+                linkedin_resource_trusted_binding
+            )
         if gmail_profile_trusted_binding is not None:
             trusted_turn_argument_values["gmail_profile"] = (
                 gmail_profile_trusted_binding

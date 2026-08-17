@@ -459,36 +459,41 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "arxiv",
         "display_template": "Materialised paper: {paper_concept_id}",
     },
-    # LinkedIn Data Dump tools
-    "linkedin_list_exports": {
+    # Owner-scoped LinkedIn export tools
+    "linkedin_index_status": {
+        "salience": "medium",
+        "category": "linkedin",
+        "display_template": "LinkedIn index: {records} records",
+    },
+    "linkedin_list_datasets": {
+        "salience": "medium",
+        "category": "linkedin",
+        "display_template": "LinkedIn datasets: {count}",
+    },
+    "linkedin_search_export": {
         "salience": "high",
         "category": "linkedin",
-        "display_template": "{total_exports} exports",
+        "display_template": "LinkedIn export matches: {count}",
     },
-    "linkedin_list_files": {
+    "linkedin_search_connections": {
         "salience": "high",
         "category": "linkedin",
-        "display_template": "Files: {export_name}",
+        "display_template": "LinkedIn connections: {count}",
     },
-    "linkedin_get_profile": {
+    "linkedin_search_messages": {
+        "salience": "high",
+        "category": "linkedin",
+        "display_template": "LinkedIn messages: {count}",
+    },
+    "linkedin_list_connection_organisations": {
         "salience": "medium",
         "category": "linkedin",
-        "display_template": "Profile: {export_name}",
+        "display_template": "LinkedIn organisations: {count}",
     },
-    "linkedin_get_csv_data": {
+    "linkedin_get_record": {
         "salience": "medium",
         "category": "linkedin",
-        "display_template": "CSV: {file_name}",
-    },
-    "linkedin_get_company_stats": {
-        "salience": "medium",
-        "category": "linkedin",
-        "display_template": "Company stats: {export_name}",
-    },
-    "linkedin_get_messages": {
-        "salience": "medium",
-        "category": "linkedin",
-        "display_template": "Messages: {export_name}",
+        "display_template": "LinkedIn record: {record_id}",
     },
     # Web/search tools (HIGH salience)
     "search_web": {
