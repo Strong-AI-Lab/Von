@@ -50,6 +50,7 @@ from ..plan_state_runtime import (
     mark_workflow_plan_state_resume,
 )
 from ..trace_model import WorkflowExecutionTrace
+from ..terminal_success_contracts import resolve_workflow_failed_terminal_error
 from ..trace_store import insert_workflow_execution_trace
 from .authority_snapshot_attestation import (
     DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
@@ -1270,7 +1271,11 @@ class DurableWorkflowExecutor(WorkflowExecutor):
 
             control_signal = get_last_control_signal(context)
             if workflow_final_state_is_failure_like(current_state):
-                error = "workflow_failed_terminal_state"
+                error = resolve_workflow_failed_terminal_error(
+                    contract=(definition.metadata or {}).get(
+                        "terminal_success_contract"
+                    )
+                )
                 trace.finish_failed(error)
                 return _build_result(
                     completed=False,

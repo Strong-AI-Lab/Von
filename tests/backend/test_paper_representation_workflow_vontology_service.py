@@ -480,6 +480,35 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID
     )
     assert source_dispatch_action.inputs["success_policy"] == "allow_partial"
+    source_dispatch_transitions = {
+        transition.reason: transition
+        for transition in source_neutral_definition.states[
+            source_dispatch_state_id
+        ].transitions
+    }
+    assert source_dispatch_transitions[
+        "paper_reference_items_produced_success"
+    ].condition_spec == {
+        "key": "for_each_success_count",
+        "kind": "context_compare",
+        "operator": "gt",
+        "value": 0,
+    }
+    assert source_dispatch_transitions[
+        "paper_reference_items_produced_success"
+    ].to_state == authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        state_id="completed",
+    )
+    assert source_dispatch_transitions[
+        "paper_reference_items_produced_no_success"
+    ].to_state == authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        state_id="failed",
+    )
+    assert source_neutral_definition.metadata["terminal_success_contract"][
+        "failed_terminal_error_code"
+    ] == "paper_reference_ingestion_no_items_succeeded"
     source_required_effects = source_neutral_definition.metadata.get(
         "required_effects_contract"
     )
@@ -1150,14 +1179,19 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     download_state = arxiv_definition.states[download_state_id]
     assert download_state.metadata["retry_policy"]["max_attempts"] == 2
+    assert all(
+        mapping["context_key"] != "arxiv_mcp_failure_details"
+        for mapping in download_state.metadata["tool_output_context_mappings"]
+    )
     download_transitions = {
         transition.reason: transition for transition in download_state.transitions
     }
     assert download_transitions["download_or_finalise_succeeded"].to_state == (
         delegate_state_id
     )
-    assert download_transitions["on_failure"].to_state == build_pdf_import_state_id
-    assert download_transitions["on_failure"].condition_spec == {
+    recovery_transition = download_transitions["on_failure"]
+    assert recovery_transition.to_state == build_pdf_import_state_id
+    assert recovery_transition.condition_spec == {
         "conditions": [
             {
                 "expected": True,
@@ -1165,23 +1199,31 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
                 "kind": "context_flag",
             },
             {
-                "key": "last_action_outputs.result.error_details.provider",
-                "kind": "context_value_equals",
-                "value": "external_third_party",
-            },
-            {
-                "key": "last_action_outputs.result.error_details.external_provider",
-                "kind": "context_value_equals",
-                "value": "arxiv-mcp-server",
+                "key": (
+                    "last_action_outputs.result.error_details."
+                    "recommended_recovery_action"
+                ),
+                "kind": "context_value_in",
+                "values": ["download_from_source", "reacquire_pdf_from_source"],
             },
         ],
         "kind": "all",
     }
+    assert "finalise_cached_pdf" not in recovery_transition.condition_spec[
+        "conditions"
+    ][1]["values"]
     build_pdf_import_action = arxiv_definition.states[
         build_pdf_import_state_id
     ].actions[0]
     assert build_pdf_import_action.action_id == "workflow_control.context_template"
     assert build_pdf_import_action.inputs["assignments"][0]["key"] == "arxiv_pdf_url"
+    import_reason_variable = build_pdf_import_action.inputs["assignments"][2][
+        "variables"
+    ]["failure_kind"]
+    assert import_reason_variable["value_from_context_options"] == [
+        "last_action_outputs.result.error_code",
+        "last_action_outputs.result.error_details.external_provider_failure_kind",
+    ]
     import_pdf_action = arxiv_definition.states[import_pdf_state_id].actions[0]
     assert import_pdf_action.action_id == "import_url_file_copy"
     assert import_pdf_action.inputs["url"] == {
@@ -1218,7 +1260,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     ].actions[0]
     assert record_pdf_import_skipped_action.action_id == "workflow_control.context_set"
     assert record_pdf_import_skipped_action.inputs.get("assignments")[:3] == [
-        {"key": "pdf_acquisition_status", "value": "skipped"},
+        {"key": "pdf_acquisition_status", "value": "unavailable"},
         {"key": "pdf_acquisition_optional", "value": True},
         {
             "key": "pdf_acquisition_failure_stage",
@@ -1599,6 +1641,52 @@ def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_
     assert errors[0]["error"] == "paper_reference_kind_unsupported"
 
 
+def test_source_neutral_paper_reference_workflow_fails_when_no_item_succeeds(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    parent_definition, item_definition = _load_source_neutral_test_definitions()
+    registry, calls = _build_source_neutral_execution_registry(
+        parent_definition=parent_definition,
+        item_definition=item_definition,
+        monkeypatch=monkeypatch,
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        parent_definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_references": [
+                {
+                    "reference_kind": "unsupported_reference",
+                    "source_uri": "urn:example:not-a-paper",
+                }
+            ]
+        },
+    )
+
+    assert result.completed is False
+    assert result.final_state.endswith("_failed")
+    assert result.error == "paper_reference_ingestion_no_items_succeeded"
+    assert result.result_envelope is not None
+    assert result.result_envelope["diagnostics"]["error"] == (
+        "paper_reference_ingestion_no_items_succeeded"
+    )
+    assert result.data["paper_reference_item_count"] == 1
+    assert result.data["for_each_success_count"] == 0
+    assert result.data["for_each_error_count"] == 1
+    assert result.data["iteration_results"][0]["error"] == (
+        "paper_reference_kind_unsupported"
+    )
+    assert calls == []
+
+
 def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
     _reset_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -1889,7 +1977,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "22" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "24" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2084,9 +2172,50 @@ def test_arxiv_launch_contract_resolves_deictic_paper_ids_from_prior_context(
 
 
 @pytest.mark.parametrize("import_succeeds", [True, False])
-def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
+@pytest.mark.parametrize(
+    ("download_error_code", "download_error_details", "expected_import_reason"),
+    [
+        (
+            "external_arxiv_mcp_download_failed",
+            {
+                "provider": "external_third_party",
+                "external_provider": "arxiv-mcp-server",
+                "external_provider_operation": "download_paper",
+                "external_provider_failure_kind": "provider_error",
+                "external_provider_retryable": True,
+                "recovery_hint": "import_pdf_url",
+                "recommended_recovery_action": "download_from_source",
+            },
+            "external_arxiv_mcp_download_failed",
+        ),
+        (
+            "arxiv_acquisition_unavailable",
+            {
+                "acquisition_stage": "proxy_initialisation",
+                "provider_invoked": False,
+                "exception_type": "RuntimeError",
+                "recommended_recovery_action": "download_from_source",
+            },
+            "arxiv_acquisition_unavailable",
+        ),
+        (
+            "arxiv_acquisition_unavailable",
+            {
+                "acquisition_stage": "proxy_initialisation",
+                "provider_invoked": False,
+                "exception_type": "RuntimeError",
+                "recommended_recovery_action": "reacquire_pdf_from_source",
+            },
+            "arxiv_acquisition_unavailable",
+        ),
+    ],
+)
+def test_arxiv_workflow_routes_recoverable_acquisition_failure_to_url_import(
     _reset_mock_db: Any,
     import_succeeds: bool,
+    download_error_code: str,
+    download_error_details: dict[str, Any],
+    expected_import_reason: str,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
@@ -2158,19 +2287,12 @@ def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
         download_calls.append(dict(request.inputs))
         return WorkflowActionResult(
             status="failed",
-            error="external_arxiv_mcp_download_failed",
+            error=download_error_code,
             outputs={
                 "result": {
                     "success": False,
-                    "error_code": "external_arxiv_mcp_download_failed",
-                    "error_details": {
-                        "provider": "external_third_party",
-                        "external_provider": "arxiv-mcp-server",
-                        "external_provider_operation": "download_paper",
-                        "external_provider_failure_kind": "provider_error",
-                        "external_provider_retryable": True,
-                        "recovery_hint": "import_pdf_url",
-                    },
+                    "error_code": download_error_code,
+                    "error_details": dict(download_error_details),
                 }
             },
         )
@@ -2287,11 +2409,11 @@ def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
     )
     assert verify_calls[0]["require_file_copy"] is False
     assert result.data["arxiv_pdf_url"] == "https://arxiv.org/pdf/2406.15341.pdf"
-    assert result.data["arxiv_pdf_import_reason"] == "provider_error"
+    assert result.data["arxiv_pdf_import_reason"] == expected_import_reason
     if import_succeeds:
         assert "pdf_acquisition_status" not in result.data
     else:
-        assert result.data["pdf_acquisition_status"] == "skipped"
+        assert result.data["pdf_acquisition_status"] == "unavailable"
         assert result.data["pdf_acquisition_optional"] is True
         assert result.data["pdf_acquisition_failure_stage"] == (
             "import_arxiv_pdf_from_url"

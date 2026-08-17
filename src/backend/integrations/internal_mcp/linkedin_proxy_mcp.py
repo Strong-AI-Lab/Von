@@ -7,10 +7,10 @@ can expose deterministic, typed tools for LinkedIn export inspection.
 from __future__ import annotations
 
 import ast
-import asyncio
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -267,7 +267,8 @@ def _build_linkedin_config() -> LinkedInProxyConfig:
 
 
 _proxy_instance: Optional[LinkedInMCPProxy] = None
-_proxy_lock = asyncio.Lock()
+# Catalogue calls can run on fresh event loops, so construction is loop-neutral.
+_proxy_lock = threading.Lock()
 
 
 async def get_linkedin_proxy() -> LinkedInMCPProxy:
@@ -275,7 +276,7 @@ async def get_linkedin_proxy() -> LinkedInMCPProxy:
 
     global _proxy_instance
 
-    async with _proxy_lock:
+    with _proxy_lock:
         if _proxy_instance is None:
             config = _build_linkedin_config()
             _proxy_instance = LinkedInMCPProxy(config)

@@ -61,6 +61,7 @@ from .progress_projection import (
     build_progress_facts_for_step,
 )
 from .trace_model import WorkflowExecutionTrace
+from .terminal_success_contracts import resolve_workflow_failed_terminal_error
 
 logger = logging.getLogger(__name__)
 
@@ -2500,7 +2501,11 @@ class WorkflowExecutor:
                     transitions=transitions,
                     trace=trace,
                     final_state=current_state,
-                    error="workflow_failed_terminal_state",
+                    error=resolve_workflow_failed_terminal_error(
+                        contract=(definition.metadata or {}).get(
+                            "terminal_success_contract"
+                        )
+                    ),
                 )
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
                 return self._complete_with_gate(

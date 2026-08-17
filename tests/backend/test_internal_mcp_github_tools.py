@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -332,7 +332,7 @@ async def test_github_proxy_initialisation_does_not_log_config_arguments(
 
     monkeypatch.setattr(runtime_env, "get_project_root", lambda: tmp_path)
     monkeypatch.setattr(github_proxy_mcp, "_proxy_instance", None)
-    monkeypatch.setattr(github_proxy_mcp, "_proxy_lock", asyncio.Lock())
+    monkeypatch.setattr(github_proxy_mcp, "_proxy_lock", threading.Lock())
     caplog.set_level("INFO")
 
     proxy = await github_proxy_mcp.get_github_proxy()

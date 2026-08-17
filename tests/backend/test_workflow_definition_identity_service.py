@@ -904,6 +904,41 @@ def test_validate_contract_rejects_invalid_terminal_success_contract() -> None:
     )
 
 
+def test_validate_contract_rejects_invalid_failed_terminal_error_code() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#terminal_success_contract_invalid_error_code_workflow",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        metadata={
+            "terminal_success_contract": {
+                "schema_version": "workflow_terminal_success_contract.v1",
+                "failed_terminal_error_code": {"not": "a string"},
+            }
+        },
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert validation["terminal_success_contract_issues"] == [
+        {
+            "scope": "workflow",
+            "reason_code": (
+                "workflow_terminal_success_contract_"
+                "failed_terminal_error_code_invalid"
+            ),
+        }
+    ]
+
+
+
 def test_validate_contract_rejects_invalid_required_effects_contract() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#required_effects_contract_invalid_workflow",

@@ -4830,7 +4830,38 @@ def _download_paper(**kwargs):
                 preferred_filename=kwargs.get("filename"),
             )
             if not isinstance(stored, Mapping):
-                proxy = await get_arxiv_proxy()
+                try:
+                    proxy = await get_arxiv_proxy()
+                except ArxivProxyError:
+                    raise
+                except Exception as exc:
+                    cause_preview = f"{type(exc).__name__}: {exc}"[:500]
+                    return make_error_response(
+                        "arxiv_acquisition_unavailable",
+                        (
+                            "The arXiv acquisition adapter could not be initialised "
+                            "before the provider was invoked."
+                        ),
+                        details={
+                            "arxiv_id": arxiv_id,
+                            "exception_type": type(exc).__name__,
+                            "cause_preview": cause_preview,
+                            "acquisition_stage": "proxy_initialisation",
+                            "provider_invoked": False,
+                            "cache_state": cache_diagnostics.get("cache_state"),
+                            "cache_diagnostics": cache_diagnostics,
+                            "recommended_recovery_action": cache_recovery_action,
+                            "partial_cache_recovery_attempted": (
+                                partial_cache_recovery_attempted
+                            ),
+                            "partial_cache_markdown_deleted": (
+                                partial_cache_markdown_deleted
+                            ),
+                            "partial_cache_recovery_error": (
+                                partial_cache_recovery_error
+                            ),
+                        },
+                    )
                 stored = await proxy.download_paper(
                     arxiv_id=arxiv_id,
                     filename=kwargs.get("filename"),
