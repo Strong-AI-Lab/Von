@@ -54,6 +54,7 @@ from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
 from ...services import conversation_management_service
 from ...services.adaptive_turn_service import (
+    build_effect_outcome_spoken_fallback,
     execute_adaptive_turn,
 )
 from ...services.conversation_turn_memory_context_service import (
@@ -7707,6 +7708,51 @@ def _extract_presenter_channels(text: str) -> dict[str, object] | None:
     }
 
 
+_CANONICAL_MODEL_DRAFT_MARKER = "\n\n### Model draft (non-authoritative)\n\n"
+
+
+def _canonical_report_terminal_status(screen_text: object) -> str | None:
+    """Recognise only the controlled lead at the start of a canonical report."""
+
+    if not isinstance(screen_text, str):
+        return None
+    authoritative_text, _marker, _draft = screen_text.partition(
+        _CANONICAL_MODEL_DRAFT_MARKER
+    )
+    lines = [line.strip() for line in authoritative_text.splitlines()]
+    nonempty_lines = [line for line in lines if line]
+    if not nonempty_lines or nonempty_lines[0] != "## Effect outcome report":
+        return None
+    lead = nonempty_lines[1] if len(nonempty_lines) > 1 else ""
+    return {
+        "This turn completed only partially.": "effect_partially_completed",
+        "This turn has at least one unresolved effect outcome.": (
+            "effect_outcome_indeterminate"
+        ),
+        "This turn did not complete all requested effects.": "effect_failed",
+        "At least one requested effect was not started.": "effect_not_started",
+        "The model did not produce a reliable final answer.": "model_error",
+        "The model did not produce a usable final answer.": "model_non_answer",
+    }.get(lead)
+
+
+def _buttonify_response_text(
+    response_text: Any,
+    *,
+    canonical_outcome: bool,
+) -> str:
+    """Return only authoritative answer text for quick-reply generation."""
+
+    if not isinstance(response_text, str):
+        return ""
+    if not canonical_outcome:
+        return response_text
+    authoritative_text, marker, _draft = response_text.partition(
+        _CANONICAL_MODEL_DRAFT_MARKER
+    )
+    return authoritative_text.strip() if marker else response_text
+
+
 def _presenter_tag_present(text: str, tag: str) -> bool:
     return _extract_tagged_block(text, tag) is not None
 
@@ -11753,6 +11799,19 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             getattr(adaptive_turn_result, "response_authority", "model") or "model"
         ).strip()
         canonical_outcome_response = response_authority == "canonical_outcome"
+        raw_canonical_spoken_text = getattr(
+            adaptive_turn_result,
+            "canonical_outcome_spoken_text",
+            None,
+        )
+        canonical_spoken_text = (
+            raw_canonical_spoken_text.strip()
+            if isinstance(raw_canonical_spoken_text, str)
+            and raw_canonical_spoken_text.strip()
+            else build_effect_outcome_spoken_fallback(
+                terminal_status=adaptive_terminal_status,
+            )
+        )
         adaptive_partial_delivery = (
             adaptive_terminal_status == "effect_partially_completed"
             and isinstance(response_text, str)
@@ -11823,15 +11882,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
 
-        presenter_channels = (
-            {
-                "screen": response_text,
-                "spoken": response_text,
-                "format": "effect_outcome_report_v1",
-            }
-            if presenter_mode_requested and canonical_outcome_response
-            else _extract_presenter_channels(response_text)
-        )
+        if canonical_outcome_response:
+            presenter_channels = (
+                {
+                    "screen": response_text,
+                    "spoken": canonical_spoken_text,
+                    "format": "effect_outcome_report_v1",
+                }
+                if presenter_mode_requested
+                else None
+            )
+        else:
+            presenter_channels = _extract_presenter_channels(response_text)
         current_turn_messages = [{"role": "user", "content": prompt_text}]
         if tool_messages:
             current_turn_messages.extend(tool_messages)
@@ -12663,17 +12725,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             False if eligibility_denied else None
                         ),
                     )
-                presenter_channels = presenter_channels
-
         spoken_backfill_latency_ms = (
             time.perf_counter() - spoken_backfill_started_perf
         ) * 1000.0
         if not presenter_mode_requested:
             spoken_backfill_status = "skipped"
             spoken_backfill_suppression_reason = "presenter_mode_disabled"
-        elif canonical_outcome_response:
-            spoken_backfill_status = "skipped"
-            spoken_backfill_suppression_reason = "canonical_outcome_report"
         elif not needs_spoken_backfill:
             spoken_backfill_status = "skipped"
             spoken_backfill_suppression_reason = "not_required"
@@ -12980,6 +13037,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_suppression_reason = None
         buttonify_model_attempted = False
         buttonify_filtering_boundary: dict[str, Any] | None = None
+        buttonify_source_text = _buttonify_response_text(
+            response_text,
+            canonical_outcome=canonical_outcome_response,
+        )
 
         if not buttonify_setting_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
@@ -12993,7 +13054,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             buttonify_suppression_reason = "buttonify_disabled"
         elif not buttonify_allowed:
             buttonify_suppression_reason = "buttonify_not_allowed"
-        elif not isinstance(response_text, str) or not response_text.strip():
+        elif not buttonify_source_text.strip():
             buttonify_suppression_reason = "empty_response"
         else:
             buttonify_status = "no_op"
@@ -13014,7 +13075,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     BUTTONIFY_PROMPT_IDS,
                     variables={
                         "user_message": prompt_text,
-                        "assistant_response": response_text,
+                        "assistant_response": buttonify_source_text,
                     },
                     fallback=None,
                     max_chars=6000,
@@ -13038,7 +13099,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
             if buttonify_prompt_available and not buttonify_options:
                 buttonify_response = None
-                if _contains_openai_quota_error(response_text):
+                if _contains_openai_quota_error(buttonify_source_text):
                     buttonify_suppression_reason = "quota_exhausted"
                 else:
                     buttonify_model_attempted = True
@@ -13148,9 +13209,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 input_summary={
                     "buttonify_enabled": buttonify_enabled,
                     "buttonify_allowed": buttonify_allowed,
-                    "response_text_chars": (
-                        len(response_text) if isinstance(response_text, str) else 0
-                    ),
+                    "response_text_chars": len(buttonify_source_text),
                 },
                 output_summary={
                     "options": list(buttonify_options),
@@ -14923,6 +14982,8 @@ def history_backfill_spoken():
     except Exception:
         owner_user_id = user_concept_id
 
+    replace_unsafe_canonical_channels = False
+
     # Fetch the stored assistant message and associated previous user prompt.
     try:
         chat_history_coll = chat_history_service.get_chat_history_collection_service()
@@ -14951,6 +15012,7 @@ def history_backfill_spoken():
         if not isinstance(screen_text, str) or not screen_text.strip():
             return jsonify({"error": "Assistant message has no content"}), 400
         screen_text = screen_text.strip()
+        legacy_canonical_status = _canonical_report_terminal_status(screen_text)
 
         existing_debug = entry.get("llm_debug_data")
         existing_channels = None
@@ -14959,35 +15021,47 @@ def history_backfill_spoken():
         if not force and isinstance(existing_channels, dict):
             spoken_existing = existing_channels.get("spoken")
             if isinstance(spoken_existing, str) and spoken_existing.strip():
-                existing_display_elements = (
-                    existing_debug.get("display_elements")
-                    if isinstance(existing_debug, dict)
-                    else None
-                )
-                if not isinstance(existing_display_elements, dict):
-                    existing_display_elements = build_turn_display_elements(
-                        response_text=screen_text,
-                        presenter_channels=existing_channels,
+                existing_format = str(existing_channels.get("format") or "").strip()
+                unsafe_canonical_channels = bool(
+                    legacy_canonical_status
+                    and (
+                        existing_format != "effect_outcome_report_v1"
+                        or spoken_existing.strip() == screen_text
+                        or "## Effect outcome report" in spoken_existing
                     )
-                existing_health = None
-                if isinstance(existing_debug, dict):
-                    existing_health = existing_debug.get("turn_output_health")
-                if not isinstance(existing_health, dict):
-                    existing_health = build_turn_output_health(
+                )
+                if unsafe_canonical_channels:
+                    replace_unsafe_canonical_channels = True
+                else:
+                    existing_display_elements = (
+                        existing_debug.get("display_elements")
+                        if isinstance(existing_debug, dict)
+                        else None
+                    )
+                    if not isinstance(existing_display_elements, dict):
+                        existing_display_elements = build_turn_display_elements(
+                            response_text=screen_text,
+                            presenter_channels=existing_channels,
+                        )
+                    existing_health = None
+                    if isinstance(existing_debug, dict):
+                        existing_health = existing_debug.get("turn_output_health")
+                    if not isinstance(existing_health, dict):
+                        existing_health = build_turn_output_health(
+                            {
+                                "presenter_channels": existing_channels,
+                                "display_elements": existing_display_elements,
+                            }
+                        )
+                    return jsonify(
                         {
+                            "status": "already_present",
                             "presenter_channels": existing_channels,
                             "display_elements": existing_display_elements,
+                            "turn_output_health": existing_health,
+                            "updated": False,
                         }
                     )
-                return jsonify(
-                    {
-                        "status": "already_present",
-                        "presenter_channels": existing_channels,
-                        "display_elements": existing_display_elements,
-                        "turn_output_health": existing_health,
-                        "updated": False,
-                    }
-                )
 
         prompt_text = ""
         for i in range(history_index - 1, -1, -1):
@@ -15005,6 +15079,73 @@ def history_backfill_spoken():
 
     except Exception as e:
         return jsonify({"error": f"Failed reading history: {e}"}), 500
+
+    if legacy_canonical_status:
+        spoken = build_effect_outcome_spoken_fallback(
+            terminal_status=legacy_canonical_status,
+        )
+        presenter_channels = {
+            "screen": screen_text,
+            "spoken": spoken,
+            "format": "effect_outcome_report_v1",
+        }
+        spoken_backfill_reason = "legacy_canonical_outcome_report"
+        display_elements_contract = build_turn_display_elements(
+            response_text=screen_text,
+            presenter_channels=presenter_channels,
+            spoken_backfill_second_pass_attempted=True,
+            spoken_backfill_second_pass_reason=spoken_backfill_reason,
+        )
+        turn_output_health = build_turn_output_health(
+            {
+                "presenter_channels": presenter_channels,
+                "display_elements": display_elements_contract,
+                "spoken_backfill_second_pass_attempted": True,
+                "spoken_backfill_second_pass_reason": spoken_backfill_reason,
+            }
+        )
+        persistence_attempted = owner_user_id == user_concept_id
+        persistence_suppression_reason = None
+        if persistence_attempted:
+            try:
+                update_result = (
+                    chat_history_service.upsert_presenter_channels_for_history_message(
+                        user_id=owner_user_id,
+                        session_id=target_session_id,
+                        history_index=history_index,
+                        presenter_channels=presenter_channels,
+                        display_elements=display_elements_contract,
+                        turn_output_health=turn_output_health,
+                        generated_at=datetime.now(timezone.utc),
+                        force=force or replace_unsafe_canonical_channels,
+                    )
+                )
+            except Exception as exc:
+                return (
+                    jsonify({"error": f"Failed persisting safe talk track: {exc}"}),
+                    500,
+                )
+        else:
+            # An accepted invite permits the viewer to read and present the owner's
+            # conversation.  It does not grant authority to mutate the owner's
+            # history carrier merely to cache a derived talk track.
+            update_result = {"updated": False, "matched": True}
+            persistence_suppression_reason = (
+                "shared_viewer_owner_history_write_not_authorised"
+            )
+        return jsonify(
+            {
+                "status": "ok",
+                "source": "deterministic_legacy_canonical_fallback",
+                "presenter_channels": presenter_channels,
+                "display_elements": display_elements_contract,
+                "turn_output_health": turn_output_health,
+                "updated": bool(update_result.get("updated")),
+                "matched": bool(update_result.get("matched")),
+                "persistence_attempted": persistence_attempted,
+                "persistence_suppression_reason": persistence_suppression_reason,
+            }
+        )
 
     # Load narration prompt fragments (best-effort).
     narration_prompt_text = None

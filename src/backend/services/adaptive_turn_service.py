@@ -117,6 +117,7 @@ class AdaptiveTurnResult:
     evidence_index: Sequence[Mapping[str, Any]] = ()
     response_authority: str = "model"
     conversation_situation: str | None = None
+    canonical_outcome_spoken_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -4205,6 +4206,496 @@ def _effect_scope_fact(
     return None
 
 
+_EFFECT_OUTCOME_FALLBACK_NARRATION = {
+    "effect_partially_completed": (
+        "I couldn't complete or confirm every requested change. The screen has the "
+        "details and explains what remains uncertain."
+    ),
+    "effect_outcome_indeterminate": (
+        "I couldn't confirm the result of every change. The screen explains what "
+        "needs checking before you try again."
+    ),
+    "effect_failed": (
+        "I couldn't complete every requested change. The screen shows what failed "
+        "and whether anything changed."
+    ),
+    "effect_not_started": (
+        "I couldn't start every requested change. The screen explains what happened "
+        "and what you can do next."
+    ),
+    "model_error": (
+        "I couldn't produce a fully reliable final answer. "
+        "The screen has the details and anything that still needs checking."
+    ),
+    "model_non_answer": (
+        "I couldn't produce a useful final answer. The screen has the details and "
+        "anything that still needs checking."
+    ),
+}
+
+
+def build_effect_outcome_spoken_fallback(
+    *,
+    terminal_status: str,
+    narration_context: Mapping[str, Any] | None = None,
+) -> str:
+    """Return a short human fallback when semantic narration is unavailable."""
+
+    spoken = _EFFECT_OUTCOME_FALLBACK_NARRATION.get(
+        str(terminal_status or "").strip(),
+        (
+            "I couldn't finish this cleanly. The screen shows what happened and "
+            "what still needs attention."
+        ),
+    )
+    context = narration_context if isinstance(narration_context, Mapping) else {}
+    scope = str(context.get("scope") or "").strip()
+    if scope == (
+        "at least one checked result is in the current user's personal scope; "
+        "organisation publication was not established"
+    ):
+        spoken += (
+            " A checked result is in your personal scope; this does not establish "
+            "organisation publication."
+        )
+    elif scope == "at least one checked result has organisation scope":
+        spoken += " A checked result has organisation scope."
+    elif scope == "at least one checked result has global scope":
+        spoken += " A checked result has global scope."
+    elif scope == "multiple scopes":
+        spoken += " The work shown spans more than one scope."
+    return spoken
+
+
+def _safe_narration_operation(value: Any) -> str:
+    """Return a bounded display label without exposing identifiers or markup."""
+
+    raw = str(value or "").strip()
+    if re.search(
+        r"(?i)(?:\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        r"[0-9a-f]{4}-[0-9a-f]{12}\b|\b[0-9a-f]{16,}\b)",
+        raw,
+    ):
+        return "one requested operation"
+    raw = raw.removeprefix("#V#")
+    raw = re.sub(r"[_-]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    if (
+        not raw
+        or len(raw) > 80
+        or any(character.isdigit() for character in raw)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .&/'()]*", raw)
+    ):
+        return "one requested operation"
+    if raw.islower():
+        raw = raw[0].upper() + raw[1:]
+    return raw
+
+
+def _safe_narration_target_label(value: Any) -> str | None:
+    """Humanise a conservative Vontology slug without exposing its identifier."""
+
+    match = re.fullmatch(r"#V#([A-Za-z][A-Za-z0-9_]{1,60})", str(value or "").strip())
+    if not match:
+        return None
+    words = match.group(1).split("_")
+    # Identifiers commonly end in short mixed letter/digit digests.  A target
+    # containing any digit is therefore kept on screen instead of guessed at
+    # as a human label.
+    if any(
+        not word or any(character.isdigit() for character in word)
+        for word in words
+    ):
+        return None
+    minor_words = {"a", "an", "and", "at", "for", "in", "of", "on", "the", "to"}
+    label_words = [
+        word.lower() if index and word.lower() in minor_words else word.capitalize()
+        for index, word in enumerate(words)
+    ]
+    return " ".join(label_words)
+
+
+def _project_effect_outcome_narration_fact(
+    fact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project one effect into safe semantic data for the narration renderer."""
+
+    raw_status = str(fact.get("effect_status") or "unknown").strip().lower()
+    known_statuses = {
+        "succeeded",
+        "failed",
+        "partial",
+        "indeterminate",
+        "not_started",
+        "not started",
+    }
+    status = (
+        raw_status
+        if raw_status in known_statuses
+        else "unknown"
+    )
+    projected: dict[str, Any] = {
+        "operation": _safe_narration_operation(fact.get("tool")),
+        "original_status": status.replace("_", " "),
+    }
+    target_ids = fact.get("target_ids")
+    if isinstance(target_ids, Sequence) and not isinstance(target_ids, (str, bytes)):
+        target_labels: list[str] = []
+        for value in target_ids:
+            label = _safe_narration_target_label(value)
+            if label and label not in target_labels:
+                target_labels.append(label)
+            if len(target_labels) == 2:
+                break
+        if target_labels:
+            projected["targets"] = target_labels
+
+    if status == "succeeded":
+        if fact.get("reconciliation_status") == "canonically_verified":
+            projected.update(
+                outcome="succeeded",
+                confirmation="confirmed after checking the current state",
+            )
+        elif fact.get("canonical_readback_verified") is True:
+            projected.update(
+                outcome="succeeded",
+                confirmation="confirmed in the current state",
+            )
+        elif fact.get("canonical_readback_present") is True:
+            projected.update(
+                outcome="reported as succeeded",
+                confirmation="not confirmed by the current-state check",
+            )
+        else:
+            projected.update(
+                outcome="reported as succeeded",
+                confirmation="not independently confirmed",
+            )
+        return projected
+
+    if fact.get("recovered_by_effect_id"):
+        projected["outcome"] = "recovered by a later successful retry"
+        if fact.get("current_outcome_status") == "target_absent":
+            projected["state_before_retry"] = "the requested target was absent"
+        return projected
+
+    if fact.get("outcome_resolved") is True:
+        projected.update(
+            outcome="the current state was checked",
+        )
+        current_outcome = str(fact.get("current_outcome_status") or "").strip()
+        if current_outcome == "target_observed":
+            projected["current_state"] = "the requested target is now present"
+        elif current_outcome == "target_absent":
+            projected["current_state"] = "the requested target is absent"
+        else:
+            projected["current_state"] = "the current-state check resolved the outcome"
+        return projected
+
+    projected["outcome"] = {
+        "partial": "completed only partly",
+        "failed": "failed",
+        "indeterminate": "could not be confirmed",
+        "not_started": "was not started",
+        "not started": "was not started",
+    }.get(status, "could not be confirmed")
+    if fact.get("changed") is True:
+        projected["possible_state_change"] = True
+    elif fact.get("changed") is False:
+        projected["reported_no_change"] = True
+    return projected
+
+
+def build_effect_outcome_narration_context(
+    *,
+    terminal_status: str,
+    facts: Sequence[Mapping[str, Any]],
+    canonical_scopes: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Build bounded authoritative data for a natural spoken synopsis."""
+
+    normalised_facts = [fact for fact in facts if isinstance(fact, Mapping)]
+
+    def _salience(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int]:
+        index, fact = item
+        status = str(fact.get("effect_status") or "").strip().lower()
+        if (
+            status in {"failed", "partial", "indeterminate", "not_started"}
+            and fact.get("outcome_resolved") is not True
+            and not fact.get("recovered_by_effect_id")
+        ):
+            return (0, index)
+        if status != "succeeded" and fact.get("outcome_resolved") is True:
+            return (1, index)
+        if (
+            status == "succeeded"
+            and fact.get("reconciliation_status") != "canonically_verified"
+            and fact.get("canonical_readback_verified") is not True
+        ):
+            return (2, index)
+        return (3, index)
+
+    salient_facts = [
+        fact
+        for _index, fact in sorted(enumerate(normalised_facts), key=_salience)
+    ]
+    projected_facts = [
+        _project_effect_outcome_narration_fact(fact) for fact in salient_facts
+    ]
+    scope_keys: list[tuple[str, str]] = []
+    for scope_fact in canonical_scopes:
+        if not isinstance(scope_fact, Mapping):
+            continue
+        mode = str(scope_fact.get("mode") or "").strip().lower()
+        concept_id = str(scope_fact.get("concept_id") or "").strip()
+        scope_key = (mode, concept_id)
+        if mode in {"user", "organisation", "global"} and scope_key not in scope_keys:
+            scope_keys.append(scope_key)
+
+    if len(scope_keys) > 1:
+        scope = "multiple scopes"
+    elif scope_keys and scope_keys[0][0] == "user":
+        scope = (
+            "at least one checked result is in the current user's personal scope; "
+            "organisation publication was not established"
+        )
+    elif scope_keys and scope_keys[0][0] == "organisation":
+        scope = "at least one checked result has organisation scope"
+    elif scope_keys and scope_keys[0][0] == "global":
+        scope = "at least one checked result has global scope"
+    else:
+        scope = None
+
+    turn_outcome = {
+        "effect_partially_completed": "partially completed",
+        "effect_outcome_indeterminate": "at least one result could not be confirmed",
+        "effect_failed": "not all requested work completed",
+        "effect_not_started": "at least one requested operation was not started",
+        "model_error": "no reliable final answer was produced",
+        "model_non_answer": "no useful final answer was produced",
+    }.get(str(terminal_status or "").strip(), "unknown")
+
+    return {
+        "schema_version": "adaptive_turn_effect_narration_input.v1",
+        "turn_outcome": turn_outcome,
+        "operation_outcomes": projected_facts[:3],
+        "additional_operation_count": max(0, len(projected_facts) - 3),
+        "scope": scope,
+    }
+
+
+def _join_spoken_labels(labels: Sequence[str]) -> tuple[str, bool]:
+    bounded = [str(label).strip() for label in labels if str(label).strip()][:2]
+    if not bounded:
+        return "", False
+    if len(bounded) == 1:
+        return bounded[0], False
+    return f"{bounded[0]} and {bounded[1]}", True
+
+
+def _effect_outcome_spoken_fact(fact: Mapping[str, Any]) -> tuple[str, set[str]]:
+    """Render one projected fact without giving a model room to change its meaning."""
+
+    raw_targets = fact.get("targets")
+    targets = (
+        [target for target in raw_targets if isinstance(target, str) and target.strip()]
+        if isinstance(raw_targets, Sequence)
+        and not isinstance(raw_targets, (str, bytes))
+        else []
+    )
+    subject, plural = _join_spoken_labels(targets)
+    covered_targets = {target.casefold() for target in targets}
+    operation = str(fact.get("operation") or "").strip()
+    operation_reference = (
+        f"the {operation.lower()} step"
+        if operation and operation != "one requested operation"
+        else "the requested change"
+    )
+    outcome = str(fact.get("outcome") or "").strip()
+    current_state = str(fact.get("current_state") or "").strip()
+
+    if outcome == "the current state was checked":
+        if current_state == "the requested target is now present":
+            if subject:
+                return (
+                    f"{subject} {'are' if plural else 'is'} now present, but I "
+                    "couldn't confirm whether the original attempt itself succeeded.",
+                    covered_targets,
+                )
+            return (
+                "The requested result is now present, but I couldn't confirm whether "
+                "the original attempt itself succeeded.",
+                covered_targets,
+            )
+        if current_state == "the requested target is absent":
+            if subject:
+                return (
+                    f"{subject} {'are' if plural else 'is'} not present, and I "
+                    "couldn't confirm the original attempt as successful.",
+                    covered_targets,
+                )
+            return (
+                "The requested result is not present, and I couldn't confirm the "
+                "original attempt as successful.",
+                covered_targets,
+            )
+        return (
+            f"I established the current state for {subject or operation_reference}, "
+            "but I still couldn't confirm whether the original attempt succeeded.",
+            covered_targets,
+        )
+
+    if outcome == "succeeded":
+        if subject:
+            return f"I confirmed the result for {subject}.", covered_targets
+        return f"I confirmed that {operation_reference} succeeded.", covered_targets
+
+    if outcome == "reported as succeeded":
+        reported_subject = (
+            f"The change for {subject}"
+            if subject
+            else operation_reference.capitalize()
+        )
+        return (
+            f"{reported_subject} was reported as successful, but I couldn't "
+            "confirm the result independently.",
+            covered_targets,
+        )
+
+    if outcome == "recovered by a later successful retry":
+        recovered_subject = (
+            f"The change for {subject}"
+            if subject
+            else operation_reference.capitalize()
+        )
+        return (
+            f"{recovered_subject} succeeded on a later retry.",
+            covered_targets,
+        )
+
+    if outcome == "completed only partly":
+        partial_subject = (
+            f"The change for {subject}"
+            if subject
+            else operation_reference.capitalize()
+        )
+        return f"{partial_subject} completed only partly.", covered_targets
+    if outcome == "failed":
+        failed_subject = f"the change for {subject}" if subject else operation_reference
+        return f"I couldn't complete {failed_subject}.", covered_targets
+    if outcome == "was not started":
+        pending_subject = (
+            f"The change for {subject}"
+            if subject
+            else operation_reference.capitalize()
+        )
+        return f"{pending_subject} was not started.", covered_targets
+    unresolved_subject = subject or operation_reference
+    return f"I couldn't confirm the result for {unresolved_subject}.", covered_targets
+
+
+def build_effect_outcome_spoken_text(
+    *,
+    terminal_status: str,
+    narration_context: Mapping[str, Any] | None = None,
+) -> str:
+    """Render a concise, natural synopsis from the authority-safe projection."""
+
+    context = narration_context if isinstance(narration_context, Mapping) else {}
+    raw_outcomes = context.get("operation_outcomes")
+    outcomes = (
+        [item for item in raw_outcomes if isinstance(item, Mapping)]
+        if isinstance(raw_outcomes, Sequence)
+        and not isinstance(raw_outcomes, (str, bytes))
+        else []
+    )
+    operation_sentences: list[str] = []
+    rendered_outcomes: list[str] = []
+    covered_targets: set[str] = set()
+    for outcome in outcomes:
+        raw_targets = outcome.get("targets")
+        outcome_targets = {
+            str(target).strip().casefold()
+            for target in (
+                raw_targets
+                if isinstance(raw_targets, Sequence)
+                and not isinstance(raw_targets, (str, bytes))
+                else []
+            )
+            if str(target).strip()
+        }
+        if outcome_targets and outcome_targets.issubset(covered_targets):
+            continue
+        sentence, sentence_targets = _effect_outcome_spoken_fact(outcome)
+        if sentence:
+            operation_sentences.append(sentence)
+            rendered_outcomes.append(str(outcome.get("outcome") or "").strip())
+            covered_targets.update(sentence_targets)
+        if len(operation_sentences) == 2:
+            break
+
+    if not operation_sentences:
+        return build_effect_outcome_spoken_fallback(
+            terminal_status=terminal_status,
+            narration_context=context,
+        )
+
+    terminal_leads = {
+        "effect_partially_completed": (
+            "I couldn't complete or confirm every requested change."
+        ),
+        "effect_outcome_indeterminate": (
+            "I couldn't confirm every requested result."
+        ),
+        "effect_failed": "I couldn't complete every requested change.",
+        "effect_not_started": "I couldn't start every requested change.",
+        "model_error": "I couldn't produce a fully reliable final answer.",
+        "model_non_answer": "I couldn't produce a useful final answer.",
+    }
+    normalised_terminal_status = str(terminal_status or "").strip()
+    always_needs_lead = normalised_terminal_status in {
+        "model_error",
+        "model_non_answer",
+    }
+    positive_outcomes = {"succeeded", "recovered by a later successful retry"}
+    only_positive_operation_sentences = bool(rendered_outcomes) and all(
+        outcome in positive_outcomes for outcome in rendered_outcomes
+    )
+    lead = terminal_leads.get(normalised_terminal_status)
+    if lead and (always_needs_lead or only_positive_operation_sentences):
+        sentences = [lead, operation_sentences[0]]
+    else:
+        sentences = operation_sentences
+
+    scope = str(context.get("scope") or "").strip()
+    if scope == (
+        "at least one checked result is in the current user's personal scope; "
+        "organisation publication was not established"
+    ):
+        closing = (
+            "One checked result is in your personal scope, not published to the "
+            "organisation; the exact details are on screen."
+        )
+    elif scope == "at least one checked result has organisation scope":
+        closing = (
+            "One checked result has organisation scope; the exact details are on "
+            "screen."
+        )
+    elif scope == "at least one checked result has global scope":
+        closing = (
+            "One checked result has global scope; the exact details are on screen."
+        )
+    elif scope == "multiple scopes":
+        closing = (
+            "The results shown span more than one scope; the exact details are on "
+            "screen."
+        )
+    else:
+        closing = "The exact details are on screen."
+    sentences.append(closing)
+    return " ".join(sentences)
+
+
 def _build_effect_outcome_report(
     *,
     terminal_status: str,
@@ -4462,11 +4953,21 @@ def _build_effect_outcome_report(
                 "Inspect the named current state before retrying an unresolved effect.",
             )
         )
+    narration_context = build_effect_outcome_narration_context(
+        terminal_status=terminal_status,
+        facts=facts,
+        canonical_scopes=scope_facts,
+    )
     report = {
         "schema_version": "adaptive_turn_effect_outcome_report.v1",
         "terminal_status": terminal_status,
         "facts": facts,
         "canonical_scopes": scope_facts,
+        "narration_context": narration_context,
+        "spoken_text": build_effect_outcome_spoken_text(
+            terminal_status=terminal_status,
+            narration_context=narration_context,
+        ),
     }
     return "\n".join(lines), report
 
@@ -6510,6 +7011,7 @@ def execute_adaptive_turn(
         if cited_ontology_mutation_claim_conflicts and status == "completed":
             status = "effect_partially_completed"
         response_authority = "model"
+        canonical_outcome_spoken_text = None
         if cited_ontology_mutation_claim_conflicts:
             aux_calls.append(
                 {
@@ -6536,6 +7038,12 @@ def execute_adaptive_turn(
                 effect_snapshot=effect_snapshot,
                 tool_invocations=reconciled_invocations,
                 trusted_scope=scope,
+            )
+            raw_spoken_text = outcome_report.get("spoken_text")
+            canonical_outcome_spoken_text = (
+                raw_spoken_text.strip()
+                if isinstance(raw_spoken_text, str) and raw_spoken_text.strip()
+                else None
             )
             if model_answer_completed and model_draft.strip():
                 quoted_draft = "\n".join(
@@ -6611,6 +7119,7 @@ def execute_adaptive_turn(
             evidence_index=tuple(evidence_index),
             response_authority=response_authority,
             conversation_situation=updated_conversation_situation,
+            canonical_outcome_spoken_text=canonical_outcome_spoken_text,
         )
 
     def synthesis_draft_text() -> str:

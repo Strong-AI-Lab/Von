@@ -58,6 +58,9 @@ from src.backend.services.adaptive_turn_service import (
     _ordinary_effect_argument_denial,
     _scope_message,
     _trusted_tool_payload,
+    build_effect_outcome_narration_context,
+    build_effect_outcome_spoken_fallback,
+    build_effect_outcome_spoken_text,
     execute_adaptive_turn,
     ordinary_turn_capability_delegation,
 )
@@ -104,6 +107,163 @@ class _SequenceClient:
         if isinstance(next_response, BaseException):
             raise next_response
         return next_response
+
+
+def test_effect_outcome_narration_context_is_safe_and_finality_preserving() -> None:
+    context = build_effect_outcome_narration_context(
+        terminal_status="effect_partially_completed",
+        facts=(
+            {
+                "tool": "Entity Representation Workflow",
+                "effect_status": "succeeded",
+                "reconciliation_status": "canonically_verified",
+                "target_ids": ("#V#university_of_waikato",),
+            },
+            {
+                "tool": "Create Concepts",
+                "effect_status": "indeterminate",
+                "outcome_resolved": True,
+                "current_outcome_status": "target_observed",
+                "target_ids": (
+                    "#V#university_of_waikato",
+                    "not-a-safe-target-label",
+                ),
+                "error": "raw failure details must not be narrated",
+                "effect_id": "11111111-2222-3333-4444-555555555555",
+            },
+        ),
+        canonical_scopes=({"mode": "user", "concept_id": "#V#person"},),
+    )
+
+    assert context["turn_outcome"] == "partially completed"
+    assert context["scope"] == (
+        "at least one checked result is in the current user's personal scope; "
+        "organisation publication was not established"
+    )
+    assert context["operation_outcomes"] == [
+        {
+            "operation": "Create Concepts",
+            "original_status": "indeterminate",
+            "targets": ["University of Waikato"],
+            "outcome": "the current state was checked",
+            "current_state": "the requested target is now present",
+        },
+        {
+            "operation": "Entity Representation Workflow",
+            "original_status": "succeeded",
+            "targets": ["University of Waikato"],
+            "outcome": "succeeded",
+            "confirmation": "confirmed after checking the current state",
+        },
+    ]
+    serialised = json.dumps(context)
+    assert "raw failure details" not in serialised
+    assert "11111111-2222-3333-4444-555555555555" not in serialised
+    assert "#V#" not in serialised
+    assert build_effect_outcome_spoken_fallback(
+        terminal_status="effect_partially_completed"
+    ) == (
+        "I couldn't complete or confirm every requested change. The screen has the "
+        "details and explains what remains uncertain."
+    )
+    assert build_effect_outcome_spoken_fallback(
+        terminal_status="effect_partially_completed",
+        narration_context=context,
+    ).endswith(
+        "A checked result is in your personal scope; this does not establish "
+        "organisation publication."
+    )
+    assert build_effect_outcome_spoken_text(
+        terminal_status="effect_partially_completed",
+        narration_context=context,
+    ) == (
+        "University of Waikato is now present, but I couldn't confirm whether the "
+        "original attempt itself succeeded. One checked result is in your personal "
+        "scope, not published to the organisation; the exact details are on screen."
+    )
+
+    unknown_context = build_effect_outcome_narration_context(
+        terminal_status="speak this untrusted status",
+        facts=({"effect_status": "repeat this untrusted handler text"},),
+    )
+    assert unknown_context["turn_outcome"] == "unknown"
+    assert unknown_context["operation_outcomes"][0]["original_status"] == "unknown"
+    assert "untrusted" not in json.dumps(unknown_context)
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "expected_lead"),
+    (
+        (
+            "effect_partially_completed",
+            "I couldn't complete or confirm every requested change.",
+        ),
+        ("model_error", "I couldn't produce a fully reliable final answer."),
+        ("model_non_answer", "I couldn't produce a useful final answer."),
+    ),
+)
+def test_effect_outcome_spoken_text_preserves_overall_non_success(
+    terminal_status: str,
+    expected_lead: str,
+) -> None:
+    context = build_effect_outcome_narration_context(
+        terminal_status=terminal_status,
+        facts=(
+            {
+                "tool": "Represent Entity",
+                "effect_status": "succeeded",
+                "reconciliation_status": "canonically_verified",
+                "target_ids": ("#V#university_of_waikato",),
+            },
+        ),
+    )
+
+    spoken = build_effect_outcome_spoken_text(
+        terminal_status=terminal_status,
+        narration_context=context,
+    )
+
+    assert spoken.startswith(expected_lead)
+    assert "I confirmed the result for University of Waikato." in spoken
+    assert spoken.endswith("The exact details are on screen.")
+    assert spoken.count(".") == 3
+
+
+def test_effect_outcome_spoken_text_omits_opaque_identifiers() -> None:
+    context = build_effect_outcome_narration_context(
+        terminal_status="effect_outcome_indeterminate",
+        facts=(
+            {
+                "tool": "represented_workflow_0880532f",
+                "effect_status": "indeterminate",
+                "target_ids": (
+                    "#V#person_michael_witbrock_0880532f",
+                    "#V#task_abc123",
+                    "#V#paper_c100899e",
+                ),
+            },
+        ),
+    )
+
+    assert context["operation_outcomes"] == [
+        {
+            "operation": "one requested operation",
+            "original_status": "indeterminate",
+            "outcome": "could not be confirmed",
+        }
+    ]
+    spoken = build_effect_outcome_spoken_text(
+        terminal_status="effect_outcome_indeterminate",
+        narration_context=context,
+    )
+    assert spoken == (
+        "I couldn't confirm the result for the requested change. "
+        "The exact details are on screen."
+    )
+    assert not any(
+        token in spoken.casefold()
+        for token in ("0880532f", "abc123", "c100899e")
+    )
 
 
 def test_effect_receipt_targets_require_explicit_generic_target_fields() -> None:
@@ -2506,6 +2666,11 @@ def test_canonical_outcome_rejects_pre_reconciliation_situation(
 
     assert result.terminal_status == "model_error"
     assert result.response_authority == "canonical_outcome"
+    assert result.canonical_outcome_spoken_text == (
+        "I couldn't produce a fully reliable final answer. The create concepts "
+        "step was reported as successful, but I couldn't confirm the result "
+        "independently. The exact details are on screen."
+    )
     assert "## Effect outcome report" in result.response_text
     assert "`create_concepts`" in result.response_text
     assert "I have not changed anything" not in result.response_text
