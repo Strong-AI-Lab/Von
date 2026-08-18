@@ -75,6 +75,195 @@ def test_link_file_copy_to_arxiv_paper_creates_stable_paper_instance_and_links(
     )
 
 
+def test_private_scholarly_identity_ids_do_not_collide_between_actors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    monkeypatch.setattr(
+        mod.concept_search_service,
+        "search_concepts",
+        lambda **_kwargs: {"results": []},
+    )
+
+    actor_a_paper = mod.predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id="#V#actor_a",
+        arxiv_id="2608.00003",
+    )
+    actor_b_paper = mod.predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id="#V#actor_b",
+        arxiv_id="2608.00003",
+    )
+    actor_a_author = mod.predict_scholarly_author_concept_id(
+        user_concept_id="#V#actor_a",
+        author_name="Shared Author Name",
+    )
+    actor_b_author = mod.predict_scholarly_author_concept_id(
+        user_concept_id="#V#actor_b",
+        author_name="Shared Author Name",
+    )
+    actor_a_topic = mod.predict_scholarly_topic_concept_id(
+        user_concept_id="#V#actor_a",
+        topic_label="Shared Topic Label",
+    )
+    actor_b_topic = mod.predict_scholarly_topic_concept_id(
+        user_concept_id="#V#actor_b",
+        topic_label="Shared Topic Label",
+    )
+
+    assert actor_a_paper != actor_b_paper
+    assert actor_a_author != actor_b_author
+    assert actor_a_topic != actor_b_topic
+    assert actor_a_paper == mod.predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id="#V#actor_a",
+        arxiv_id="2608.00003",
+    )
+
+
+def test_shared_exact_author_candidate_is_not_reused_or_enriched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+    from src.backend.services import concept_service
+
+    shared_author_id = "#V#shared_author"
+    create_calls: list[str] = []
+    name_writes: list[str] = []
+    monkeypatch.setattr(
+        mod.concept_search_service,
+        "search_concepts",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "concept_id": shared_author_id,
+                    "name": "Shared Author Name",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(mod, "_is_actor_private_concept", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        mod,
+        "_concept_exists",
+        lambda concept_id: concept_id == shared_author_id,
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "create_concept",
+        lambda **kwargs: create_calls.append(kwargs["concept_id"]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_ensure_name_text_relation",
+        lambda **kwargs: name_writes.append(kwargs["concept_id"]),
+    )
+
+    resolved_id = mod.resolve_or_create_scholarly_author_concept_id(
+        user_concept_id="#V#actor_a",
+        author_name="Shared Author Name",
+    )
+
+    assert resolved_id != shared_author_id
+    assert create_calls == [resolved_id]
+    assert shared_author_id not in name_writes
+
+
+def test_shared_exact_topic_candidate_is_not_reused_or_enriched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+    from src.backend.services import concept_service
+
+    shared_topic_id = "#V#shared_topic"
+    create_calls: list[str] = []
+    name_writes: list[str] = []
+    monkeypatch.setattr(
+        mod.concept_search_service,
+        "search_concepts",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "concept_id": shared_topic_id,
+                    "name": "Shared Topic Label",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(mod, "_is_actor_private_concept", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        mod,
+        "_concept_exists",
+        lambda concept_id: concept_id == shared_topic_id,
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "create_concept",
+        lambda **kwargs: create_calls.append(kwargs["concept_id"]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_ensure_name_text_relation",
+        lambda **kwargs: name_writes.append(kwargs["concept_id"]),
+    )
+
+    resolved_id = mod._resolve_or_create_topic_concept_id(
+        user_concept_id="#V#actor_a",
+        topic_label="Shared Topic Label",
+    )
+
+    assert resolved_id != shared_topic_id
+    assert create_calls == [resolved_id]
+    assert shared_topic_id not in name_writes
+
+
+@pytest.mark.parametrize("schema_support_preprovisioned", (False, True))
+def test_scholarly_type_source_only_write_requires_guarded_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    schema_support_preprovisioned: bool,
+) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    governed_calls: list[dict[str, object]] = []
+    source_only_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        mod,
+        "add_relationship",
+        lambda **kwargs: governed_calls.append(dict(kwargs)) or {"success": True},
+    )
+    monkeypatch.setattr(
+        mod,
+        "add_structural_relationship",
+        lambda **kwargs: source_only_calls.append(dict(kwargs))
+        or {"success": True},
+    )
+
+    result = mod._add_scholarly_article_type_relationship(
+        paper_concept_id="#V#paper_source",
+        schema_support_preprovisioned=schema_support_preprovisioned,
+    )
+
+    assert result["success"] is True
+    if schema_support_preprovisioned:
+        assert governed_calls == []
+        assert source_only_calls == [
+            {
+                "source_id": "#V#paper_source",
+                "predicate": "is_an_instance_of",
+                "target_id": "#V#scholarly_article",
+                "maintain_inverse": False,
+            }
+        ]
+    else:
+        assert source_only_calls == []
+        assert governed_calls == [
+            {
+                "source_id": "#V#paper_source",
+                "predicate": "is_an_instance_of",
+                "target": "#V#scholarly_article",
+            }
+        ]
+
+
 def test_materialise_scholarly_representation_adds_metadata_authors_and_topics(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -788,5 +977,3 @@ def test_gather_arxiv_paper_verification_state_all_satisfied(
     assert state["type_asserted"] is True
     assert state["file_link_verified"] is True
     assert state["summary_present"] is True
-
-

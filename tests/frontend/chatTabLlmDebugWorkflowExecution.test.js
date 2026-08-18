@@ -64,7 +64,9 @@ function buildFailureCapsule(overrides = {}) {
                 current_outcome_status: 'completed',
                 outcome_resolved: true,
                 reconciliation_status: 'resolved',
-                canonical_readback_verdict: 'verified'
+                canonical_readback_verdict: 'workflow_instance_verified',
+                workflow_id: 'workflow-paper-representation',
+                instance_id: 'instance-paper-representation'
             }
         ],
         effect_summary: {
@@ -210,6 +212,11 @@ describe('LLM debug popup workflow execution hook', () => {
                     text: 'RuntimeError: asyncio lock is bound to a different event loop'
                 })
             })
+        }));
+        expect(copiedPayload.effects[1]).toEqual(expect.objectContaining({
+            canonical_readback_verdict: 'workflow_instance_verified',
+            workflow_id: 'workflow-paper-representation',
+            instance_id: 'instance-paper-representation'
         }));
         const [capsuleUrl] = fetchWithTimeout.mock.calls[0];
         const parsedUrl = new URL(capsuleUrl, 'https://example.test');

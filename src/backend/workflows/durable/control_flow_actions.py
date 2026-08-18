@@ -66,7 +66,10 @@ from ..tool_invocation_evidence import (
     WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
     derive_tool_invocation_records_from_step_envelopes,
 )
-from ..trace_model import WorkflowExecutionTrace
+from ..trace_model import (
+    WorkflowExecutionTrace,
+    build_child_workflow_effect_identity_metadata,
+)
 from ..vontology_loader import load_workflow_definition_from_vontology
 from .nested_workflow_authority import (
     NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
@@ -487,6 +490,14 @@ def _build_fork_handler(
                     "failure_policy": failure_policy,
                     "merge_policy": merge_policy,
                     "authority_resolution": authority_resolution.to_projection(),
+                    **build_child_workflow_effect_identity_metadata(
+                        request.trace,
+                        invocation_kind="fork",
+                        parent_workflow_id=request.workflow_id,
+                        parent_state_id=request.workflow_state_id,
+                        child_workflow_id=child_workflow_id,
+                        discriminator=f"{fork_id}:{branch['branch_id']}",
+                    ),
                 },
             )
             child_result = WorkflowExecutor(
@@ -732,6 +743,14 @@ def _build_for_each_handler(
                     "success_policy": success_policy,
                     "stop_on_error": stop_on_error,
                     "authority_resolution": authority_resolution.to_projection(),
+                    **build_child_workflow_effect_identity_metadata(
+                        request.trace,
+                        invocation_kind="for_each",
+                        parent_workflow_id=request.workflow_id,
+                        parent_state_id=request.workflow_state_id,
+                        child_workflow_id=child_workflow_id,
+                        discriminator=index,
+                    ),
                 },
             )
             child_result = WorkflowExecutor(

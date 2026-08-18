@@ -7,16 +7,23 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 from bson import ObjectId
 
-from .concept_search_service import _search_text_relations
-from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
-from ..security.access_control import filter_accessible_concept_ids
+from ..security.access_control import (
+    filter_accessible_concept_ids,
+    get_effective_user_concept_id,
+)
 from ..vontology.code_concepts_registry import is_code_concept_id
 from ..vontology.utils_vontology import get_vontology_node_and_descendant_ids
+from .concept_search_service import _search_text_relations
+from .ontology_publication_authority_service import (
+    PublicationContextKind,
+    concept_publication_context,
+)
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 _CODE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 _PERSON_TYPE_ID = "#V#person"
@@ -81,6 +88,29 @@ def _accessible_candidate_ids(candidate_ids: Sequence[str] | set[str]) -> set[st
     return filter_accessible_concept_ids(candidate_ids)
 
 
+def _actor_private_candidate_ids(
+    candidate_ids: Sequence[str] | set[str],
+) -> set[str]:
+    """Keep only concepts published solely to the trusted current actor."""
+
+    actor_id = get_effective_user_concept_id()
+    if not actor_id or not candidate_ids:
+        return set()
+
+    private_ids: set[str] = set()
+    for concept_id in sorted(set(candidate_ids)):
+        try:
+            publication_context = concept_publication_context(concept_id)
+        except (LookupError, ValueError):
+            continue
+        if (
+            publication_context.kind == PublicationContextKind.USER
+            and publication_context.concept_id == actor_id
+        ):
+            private_ids.add(concept_id)
+    return private_ids
+
+
 def _slug_to_concept_id(value: str) -> Optional[str]:
     raw = value.strip()
     if not raw or " " in raw:
@@ -111,6 +141,7 @@ def resolve_concept_by_name(
     match_code_strings: bool = True,
     normalisation_level: str = "default",
     max_results: int = 5,
+    require_actor_private: bool = False,
 ) -> Dict[str, Any]:
     """Resolve a Vontology concept deterministically from a user-provided surface form.
 
@@ -152,7 +183,12 @@ def resolve_concept_by_name(
         if maybe_id:
             audit.append({"stage": "code_string", "candidate": maybe_id})
             doc = ConceptsRepository.find_one({"concept_id": maybe_id}, {"_id": 1})
-            if doc or is_code_concept_id(maybe_id):
+            actor_private_ids = (
+                _actor_private_candidate_ids({maybe_id})
+                if require_actor_private
+                else {maybe_id}
+            )
+            if (doc or is_code_concept_id(maybe_id)) and maybe_id in actor_private_ids:
                 return {
                     "success": True,
                     "status": "resolved",
@@ -350,6 +386,18 @@ def resolve_concept_by_name(
             }
         )
         candidate_ids = existing
+
+    if require_actor_private:
+        actor_private_ids = _actor_private_candidate_ids(candidate_ids)
+        audit.append(
+            {
+                "stage": "filter",
+                "method": "actor_private",
+                "before": len(candidate_ids),
+                "after": len(actor_private_ids),
+            }
+        )
+        candidate_ids = actor_private_ids
 
     # Optional instance_of filter (recursive, includes descendants).
     if instance_of:

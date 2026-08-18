@@ -4,12 +4,15 @@ import hashlib
 import re
 from typing import Any, Iterable, Mapping, TypedDict
 
-from ..security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 from . import concept_search_service
+from .concept_external_identity_service import (
+    ExternalIdentifier,
+    canonical_concept_id_for_external_identifiers,
+)
 from .identity_resolution_workflow_request_service import (
     request_identity_resolution_for_materialised_scholarly_authors,
 )
-from .relationship_write_service import add_relationship
+from .relationship_write_service import add_relationship, add_structural_relationship
 from .text_value_service import get_texts_for_concept, upsert_text_for_concept
 
 _ARXIV_ID_PATTERN = re.compile(
@@ -272,6 +275,39 @@ def _stable_named_instance_concept_id(name: str, *, prefix: str) -> str:
     return f"#V#{prefix}_{slug}_{digest}"
 
 
+def _stable_actor_private_named_instance_concept_id(
+    *,
+    actor_concept_id: str,
+    name: str,
+    prefix: str,
+) -> str:
+    base_id = _stable_named_instance_concept_id(name, prefix=prefix)
+    scope_digest = hashlib.sha256(
+        str(actor_concept_id or "").strip().casefold().encode("utf-8")
+    ).hexdigest()[:10]
+    return f"{base_id}_scope_{scope_digest}"
+
+
+def _is_actor_private_concept(
+    *,
+    concept_id: str,
+    actor_concept_id: str,
+) -> bool:
+    from .ontology_publication_authority_service import (
+        PublicationContextKind,
+        concept_publication_context,
+    )
+
+    try:
+        context = concept_publication_context(concept_id)
+    except (LookupError, ValueError):
+        return False
+    return (
+        context.kind == PublicationContextKind.USER
+        and context.concept_id == str(actor_concept_id or "").strip()
+    )
+
+
 def _resolve_or_create_person_concept_id(
     *,
     user_concept_id: str,
@@ -299,14 +335,10 @@ def _resolve_or_create_person_concept_id(
             parent_concept_ids=["#V#person"],
             create_as_instance=True,
             system_tags=["author", "scholarly", "arxiv"],
-        )
-        concept_service.update_concept(
-            concept_id,
-            {
-                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
-                    user_concept_id.strip()
-                ]
-            },
+            created_by_concept_id=user_concept_id.strip(),
+            visibility_scope_mode="user_only_default",
+            maintain_relationship_inverses=False,
+            resolve_visibility_from_event_namespace=False,
         )
     except Exception as exc:
         if logger is not None:
@@ -352,14 +384,10 @@ def _resolve_or_create_topic_concept_id(
             parent_concept_ids=["#V#research_topic"],
             create_as_instance=True,
             system_tags=["topic", "scholarly", "arxiv"],
-        )
-        concept_service.update_concept(
-            concept_id,
-            {
-                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
-                    user_concept_id.strip()
-                ]
-            },
+            created_by_concept_id=user_concept_id.strip(),
+            visibility_scope_mode="user_only_default",
+            maintain_relationship_inverses=False,
+            resolve_visibility_from_event_namespace=False,
         )
     except Exception as exc:
         if logger is not None:
@@ -478,6 +506,48 @@ def predict_arxiv_paper_concept_id(*, arxiv_id: str) -> str:
     return _stable_paper_instance_concept_id(arxiv_id)
 
 
+def predict_actor_private_arxiv_paper_concept_id(
+    *,
+    user_concept_id: str,
+    arxiv_id: str,
+) -> str:
+    """Return an actor-scoped stable ID for one arXiv paper representation."""
+
+    identifier = ExternalIdentifier(
+        scheme="arxiv",
+        value=_normalise_arxiv_id(arxiv_id).casefold(),
+    )
+    concept_id = canonical_concept_id_for_external_identifiers(
+        (identifier,),
+        kind="instance",
+        parent_id="#V#paper_on_arxiv",
+        scope_mode="user_only_default",
+        actor_user_id=user_concept_id,
+    )
+    if concept_id is None:  # pragma: no cover - one validated identifier is stable
+        raise ValueError("actor_private_arxiv_identity_unavailable")
+    return concept_id
+
+
+def resolve_actor_private_arxiv_paper_concept_id(
+    *,
+    user_concept_id: str,
+    arxiv_id: str,
+) -> str:
+    """Reuse an actor-owned legacy ID, otherwise select the scoped identity ID."""
+
+    legacy_concept_id = predict_arxiv_paper_concept_id(arxiv_id=arxiv_id)
+    if _concept_exists(legacy_concept_id) and _is_actor_private_concept(
+        concept_id=legacy_concept_id,
+        actor_concept_id=user_concept_id,
+    ):
+        return legacy_concept_id
+    return predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id=user_concept_id,
+        arxiv_id=arxiv_id,
+    )
+
+
 def predict_scholarly_author_concept_id(
     *,
     user_concept_id: str,
@@ -485,7 +555,6 @@ def predict_scholarly_author_concept_id(
 ) -> str:
     """Resolve the expected author concept ID without creating any concepts."""
 
-    del user_concept_id
     search_result = concept_search_service.search_concepts(
         query=author_name,
         instance_of="#V#person",
@@ -501,8 +570,17 @@ def predict_scholarly_author_concept_id(
             continue
         if isinstance(candidate_name, str) and candidate_name.strip():
             if candidate_name.strip().casefold() == author_name.casefold():
-                return candidate_id.strip()
-    return _stable_named_instance_concept_id(author_name, prefix="person")
+                candidate_id = candidate_id.strip()
+                if _is_actor_private_concept(
+                    concept_id=candidate_id,
+                    actor_concept_id=user_concept_id,
+                ):
+                    return candidate_id
+    return _stable_actor_private_named_instance_concept_id(
+        actor_concept_id=user_concept_id,
+        name=author_name,
+        prefix="person",
+    )
 
 
 def predict_scholarly_topic_concept_id(
@@ -512,7 +590,6 @@ def predict_scholarly_topic_concept_id(
 ) -> str:
     """Resolve the expected topic concept ID without creating any concepts."""
 
-    del user_concept_id
     search_result = concept_search_service.search_concepts(
         query=topic_label,
         instance_of="#V#research_topic",
@@ -528,8 +605,17 @@ def predict_scholarly_topic_concept_id(
             continue
         if isinstance(candidate_name, str) and candidate_name.strip():
             if candidate_name.strip().casefold() == topic_label.casefold():
-                return candidate_id.strip()
-    return _stable_named_instance_concept_id(topic_label, prefix="research_topic")
+                candidate_id = candidate_id.strip()
+                if _is_actor_private_concept(
+                    concept_id=candidate_id,
+                    actor_concept_id=user_concept_id,
+                ):
+                    return candidate_id
+    return _stable_actor_private_named_instance_concept_id(
+        actor_concept_id=user_concept_id,
+        name=topic_label,
+        prefix="research_topic",
+    )
 
 
 def _relation_contains_target(
@@ -548,6 +634,32 @@ def _relation_contains_target(
     if isinstance(raw_targets, str):
         raw_targets = [raw_targets]
     return target_concept_id in raw_targets
+
+
+def _add_scholarly_article_type_relationship(
+    *,
+    paper_concept_id: str,
+    schema_support_preprovisioned: bool,
+) -> dict[str, Any]:
+    """Type one paper without widening the source authority boundary."""
+
+    if schema_support_preprovisioned:
+        # Guarded workflow callers have proved the source actor-private. Keep
+        # the edge source-only so the global type is not a second mutation.
+        return add_structural_relationship(
+            source_id=paper_concept_id,
+            predicate="is_an_instance_of",
+            target_id="#V#scholarly_article",
+            maintain_inverse=False,
+        )
+
+    # Independently exposed service/tool callers retain the governed path;
+    # they must not acquire an unguarded shared-source write bypass here.
+    return add_relationship(
+        source_id=paper_concept_id,
+        predicate="is_an_instance_of",
+        target="#V#scholarly_article",
+    )
 
 
 def ensure_paper_on_arxiv_type_exists(*, logger: Any | None = None) -> None:
@@ -592,16 +704,21 @@ def ensure_arxiv_paper_instance(
     user_concept_id: str,
     arxiv_id: str,
     logger: Any | None = None,
+    schema_support_preprovisioned: bool = False,
 ) -> str:
     """Ensure a stable per-arXiv-ID paper instance exists; returns its concept_id."""
 
-    ensure_paper_on_arxiv_type_exists(logger=logger)
+    if not schema_support_preprovisioned:
+        ensure_paper_on_arxiv_type_exists(logger=logger)
 
     from . import concept_service
 
     type_concept_id = "#V#paper_on_arxiv"
     normalised_arxiv_id = _normalise_arxiv_id(arxiv_id)
-    instance_concept_id = predict_arxiv_paper_concept_id(arxiv_id=normalised_arxiv_id)
+    instance_concept_id = resolve_actor_private_arxiv_paper_concept_id(
+        user_concept_id=user_concept_id,
+        arxiv_id=normalised_arxiv_id,
+    )
 
     existing = None
     try:
@@ -620,14 +737,10 @@ def ensure_arxiv_paper_instance(
                 "source": "arxiv",
                 "arxiv_id": normalised_arxiv_id,
             },
-        )
-        concept_service.update_concept(
-            instance_concept_id,
-            {
-                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
-                    user_concept_id.strip()
-                ]
-            },
+            created_by_concept_id=user_concept_id.strip(),
+            visibility_scope_mode="user_only_default",
+            maintain_relationship_inverses=False,
+            resolve_visibility_from_event_namespace=False,
         )
 
         # Make the arXiv identifier directly searchable without introducing a new predicate.
@@ -655,6 +768,7 @@ def link_file_copy_to_arxiv_paper(
     arxiv_id: str,
     file_copy_concept_id: str,
     logger: Any | None = None,
+    schema_support_preprovisioned: bool = False,
 ) -> dict[str, Any]:
     """Link a #V#computer_file_copy to the corresponding #V#paper_on_arxiv instance."""
 
@@ -662,6 +776,7 @@ def link_file_copy_to_arxiv_paper(
         user_concept_id=user_concept_id,
         arxiv_id=arxiv_id,
         logger=logger,
+        schema_support_preprovisioned=schema_support_preprovisioned,
     )
     changed = _link_file_copy_to_paper_concept(
         file_copy_concept_id=file_copy_concept_id,
@@ -718,17 +833,19 @@ def materialise_scholarly_representation_for_file_copy(
     file_copy_concept_id: str,
     metadata: Mapping[str, Any] | None = None,
     logger: Any | None = None,
+    schema_support_preprovisioned: bool = False,
 ) -> dict[str, Any]:
     """Materialise a minimal scholarly-paper concept for a file-copy document."""
 
     from . import concept_service
 
-    _ensure_type_concept(
-        "#V#scholarly_article",
-        "Scholarly Article",
-        preferred_parent_id="#V#scholarly_work",
-        logger=logger,
-    )
+    if not schema_support_preprovisioned:
+        _ensure_type_concept(
+            "#V#scholarly_article",
+            "Scholarly Article",
+            preferred_parent_id="#V#scholarly_work",
+            logger=logger,
+        )
 
     paper_concept_id = _stable_file_copy_paper_instance_concept_id(file_copy_concept_id)
     existing = None
@@ -753,20 +870,15 @@ def materialise_scholarly_representation_for_file_copy(
                 "source": "file_copy",
                 "file_copy_concept_id": str(file_copy_concept_id).strip(),
             },
-        )
-        concept_service.update_concept(
-            paper_concept_id,
-            {
-                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
-                    user_concept_id.strip()
-                ]
-            },
+            created_by_concept_id=user_concept_id.strip(),
+            visibility_scope_mode="user_only_default",
+            maintain_relationship_inverses=False,
+            resolve_visibility_from_event_namespace=False,
         )
 
-    add_relationship(
-        source_id=paper_concept_id,
-        predicate="is_an_instance_of",
-        target="#V#scholarly_article",
+    _add_scholarly_article_type_relationship(
+        paper_concept_id=paper_concept_id,
+        schema_support_preprovisioned=schema_support_preprovisioned,
     )
     _link_file_copy_to_paper_concept(
         file_copy_concept_id=file_copy_concept_id,
@@ -1227,6 +1339,7 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
     file_copy_concept_id: str,
     metadata: Mapping[str, Any] | None = None,
     logger: Any | None = None,
+    schema_support_preprovisioned: bool = False,
 ) -> dict[str, Any]:
     """Materialise a rich scholarly-paper representation for an uploaded arXiv file.
 
@@ -1244,6 +1357,7 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
         arxiv_id=normalised_arxiv_id,
         file_copy_concept_id=file_copy_concept_id,
         logger=logger,
+        schema_support_preprovisioned=schema_support_preprovisioned,
     )
     paper_concept_id = str(link_result.get("paper_concept_id") or "").strip()
     if not paper_concept_id:
@@ -1255,12 +1369,12 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
             "file_copy_concept_id": file_copy_concept_id,
         }
 
-    _ensure_arxiv_scholarly_type_skeleton(logger=logger)
+    if not schema_support_preprovisioned:
+        _ensure_arxiv_scholarly_type_skeleton(logger=logger)
 
-    type_relation = add_relationship(
-        source_id=paper_concept_id,
-        predicate="is_an_instance_of",
-        target="#V#scholarly_article",
+    type_relation = _add_scholarly_article_type_relationship(
+        paper_concept_id=paper_concept_id,
+        schema_support_preprovisioned=schema_support_preprovisioned,
     )
 
     title = _extract_metadata_title(metadata)
@@ -1352,8 +1466,10 @@ __all__ = [
     "link_file_copy_to_arxiv_paper",
     "materialise_scholarly_representation_for_file_copy",
     "materialise_scholarly_representation_for_arxiv_file_copy",
+    "predict_actor_private_arxiv_paper_concept_id",
     "predict_arxiv_paper_concept_id",
     "predict_scholarly_author_concept_id",
     "predict_scholarly_topic_concept_id",
+    "resolve_actor_private_arxiv_paper_concept_id",
     "resolve_or_create_scholarly_author_concept_id",
 ]

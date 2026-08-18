@@ -197,6 +197,7 @@ class OntologyInvocationContext:
     effect_id: str | None = None
     turn_id: str | None = None
     workflow_id: str | None = None
+    actor_bound_workflow_effect: bool = False
 
 
 @dataclass(frozen=True)
@@ -420,6 +421,7 @@ def bind_ontology_invocation(
     effect_id: str | None = None,
     turn_id: str | None = None,
     workflow_id: str | None = None,
+    actor_bound_workflow_effect: bool = False,
 ) -> Iterator[OntologyInvocationContext]:
     """Bind server-established execution provenance around one exact effect."""
 
@@ -433,6 +435,7 @@ def bind_ontology_invocation(
         workflow_id=_normalise_concept_id(workflow_id)
         or _clean_text(workflow_id)
         or None,
+        actor_bound_workflow_effect=actor_bound_workflow_effect is True,
     )
     token = _ONTOLOGY_INVOCATION.set(invocation)
     try:
@@ -692,6 +695,39 @@ def _gateway_actor_trust_source() -> str | None:
         return get_internal_mcp_actor_context_source()
     except Exception:  # noqa: BLE001 - optional integration provenance probe
         return None
+
+
+def _actor_bound_workflow_direct_authority_eligible(
+    *,
+    intent: OntologyMutationIntent,
+    invocation: OntologyInvocationContext | None,
+    actor_concept_id: str | None,
+    trust_source: str | None,
+) -> bool:
+    """Return whether one admitted workflow effect retains direct actor authority.
+
+    The marker is bound by workflow support code only after the resolved MCP
+    write has passed the workflow mutation ceiling.  This exception therefore
+    carries no authority of its own: it merely permits the existing exact live
+    authority decision for an effect whose complete publication boundary stays
+    inside the authenticated actor's private context.
+    """
+
+    actor_id = _normalise_concept_id(actor_concept_id)
+    if (
+        invocation is None
+        or invocation.actor_bound_workflow_effect is not True
+        or invocation.surface != "workflow"
+        or invocation.audience != "workflow"
+        or trust_source != "preexisting_authenticated_or_workflow_context"
+        or actor_id is None
+    ):
+        return False
+
+    return all(
+        context.kind == PublicationContextKind.USER and context.concept_id == actor_id
+        for context in (*intent.source_contexts, intent.publication_context)
+    )
 
 
 def _decision(
@@ -1379,6 +1415,19 @@ def authorise_ontology_mutation(
             )
 
     if invocation and invocation.executing_agent_concept_id:
+        if _actor_bound_workflow_direct_authority_eligible(
+            intent=intent,
+            invocation=invocation,
+            actor_concept_id=actor_id,
+            trust_source=trust_source,
+        ):
+            return _direct_authority_decision(
+                intent=intent,
+                actor_concept_id=actor_id,
+                organisation_concept_id=organisation_id,
+                invocation=invocation,
+                trust_source=trust_source,
+            )
         return _decision(
             allowed=False,
             reason_code="ontology_agent_delegation_required",

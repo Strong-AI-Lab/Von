@@ -159,6 +159,18 @@ def _delete_workflow_text_relations(
         delete_text_relation(workflow_id, relation_id, garbage_collect=True)
 
 
+def _snapshot_concept_text_relations(concept_id: str) -> list[tuple[str, str, str, str]]:
+    return sorted(
+        (
+            str(row.get("predicate") or ""),
+            str(row.get("text") or ""),
+            str(row.get("lang") or ""),
+            json.dumps(row.get("context") or {}, sort_keys=True),
+        )
+        for row in get_texts_for_concept(concept_id, limit=200)
+    )
+
+
 def _live_acceptance_enabled(*, batch: bool = False) -> bool:
     env_name = (
         _LIVE_ARXIV_ACCEPTANCE_BATCH_RUN_ENV
@@ -412,16 +424,26 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert counts.get("errors") == 0
     support_concepts = report.get("support_concepts") or {}
     assert support_concepts.get("errors") == []
-    assert "#V#scholarly_article" in (support_concepts.get("created_concept_ids") or [])
-    assert "#V#has_doi" in (support_concepts.get("created_concept_ids") or [])
-    assert "#V#has_source_uri" in (support_concepts.get("created_concept_ids") or [])
-    source_uri_predicate = concept_service.get_concept_by_concept_id(
-        "#V#has_source_uri"
-    )
-    assert source_uri_predicate is not None
-    assert "#V#predicate" in (
-        (source_uri_predicate.get("relationships") or {}).get("is_an_instance_of") or []
-    )
+    created_support_ids = support_concepts.get("created_concept_ids") or []
+    assert "#V#scholarly_article" in created_support_ids
+    assert "#V#person" in created_support_ids
+    assert "#V#research_topic" in created_support_ids
+    assert "#V#paper_on_arxiv" in created_support_ids
+    assert "#V#authored_by" in created_support_ids
+    assert "#V#about" in created_support_ids
+    assert "#V#has_doi" in created_support_ids
+    assert "#V#has_source_uri" in created_support_ids
+    for predicate_id in (
+        "#V#authored_by",
+        "#V#about",
+        "#V#has_doi",
+        "#V#has_source_uri",
+    ):
+        predicate_doc = concept_service.get_concept_by_concept_id(predicate_id)
+        assert predicate_doc is not None
+        assert "#V#predicate" in (
+            (predicate_doc.get("relationships") or {}).get("is_an_instance_of") or []
+        )
     prompt_support = report.get("prompt_support") or {}
     assert prompt_support.get("success") is True
     metadata_prompt_rows = get_texts_for_concept(
@@ -713,26 +735,79 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             },
         ],
     }
-    ensure_arxiv_paper_state_id = authority_service._step_concept_id(
+    normalise_external_identity_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
-        state_id="ensure_arxiv_paper_concept",
+        state_id="normalise_external_identity",
     )
-    assert (
-        normalise_metadata_transitions["canonical_arxiv_identity_available"].to_state
-        == ensure_arxiv_paper_state_id
+    assert any(
+        transition.to_state == normalise_external_identity_state_id
+        for transition in metadata_definition.states[
+            normalise_metadata_state_id
+        ].transitions
     )
-    ensure_arxiv_paper_state = metadata_definition.states[
-        ensure_arxiv_paper_state_id
+    normalise_external_identity_state = metadata_definition.states[
+        normalise_external_identity_state_id
     ]
-    ensure_arxiv_paper_action = ensure_arxiv_paper_state.actions[0]
-    assert ensure_arxiv_paper_action.action_id == (
-        "scholarly_paper.ensure_paper_concept"
+    assert normalise_external_identity_state.actions[0].action_id == (
+        "scholarly_paper.normalise_external_identity"
     )
-    assert ensure_arxiv_paper_state.metadata.get("mutation_authority") == {
+    external_identity_transitions = {
+        transition.reason: transition
+        for transition in normalise_external_identity_state.transitions
+    }
+    create_external_identity_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="create_article_by_external_identity",
+    )
+    assert external_identity_transitions[
+        "canonical_external_identity_available"
+    ].to_state == create_external_identity_state_id
+    attach_metadata_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="attach_metadata",
+    )
+    assert external_identity_transitions[
+        "actor_private_external_identity_resolved"
+    ].to_state == attach_metadata_state_id
+    create_external_identity_state = metadata_definition.states[
+        create_external_identity_state_id
+    ]
+    create_external_identity_action = create_external_identity_state.actions[0]
+    assert create_external_identity_action.action_id == "create_concepts"
+    assert create_external_identity_action.inputs.get("scope_mode") == (
+        "user_only_default"
+    )
+    assert create_external_identity_action.inputs.get("duplicate_resolution_mode") == (
+        "canonical_id_only"
+    )
+    assert create_external_identity_action.inputs["concepts"][0]["concept_id"] == {
+        "$context_key": "paper_external_identity_concept_id"
+    }
+    assert "external_identifiers" not in (
+        create_external_identity_action.inputs["concepts"][0]
+    )
+    assert create_external_identity_state.metadata.get("mutation_authority") == {
         "maximum_level": "additive_vontology",
-        "reason_code": "canonical_arxiv_paper_identity_additive_writes",
+        "reason_code": "scholarly_article_external_identity_additive_writes",
         "schema_version": "workflow_step_mutation_authority.v1",
     }
+    resolve_existing_article_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="resolve_existing_article",
+    )
+    reject_title_reuse_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="reject_unverified_title_reuse",
+    )
+    resolve_existing_article_transitions = {
+        transition.reason: transition
+        for transition in metadata_definition.states[
+            resolve_existing_article_state_id
+        ].transitions
+    }
+    assert resolve_existing_article_transitions[
+        "title_match_without_stable_identity_requires_review"
+    ].to_state == reject_title_reuse_state_id
     resolve_topics_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="resolve_topics",
@@ -1977,7 +2052,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "24" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "26" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2526,6 +2601,529 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     assert "A paper about composable identity control." in descriptions
 
 
+def test_metadata_workflow_reuses_existing_article_on_identical_retry(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    )
+    environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+    workflow_data = {
+        "paper_metadata": {
+            "title": "Retry-safe Scholarly Article Representation",
+            "abstract": "The same authorised request should reuse its article.",
+            "authors": ["Ada Lovelace", "Grace Hopper"],
+            "publication_date": "2026-08-18",
+        },
+        "require_representation_evidence_summary": False,
+    }
+
+    first = executor.run(
+        definition,
+        environment=environment,
+        data=dict(workflow_data),
+    )
+    second = executor.run(
+        definition,
+        environment=environment,
+        data=dict(workflow_data),
+    )
+
+    assert first.completed is True, first.error
+    assert first.data.get("paper_external_identity_scheme") == "bibliographic"
+    assert "article_resolution_status" not in first.data
+    first_paper_concept_id = first.data.get("paper_concept_id")
+    assert isinstance(first_paper_concept_id, str)
+
+    assert second.completed is True, second.error
+    assert second.data.get("paper_external_identity_scheme") == "bibliographic"
+    assert second.data.get("paper_external_identity_resolution_status") == "resolved"
+    assert "article_resolution_status" not in second.data
+    assert second.data.get("paper_concept_id") == first_paper_concept_id
+    assert "create_article_result" not in second.data
+    assert concept_service.get_concept_by_concept_id(first_paper_concept_id) is not None
+
+
+def test_metadata_workflow_reuses_same_doi_when_title_varies(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    )
+    environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+
+    first = executor.run(
+        definition,
+        environment=environment,
+        data={
+            "paper_metadata": {
+                "title": "Initial Display Title for a DOI Paper",
+                "doi": "https://doi.org/10.5555/Identity-First",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+    second = executor.run(
+        definition,
+        environment=environment,
+        data={
+            "paper_metadata": {
+                "title": "Corrected Display Title for the Same DOI Paper",
+                "doi": "10.5555/identity-first",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert first.completed is True, first.error
+    assert second.completed is True, second.error
+    assert first.data.get("paper_external_identity_scheme") == "doi"
+    assert second.data.get("paper_external_identity_scheme") == "doi"
+    assert second.data.get("paper_external_identity_resolution_status") == "resolved"
+    assert second.data.get("paper_concept_id") == first.data.get("paper_concept_id")
+    assert "article_resolution_status" not in second.data
+    assert "create_article_result" not in second.data
+
+
+def test_metadata_workflow_creates_distinct_same_title_articles_for_different_dois(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    )
+    environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+    title = "A Legitimate Scholarly Article Homonym"
+
+    first = executor.run(
+        definition,
+        environment=environment,
+        data={
+            "paper_metadata": {"title": title, "doi": "10.5555/homonym-a"},
+            "require_representation_evidence_summary": False,
+        },
+    )
+    assert first.completed is True, first.error
+    first_paper_concept_id = first.data.get("paper_concept_id")
+    assert isinstance(first_paper_concept_id, str)
+    first_text_snapshot = _snapshot_concept_text_relations(first_paper_concept_id)
+
+    second = executor.run(
+        definition,
+        environment=environment,
+        data={
+            "paper_metadata": {"title": title, "doi": "10.5555/homonym-b"},
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert second.completed is True, second.error
+    second_paper_concept_id = second.data.get("paper_concept_id")
+    assert isinstance(second_paper_concept_id, str)
+    assert second_paper_concept_id != first_paper_concept_id
+    assert second.data.get("paper_external_identity_scheme") == "doi"
+    assert "article_resolution_status" not in second.data
+    assert _snapshot_concept_text_relations(first_paper_concept_id) == (
+        first_text_snapshot
+    )
+    assert {
+        row.get("text")
+        for row in get_texts_for_concept(
+            second_paper_concept_id,
+            predicate="#V#has_doi",
+            limit=5,
+        )
+    } == {"10.5555/homonym-b"}
+
+
+def test_metadata_workflow_creates_distinct_same_title_articles_for_different_source_uris(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    )
+    environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+    title = "A Source-identified Scholarly Article Homonym"
+    first_source_uri = "https://publisher.example/papers/homonym-a"
+    second_source_uri = "https://publisher.example/papers/homonym-b"
+
+    first = executor.run(
+        definition,
+        environment=environment,
+        data={
+            "paper_metadata": {"title": title},
+            "source_uri": first_source_uri,
+            "require_representation_evidence_summary": False,
+        },
+    )
+    assert first.completed is True, first.error
+    first_paper_concept_id = first.data.get("paper_concept_id")
+    assert isinstance(first_paper_concept_id, str)
+    first_text_snapshot = _snapshot_concept_text_relations(first_paper_concept_id)
+
+    second = executor.run(
+        definition,
+        environment=environment,
+        data={
+            "paper_metadata": {"title": title},
+            "source_uri": second_source_uri,
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert second.completed is True, second.error
+    second_paper_concept_id = second.data.get("paper_concept_id")
+    assert isinstance(second_paper_concept_id, str)
+    assert second_paper_concept_id != first_paper_concept_id
+    assert second.data.get("paper_external_identity_scheme") == "url"
+    assert "article_resolution_status" not in second.data
+    assert _snapshot_concept_text_relations(first_paper_concept_id) == (
+        first_text_snapshot
+    )
+    assert {
+        row.get("text")
+        for row in get_texts_for_concept(
+            second_paper_concept_id,
+            predicate="#V#has_source_uri",
+            limit=5,
+        )
+    } == {second_source_uri}
+
+
+def test_metadata_workflow_rejects_title_only_reuse_before_mutation(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    )
+    environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+    workflow_data = {
+        "paper_metadata": {
+            "title": "Identity-less Title Collision",
+            "abstract": "A title alone does not prove paper identity.",
+        },
+        "require_representation_evidence_summary": False,
+    }
+
+    first = executor.run(
+        definition,
+        environment=environment,
+        data=dict(workflow_data),
+    )
+    assert first.completed is True, first.error
+    paper_concept_id = first.data.get("paper_concept_id")
+    assert isinstance(paper_concept_id, str)
+    before_retry = _snapshot_concept_text_relations(paper_concept_id)
+
+    second = executor.run(
+        definition,
+        environment=environment,
+        data=dict(workflow_data),
+    )
+
+    assert second.completed is False
+    assert second.data.get("article_resolution_status") == "resolved"
+    assert second.data.get("paper_concept_id") == paper_concept_id
+    assert second.data.get("last_action_error") == (
+        "scholarly_paper_title_only_reuse_unverified"
+    )
+    assert _snapshot_concept_text_relations(paper_concept_id) == before_retry
+
+
+@pytest.mark.parametrize(
+    "scope_mode",
+    ["organisation_general", "global_general"],
+)
+def test_metadata_workflow_does_not_reuse_shared_article_by_title(
+    _reset_mock_db: Any,
+    scope_mode: str,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    title = "Shared Scope Scholarly Article"
+    shared_concept_id = "#V#shared_scope_scholarly_article"
+    concept_service.create_concept(
+        name=title,
+        concept_id=shared_concept_id,
+        parent_concept_ids=["#V#scholarly_article"],
+        create_as_instance=True,
+        description="The shared article description must remain unchanged.",
+        created_by_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        organisation_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        visibility_scope_mode=scope_mode,
+        maintain_relationship_inverses=False,
+    )
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_metadata": {
+                "title": title,
+                "abstract": "This private request must not modify the shared article.",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert result.completed is False
+    assert result.data.get("article_resolution_status") == "not_found"
+    assert result.data.get("last_action_error") == (
+        "ontology_create_concept_id_conflict"
+    )
+    descriptions = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            shared_concept_id,
+            predicate="hasDescription",
+            limit=10,
+        )
+    ]
+    assert descriptions == ["The shared article description must remain unchanged."]
+
+
+@pytest.mark.parametrize(
+    "scope_mode",
+    ["organisation_general", "global_general"],
+)
+def test_metadata_workflow_rejects_supplied_shared_article_before_text_mutation(
+    _reset_mock_db: Any,
+    scope_mode: str,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    paper_concept_id = "#V#supplied_shared_scholarly_article"
+    concept_service.create_concept(
+        name="Supplied Shared Scholarly Article",
+        concept_id=paper_concept_id,
+        parent_concept_ids=["#V#scholarly_article"],
+        create_as_instance=True,
+        description="Original shared description.",
+        created_by_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        organisation_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        visibility_scope_mode=scope_mode,
+        maintain_relationship_inverses=False,
+    )
+    before_text = _snapshot_concept_text_relations(paper_concept_id)
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_concept_id": paper_concept_id,
+            "paper_metadata": {
+                "title": "Attempted Shared Article Rewrite",
+                "abstract": "This must not be attached to the shared target.",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert result.completed is False
+    assert result.data.get("last_action_error") == (
+        "scholarly_paper_actor_private_target_required"
+    )
+    assert _snapshot_concept_text_relations(paper_concept_id) == before_text
+
+
+def test_metadata_workflow_rejects_supplied_private_article_without_trusted_actor(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    paper_concept_id = "#V#other_users_private_scholarly_article"
+    concept_service.create_concept(
+        name="Other User's Private Scholarly Article",
+        concept_id=paper_concept_id,
+        parent_concept_ids=["#V#scholarly_article"],
+        create_as_instance=True,
+        description="Other user's original description.",
+        created_by_concept_id="#V#other_user",
+        visibility_scope_mode="user_only_default",
+        maintain_relationship_inverses=False,
+    )
+    before_text = _snapshot_concept_text_relations(paper_concept_id)
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=None,
+            user_concept_id=None,
+            org_concept_id=None,
+        ),
+        data={
+            "paper_concept_id": paper_concept_id,
+            "paper_metadata": {
+                "title": "Attempted Sessionless Rewrite",
+                "abstract": "This must not be attached without a trusted actor.",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert result.completed is False
+    assert result.data.get("last_action_error") == (
+        "scholarly_paper_actor_private_target_required"
+    )
+    assert _snapshot_concept_text_relations(paper_concept_id) == before_text
+
+
+def test_metadata_workflow_accepts_supplied_actor_private_article(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    paper_concept_id = "#V#supplied_actor_private_scholarly_article"
+    concept_service.create_concept(
+        name="Supplied Actor-private Scholarly Article",
+        concept_id=paper_concept_id,
+        parent_concept_ids=["#V#scholarly_article"],
+        create_as_instance=True,
+        created_by_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        organisation_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        visibility_scope_mode="user_only_default",
+        maintain_relationship_inverses=False,
+    )
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_concept_id": paper_concept_id,
+            "paper_metadata": {
+                "title": "Supplied Actor-private Scholarly Article",
+                "abstract": "The trusted actor may extend their private article.",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert result.completed is True, result.error
+    assert result.data.get("paper_concept_id") == paper_concept_id
+    descriptions = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="hasDescription",
+            limit=10,
+        )
+    ]
+    assert "The trusted actor may extend their private article." in descriptions
+
+
 def test_metadata_workflow_represents_sparse_source_uri_without_title(
     _reset_mock_db: Any,
 ) -> None:
@@ -2621,7 +3219,8 @@ def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
     assert result.final_state.endswith("_completed"), result.data.get(
         "last_action_outputs"
     )
-    assert result.data.get("paper_concept_created") is True
+    assert result.data.get("paper_external_identity_scheme") == "arxiv"
+    assert (result.data.get("create_article_result") or {}).get("successful") == 1
     paper_concept_id = result.data.get("paper_concept_id")
     assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
 

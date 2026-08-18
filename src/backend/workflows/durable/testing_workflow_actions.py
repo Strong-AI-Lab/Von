@@ -10,6 +10,7 @@ from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICA
 from ...services import concept_service
 from ...services.arxiv_paper_link_service import (
     extract_arxiv_id_candidates,
+    predict_actor_private_arxiv_paper_concept_id,
     predict_arxiv_paper_concept_id,
 )
 from ...services.experiment_run_service import (
@@ -474,7 +475,15 @@ def _validated_arxiv_cleanup_inputs(
     requested_paper_id = _safe_str(inputs.get("paper_concept_id"))
     if not arxiv_id or not fixture_paper_id or requested_paper_id != fixture_paper_id:
         return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
-    if predict_arxiv_paper_concept_id(arxiv_id=arxiv_id) != fixture_paper_id:
+    actor_user_id = _safe_str(actor.get("user_id"))
+    expected_paper_ids = {
+        predict_actor_private_arxiv_paper_concept_id(
+            user_concept_id=actor_user_id,
+            arxiv_id=arxiv_id,
+        ),
+        predict_arxiv_paper_concept_id(arxiv_id=arxiv_id),
+    }
+    if fixture_paper_id not in expected_paper_ids:
         return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
 
     requested_file_copy_ids = _normalise_concept_ids(
@@ -592,11 +601,25 @@ def _arxiv_repair_is_actor_owned(
     if not candidates:
         # The fixture service will reject the identifier without mutation.
         return True
-    paper_id = predict_arxiv_paper_concept_id(arxiv_id=candidates[0])
+    actor_user_id = _safe_str(actor.get("user_id"))
+    if not actor_user_id:
+        return False
+    paper_id = predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id=actor_user_id,
+        arxiv_id=candidates[0],
+    )
     try:
         paper = _load_cleanup_concept_for_authority(paper_id)
     except Exception:
         return False
+    if paper is None:
+        legacy_paper_id = predict_arxiv_paper_concept_id(arxiv_id=candidates[0])
+        try:
+            legacy_paper = _load_cleanup_concept_for_authority(legacy_paper_id)
+        except Exception:
+            return False
+        if legacy_paper is not None:
+            paper = legacy_paper
     if paper is None:
         return True
     if not _concept_is_owned_by_actor(paper, actor):

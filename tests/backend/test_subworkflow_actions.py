@@ -21,7 +21,12 @@ from src.backend.workflows.subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
 )
-from src.backend.workflows.trace_model import WorkflowExecutionTrace
+from src.backend.workflows.trace_model import (
+    WORKFLOW_EFFECT_PATH_DEPTH_METADATA_KEY,
+    WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY,
+    WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY,
+    WorkflowExecutionTrace,
+)
 
 
 def _always_true(_context):
@@ -132,6 +137,77 @@ def test_subworkflow_action_executes_child_and_emits_trace_chain() -> None:
     assert event["child_workflow_id"] == "#V#child_success"
     assert event["child_completed"] is True
     assert event["invocation_chain"] == ["#V#parent_workflow", "#V#child_success"]
+
+
+def test_subworkflow_action_propagates_stable_durable_effect_path_on_replay() -> None:
+    registry = ActionRegistry()
+    child_trace_snapshots: list[tuple[str, dict[str, object]]] = []
+
+    def _capture_child_trace(request: WorkflowActionRequest) -> WorkflowActionResult:
+        child_trace_snapshots.append(
+            (request.trace.execution_id, dict(request.trace.metadata))
+        )
+        return WorkflowActionResult(status="success", outputs={"ok": True})
+
+    registry.register(
+        ActionSpec(action_id="child.capture_trace", handler=_capture_child_trace)
+    )
+    child_definition = WorkflowDefinition(
+        workflow_id="#V#child_effect_path",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(
+                    WorkflowActionInvocation(action_id="child.capture_trace"),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            child_definition if workflow_id == child_definition.workflow_id else None
+        ),
+    )
+
+    for _ in range(2):
+        result = registry.execute(
+            WORKFLOW_SUBWORKFLOW_ACTION_ID,
+            inputs={
+                "workflow_id": child_definition.workflow_id,
+                "__parent_workflow_id": "#V#durable_parent",
+                "__parent_state_id": "represent",
+            },
+            context={},
+            env=WorkflowEnvironment(llm_client=None),
+            trace=WorkflowExecutionTrace(
+                workflow_id="#V#durable_parent",
+                instance_id="durable-root-instance",
+            ),
+            workflow_id="#V#durable_parent",
+            workflow_state_id="represent",
+        )
+        assert result.status == "success"
+
+    assert len(child_trace_snapshots) == 2
+    first_execution_id, first_metadata = child_trace_snapshots[0]
+    second_execution_id, second_metadata = child_trace_snapshots[1]
+    assert first_execution_id != second_execution_id
+    assert (
+        first_metadata[WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY]
+        == second_metadata[WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY]
+        == "durable-root-instance"
+    )
+    assert (
+        first_metadata[WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY]
+        == second_metadata[WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY]
+    )
+    assert len(str(first_metadata[WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY])) == 64
+    assert first_metadata[WORKFLOW_EFFECT_PATH_DEPTH_METADATA_KEY] == 1
+    assert second_metadata[WORKFLOW_EFFECT_PATH_DEPTH_METADATA_KEY] == 1
 
 
 def test_subworkflow_action_applies_launch_contract_ambient_exclusions() -> None:

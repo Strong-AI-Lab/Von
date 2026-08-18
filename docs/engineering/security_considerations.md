@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 13 August 2026
+- **Last reviewed:** 18 August 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -236,8 +236,12 @@ Current implementation details:
 Canonical ontology publication is not part of an ordinary tool's visibility
 aperture. The `JVNAUTOSCI-2632` candidate separates organisation/global
 semantic roles from Von operational administration and requires an exact,
-server-issued, short-lived, non-recursive delegation when an agent performs a
-covered ontology effect. Its current design/implementation boundary is
+server-issued, short-lived, non-recursive delegation when authority for a
+covered ontology effect is handed to a separately acting agent. A workflow
+effect that stays inside one trusted authenticated actor's exact private scope
+may retain that actor's direct authority after the workflow write ceiling and
+the final intent are checked; that is not a semantic delegation. The current
+design/implementation boundary is
 [Ontology publication authority](ontology_publication_authority.md). This is a
 candidate branch reference, not evidence that a deployment has represented
 roles or released the capability.

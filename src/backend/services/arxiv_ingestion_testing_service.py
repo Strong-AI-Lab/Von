@@ -20,9 +20,9 @@ from .arxiv_paper_link_service import (
     extract_scholarly_metadata_summary,
     extract_scholarly_metadata_title,
     extract_scholarly_topic_labels,
-    predict_arxiv_paper_concept_id,
     predict_scholarly_author_concept_id,
     predict_scholarly_topic_concept_id,
+    resolve_actor_private_arxiv_paper_concept_id,
 )
 from .computer_file_copy_service import delete_file_copy_blob_and_concept
 from .text_value_service import get_texts_for_concept
@@ -378,7 +378,10 @@ def prepare_arxiv_paper_ingestion_test_fixture(
         )
         for topic_label in expected_topic_labels
     ]
-    paper_concept_id = predict_arxiv_paper_concept_id(arxiv_id=resolved_arxiv_id)
+    paper_concept_id = resolve_actor_private_arxiv_paper_concept_id(
+        user_concept_id=resolved_user_concept_id,
+        arxiv_id=resolved_arxiv_id,
+    )
     stale_artifact_reclamation: dict[str, Any] | None = None
     if _concept_exists(paper_concept_id):
         if not repair_existing_artifacts:

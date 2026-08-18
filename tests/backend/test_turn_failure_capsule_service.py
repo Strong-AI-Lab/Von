@@ -146,6 +146,91 @@ def test_capsule_projects_exact_paper_lock_incident_without_private_scope() -> N
     assert capsule["redaction"]["redacted_count"] >= 4
 
 
+def test_capsule_scopes_exact_workflow_instance_readback_verdict() -> None:
+    report = _paper_outcome_report()
+    report["facts"].append(
+        {
+            "effect_id": "effect-workflow-instance",
+            "tool": "Scholarly Article Metadata Representation Workflow",
+            "effect_status": "failed",
+            "initial_effect_status": "failed",
+            "changed": True,
+            "current_outcome_status": "failed",
+            "outcome_resolved": True,
+            "reconciliation_status": "canonically_verified",
+            "canonical_readback_present": True,
+            "canonical_readback_verified": False,
+            "workflow_instance_operational_readback": True,
+            "workflow_instance_readback_verified": True,
+            "workflow_id": "#V#scholarly_article_metadata_representation_workflow",
+            "instance_id": "workflow-instance-failed-1",
+            "evidence_id": "evidence-workflow-instance-readback",
+        }
+    )
+
+    capsule = build_turn_failure_capsule(
+        request_id="workflow-instance-readback-verdict",
+        terminal_status="effect_failed",
+        response_authority="canonical_outcome",
+        visible_response="The workflow instance failed.",
+        outcome_report=report,
+        generated_at_utc="2026-08-18T00:00:00Z",
+    )
+
+    workflow = next(
+        effect
+        for effect in capsule["effects"]
+        if effect["effect_id"] == "effect-workflow-instance"
+    )
+    assert workflow["canonical_readback_verdict"] == "workflow_instance_verified"
+    assert workflow["instance_id"] == "workflow-instance-failed-1"
+    assert workflow["evidence_id"] == "evidence-workflow-instance-readback"
+    domain_create = next(
+        effect for effect in capsule["effects"] if effect["name"] == "create_concepts"
+    )
+    assert domain_create["canonical_readback_verdict"] == "present_unverified"
+    domain_marker = next(
+        effect
+        for effect in capsule["effects"]
+        if effect["name"] == "record_source_processing_marker"
+    )
+    assert domain_marker["canonical_readback_verdict"] == "verified"
+
+
+def test_capsule_distinguishes_unverified_workflow_instance_readback() -> None:
+    report = _paper_outcome_report()
+    report["facts"] = [
+        {
+            "effect_id": "effect-workflow-instance-unverified",
+            "tool": "Scholarly Article Metadata Representation Workflow",
+            "effect_status": "failed",
+            "current_outcome_status": "failed",
+            "outcome_resolved": True,
+            "reconciliation_status": "canonically_verified",
+            "canonical_readback_present": True,
+            "canonical_readback_verified": False,
+            "workflow_instance_operational_readback": True,
+            "workflow_instance_readback_verified": False,
+            "workflow_id": "#V#scholarly_article_metadata_representation_workflow",
+            "instance_id": "workflow-instance-unverified-1",
+            "evidence_id": "evidence-workflow-instance-readback",
+        }
+    ]
+
+    capsule = build_turn_failure_capsule(
+        request_id="workflow-instance-unverified-verdict",
+        terminal_status="effect_failed",
+        response_authority="canonical_outcome",
+        visible_response="The workflow instance read-back was inconsistent.",
+        outcome_report=report,
+        generated_at_utc="2026-08-18T00:00:00Z",
+    )
+
+    assert capsule["effects"][0]["canonical_readback_verdict"] == (
+        "workflow_instance_unverified"
+    )
+
+
 def test_capsule_redacts_secret_forms_from_every_text_surface() -> None:
     report = _paper_outcome_report()
     report["model_draft"]["preview"] = (

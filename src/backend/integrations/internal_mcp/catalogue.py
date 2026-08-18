@@ -10610,6 +10610,7 @@ def _resolve_concept_by_name(**kwargs):
         match_code_strings=bool(kwargs.get("match_code_strings", True)),
         normalisation_level=str(kwargs.get("normalisation_level", "default")),
         max_results=int(kwargs.get("max_results", 5)),
+        require_actor_private=bool(kwargs.get("require_actor_private", False)),
     )
 
 
@@ -10625,11 +10626,13 @@ def _resolve_concept_by_name_input_schema() -> Schema:
             "match_code_strings": (bool, type(None)),
             "normalisation_level": (str, type(None)),
             "max_results": (int, type(None)),
+            "require_actor_private": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
             "resolve_concept_by_name input: name (str) plus optional language preferences/constraints, "
-            "instance_of restriction, code-string matching toggle, normalisation_level, max_results"
+            "instance_of restriction, code-string matching toggle, normalisation_level, "
+            "max_results, and an optional trusted-actor-private scope restriction"
         ),
     )
 

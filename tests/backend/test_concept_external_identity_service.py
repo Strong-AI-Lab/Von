@@ -577,6 +577,22 @@ def test_stable_id_is_parent_and_kind_neutral_but_actor_scoped() -> None:
         actor_user_id="#V#user_a",
         actor_org_id="#V#org_b",
     )
+    private_user_a = service.canonical_concept_id_for_external_identifiers(
+        [identifier],
+        kind="instance",
+        parent_id="#V#archival_record",
+        scope_mode="user_only_default",
+        actor_user_id="#V#user_a",
+        actor_org_id="#V#org_a",
+    )
+    private_user_b = service.canonical_concept_id_for_external_identifiers(
+        [identifier],
+        kind="instance",
+        parent_id="#V#archival_record",
+        scope_mode="user_only_default",
+        actor_user_id="#V#user_b",
+        actor_org_id="#V#org_a",
+    )
 
     assert global_instance is not None
     assert global_instance == global_type
@@ -587,6 +603,8 @@ def test_stable_id_is_parent_and_kind_neutral_but_actor_scoped() -> None:
     assert org_a_user_a == org_a_user_b
     assert org_a_user_a != global_instance
     assert org_b not in {global_instance, org_a_user_a}
+    assert private_user_a not in {global_instance, org_a_user_a, private_user_b}
+    assert private_user_b not in {global_instance, org_a_user_a}
 
 
 def test_persists_one_generic_marker_and_retains_failure_evidence(

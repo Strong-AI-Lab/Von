@@ -496,7 +496,7 @@ def test_verify_arxiv_ingestion_result_action_forwards_expected_metadata(monkeyp
 def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monkeypatch):
     from src.backend.workflows.durable import testing_workflow_actions as mod
     from src.backend.services.arxiv_paper_link_service import (
-        predict_arxiv_paper_concept_id,
+        predict_actor_private_arxiv_paper_concept_id,
     )
 
     captured: dict[str, Any] = {}
@@ -506,7 +506,10 @@ def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monke
         lambda **kwargs: captured.update(kwargs)
         or {"success": True, "cleanup_passed": True},
     )
-    paper_concept_id = predict_arxiv_paper_concept_id(arxiv_id="2603.21702")
+    paper_concept_id = predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id="#V#user",
+        arxiv_id="2603.21702",
+    )
     concept_docs = {
         paper_concept_id: {
             "relationships": {
@@ -1545,11 +1548,14 @@ def test_foreign_testing_theory_paths_deny_before_service_mutation(monkeypatch):
 def test_arxiv_cleanup_rejects_arbitrary_targets_before_service_mutation(monkeypatch):
     from src.backend.workflows.durable import testing_workflow_actions as mod
     from src.backend.services.arxiv_paper_link_service import (
-        predict_arxiv_paper_concept_id,
+        predict_actor_private_arxiv_paper_concept_id,
     )
 
     mutation_calls: list[str] = []
-    fixture_paper_id = predict_arxiv_paper_concept_id(arxiv_id="2603.21702")
+    fixture_paper_id = predict_actor_private_arxiv_paper_concept_id(
+        user_concept_id="#V#owner",
+        arxiv_id="2603.21702",
+    )
     monkeypatch.setattr(
         mod,
         "cleanup_arxiv_paper_ingestion_test_artifacts",

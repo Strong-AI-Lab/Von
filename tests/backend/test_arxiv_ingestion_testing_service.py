@@ -34,7 +34,11 @@ def test_prepare_arxiv_fixture_can_reclaim_existing_artifacts(
         lambda *_args: ["Author One", "Author Two"],
     )
     monkeypatch.setattr(mod, "extract_scholarly_topic_labels", lambda *_args: ["cs.AI"])
-    monkeypatch.setattr(mod, "predict_arxiv_paper_concept_id", lambda **_kwargs: paper_concept_id)
+    monkeypatch.setattr(
+        mod,
+        "resolve_actor_private_arxiv_paper_concept_id",
+        lambda **_kwargs: paper_concept_id,
+    )
     monkeypatch.setattr(
         mod,
         "predict_scholarly_author_concept_id",

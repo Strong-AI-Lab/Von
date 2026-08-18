@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -17,11 +19,24 @@ from ...services.arxiv_paper_link_service import (
     extract_scholarly_topic_labels,
     materialise_scholarly_representation_for_arxiv_file_copy,
     materialise_scholarly_representation_for_file_copy,
+    predict_scholarly_author_concept_id,
+    predict_scholarly_topic_concept_id,
     resolve_or_create_scholarly_author_concept_id,
 )
-from ...services.relationship_write_service import add_relationship
-from ...services.text_value_service import get_texts_for_concept, upsert_text_for_concept
-from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
+from ...services.ontology_publication_authority_service import (
+    PublicationContext,
+    PublicationContextKind,
+    concept_publication_context,
+)
+from ...services.relationship_write_service import (
+    add_relationship,
+    add_structural_relationship,
+    validate_predicate_concept,
+)
+from ...services.text_value_service import (
+    get_texts_for_concept,
+    upsert_text_for_concept,
+)
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -35,6 +50,9 @@ _PUBLICATION_DATE_PREDICATE_ID = "#V#has_publication_date"
 _MAX_TOPIC_RELATIONS = 3
 
 SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID = "scholarly_paper.normalise_inputs"
+SCHOLARLY_PAPER_NORMALISE_EXTERNAL_IDENTITY_ACTION_ID = (
+    "scholarly_paper.normalise_external_identity"
+)
 SCHOLARLY_PAPER_ENSURE_PAPER_CONCEPT_ACTION_ID = "scholarly_paper.ensure_paper_concept"
 SCHOLARLY_PAPER_LINK_FILE_COPY_ACTION_ID = "scholarly_paper.link_file_copy"
 SCHOLARLY_PAPER_ATTACH_METADATA_ACTION_ID = "scholarly_paper.attach_metadata"
@@ -492,6 +510,92 @@ def _resolve_user_concept_id(request: WorkflowActionRequest) -> str | None:
     return _clean_text(resolved_user) or None
 
 
+def _trusted_actor_concept_id(request: WorkflowActionRequest) -> str | None:
+    """Return only the server-bound workflow actor, never payload identity."""
+
+    return _clean_text(getattr(request.environment, "user_concept_id", None)) or None
+
+
+def _require_actor_private_targets(
+    request: WorkflowActionRequest,
+    concept_ids: Sequence[str],
+) -> WorkflowActionResult | None:
+    """Preflight every pre-existing record a custom action will mutate."""
+
+    actor_concept_id = _trusted_actor_concept_id(request)
+    if not actor_concept_id:
+        return WorkflowActionResult(
+            status="failed",
+            error="scholarly_paper_actor_private_target_required",
+        )
+
+    expected_context = PublicationContext.user(actor_concept_id)
+    checked: set[str] = set()
+    for raw_concept_id in concept_ids:
+        concept_id = _clean_text(raw_concept_id)
+        if not concept_id or concept_id in checked:
+            continue
+        checked.add(concept_id)
+        try:
+            target_context = concept_publication_context(concept_id)
+        except (LookupError, ValueError):
+            return WorkflowActionResult(
+                status="failed",
+                outputs={"mutation_target_concept_id": concept_id},
+                error="scholarly_paper_mutation_target_missing",
+            )
+        if (
+            target_context.kind != PublicationContextKind.USER
+            or target_context.concept_id != expected_context.concept_id
+        ):
+            return WorkflowActionResult(
+                status="failed",
+                outputs={
+                    "mutation_target_concept_id": concept_id,
+                    "mutation_target_publication_context": target_context.to_mapping(),
+                },
+                error="scholarly_paper_actor_private_target_required",
+            )
+    return None
+
+
+def _require_preprovisioned_schema_support(
+    *,
+    type_concept_ids: Sequence[str] = (),
+    predicate_concept_ids: Sequence[str] = (),
+) -> WorkflowActionResult | None:
+    """Reject ordinary actor-private work instead of creating global schema."""
+
+    missing = [
+        concept_id
+        for concept_id in (*type_concept_ids, *predicate_concept_ids)
+        if not _concept_exists(concept_id)
+    ]
+    if missing:
+        return WorkflowActionResult(
+            status="failed",
+            outputs={"missing_schema_concept_ids": list(dict.fromkeys(missing))},
+            error="scholarly_paper_schema_support_missing",
+        )
+
+    # Predicate typing is hard schema authority rather than actor-visible domain
+    # data.  Use the canonical validator: it deliberately reads that one schema
+    # fact through the hard-authority view, while mutation source/target access
+    # remains governed by ``_require_actor_private_targets``.
+    invalid_predicates = [
+        concept_id
+        for concept_id in predicate_concept_ids
+        if not validate_predicate_concept(concept_id)[0]
+    ]
+    if invalid_predicates:
+        return WorkflowActionResult(
+            status="failed",
+            outputs={"invalid_schema_predicate_ids": invalid_predicates},
+            error="scholarly_paper_schema_support_invalid",
+        )
+    return None
+
+
 def _extract_metadata_from_context(request: WorkflowActionRequest) -> dict[str, Any]:
     for source in (
         request.inputs.get("paper_metadata"),
@@ -691,9 +795,154 @@ def _build_normalise_inputs_handler():
     return _handle
 
 
+def _build_normalise_external_identity_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        metadata = _extract_metadata_from_context(request)
+        source_uri = _first_non_empty_text(
+            request.inputs.get("source_uri"),
+            request.data.get("source_uri"),
+            metadata.get("source_uri"),
+            metadata.get("source_url"),
+            metadata.get("url"),
+        )
+        arxiv_id = _extract_arxiv_id_from_request(request)
+        doi_candidates = _extract_doi_candidates(
+            (
+                request.inputs.get("doi"),
+                request.data.get("doi"),
+                source_uri,
+            )
+        ) or _extract_doi_candidates(metadata)
+        doi = doi_candidates[0].casefold() if doi_candidates else ""
+        title = _extract_title_from_request(request)
+        publication_date = _extract_publication_date_from_request(request)
+        author_names = _extract_author_names_from_request(request)
+        bibliographic_identity_value: str | None = None
+        if title and publication_date and author_names:
+            bibliographic_material = {
+                "authors": sorted(
+                    {
+                        " ".join(author_name.split()).casefold()
+                        for author_name in author_names
+                        if _clean_text(author_name)
+                    }
+                ),
+                "publication_date": " ".join(publication_date.split()).casefold(),
+                "title": " ".join(title.split()).casefold(),
+            }
+            if bibliographic_material["authors"]:
+                bibliographic_digest = hashlib.sha256(
+                    json.dumps(
+                        bibliographic_material,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                bibliographic_identity_value = f"sha256:{bibliographic_digest}"
+
+        identity_scheme: str | None = None
+        identity_value: str | None = None
+        if arxiv_id:
+            identity_scheme = "arxiv"
+            identity_value = arxiv_id
+        elif doi:
+            identity_scheme = "doi"
+            identity_value = doi
+        elif source_uri:
+            identity_scheme = "url"
+            identity_value = source_uri
+        elif bibliographic_identity_value:
+            identity_scheme = "bibliographic"
+            identity_value = bibliographic_identity_value
+
+        identity_concept_id: str | None = None
+        identity_resolution_status = "not_applicable"
+        resolved_paper_concept_id: str | None = None
+        if identity_scheme and identity_value:
+            actor_concept_id = _trusted_actor_concept_id(request)
+            if not actor_concept_id:
+                return WorkflowActionResult(
+                    status="failed",
+                    error="scholarly_paper_actor_user_missing",
+                )
+            from ...services.concept_external_identity_service import (
+                ExternalIdentifier,
+                canonical_concept_id_for_external_identifiers,
+            )
+
+            identity_concept_id = canonical_concept_id_for_external_identifiers(
+                [
+                    ExternalIdentifier(
+                        scheme=identity_scheme,
+                        value=identity_value,
+                    )
+                ],
+                kind="instance",
+                parent_id="#V#scholarly_article",
+                scope_mode="user_only_default",
+                actor_user_id=actor_concept_id,
+                actor_org_id=_clean_text(
+                    getattr(request.environment, "org_concept_id", None)
+                )
+                or None,
+            )
+            if not identity_concept_id:
+                return WorkflowActionResult(
+                    status="failed",
+                    error="scholarly_paper_external_identity_invalid",
+                )
+            existing_doc = _get_concept(identity_concept_id)
+            if existing_doc is None:
+                identity_resolution_status = "not_found"
+            else:
+                target_preflight = _require_actor_private_targets(
+                    request,
+                    (identity_concept_id,),
+                )
+                if target_preflight is not None:
+                    return target_preflight
+                if not _relation_contains_target(
+                    existing_doc,
+                    "is_an_instance_of",
+                    "#V#scholarly_article",
+                ):
+                    return WorkflowActionResult(
+                        status="failed",
+                        outputs={
+                            "paper_external_identity_concept_id": identity_concept_id,
+                        },
+                        error="scholarly_paper_external_identity_conflict",
+                    )
+                identity_resolution_status = "resolved"
+                resolved_paper_concept_id = identity_concept_id
+
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "arxiv_id": arxiv_id,
+                "paper_external_identity_present": bool(identity_value),
+                "paper_external_identity_scheme": identity_scheme,
+                "paper_external_identity_value": identity_value,
+                "paper_external_identity_concept_id": identity_concept_id,
+                "paper_external_identity_resolution_status": (
+                    identity_resolution_status
+                ),
+                "paper_concept_id": resolved_paper_concept_id,
+            },
+        )
+
+    return _handle
+
+
 def _build_materialise_from_file_copy_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
-        user_concept_id = _resolve_user_concept_id(request)
+        from ...services.arxiv_paper_link_service import (
+            _stable_file_copy_paper_instance_concept_id,
+            resolve_actor_private_arxiv_paper_concept_id,
+        )
+
+        user_concept_id = _trusted_actor_concept_id(request)
         if not user_concept_id:
             return WorkflowActionResult(
                 status="failed",
@@ -712,6 +961,60 @@ def _build_materialise_from_file_copy_handler():
 
         arxiv_id = _extract_arxiv_id_from_request(request)
         metadata = _extract_metadata_from_context(request)
+        preflight_targets = [file_copy_concept_id]
+        if arxiv_id:
+            expected_paper_concept_id = resolve_actor_private_arxiv_paper_concept_id(
+                user_concept_id=user_concept_id,
+                arxiv_id=arxiv_id,
+            )
+            schema_preflight = _require_preprovisioned_schema_support(
+                type_concept_ids=(
+                    "#V#paper_on_arxiv",
+                    "#V#scholarly_article",
+                    "#V#person",
+                    "#V#research_topic",
+                ),
+                predicate_concept_ids=("#V#authored_by", "#V#about"),
+            )
+            author_names = _extract_author_names_from_request(request)
+            topic_labels = _extract_topic_labels_from_request(request)
+            related_candidate_ids = [
+                *(
+                    predict_scholarly_author_concept_id(
+                        user_concept_id=user_concept_id,
+                        author_name=author_name,
+                    )
+                    for author_name in author_names
+                ),
+                *(
+                    predict_scholarly_topic_concept_id(
+                        user_concept_id=user_concept_id,
+                        topic_label=topic_label,
+                    )
+                    for topic_label in topic_labels[:_MAX_TOPIC_RELATIONS]
+                ),
+            ]
+            preflight_targets.extend(
+                concept_id
+                for concept_id in (expected_paper_concept_id, *related_candidate_ids)
+                if _concept_exists(concept_id)
+            )
+        else:
+            expected_paper_concept_id = _stable_file_copy_paper_instance_concept_id(
+                file_copy_concept_id
+            )
+            schema_preflight = _require_preprovisioned_schema_support(
+                type_concept_ids=("#V#scholarly_article",),
+            )
+            if _concept_exists(expected_paper_concept_id):
+                preflight_targets.append(expected_paper_concept_id)
+
+        target_preflight = _require_actor_private_targets(request, preflight_targets)
+        if target_preflight is not None:
+            return target_preflight
+        if schema_preflight is not None:
+            return schema_preflight
+
         if arxiv_id:
             report = materialise_scholarly_representation_for_arxiv_file_copy(
                 user_concept_id=user_concept_id,
@@ -719,6 +1022,7 @@ def _build_materialise_from_file_copy_handler():
                 file_copy_concept_id=file_copy_concept_id,
                 metadata=metadata or None,
                 logger=logger,
+                schema_support_preprovisioned=True,
             )
         else:
             report = materialise_scholarly_representation_for_file_copy(
@@ -726,6 +1030,7 @@ def _build_materialise_from_file_copy_handler():
                 file_copy_concept_id=file_copy_concept_id,
                 metadata=metadata or None,
                 logger=logger,
+                schema_support_preprovisioned=True,
             )
 
         if not isinstance(report, Mapping):
@@ -773,6 +1078,12 @@ def _build_enrich_from_metadata_handler():
                 status="failed",
                 error="scholarly_paper_paper_concept_id_missing",
             )
+        target_preflight = _require_actor_private_targets(
+            request,
+            (paper_concept_id,),
+        )
+        if target_preflight is not None:
+            return target_preflight
 
         title = _extract_title_from_request(request)
         summary = _extract_summary_from_request(request)
@@ -893,12 +1204,39 @@ def _build_resolve_authors_handler():
                 },
             )
 
-        user_concept_id = _resolve_user_concept_id(request)
+        user_concept_id = _trusted_actor_concept_id(request)
         if not user_concept_id:
             return WorkflowActionResult(
                 status="failed",
                 error="scholarly_author_actor_user_missing",
             )
+
+        schema_preflight = _require_preprovisioned_schema_support(
+            type_concept_ids=("#V#person",),
+            predicate_concept_ids=("#V#authored_by",),
+        )
+        predicted_author_concept_ids = [
+            predict_scholarly_author_concept_id(
+                user_concept_id=user_concept_id,
+                author_name=author_name,
+            )
+            for author_name in author_names
+        ]
+        target_preflight = _require_actor_private_targets(
+            request,
+            (
+                paper_concept_id,
+                *(
+                    concept_id
+                    for concept_id in predicted_author_concept_ids
+                    if _concept_exists(concept_id)
+                ),
+            ),
+        )
+        if target_preflight is not None:
+            return target_preflight
+        if schema_preflight is not None:
+            return schema_preflight
 
         resolved_author_concept_ids: list[str] = []
         for author_name in author_names:
@@ -1120,13 +1458,12 @@ def _build_verify_representation_handler():
 def _build_scholarly_paper_ensure_paper_concept_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         from ...services.arxiv_paper_link_service import (
-            _ensure_type_concept,
             _stable_file_copy_paper_instance_concept_id,
             ensure_arxiv_paper_instance,
-            predict_arxiv_paper_concept_id,
+            resolve_actor_private_arxiv_paper_concept_id,
         )
 
-        user_concept_id = _resolve_user_concept_id(request)
+        user_concept_id = _trusted_actor_concept_id(request)
         if not user_concept_id:
             return WorkflowActionResult(
                 status="failed",
@@ -1139,30 +1476,49 @@ def _build_scholarly_paper_ensure_paper_concept_handler():
             request.data.get("file_copy_concept_id"),
         )
 
-        # 1. Ensure the scholarly article type exists
-        _ensure_type_concept(
-            "#V#scholarly_article",
-            "Scholarly Article",
-            preferred_parent_id="#V#scholarly_work",
-            logger=logger,
-        )
-
-        # 2. Determine or create the paper instance
         if arxiv_id:
-            expected_paper_concept_id = predict_arxiv_paper_concept_id(
-                arxiv_id=arxiv_id
+            paper_concept_id = resolve_actor_private_arxiv_paper_concept_id(
+                user_concept_id=user_concept_id,
+                arxiv_id=arxiv_id,
             )
-            existed_before = _concept_exists(expected_paper_concept_id)
+            schema_preflight = _require_preprovisioned_schema_support(
+                type_concept_ids=("#V#paper_on_arxiv", "#V#scholarly_article"),
+            )
+            existed_before = _concept_exists(paper_concept_id)
+            preflight_targets = [paper_concept_id] if existed_before else []
+        elif file_copy_concept_id:
+            paper_concept_id = _stable_file_copy_paper_instance_concept_id(
+                file_copy_concept_id
+            )
+            schema_preflight = _require_preprovisioned_schema_support(
+                type_concept_ids=("#V#scholarly_article",),
+            )
+            existed_before = _concept_exists(paper_concept_id)
+            preflight_targets = [file_copy_concept_id]
+            if existed_before:
+                preflight_targets.append(paper_concept_id)
+        else:
+            return WorkflowActionResult(
+                status="failed",
+                error="scholarly_paper_insufficient_identifiers",
+            )
+
+        target_preflight = _require_actor_private_targets(request, preflight_targets)
+        if target_preflight is not None:
+            return target_preflight
+        if schema_preflight is not None:
+            return schema_preflight
+
+        created = not existed_before
+        if arxiv_id:
             paper_concept_id = ensure_arxiv_paper_instance(
                 user_concept_id=user_concept_id,
                 arxiv_id=arxiv_id,
                 logger=logger,
+                schema_support_preprovisioned=True,
             )
-            created = not existed_before
-        elif file_copy_concept_id:
-            paper_concept_id = _stable_file_copy_paper_instance_concept_id(file_copy_concept_id)
-            created = False
-            if not _concept_exists(paper_concept_id):
+        elif created:
+            if file_copy_concept_id:
                 metadata = _extract_metadata_from_context(request)
                 title = extract_scholarly_metadata_title(metadata)
                 default_name = f"Scholarly paper for {file_copy_concept_id}"
@@ -1176,35 +1532,39 @@ def _build_scholarly_paper_ensure_paper_concept_handler():
                         "source": "file_copy",
                         "file_copy_concept_id": str(file_copy_concept_id).strip(),
                     },
+                    created_by_concept_id=user_concept_id,
+                    visibility_scope_mode="user_only_default",
+                    maintain_relationship_inverses=False,
+                    resolve_visibility_from_event_namespace=False,
                 )
-                concept_service.update_concept(
-                    paper_concept_id,
-                    {
-                        f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
-                            user_concept_id.strip()
-                        ]
-                    },
-                )
-                created = True
-        else:
-            return WorkflowActionResult(
-                status="failed",
-                error="scholarly_paper_insufficient_identifiers",
-            )
 
-        # 3. Ensure it is explicitly typed as a scholarly article
-        add_relationship(
+        # The source was actor-private-preflighted above. Suppress the inverse
+        # so this private effect does not also mutate the global schema type.
+        type_relation = add_structural_relationship(
             source_id=paper_concept_id,
             predicate="is_an_instance_of",
-            target="#V#scholarly_article",
+            target_id="#V#scholarly_article",
+            maintain_inverse=False,
         )
+        if not bool(type_relation.get("success")):
+            return WorkflowActionResult(
+                status="failed",
+                outputs={
+                    "paper_concept_id": paper_concept_id,
+                    "type_relationship_write_result": type_relation,
+                },
+                error=(
+                    "scholarly_paper_type_assertion_failed:"
+                    f"{type_relation.get('error') or 'unknown_error'}"
+                ),
+            )
 
         return WorkflowActionResult(
             status="success",
             outputs={
                 "paper_concept_id": paper_concept_id,
                 "paper_concept_created": created,
-                "type_asserted": True,
+                "type_asserted": bool(type_relation.get("success")),
             },
         )
 
@@ -1229,6 +1589,12 @@ def _build_scholarly_paper_link_file_copy_handler():
                 status="failed",
                 error="scholarly_paper_link_missing_ids",
             )
+        target_preflight = _require_actor_private_targets(
+            request,
+            (paper_concept_id, file_copy_concept_id),
+        )
+        if target_preflight is not None:
+            return target_preflight
 
         changed = _link_file_copy_to_paper_concept(
             file_copy_concept_id=file_copy_concept_id,
@@ -1259,6 +1625,13 @@ def _build_scholarly_paper_attach_metadata_handler():
                 status="failed",
                 error="scholarly_paper_paper_concept_id_missing",
             )
+
+        target_preflight = _require_actor_private_targets(
+            request,
+            (paper_concept_id,),
+        )
+        if target_preflight is not None:
+            return target_preflight
 
         title = _extract_title_from_request(request)
         summary = _extract_summary_from_request(request)
@@ -1313,8 +1686,6 @@ def _build_scholarly_paper_resolve_topics_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         from ...services.arxiv_paper_link_service import (
             _resolve_or_create_topic_concept_id,
-            _ensure_type_concept,
-            _ensure_predicate_concept,
         )
 
         paper_concept_id = _first_non_empty_text(
@@ -1338,20 +1709,39 @@ def _build_scholarly_paper_resolve_topics_handler():
                 },
             )
 
-        user_concept_id = _resolve_user_concept_id(request)
+        user_concept_id = _trusted_actor_concept_id(request)
         if not user_concept_id:
             return WorkflowActionResult(
                 status="failed",
                 error="scholarly_topic_actor_user_missing",
             )
 
-        _ensure_type_concept(
-            "#V#research_topic",
-            "Research Topic",
-            preferred_parent_id="#V#thing",
-            logger=logger,
+        schema_preflight = _require_preprovisioned_schema_support(
+            type_concept_ids=("#V#research_topic",),
+            predicate_concept_ids=("#V#about",),
         )
-        _ensure_predicate_concept("#V#about", "About", logger=logger)
+        predicted_topic_concept_ids = [
+            predict_scholarly_topic_concept_id(
+                user_concept_id=user_concept_id,
+                topic_label=topic_label,
+            )
+            for topic_label in topic_labels[:_MAX_TOPIC_RELATIONS]
+        ]
+        target_preflight = _require_actor_private_targets(
+            request,
+            (
+                paper_concept_id,
+                *(
+                    concept_id
+                    for concept_id in predicted_topic_concept_ids
+                    if _concept_exists(concept_id)
+                ),
+            ),
+        )
+        if target_preflight is not None:
+            return target_preflight
+        if schema_preflight is not None:
+            return schema_preflight
 
         topic_concept_ids: list[str] = []
         for label in topic_labels[:_MAX_TOPIC_RELATIONS]:
@@ -1366,13 +1756,6 @@ def _build_scholarly_paper_resolve_topics_handler():
                 predicate="#V#about",
                 target=topic_concept_id,
             )
-            if relationship_result.get("error") == "predicate_concept_not_typed":
-                _ensure_predicate_concept("#V#about", "About", logger=logger)
-                relationship_result = add_relationship(
-                    source_id=paper_concept_id,
-                    predicate="#V#about",
-                    target=topic_concept_id,
-                )
             if not bool(relationship_result.get("success")):
                 return WorkflowActionResult(
                     status="failed",
@@ -1421,6 +1804,12 @@ def _build_scholarly_paper_assert_source_identity_handler():
                 status="failed",
                 error="scholarly_paper_paper_concept_id_missing",
             )
+        target_preflight = _require_actor_private_targets(
+            request,
+            (paper_concept_id,),
+        )
+        if target_preflight is not None:
+            return target_preflight
 
         arxiv_id = _extract_arxiv_id_from_request(request)
         source_uri = _first_non_empty_text(
@@ -1605,9 +1994,22 @@ def _build_arxiv_inspect_existing_state_handler():
                 error="arxiv_identifier_missing",
             )
 
-        # JVNAUTOSCI-1768: Proper search over ontology identity relations.
-        from ...services.arxiv_paper_link_service import predict_arxiv_paper_concept_id
-        predicted_cid = predict_arxiv_paper_concept_id(arxiv_id=arxiv_id)
+        actor_concept_id = _trusted_actor_concept_id(request)
+        if not actor_concept_id:
+            return WorkflowActionResult(
+                status="failed",
+                error="scholarly_paper_actor_user_missing",
+            )
+
+        # JVNAUTOSCI-1768: Proper search over actor-scoped ontology identity.
+        from ...services.arxiv_paper_link_service import (
+            resolve_actor_private_arxiv_paper_concept_id,
+        )
+
+        predicted_cid = resolve_actor_private_arxiv_paper_concept_id(
+            user_concept_id=actor_concept_id,
+            arxiv_id=arxiv_id,
+        )
 
         paper_concept_id = None
         if _concept_exists(predicted_cid):
@@ -1770,6 +2172,16 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
     )
     registry.register_if_absent(
         ActionSpec(
+            action_id=SCHOLARLY_PAPER_NORMALISE_EXTERNAL_IDENTITY_ACTION_ID,
+            handler=_build_normalise_external_identity_handler(),
+            description=(
+                "Normalise a paper's arXiv, DOI, or source-URI identity before "
+                "title-based resolution."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
             action_id=SCHOLARLY_PAPER_ENSURE_PAPER_CONCEPT_ACTION_ID,
             handler=_build_scholarly_paper_ensure_paper_concept_handler(),
             description="Ensure a scholarly-paper concept instance exists.",
@@ -1897,6 +2309,7 @@ __all__ = [
     "PAPER_REFERENCE_NORMALISE_SET_ACTION_ID",
     "SCHOLARLY_PAPER_ENRICH_ACTION_ID",
     "SCHOLARLY_PAPER_MATERIALISE_ACTION_ID",
+    "SCHOLARLY_PAPER_NORMALISE_EXTERNAL_IDENTITY_ACTION_ID",
     "SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID",
     "SCHOLARLY_PAPER_RESOLVE_AUTHORS_ACTION_ID",
     "SCHOLARLY_PAPER_VERIFY_ACTION_ID",
