@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 13 August 2026
+- **Last reviewed:** 18 August 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -133,6 +133,7 @@ human acceptance and promotion into a current public authority surface.
 | Private research syntheses | Advisory material retained outside the public repository | Public coding agents must not depend on private notes; promote approved decisions into the applicable public canonical guide |
 | [Automated policy learning](engineering/automated_policy_learning_design.md) | Design with partial substrate | Use as a proposed learning architecture, not proof of a closed operational loop |
 | [Testing workflows and ephemeral theories](engineering/testing_workflows_ephemeral_theories_design.md) | Research/design proposal with partial substrate | Use for design intent and explicit hypotheses; verify implemented surfaces |
+| [Reliability Ratchet articles and case log](engineering/reliability_ratchet_articles_and_cases.md) | Active advisory source copy and evidence log | Use as a revisable diagnostic lens and dated case record; not as standing policy, repair authority, or proof of current behaviour |
 | [Multi-agent coordination](engineering/multi_agent_coordination_design.md) | Early design proposal | Use as a direction to evaluate, not implemented architecture |
 | [Vontology tooling from KA/KR literature](engineering/vontology_tooling_from_ka_kcap_kr_literature.md) | Research-backed advisory roadmap | Use for alternatives and research uptake, not present capability claims |
 

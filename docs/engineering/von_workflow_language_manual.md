@@ -8,8 +8,8 @@
   workflow definitions; current code, tests, and telemetry govern observed
   runtime behaviour
 - **Created:** 2026-05-03
-- **Last substantive content update:** 2026-07-25
-- **Last reviewed:** 2026-07-25
+- **Last substantive content update:** 2026-08-18
+- **Last reviewed:** 2026-08-18
 - **Audience:** Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -288,6 +288,12 @@ Validation semantics:
   MUST expose enough capability/effect policy for the runtime to enforce that
   ceiling; bounded, observable, reliably recoverable effects should not acquire
   an approval workflow merely because they are labelled write or destructive;
+- after that ceiling admits a governed ontology write, an actor-bound trusted
+  workflow MAY retain the authenticated actor's direct authority only when the
+  final exact intent and every source/publication context remain in that
+  actor's user-private scope. A separately acting, sessionless, cross-user,
+  organisation, global, historical/mixed, or governance effect still needs its
+  applicable stronger authority carrier;
 - domain sequencing, extraction, filtering, and user-facing policy MUST remain in VWL, prompt, KB, or Vontology artefacts rather than in the generic action implementation.
 
 ### 3.4b Wrapper Workflow Boundaries for External and Low-Level Tools

@@ -80,6 +80,19 @@ tool payload cannot create, enlarge, or relay a semantic delegation. Sessionless
 gateway and stdio mutations are currently denied before target-sensitive reads;
 they must not recover a grantor's private visibility merely from an opaque grant.
 
+An actor-bound workflow effect executed within the same trusted server does not
+become a separate authority handoff merely because an agent selected or
+composed it. After the resolved write passes the workflow mutation ceiling, it
+may use the authenticated actor's existing direct authority only when every
+source and publication context is that actor's exact user-private context. The
+governed MCP path still evaluates the final intent live and retains agent
+provenance, a durable effect receipt, and canonical read-back. Existing custom
+scholarly handlers do not yet share that receipt path; their bounded exception
+preflights every existing mutation target as the exact actor's private concept
+and requires global schema support to be preprovisioned. Organisation, global,
+historical/mixed, other-user, reserved-governance, sessionless, or otherwise
+separately delegated effects do not inherit this private path.
+
 ## 4. Governed effects and scope transition
 
 The release centralises authority decisions for the supported canonical
@@ -182,6 +195,9 @@ global authority; operational-admin non-equivalence; expiry, revocation,
 tampering, and cross-audience delegation denial; alternate entry-point
 enforcement; private-context non-leakage; retry/concurrency behaviour; and
 receipt-backed canonical read-back of successful and partial effects.
+Where a supported workflow route uses direct actor-private authority, the
+positive evidence must exercise its normal production actor binding and write
+ceiling rather than a manually injected delegation value.
 
 For legacy inline-name cleanup, the bounded evidence additionally covers exact
 Unicode preservation, stale and repeated selector refusal, canonical-name
