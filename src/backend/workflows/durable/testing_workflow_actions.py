@@ -619,7 +619,6 @@ def _arxiv_repair_is_actor_owned(
         except Exception:
             return False
         if legacy_paper is not None:
-            paper_id = legacy_paper_id
             paper = legacy_paper
     if paper is None:
         return True

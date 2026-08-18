@@ -49,10 +49,7 @@ def _reset_durable_paper_state(monkeypatch: pytest.MonkeyPatch) -> Any:
             "workflow_instances",
             "workflow_executions",
         ):
-            try:
-                db.drop_collection(collection_name)
-            except Exception:
-                pass
+            db.drop_collection(collection_name)
     yield
     invalidate_workflow_runnable_verification_cache()
     workflow_concept_authority_service.clear_workflow_type_resolution_cache()

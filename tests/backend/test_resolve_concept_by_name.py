@@ -697,7 +697,7 @@ def test_resolve_concept_by_name_can_require_actor_private_publication(
     monkeypatch.setattr(
         concept_resolution_service,
         "filter_accessible_concept_ids",
-        lambda candidate_ids: set(candidate_ids),
+        set,
     )
     monkeypatch.setattr(
         concept_resolution_service.ConceptsRepository,
