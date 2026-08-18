@@ -8,6 +8,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
@@ -72,6 +73,7 @@ _METHOD_OPERATION = {
     "upsert_singleton_text_relation": "text.upsert",
     "add_names_to_concept": "text.upsert",
     "delete_text_relation": "text.delete",
+    "delete_legacy_name": "text.delete",
     "add_relationship": "relationship.add",
     "remove_relationship": "relationship.remove",
     "remove_relationships_bulk": "relationship.remove",
@@ -309,6 +311,162 @@ def _canonical_json_sha256(value: Any) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _raw_json_sha256(value: Any) -> str:
+    """Hash a JSON-safe value without changing any Unicode string value.
+
+    ``ensure_ascii=False`` makes the byte contract explicit: composed and
+    decomposed Unicode remain distinct UTF-8 byte sequences.  Sorting object
+    keys makes hashes stable without normalising, trimming, or case-folding
+    any stored string.
+    """
+
+    encoded = json.dumps(
+        _json_safe(value),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def legacy_name_selector_metadata(
+    *,
+    concept_id: str,
+    names: Sequence[Any],
+    ordinal: int,
+) -> dict[str, Any]:
+    """Return the opaque exact selector exposed for one legacy ``names[]`` row."""
+
+    canonical_id = _normalise_concept_id(concept_id)
+    if canonical_id is None:
+        raise ValueError("concept_id is required")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+        raise TypeError("legacy name ordinal must be an integer")
+    snapshot = list(names)
+    if ordinal < 0 or ordinal >= len(snapshot):
+        raise IndexError("legacy name ordinal is out of range")
+    return {
+        "concept_id": canonical_id,
+        "ordinal": ordinal,
+        "entry_sha256": _raw_json_sha256(snapshot[ordinal]),
+        "names_snapshot_sha256": _raw_json_sha256(snapshot),
+    }
+
+
+def _legacy_name_document_snapshot(concept_id: str) -> dict[str, Any]:
+    concept = ConceptsRepository.find_one({"concept_id": concept_id})
+    if not isinstance(concept, Mapping):
+        raise OntologyMutationCommandError(
+            "ontology_mutation_target_not_found",
+            "The requested ontology target was not found.",
+        )
+    raw_names = concept.get("names")
+    names = list(raw_names) if isinstance(raw_names, list) else []
+    return {
+        "concept_id": concept_id,
+        "names": names,
+        "names_count": len(names),
+        "names_snapshot_sha256": _raw_json_sha256(names),
+    }
+
+
+def _canonical_has_name_snapshot(concept_id: str) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    relations = TextRelationsRepository.find(
+        {
+            "subject_concept_id": concept_id,
+            "predicate": {"$in": ["hasName", "#V#hasName"]},
+        }
+    )
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        text_value = TextValuesRepository.find_one_by_id(relation.get("object_text_id"))
+        if not isinstance(text_value, Mapping) or not isinstance(
+            text_value.get("text"), str
+        ):
+            continue
+        rows.append(
+            {
+                "relation_id": str(relation.get("_id") or ""),
+                "object_text_id": str(relation.get("object_text_id") or ""),
+                "predicate": relation.get("predicate"),
+                "text_sha256": hashlib.sha256(
+                    text_value["text"].encode("utf-8")
+                ).hexdigest(),
+                "language_sha256": _raw_json_sha256(text_value.get("lang")),
+                "context_sha256": _raw_json_sha256(relation.get("context") or {}),
+                "provenance_sha256": _raw_json_sha256(
+                    text_value.get("provenance") or {}
+                ),
+            }
+        )
+    rows.sort(key=lambda row: (row["relation_id"], row["object_text_id"]))
+    return {
+        "canonical_has_name_present": bool(rows),
+        "canonical_has_name_count": len(rows),
+        "canonical_has_name_relation_ids": [row["relation_id"] for row in rows],
+        "canonical_has_name_snapshot_sha256": _raw_json_sha256(rows),
+    }
+
+
+def _validated_legacy_name_precondition(
+    *,
+    concept_id: str,
+    legacy_name_selector: Any,
+) -> dict[str, Any]:
+    if not isinstance(legacy_name_selector, Mapping):
+        raise OntologyMutationCommandError(
+            "exact_legacy_name_selector_required",
+            "An exact legacy name selector is required.",
+        )
+    selector_concept_id = _normalise_concept_id(legacy_name_selector.get("concept_id"))
+    ordinal = legacy_name_selector.get("ordinal")
+    entry_sha256 = _clean_text(legacy_name_selector.get("entry_sha256")).lower()
+    names_snapshot_sha256 = _clean_text(
+        legacy_name_selector.get("names_snapshot_sha256")
+    ).lower()
+
+    def valid_sha256(value: str) -> bool:
+        return len(value) == 64 and all(
+            character in "0123456789abcdef" for character in value
+        )
+
+    if (
+        selector_concept_id != concept_id
+        or isinstance(ordinal, bool)
+        or not isinstance(ordinal, int)
+        or ordinal < 0
+        or not valid_sha256(entry_sha256)
+        or not valid_sha256(names_snapshot_sha256)
+    ):
+        raise OntologyMutationCommandError(
+            "exact_legacy_name_selector_required",
+            "The legacy name selector is incomplete or does not match this concept.",
+        )
+
+    snapshot = _legacy_name_document_snapshot(concept_id)
+    if snapshot["names_snapshot_sha256"] != names_snapshot_sha256:
+        raise OntologyMutationCommandError(
+            "legacy_name_snapshot_precondition_failed",
+            "The legacy name list changed; reload the concept and select it again.",
+        )
+    names = snapshot["names"]
+    if ordinal >= len(names) or _raw_json_sha256(names[ordinal]) != entry_sha256:
+        raise OntologyMutationCommandError(
+            "legacy_name_selector_precondition_failed",
+            "The selected legacy name is no longer present at that exact position.",
+        )
+    resulting_names = [*names[:ordinal], *names[ordinal + 1 :]]
+    return {
+        **snapshot,
+        "ordinal": ordinal,
+        "entry_sha256": entry_sha256,
+        "resulting_names": resulting_names,
+        "resulting_names_snapshot_sha256": _raw_json_sha256(resulting_names),
+    }
 
 
 def _uncertain_assertion_snapshot(
@@ -1060,6 +1218,47 @@ def build_ontology_mutation_intent(
             # authoritative; reverse traversal belongs to the derived extent.
             "maintain_parent_inverse": False,
         }
+    elif method == "delete_legacy_name":
+        subject_id = _normalise_concept_id(arguments.get("concept_id"))
+        if not subject_id:
+            raise OntologyMutationCommandError(
+                "ontology_mutation_subject_required",
+                "A canonical ontology mutation subject is required.",
+            )
+        _visible_or_fail((subject_id,))
+        legacy_snapshot = _validated_legacy_name_precondition(
+            concept_id=subject_id,
+            legacy_name_selector=arguments.get("legacy_name_selector"),
+        )
+        canonical_names = _canonical_has_name_snapshot(subject_id)
+        if canonical_names["canonical_has_name_present"] is not True:
+            raise OntologyMutationCommandError(
+                "canonical_has_name_required_for_legacy_cleanup",
+                (
+                    "A legacy inline name can be removed only after a canonical "
+                    "hasName relation exists."
+                ),
+            )
+        publication_context = concept_publication_context(subject_id)
+        targets = (subject_id,)
+        predicate = "hasName"
+        delta = {
+            "legacy_name_ordinal": legacy_snapshot["ordinal"],
+            "legacy_name_entry_sha256": legacy_snapshot["entry_sha256"],
+            "legacy_names_count": legacy_snapshot["names_count"],
+            "legacy_names_snapshot_sha256": legacy_snapshot["names_snapshot_sha256"],
+            "resulting_legacy_names_count": legacy_snapshot["names_count"] - 1,
+            "resulting_legacy_names_snapshot_sha256": legacy_snapshot[
+                "resulting_names_snapshot_sha256"
+            ],
+            "canonical_has_name_count": canonical_names["canonical_has_name_count"],
+            "canonical_has_name_relation_ids": canonical_names[
+                "canonical_has_name_relation_ids"
+            ],
+            "canonical_has_name_snapshot_sha256": canonical_names[
+                "canonical_has_name_snapshot_sha256"
+            ],
+        }
     elif method in {
         "upsert_text_relation",
         "update_text_relation",
@@ -1612,6 +1811,82 @@ def _text_read_back(
     }
 
 
+def _legacy_name_read_back(
+    *,
+    concept_id: str,
+    intent_delta: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    snapshot = _legacy_name_document_snapshot(concept_id)
+    canonical_names = _canonical_has_name_snapshot(concept_id)
+    expected = intent_delta if isinstance(intent_delta, Mapping) else {}
+    expected_result_hash = _clean_text(
+        expected.get("resulting_legacy_names_snapshot_sha256")
+    )
+    selected_entry_absent = bool(expected_result_hash) and (
+        snapshot["names_snapshot_sha256"] == expected_result_hash
+        and snapshot["names_count"] == expected.get("resulting_legacy_names_count")
+    )
+    return {
+        "concept_id": concept_id,
+        "legacy_name_selected_entry_absent": selected_entry_absent,
+        "legacy_names_count": snapshot["names_count"],
+        "legacy_names_snapshot_sha256": snapshot["names_snapshot_sha256"],
+        **canonical_names,
+        "publication_context": concept_publication_context(concept_id).to_mapping(),
+    }
+
+
+def _delete_legacy_name_compare_and_set(
+    *,
+    concept_id: str,
+    precondition: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Atomically remove one selected legacy row without rewriting its peers."""
+
+    updated = ConceptsRepository.find_one_and_update(
+        {
+            "concept_id": concept_id,
+            "names": list(precondition["names"]),
+        },
+        {
+            "$set": {
+                "names": list(precondition["resulting_names"]),
+                "embedding_status": "stale",
+                "updated_at": datetime.now(UTC),
+            }
+        },
+        return_document=True,
+    )
+    if not isinstance(updated, Mapping):
+        return {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": "legacy_name_compare_and_set_failed",
+            "error": (
+                "The legacy name list changed before it could be updated; "
+                "reload the concept and select it again."
+            ),
+        }
+    try:
+        from .concept_service import _invalidate_concept_mutation_caches
+
+        _invalidate_concept_mutation_caches()
+    except Exception:
+        logger.exception("Legacy-name cleanup cache invalidation failed")
+    return {
+        "success": True,
+        "changed": True,
+        "concept_id": concept_id,
+        "deleted_legacy_name_ordinal": precondition["ordinal"],
+        "deleted_legacy_name_entry_sha256": precondition["entry_sha256"],
+        "previous_legacy_names_snapshot_sha256": precondition["names_snapshot_sha256"],
+        "legacy_names_snapshot_sha256": precondition["resulting_names_snapshot_sha256"],
+        "legacy_names_count": len(precondition["resulting_names"]),
+    }
+
+
 def _uncertain_promotion_read_back(
     *,
     source_id: str,
@@ -1711,6 +1986,17 @@ def canonical_read_back_for_method(
         )
     if method == "remove_relationships_bulk":
         return _bulk_relationship_read_back(arguments)
+    if method == "delete_legacy_name":
+        result_map = result if isinstance(result, Mapping) else {}
+        return _legacy_name_read_back(
+            concept_id=_normalise_concept_id(arguments.get("concept_id")) or "",
+            intent_delta={
+                "resulting_legacy_names_snapshot_sha256": result_map.get(
+                    "legacy_names_snapshot_sha256"
+                ),
+                "resulting_legacy_names_count": result_map.get("legacy_names_count"),
+            },
+        )
     if method in {
         "upsert_text_relation",
         "update_text_relation",
@@ -1836,6 +2122,22 @@ def _verify_method_postcondition(
         return bool(expected_hash) and exact_relation
     if method == "delete_text_relation":
         return canonical_state.get("relation_present") is False
+    if method == "delete_legacy_name":
+        return (
+            result.get("success") is True
+            and canonical_state.get("legacy_name_selected_entry_absent") is True
+            and canonical_state.get("legacy_names_count")
+            == intent.delta.get("resulting_legacy_names_count")
+            and canonical_state.get("legacy_names_snapshot_sha256")
+            == intent.delta.get("resulting_legacy_names_snapshot_sha256")
+            and canonical_state.get("canonical_has_name_present") is True
+            and canonical_state.get("canonical_has_name_count")
+            == intent.delta.get("canonical_has_name_count")
+            and canonical_state.get("canonical_has_name_relation_ids")
+            == intent.delta.get("canonical_has_name_relation_ids")
+            and canonical_state.get("canonical_has_name_snapshot_sha256")
+            == intent.delta.get("canonical_has_name_snapshot_sha256")
+        )
     if method == "create_concepts":
         concepts = canonical_state.get("concepts")
         expected_context = intent.publication_context.to_mapping()
@@ -2199,6 +2501,49 @@ def execute_governed_ontology_method(
     result_holder: dict[str, Mapping[str, Any]] = {}
 
     def perform_locked() -> Mapping[str, Any]:
+        if method_name == "delete_legacy_name":
+            concept_id = _normalise_concept_id(arguments.get("concept_id")) or ""
+            try:
+                precondition = _validated_legacy_name_precondition(
+                    concept_id=concept_id,
+                    legacy_name_selector=arguments.get("legacy_name_selector"),
+                )
+                canonical_names = _canonical_has_name_snapshot(concept_id)
+            except OntologyMutationCommandError as exc:
+                return _safe_command_error(exc)
+            if canonical_names["canonical_has_name_present"] is not True:
+                return _safe_command_error(
+                    OntologyMutationCommandError(
+                        "canonical_has_name_required_for_legacy_cleanup",
+                        (
+                            "A legacy inline name can be removed only while a "
+                            "canonical hasName relation exists."
+                        ),
+                    )
+                )
+            if (
+                canonical_names["canonical_has_name_count"]
+                != intent.delta.get("canonical_has_name_count")
+                or canonical_names["canonical_has_name_relation_ids"]
+                != intent.delta.get("canonical_has_name_relation_ids")
+                or canonical_names["canonical_has_name_snapshot_sha256"]
+                != intent.delta.get("canonical_has_name_snapshot_sha256")
+            ):
+                return _safe_command_error(
+                    OntologyMutationCommandError(
+                        "canonical_has_name_precondition_failed",
+                        (
+                            "The canonical hasName relation changed; reload the "
+                            "concept before removing legacy data."
+                        ),
+                    )
+                )
+            result = _delete_legacy_name_compare_and_set(
+                concept_id=concept_id,
+                precondition=precondition,
+            )
+            result_holder["result"] = result
+            return result
         if method_name == "merge_concepts":
             from .concept_merge_service import (
                 ConceptMergePlanError,
@@ -2340,6 +2685,33 @@ def execute_governed_ontology_method(
                         or []
                         if _clean_text(relation_id)
                     )
+                if (
+                    method_name
+                    in {
+                        "upsert_text_relation",
+                        "update_text_relation",
+                        "upsert_singleton_text_relation",
+                        "delete_text_relation",
+                        "delete_legacy_name",
+                    }
+                    and _clean_text(intent.predicate).removeprefix("#V#") == "hasName"
+                ):
+                    concept_id = _normalise_concept_id(
+                        arguments.get("concept_id")
+                        or arguments.get("subject_concept_id")
+                    )
+                    if concept_id:
+                        resource_keys.add(f"ontology-concept-names:{concept_id}")
+                if method_name == "delete_legacy_name":
+                    concept_id = _normalise_concept_id(arguments.get("concept_id"))
+                    resource_keys.update(
+                        f"ontology-text-relation:{relation_id}"
+                        for relation_id in intent.delta.get(
+                            "canonical_has_name_relation_ids"
+                        )
+                        or []
+                        if _clean_text(relation_id)
+                    )
                 if method_name == "create_concepts":
                     expected_concept_id = _normalise_concept_id(
                         intent.delta.get("expected_concept_id")
@@ -2436,6 +2808,37 @@ def execute_governed_ontology_method(
             )
         )
     return outcome
+
+
+def delete_legacy_name(
+    *,
+    concept_id: str,
+    legacy_name_selector: Mapping[str, Any],
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """Govern and atomically remove one exact legacy inline ``names[]`` row."""
+
+    arguments: dict[str, Any] = {
+        "concept_id": concept_id,
+        "legacy_name_selector": dict(legacy_name_selector),
+    }
+    if _clean_text(request_id):
+        arguments["request_id"] = _clean_text(request_id)
+    return execute_governed_ontology_method(
+        method_name="delete_legacy_name",
+        arguments=arguments,
+        # The command service deliberately owns this mutation.  This fallback
+        # can report no effect if the dedicated branch is ever disconnected;
+        # it cannot become a generic concept update.
+        mutate=lambda: {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": "legacy_name_dedicated_command_unavailable",
+            "error": "The dedicated legacy-name cleanup command is unavailable.",
+        },
+    )
 
 
 def issue_same_turn_method_delegation(
@@ -2539,9 +2942,11 @@ __all__ = [
     "OntologyMutationCommandError",
     "build_ontology_mutation_intent",
     "canonical_read_back_for_method",
+    "delete_legacy_name",
     "execute_governed_ontology_method",
     "is_ontology_mutation_method",
     "issue_same_turn_method_delegation",
+    "legacy_name_selector_metadata",
     "normalise_governed_ontology_arguments",
     "reconcile_governed_ontology_postcondition",
     "resolve_governed_ontology_arguments",

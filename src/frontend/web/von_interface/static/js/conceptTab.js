@@ -276,6 +276,8 @@ function normaliseNameRecord(raw) {
       type: 'NL',
       relationId: null,
       textValueId: null,
+      storageKind: null,
+      legacyNameSelector: null,
     };
   }
   if (typeof raw === 'string') {
@@ -285,12 +287,14 @@ function normaliseNameRecord(raw) {
       type: 'NL',
       relationId: null,
       textValueId: null,
+      storageKind: null,
+      legacyNameSelector: null,
     };
   }
 
   const context = raw.context || {};
   const nameSource = raw.name ?? raw.text ?? '';
-  const nameValue = (typeof nameSource === 'string' ? nameSource : String(nameSource || '')).trim();
+  const nameValue = typeof nameSource === 'string' ? nameSource : String(nameSource ?? '');
   const languageSource = raw.language ?? raw.lang ?? 'en-NZ';
   const language = (typeof languageSource === 'string' ? languageSource : String(languageSource || 'en-NZ')).trim() || 'en-NZ';
   const typeSource = raw.type ?? context.name_type ?? 'NL';
@@ -303,7 +307,41 @@ function normaliseNameRecord(raw) {
     type,
     relationId: raw.relation_id ?? raw.relationId ?? null,
     textValueId: raw.text_value_id ?? raw.textValueId ?? null,
+    storageKind: raw.storage_kind ?? raw.storageKind ?? null,
+    // This is an opaque optimistic-concurrency selector. Preserve the object
+    // exactly as supplied by the backend; in particular, never derive it from
+    // display text or normalise any of its values.
+    legacyNameSelector: raw.legacy_name_selector ?? raw.legacyNameSelector ?? null,
   };
+}
+
+function getExactRelationId(nameRecord) {
+  const relationId = nameRecord?.relationId;
+  return typeof relationId === 'string' && relationId.trim() ? relationId : null;
+}
+
+function getExactLegacyNameSelector(nameRecord, conceptId) {
+  if (nameRecord?.storageKind !== 'legacy_inline') {
+    return null;
+  }
+
+  const selector = nameRecord.legacyNameSelector;
+  if (!selector || typeof selector !== 'object' || Array.isArray(selector)) {
+    return null;
+  }
+
+  const isSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
+  if (
+    selector.concept_id !== conceptId
+    || !Number.isInteger(selector.ordinal)
+    || selector.ordinal < 0
+    || !isSha256(selector.entry_sha256)
+    || !isSha256(selector.names_snapshot_sha256)
+  ) {
+    return null;
+  }
+
+  return selector;
 }
 
 function setNamesStatusMessage(suffix, message, colour, autoClear = false) {
@@ -614,25 +652,6 @@ export async function executeConceptIdRename(suffix = '') {
     if (executeButton) executeButton.disabled = false;
     return null;
   }
-}
-
-async function deleteTextRelationByPredicate(conceptId, predicate, text, options = {}) {
-  const payload = { predicate, text };
-  if (options.lang) {
-    payload.lang = options.lang;
-  }
-  if (options.context && typeof options.context === 'object') {
-    payload.context = options.context;
-  }
-  const res = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return res.json();
 }
 
 function renderMissingConceptState(conceptId, suffix = '', options = {}) {
@@ -3134,9 +3153,17 @@ export async function displayConceptNames(names = [], suffix = '') {
     nameText.title = nameObj.name || nameObj.text || '';
 
     const isCodeName = (nameObj.type || '').toString().trim().toUpperCase() === 'CODE';
+    const isLegacyInlineName = nameObj.storageKind === 'legacy_inline';
+    const canEditName = !isCodeName && !isLegacyInlineName && Boolean(getExactRelationId(nameObj));
+
+    if (isLegacyInlineName) {
+      nameText.title = 'Legacy inline names cannot be edited; remove this name and add a canonical name instead';
+    } else if (!isCodeName && !canEditName) {
+      nameText.title = 'This name cannot be edited because its exact text relation is unavailable';
+    }
 
     // Inline edit behaviour (JVNAUTOSCI-937): CODE names are read-only (for now).
-    if (!isCodeName) nameText.addEventListener('click', () => {
+    if (canEditName) nameText.addEventListener('click', () => {
       try {
         const original = nameObj.name || nameObj.text || '';
         const input = document.createElement('input');
@@ -3156,13 +3183,13 @@ export async function displayConceptNames(names = [], suffix = '') {
         const finish = async (save) => {
           if (finished) return; // one-shot guard to avoid double-invoke on Enter+blur
           finished = true;
-          const newVal = (input.value || '').trim();
+          const newVal = input.value || '';
           // Restore text span in DOM
           cartouche.replaceChild(nameText, input);
           if (!save) {
             return; // cancelled
           }
-          if (!newVal) {
+          if (!newVal.trim()) {
             // Do not save empty strings; keep original
             return;
           }
@@ -3327,15 +3354,25 @@ export async function deleteName(index, suffix = '') {
     return;
   }
 
+  const relationId = getExactRelationId(nameToDelete);
+  const legacyNameSelector = getExactLegacyNameSelector(nameToDelete, conceptId);
+  if (!relationId && !legacyNameSelector) {
+    setNamesStatusMessage(
+      suffix,
+      'Cannot remove this name safely because its exact storage identifier is unavailable',
+      'red'
+    );
+    return;
+  }
+
   try {
     setNamesStatusMessage(suffix, 'Deleting...', 'blue');
 
-    if (nameToDelete?.relationId) {
-      await deleteJson(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(nameToDelete.relationId)}`);
+    if (relationId) {
+      await deleteJson(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(relationId)}`);
     } else {
-      await deleteTextRelationByPredicate(conceptId, 'hasName', nameToDelete.name, {
-        lang: nameToDelete.language,
-        context: { name_type: nameToDelete.type },
+      await deleteJson(`/api/concepts/${encodeURIComponent(conceptId)}/legacy-names`, {
+        legacy_name_selector: legacyNameSelector,
       });
     }
 
@@ -3372,26 +3409,23 @@ async function updateConceptNameEntry(index, newValue, suffix = '') {
   }
 
   const lang = entry.language || 'en-NZ';
-  const relationId = entry.relationId;
+  const relationId = getExactRelationId(entry);
 
   if (!relationId) {
-    // No relation id available, fallback by deleting + re-adding the name.
-    await deleteTextRelationByPredicate(conceptId, 'hasName', entry.name, {
-      lang: entry.language,
-      context: { name_type: entry.type },
-    });
-    await postJson(`/api/concepts/${encodeURIComponent(conceptId)}/texts`, {
-      predicate: 'hasName',
-      text: newValue,
-      lang,
-      context: { name_type: entry.type || 'NL' },
-    });
-  } else {
-    await patchJson(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(relationId)}`, {
-      text: newValue,
-      lang,
-    });
+    setNamesStatusMessage(
+      suffix,
+      entry.storageKind === 'legacy_inline'
+        ? 'Legacy inline names cannot be edited; remove this name and add a canonical name instead'
+        : 'Cannot edit this name safely because its exact text relation is unavailable',
+      'red'
+    );
+    return;
   }
+
+  await patchJson(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(relationId)}`, {
+    text: newValue,
+    lang,
+  });
 
   await loadConceptNames(conceptId, suffix);
   setNamesStatusMessage(suffix, 'Name updated successfully', 'green', true);

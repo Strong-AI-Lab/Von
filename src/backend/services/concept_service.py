@@ -1224,6 +1224,7 @@ def enrich_concept_with_text_relations(
             "language": item.get("lang", "en-NZ"),
             "type": item.get("context", {}).get("name_type", "NL"),
             "relation_id": item.get("relation_id"),
+            "storage_kind": "text_relation",
         }
         for item in names_from_relations
     ]
@@ -1240,7 +1241,11 @@ def enrich_concept_with_text_relations(
         if isinstance(item, dict)
     }
     if isinstance(legacy_names, list):
-        for legacy_name in legacy_names:
+        from .ontology_mutation_command_service import (
+            legacy_name_selector_metadata,
+        )
+
+        for legacy_ordinal, legacy_name in enumerate(legacy_names):
             name_text = (
                 legacy_name.get("name", "")
                 if isinstance(legacy_name, dict)
@@ -1268,6 +1273,12 @@ def enrich_concept_with_text_relations(
                     "language": language,
                     "type": name_type,
                     "relation_id": None,
+                    "storage_kind": "legacy_inline",
+                    "legacy_name_selector": legacy_name_selector_metadata(
+                        concept_id=concept_id,
+                        names=legacy_names,
+                        ordinal=legacy_ordinal,
+                    ),
                 }
             )
             existing_name_keys.add(key)

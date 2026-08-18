@@ -27,6 +27,7 @@ from ...services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
     maybe_sync_concept_text_relations_to_rag,
 )
+from ...services.ontology_mutation_command_service import delete_legacy_name
 from ...services.paper_recommendation_profile_vontology_service import (
     load_paper_recommendation_profile,
     upsert_paper_recommendation_profile,
@@ -84,6 +85,13 @@ def _governed_mutation_response(
         "ontology_mutation_replay_projection_unavailable",
     }:
         return jsonify(result), 503
+    if error_code in {
+        "legacy_name_snapshot_precondition_failed",
+        "legacy_name_selector_precondition_failed",
+        "legacy_name_compare_and_set_failed",
+        "canonical_has_name_precondition_failed",
+    }:
+        return jsonify(result), 409
     return jsonify(result), 400
 
 
@@ -1757,3 +1765,57 @@ def delete_concept_text_relation_route(concept_id: str, relation_id: str):
             exc_info=True,
         )
         return jsonify(error="Failed to delete text relation"), 500
+
+
+@concept_bp.route("/<string:concept_id>/legacy-names", methods=["DELETE"])
+def delete_concept_legacy_name_route(concept_id: str):
+    """Remove one exact legacy inline name through semantic authority."""
+
+    from ...security.access_control import (
+        AUTHENTICATED_SESSION_ACTOR_SOURCE,
+        AUTHENTICATED_SESSION_DERIVED_ACTOR_SOURCE,
+        get_effective_user_concept_id_with_source,
+    )
+
+    actor_id, actor_source = get_effective_user_concept_id_with_source()
+    if not actor_id or actor_source not in {
+        AUTHENTICATED_SESSION_ACTOR_SOURCE,
+        AUTHENTICATED_SESSION_DERIVED_ACTOR_SOURCE,
+    }:
+        return _governed_mutation_response(
+            {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "error_code": "authenticated_actor_context_required",
+                "error": "A trusted signed-in actor is required.",
+            }
+        )
+    payload = request.get_json(silent=True) or {}
+    selector = payload.get("legacy_name_selector")
+    if not isinstance(selector, dict):
+        return (
+            jsonify(
+                success=False,
+                effect_status="not_started",
+                mutation_outcome="not_started",
+                changed=False,
+                error_code="exact_legacy_name_selector_required",
+                error="legacy_name_selector must be an exact selector object.",
+            ),
+            400,
+        )
+    try:
+        result = delete_legacy_name(
+            concept_id=concept_id,
+            legacy_name_selector=selector,
+            request_id=payload.get("request_id"),
+        )
+        return _governed_mutation_response(result)
+    except Exception:
+        current_app.logger.exception(
+            "Error deleting a legacy inline name for %s",
+            concept_id,
+        )
+        return jsonify(error="Failed to delete legacy name"), 500

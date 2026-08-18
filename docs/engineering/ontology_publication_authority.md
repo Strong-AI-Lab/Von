@@ -7,7 +7,7 @@
 - **Authority scope:** Canonical Vontology publication, retraction, identity
   consolidation, and publication-scope change
 - **Owner:** Von maintainers
-- **Last reviewed:** 13 August 2026
+- **Last reviewed:** 18 August 2026
 - **Review trigger:** Merge, deployment, a role-lifecycle change, or a new
   canonical ontology mutation entry point
 - **Live authority or implementation evidence:** Initial activation completed
@@ -94,6 +94,16 @@ and graph-wide rename and delete execution remain fail-closed until they can
 carry an equivalent complete effect plan; their read or preview paths remain
 available where safe.
 
+Legacy inline `names[]` cleanup is a dedicated governed effect rather than a
+generic concept update. The authenticated client receives an opaque selector
+bound to the concept, exact array position, exact entry value, and complete
+array snapshot. Execution rechecks that selector under the same concept-level
+lock used by canonical `hasName` mutations, requires a canonical `hasName` to
+remain, compare-and-sets only the selected legacy entry, and succeeds only when
+read-back proves both the removal and the unchanged canonical-name snapshot.
+Natural-language values are not trimmed, case-folded, title-cased, or Unicode
+normalised by the deletion boundary.
+
 Governed creation defaults to the actor's exact user-private publication
 context. Organisation publication must be requested explicitly as
 `organisation_general` and requires that organisation's semantic authority.
@@ -172,6 +182,12 @@ global authority; operational-admin non-equivalence; expiry, revocation,
 tampering, and cross-audience delegation denial; alternate entry-point
 enforcement; private-context non-leakage; retry/concurrency behaviour; and
 receipt-backed canonical read-back of successful and partial effects.
+
+For legacy inline-name cleanup, the bounded evidence additionally covers exact
+Unicode preservation, stale and repeated selector refusal, canonical-name
+retention, shared locking with canonical `hasName` writes, authenticated HTTP
+actor binding, embedding invalidation, and user-visible deletion through the
+same browser control used by the Concept tab.
 
 The motivating historical changes are evidence targets, not general permission
 to alter live Vontology. Applying any such change still requires a deployed
