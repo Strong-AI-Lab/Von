@@ -4338,8 +4338,18 @@ def _project_effect_outcome_narration_fact(
         "operation": _safe_narration_operation(fact.get("tool")),
         "original_status": status.replace("_", " "),
     }
+    workflow_instance_operational_readback = (
+        fact.get("workflow_instance_operational_readback") is True
+    )
+    workflow_instance_readback_verified = (
+        fact.get("workflow_instance_readback_verified") is True
+    )
     target_ids = fact.get("target_ids")
-    if isinstance(target_ids, Sequence) and not isinstance(target_ids, (str, bytes)):
+    if (
+        not workflow_instance_operational_readback
+        and isinstance(target_ids, Sequence)
+        and not isinstance(target_ids, (str, bytes))
+    ):
         target_labels: list[str] = []
         for value in target_ids:
             label = _safe_narration_target_label(value)
@@ -4349,6 +4359,19 @@ def _project_effect_outcome_narration_fact(
                 break
         if target_labels:
             projected["targets"] = target_labels
+
+    if workflow_instance_readback_verified:
+        projected.update(
+            outcome="workflow instance status confirmed",
+            workflow_instance_status=str(
+                fact.get("workflow_instance_terminal_status") or status
+            ).strip(),
+        )
+        return projected
+
+    if workflow_instance_operational_readback:
+        projected["outcome"] = "workflow instance status not exactly verified"
+        return projected
 
     if status == "succeeded":
         if fact.get("reconciliation_status") == "canonically_verified":
@@ -4513,6 +4536,39 @@ def _effect_outcome_spoken_fact(fact: Mapping[str, Any]) -> tuple[str, set[str]]
     )
     outcome = str(fact.get("outcome") or "").strip()
     current_state = str(fact.get("current_state") or "").strip()
+
+    if outcome == "workflow instance status confirmed":
+        workflow_status = str(
+            fact.get("workflow_instance_status") or "unknown"
+        ).strip()
+        workflow_reference = (
+            f"the {operation.lower()}"
+            if operation and operation != "one requested operation"
+            else "the requested workflow"
+        )
+        return (
+            (
+                f"I confirmed that the workflow instance for {workflow_reference} "
+                f"{workflow_status}. That check confirms only its operational "
+                "status, not the requested work product."
+            ),
+            covered_targets,
+        )
+
+    if outcome == "workflow instance status not exactly verified":
+        workflow_reference = (
+            f"the {operation.lower()}"
+            if operation and operation != "one requested operation"
+            else "the requested workflow"
+        )
+        return (
+            (
+                f"The operational read-back for the workflow instance for "
+                f"{workflow_reference} did not exactly verify a consistent terminal "
+                "status. It does not verify the requested work product."
+            ),
+            covered_targets,
+        )
 
     if outcome == "the current state was checked":
         if current_state == "the requested target is now present":
@@ -4696,6 +4752,65 @@ def build_effect_outcome_spoken_text(
     return " ".join(sentences)
 
 
+def _workflow_instance_readback_terminal_status(
+    state: Mapping[str, Any],
+    canonical_readback: Any,
+) -> str | None:
+    """Return an exact terminal instance status without implying domain read-back."""
+
+    if not (
+        state.get("reconciliation_basis") == "workflow_instance_terminal_read"
+        and state.get("reconciliation_status") == "canonically_verified"
+        and state.get("outcome_resolved") is True
+        and isinstance(canonical_readback, Mapping)
+        and canonical_readback.get("capability") == "workflow_get_instance"
+    ):
+        return None
+    instance_id = str(state.get("instance_id") or "").strip()
+    readback_instance_id = str(canonical_readback.get("instance_id") or "").strip()
+    if not instance_id or readback_instance_id != instance_id:
+        return None
+    workflow_id = str(state.get("workflow_id") or "").strip()
+    readback_workflow_id = str(canonical_readback.get("workflow_id") or "").strip()
+    if workflow_id and readback_workflow_id != workflow_id:
+        return None
+    terminal_status = str(canonical_readback.get("status") or "").strip().lower()
+    if terminal_status in {"completed", "succeeded", "success"}:
+        expected_effect_status = "succeeded"
+    elif terminal_status in {"failed", "cancelled", "canceled"}:
+        expected_effect_status = "failed"
+    else:
+        return None
+    statuses_match = (
+        str(state.get("effect_status") or "").strip().lower()
+        == expected_effect_status
+        and str(state.get("current_outcome_status") or "").strip().lower()
+        == expected_effect_status
+    )
+    if not statuses_match:
+        return None
+    if terminal_status == "success":
+        return "succeeded"
+    if terminal_status == "canceled":
+        return "cancelled"
+    return terminal_status
+
+
+def _is_workflow_instance_operational_readback(
+    state: Mapping[str, Any],
+    canonical_readback: Any,
+) -> bool:
+    """Return whether the read-back subject is workflow-instance state."""
+
+    return bool(
+        state.get("reconciliation_basis") == "workflow_instance_terminal_read"
+        or (
+            isinstance(canonical_readback, Mapping)
+            and canonical_readback.get("capability") == "workflow_get_instance"
+        )
+    )
+
+
 def _build_effect_outcome_report(
     *,
     terminal_status: str,
@@ -4751,6 +4866,22 @@ def _build_effect_outcome_report(
         if not error_code:
             error_code = _bounded_outcome_text(invocation.get("error_code"), limit=160)
         canonical_readback = state.get("canonical_readback")
+        workflow_instance_operational_readback = (
+            _is_workflow_instance_operational_readback(state, canonical_readback)
+        )
+        workflow_instance_terminal_status = (
+            _workflow_instance_readback_terminal_status(
+                state, canonical_readback
+            )
+        )
+        workflow_instance_readback_verified = (
+            workflow_instance_terminal_status is not None
+        )
+        if workflow_instance_operational_readback:
+            # This read concerns workflow execution state whether or not its
+            # terminal status verifies exactly. Keep domain targets out of the
+            # same fact so they cannot inherit that operational evidence.
+            target_ids = []
         execution_method = str(
             invocation.get("execution_method")
             or invocation.get("tool")
@@ -4783,6 +4914,15 @@ def _build_effect_outcome_report(
                     or canonical_readback.get("assertion_present") is True
                 )
             )
+        reconciliation_evidence_id = str(
+            state.get("reconciliation_evidence_id")
+            or (
+                canonical_readback.get("evidence_id")
+                if isinstance(canonical_readback, Mapping)
+                else ""
+            )
+            or ""
+        ).strip()
         effective_arguments = state.get("effective_arguments")
         argument_identity: dict[str, str] = {}
         if isinstance(effective_arguments, Mapping):
@@ -4806,10 +4946,23 @@ def _build_effect_outcome_report(
                 canonical_readback, Mapping
             ),
             "canonical_readback_verified": canonical_readback_verified,
+            "workflow_instance_operational_readback": (
+                workflow_instance_operational_readback
+            ),
+            "workflow_instance_readback_verified": (
+                workflow_instance_readback_verified
+            ),
+            "workflow_instance_terminal_status": (
+                workflow_instance_terminal_status
+            ),
             "workflow_id": state.get("workflow_id"),
             "instance_id": state.get("instance_id"),
             "target_ids": target_ids,
-            "evidence_id": evidence_id or state.get("reconciliation_evidence_id"),
+            "evidence_id": (
+                reconciliation_evidence_id
+                if workflow_instance_operational_readback
+                else evidence_id or reconciliation_evidence_id
+            ),
             "error_code": error_code,
             "error": error_detail,
             "recovered_by_effect_id": state.get("recovered_by_effect_id"),
@@ -4841,16 +4994,49 @@ def _build_effect_outcome_report(
     unresolved = [fact for fact in facts if fact not in confirmed]
 
     if confirmed:
+        confirmed_heading = (
+            "### Resolved, succeeded, recovered, or handler-reported"
+            if any(
+                fact.get("workflow_instance_operational_readback") is True
+                for fact in confirmed
+            )
+            else "### Verified, observed, recovered, or handler-reported"
+        )
         lines.extend(
             (
                 "",
-                "### Verified, observed, recovered, or handler-reported",
+                confirmed_heading,
             )
         )
         for fact in confirmed:
             label = f"`{fact['tool']}`"
             status = str(fact.get("effect_status") or "unknown")
-            if fact.get("outcome_resolved") and status != "succeeded":
+            if fact.get("workflow_instance_readback_verified") is True:
+                workflow_instance_status = str(
+                    fact.get("workflow_instance_terminal_status") or status
+                )
+                detail = (
+                    "exact read-back confirmed the workflow instance's terminal "
+                    f"status as `{workflow_instance_status}`; this confirms only "
+                    "its operational "
+                    "status, not the requested work product"
+                )
+                if fact.get("error_code"):
+                    detail += f" (`{fact['error_code']}`)"
+                if fact.get("recovered_by_effect_id"):
+                    detail += (
+                        "; a later exact retry succeeded as effect "
+                        f"`{fact['recovered_by_effect_id']}`"
+                    )
+            elif fact.get("workflow_instance_operational_readback") is True:
+                detail = (
+                    "workflow-instance operational read-back did not exactly verify "
+                    "a consistent terminal status; this operational evidence does "
+                    "not verify the requested work product"
+                )
+                if fact.get("error_code"):
+                    detail += f" (`{fact['error_code']}`)"
+            elif fact.get("outcome_resolved") and status != "succeeded":
                 if fact.get("current_outcome_status") == "target_absent":
                     detail = (
                         "exact read-back found the target absent; the original "

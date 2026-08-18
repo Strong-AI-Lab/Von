@@ -200,6 +200,10 @@ def _shrink_text_surface(surface: Any, limit: int) -> bool:
 
 
 def _canonical_readback_verdict(fact: Mapping[str, Any]) -> str | None:
+    if fact.get("workflow_instance_readback_verified") is True:
+        return "workflow_instance_verified"
+    if fact.get("workflow_instance_operational_readback") is True:
+        return "workflow_instance_unverified"
     if fact.get("canonical_readback_verified") is True:
         return "verified"
     if fact.get("canonical_readback_present") is True:

@@ -39,6 +39,7 @@ from src.backend.services.adaptive_turn_service import (
     _CONVERSATION_SITUATION_MAX_CHARS,
     _bound_tool_results_for_model,
     _bounded_conversation_observation_projection,
+    _build_effect_outcome_report,
     _canonical_effect_readback_receipt,
     _canonical_relation_readback_matches_invocation,
     _canonical_scoped_assertion_readback_matches_invocation,
@@ -9794,8 +9795,236 @@ def test_workflow_instance_readback_reconciles_only_exact_terminal_effect(
     if expected_authority == "canonical_outcome":
         assert result.response_text != "The durable work product was verified."
         assert "workflow-instance-readback-1" in result.response_text
+        outcome_report = next(
+            item
+            for item in result.aux_llm_calls
+            if item.get("type") == "adaptive_turn_effect_outcome_report"
+        )
+        workflow_fact = next(
+            fact
+            for fact in outcome_report["facts"]
+            if fact.get("workflow_id") == workflow_capability.workflow_id
+        )
+        exact_failed_readback = (
+            read_workflow_id == workflow_capability.workflow_id
+            and read_status == "failed"
+        )
+        assert (
+            workflow_fact["workflow_instance_readback_verified"]
+            is exact_failed_readback
+        )
+        if exact_failed_readback:
+            authoritative_screen = result.response_text.split(
+                "\n\n### Model draft (non-authoritative)",
+                maxsplit=1,
+            )[0]
+            assert workflow_fact["target_ids"] == []
+            assert workflow_fact["workflow_instance_terminal_status"] == "failed"
+            assert workflow_fact["evidence_id"] == canonical_readback["evidence_id"]
+            assert authoritative_screen.count("workflow-instance-readback-1") == 1
+            assert "target `workflow-instance-readback-1`" not in authoritative_screen
+            assert "the current target was read back exactly" not in authoritative_screen
+            assert "confirms only its operational status" in authoritative_screen
+            assert "not the requested work product" in authoritative_screen
+            assert result.canonical_outcome_spoken_text is not None
+            assert "workflow instance" in result.canonical_outcome_spoken_text
+            assert "failed" in result.canonical_outcome_spoken_text
+            assert "confirms only its operational status" in (
+                result.canonical_outcome_spoken_text
+            )
+            assert "not the requested work product" in (
+                result.canonical_outcome_spoken_text
+            )
     else:
         assert result.response_text == "The durable work product was verified."
+
+
+def test_completed_workflow_instance_report_does_not_verify_domain_targets() -> None:
+    instance_id = "workflow-instance-completed-report-1"
+    workflow_id = "#V#scholarly_article_metadata_representation_workflow"
+    domain_target_id = "#V#article_domain_target"
+    screen_text, report = _build_effect_outcome_report(
+        terminal_status="model_error",
+        effect_snapshot={
+            "effect-workflow-completed": {
+                "turn_finality_required": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "initial_effect_status": "partial",
+                "current_outcome_status": "succeeded",
+                "outcome_resolved": True,
+                "reconciliation_status": "canonically_verified",
+                "reconciliation_basis": "workflow_instance_terminal_read",
+                "reconciliation_evidence_id": "evidence-workflow-readback",
+                "canonical_readback": {
+                    "capability": "workflow_get_instance",
+                    "instance_id": instance_id,
+                    "workflow_id": workflow_id,
+                    "status": "completed",
+                    "evidence_id": "evidence-workflow-readback",
+                },
+                "workflow_id": workflow_id,
+                "instance_id": instance_id,
+                "result_target_ids": [instance_id, domain_target_id],
+            }
+        },
+        tool_invocations=[
+            {
+                "effect_id": "effect-workflow-completed",
+                "tool": "scholarly_article_metadata_representation",
+                "capability_display_name": (
+                    "Scholarly Article Metadata Representation Workflow"
+                ),
+                "result_target_ids": [instance_id, domain_target_id],
+                "evidence": {"evidence_id": "evidence-workflow-launch"},
+            }
+        ],
+        trusted_scope=TrustedTurnScope(
+            user_concept_id="#V#real_user",
+            organisation_concept_id="#V#real_org",
+            namespace="#V#real_user@real_org",
+        ),
+    )
+
+    assert len(report["facts"]) == 1
+    fact = report["facts"][0]
+    assert fact["workflow_instance_operational_readback"] is True
+    assert fact["workflow_instance_readback_verified"] is True
+    assert fact["workflow_instance_terminal_status"] == "completed"
+    assert fact["canonical_readback_verified"] is False
+    assert fact["target_ids"] == []
+    assert fact["evidence_id"] == "evidence-workflow-readback"
+    assert "### Resolved, succeeded, recovered, or handler-reported" in screen_text
+    assert screen_text.count(instance_id) == 1
+    assert domain_target_id not in screen_text
+    assert "terminal status as `completed`" in screen_text
+    assert "confirms only its operational status" in screen_text
+    assert "not the requested work product" in screen_text
+    assert "the current target was read back exactly" not in screen_text
+    assert "workflow instance" in report["spoken_text"]
+    assert "completed" in report["spoken_text"]
+    assert "confirms only its operational status" in report["spoken_text"]
+    assert "not the requested work product" in report["spoken_text"]
+
+
+@pytest.mark.parametrize(
+    "canonical_readback_override",
+    (
+        {"instance_id": "different-workflow-instance"},
+        {"status": "running"},
+    ),
+)
+def test_unverified_workflow_instance_readback_never_verifies_domain_targets(
+    canonical_readback_override: Mapping[str, str],
+) -> None:
+    instance_id = "workflow-instance-unverified-report-1"
+    workflow_id = "#V#scholarly_article_metadata_representation_workflow"
+    domain_target_id = "#V#article_domain_target"
+    canonical_readback = {
+        "capability": "workflow_get_instance",
+        "instance_id": instance_id,
+        "workflow_id": workflow_id,
+        "status": "failed",
+        "evidence_id": "evidence-workflow-readback",
+        **canonical_readback_override,
+    }
+    screen_text, report = _build_effect_outcome_report(
+        terminal_status="effect_failed",
+        effect_snapshot={
+            "effect-workflow-unverified": {
+                "turn_finality_required": True,
+                "effect_status": "failed",
+                "changed": True,
+                "current_outcome_status": "failed",
+                "outcome_resolved": True,
+                "reconciliation_status": "canonically_verified",
+                "reconciliation_basis": "workflow_instance_terminal_read",
+                "reconciliation_evidence_id": "evidence-workflow-readback",
+                "canonical_readback": canonical_readback,
+                "workflow_id": workflow_id,
+                "instance_id": instance_id,
+                "result_target_ids": [instance_id, domain_target_id],
+            }
+        },
+        tool_invocations=[
+            {
+                "effect_id": "effect-workflow-unverified",
+                "tool": "scholarly_article_metadata_representation",
+                "capability_display_name": (
+                    "Scholarly Article Metadata Representation Workflow"
+                ),
+                "result_target_ids": [instance_id, domain_target_id],
+                "evidence": {"evidence_id": "evidence-workflow-launch"},
+            }
+        ],
+        trusted_scope=TrustedTurnScope(
+            user_concept_id="#V#real_user",
+            organisation_concept_id="#V#real_org",
+            namespace="#V#real_user@real_org",
+        ),
+    )
+
+    assert len(report["facts"]) == 1
+    fact = report["facts"][0]
+    assert fact["workflow_instance_operational_readback"] is True
+    assert fact["workflow_instance_readback_verified"] is False
+    assert fact["canonical_readback_verified"] is False
+    assert fact["target_ids"] == []
+    assert fact["evidence_id"] == "evidence-workflow-readback"
+    assert domain_target_id not in screen_text
+    assert "### Resolved, succeeded, recovered, or handler-reported" in screen_text
+    assert "### Verified, observed, recovered, or handler-reported" not in screen_text
+    assert "workflow-instance operational read-back" in screen_text
+    assert "did not exactly verify a consistent terminal status" in screen_text
+    assert "does not verify the requested work product" in screen_text
+    assert "the current target was read back exactly" not in screen_text
+    assert "did not exactly verify a consistent terminal status" in (
+        report["spoken_text"]
+    )
+    assert "does not verify the requested work product" in report["spoken_text"]
+
+
+def test_domain_effect_report_preserves_readback_and_receipt_semantics() -> None:
+    domain_target_id = "#V#article_domain_target"
+    screen_text, report = _build_effect_outcome_report(
+        terminal_status="model_error",
+        effect_snapshot={
+            "effect-domain-create": {
+                "turn_finality_required": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "canonical_readback": {
+                    "verified": True,
+                    "evidence_id": "evidence-domain-readback",
+                },
+                "reconciliation_evidence_id": "evidence-domain-readback",
+                "result_target_ids": [domain_target_id],
+            }
+        },
+        tool_invocations=[
+            {
+                "effect_id": "effect-domain-create",
+                "tool": "create_concepts",
+                "result_target_ids": [domain_target_id],
+                "evidence": {"evidence_id": "evidence-domain-invocation"},
+            }
+        ],
+        trusted_scope=TrustedTurnScope(
+            user_concept_id="#V#real_user",
+            organisation_concept_id="#V#real_org",
+            namespace="#V#real_user@real_org",
+        ),
+    )
+
+    assert len(report["facts"]) == 1
+    fact = report["facts"][0]
+    assert fact["workflow_instance_operational_readback"] is False
+    assert fact["workflow_instance_readback_verified"] is False
+    assert "workflow_instance_terminal_status" not in fact
+    assert fact["canonical_readback_verified"] is True
+    assert fact["target_ids"] == [domain_target_id]
+    assert fact["evidence_id"] == "evidence-domain-invocation"
+    assert "### Verified, observed, recovered, or handler-reported" in screen_text
 
 
 @pytest.mark.parametrize(

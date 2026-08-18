@@ -270,7 +270,25 @@ def test_finalise_persists_inline_turn_failure_capsule_from_outcome_report(
                 "error": (
                     "RuntimeError: asyncio lock is bound to a different event loop"
                 ),
-            }
+            },
+            {
+                "effect_id": "effect-workflow-instance",
+                "tool": "Scholarly Article Metadata Representation Workflow",
+                "effect_status": "failed",
+                "initial_effect_status": "failed",
+                "changed": True,
+                "current_outcome_status": "failed",
+                "outcome_resolved": True,
+                "reconciliation_status": "canonically_verified",
+                "canonical_readback_present": True,
+                "canonical_readback_verified": False,
+                "workflow_instance_readback_verified": True,
+                "workflow_id": (
+                    "#V#scholarly_article_metadata_representation_workflow"
+                ),
+                "instance_id": "workflow-instance-failed-1",
+                "evidence_id": "evidence-workflow-instance-readback",
+            },
         ],
     }
 
@@ -312,6 +330,18 @@ def test_finalise_persists_inline_turn_failure_capsule_from_outcome_report(
     }
     assert capsule["effects"][0]["error"]["code"] == (
         "arxiv_acquisition_unavailable"
+    )
+    workflow_effect = next(
+        effect
+        for effect in capsule["effects"]
+        if effect["effect_id"] == "effect-workflow-instance"
+    )
+    assert workflow_effect["canonical_readback_verdict"] == (
+        "workflow_instance_verified"
+    )
+    assert workflow_effect["instance_id"] == "workflow-instance-failed-1"
+    assert workflow_effect["evidence_id"] == (
+        "evidence-workflow-instance-readback"
     )
     assert capsule["pre_presentation_draft"]["authority"] == (
         "non_authoritative"
