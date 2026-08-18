@@ -4,35 +4,42 @@ Provides endpoints for creating, reading, updating, and deleting tasks.
 Tasks are stored as Vontology concepts.
 """
 
-from datetime import datetime, timezone
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
-from flask import Blueprint, request, jsonify, session
+from flask import Blueprint, jsonify, redirect, request, session, url_for
 from flask.typing import ResponseReturnValue
 
+from ...services.task_external_resource_action_service import (
+    TaskExternalResourceActionAccessError,
+    TaskExternalResourceActionNotFoundError,
+    TaskExternalResourceActionResolutionError,
+    list_task_external_resource_actions,
+    resolve_task_external_resource_action,
+)
 from ...services.task_management_service import (
-    create_task,
-    get_task,
-    get_task_taxonomy,
-    update_task_fields,
-    get_tasks_for_conversation,
-    list_tasks_with_visibility,
-    search_tasks,
-    apply_bulk_task_visibility,
-    backfill_jira_migration_bulk_task_collections,
-    delete_task,
-    add_task_comment,
-    list_task_comments,
-    add_task_attachment,
-    list_task_attachments,
-    get_task_history,
-    link_tasks,
-    unlink_tasks,
-    TaskNotFoundError,
     InvalidTaskDataError,
     TaskManagementError,
+    TaskNotFoundError,
+    add_task_attachment,
+    add_task_comment,
+    apply_bulk_task_visibility,
+    backfill_jira_migration_bulk_task_collections,
+    create_task,
+    delete_task,
+    get_task,
+    get_task_history,
+    get_task_taxonomy,
+    get_tasks_for_conversation,
+    link_tasks,
+    list_task_attachments,
+    list_task_comments,
+    list_tasks_with_visibility,
+    search_tasks,
+    unlink_tasks,
+    update_task_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,13 +269,62 @@ def get_task_taxonomy_route() -> ResponseReturnValue:
 def get_task_route(task_concept_id: str) -> ResponseReturnValue:
     """Get a task by concept_id."""
     try:
-        result = get_task(task_concept_id)
+        result = dict(get_task(task_concept_id))
+        actions = list_task_external_resource_actions(result)
+        result["external_resource_actions"] = [
+            {
+                **action,
+                "href": url_for(
+                    "tasks.open_task_external_resource_action_route",
+                    task_concept_id=task_concept_id,
+                    action_id=action["action_id"],
+                ),
+            }
+            for action in actions
+        ]
         return jsonify(result), 200
 
     except TaskNotFoundError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         logger.error(f"Unexpected error getting task: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route(
+    "/<task_concept_id>/external-resource-actions/<action_id>",
+    methods=["GET"],
+)
+def open_task_external_resource_action_route(
+    task_concept_id: str,
+    action_id: str,
+) -> ResponseReturnValue:
+    """Resolve one provider-neutral task navigation action."""
+
+    try:
+        task = get_task(task_concept_id)
+        target = resolve_task_external_resource_action(task, action_id)
+        return redirect(target, code=302)
+    except TaskNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except TaskExternalResourceActionNotFoundError as exc:
+        return jsonify(
+            {"error": exc.safe_message, "reason_code": exc.reason_code}
+        ), 404
+    except TaskExternalResourceActionAccessError as exc:
+        return jsonify(
+            {"error": exc.safe_message, "reason_code": exc.reason_code}
+        ), 403
+    except TaskExternalResourceActionResolutionError as exc:
+        return jsonify(
+            {"error": exc.safe_message, "reason_code": exc.reason_code}
+        ), 502
+    except Exception as exc:  # preserve the existing route error boundary
+        logger.error(
+            "Unexpected error resolving task external-resource action %s: %s",
+            action_id,
+            exc,
+        )
         return jsonify({"error": "Internal server error"}), 500
 
 

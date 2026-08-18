@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
 from flask import Flask
 
 from src.backend.server.routes.task_routes import task_bp
+from src.backend.services.task_external_resource_action_service import (
+    TaskExternalResourceActionAccessError,
+    TaskExternalResourceActionNotFoundError,
+    TaskExternalResourceActionResolutionError,
+)
 
 
 def _build_client():
@@ -254,3 +260,120 @@ def test_add_and_remove_task_link_routes(monkeypatch):
     assert captured["remove_target"] == "#V#task_2"
     assert captured["remove_link_type"] == "blocks"
     assert captured["remove_actor"] == "#V#user_alice"
+
+
+def test_get_task_route_adds_local_hrefs_for_external_resource_actions(monkeypatch):
+    client = _build_client()
+    task = {
+        "task_concept_id": "#V#task_1",
+        "title": "Review source",
+    }
+    actions = [
+        {
+            "action_id": "provider.open_source",
+            "kind": "open_resource",
+            "label": "Open source",
+            "source_system": "provider",
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.get_task",
+        lambda task_concept_id: task,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.list_task_external_resource_actions",
+        lambda task_value: actions,
+    )
+
+    response = client.get("/api/tasks/%23V%23task_1")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        **task,
+        "external_resource_actions": [
+            {
+                **actions[0],
+                "href": (
+                    "/api/tasks/%23V%23task_1/external-resource-actions/"
+                    "provider.open_source"
+                ),
+            }
+        ],
+    }
+
+
+def test_external_resource_action_route_redirects_to_resolved_target(monkeypatch):
+    client = _build_client()
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.get_task",
+        lambda task_concept_id: {"task_concept_id": task_concept_id},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.resolve_task_external_resource_action",
+        lambda task, action_id: "https://provider.example.test/resources/one",
+    )
+
+    response = client.get(
+        "/api/tasks/%23V%23task_1/external-resource-actions/provider.open",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "https://provider.example.test/resources/one"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (
+            TaskExternalResourceActionNotFoundError(
+                reason_code="external_resource_action_not_found",
+                safe_message="No such action.",
+            ),
+            404,
+        ),
+        (
+            TaskExternalResourceActionAccessError(
+                reason_code="external_resource_access_denied",
+                safe_message="Access denied.",
+            ),
+            403,
+        ),
+        (
+            TaskExternalResourceActionResolutionError(
+                reason_code="external_resource_resolution_failed",
+                safe_message="Resolution failed.",
+            ),
+            502,
+        ),
+    ],
+)
+def test_open_task_external_resource_action_route_maps_typed_errors(
+    monkeypatch,
+    error,
+    expected_status,
+):
+    client = _build_client()
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.get_task",
+        lambda task_concept_id: {"task_concept_id": task_concept_id},
+    )
+
+    def _raise_typed_error(task, action_id):
+        raise error
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.resolve_task_external_resource_action",
+        _raise_typed_error,
+    )
+
+    response = client.get(
+        "/api/tasks/%23V%23task_1/external-resource-actions/provider.open"
+    )
+
+    assert response.status_code == expected_status
+    assert response.get_json() == {
+        "error": error.safe_message,
+        "reason_code": error.reason_code,
+    }
