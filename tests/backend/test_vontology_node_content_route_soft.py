@@ -93,7 +93,7 @@ def app_client(monkeypatch):
 def test_node_content_default_returns_404_for_missing_concept(app_client, monkeypatch):
     _, client = app_client
 
-    def _fake_get(_identifier: str):
+    def _fake_get(_identifier: str, **_kwargs):
         return {"error": "Concept '#V#missing' not found in MongoDB."}
 
     monkeypatch.setattr(
@@ -112,7 +112,10 @@ def test_node_content_default_returns_404_for_missing_concept(app_client, monkey
 def test_node_content_soft_returns_200_with_not_found_marker(app_client, monkeypatch):
     _, client = app_client
 
-    def _fake_get(_identifier: str):
+    calls = []
+
+    def _fake_get(_identifier: str, **kwargs):
+        calls.append((_identifier, kwargs))
         return {"error": "Concept '#V#missing' not found in MongoDB."}
 
     monkeypatch.setattr(
@@ -128,6 +131,9 @@ def test_node_content_soft_returns_200_with_not_found_marker(app_client, monkeyp
     payload = resp.get_json()
     assert payload["error"] == "Concept '#V#missing' not found in MongoDB."
     assert payload["not_found"] is True
+    assert calls == [
+        ("#V#missing", {"resolve_display_name": False}),
+    ]
 
 
 def test_node_content_returns_403_for_access_denied_exact_concept(
@@ -135,7 +141,7 @@ def test_node_content_returns_403_for_access_denied_exact_concept(
 ):
     _, client = app_client
 
-    def _fake_get(_identifier: str):
+    def _fake_get(_identifier: str, **_kwargs):
         return {
             "error": "Concept '#V#private' is not accessible in the current context.",
             "error_code": "access_denied",

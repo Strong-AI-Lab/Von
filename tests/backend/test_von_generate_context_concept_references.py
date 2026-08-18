@@ -40,7 +40,12 @@ def app(monkeypatch):
         lambda _user_id, **_kwargs: [],
     )
 
-    def _stub_node_content(concept_id: str, *, reconstruct_md: bool = True):
+    def _stub_node_content(
+        concept_id: str,
+        *,
+        reconstruct_md: bool = True,
+        resolve_display_name: bool = True,
+    ):
         if concept_id == "#V#person":
             return {
                 "concept_id": concept_id,

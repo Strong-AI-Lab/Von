@@ -1358,10 +1358,18 @@ def get_all_vontology_nodes_with_details(identifier: str = "Thing"):
         }
 
 
-def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) -> dict:
+def get_vontology_node_content(
+    identifier: str,
+    *,
+    reconstruct_md: bool = True,
+    resolve_display_name: bool = True,
+) -> dict:
     """
     Fetches a Vontology concept's details from MongoDB by its path, concept_id, or _id.
     Renders markdown content to HTML.
+
+    ``resolve_display_name=False`` is an internal hot-path option for callers
+    that immediately perform their own canonical hasName projection.
     """
     if not identifier:
         logger.error("Identifier cannot be empty for get_vontology_node_content.")
@@ -1504,6 +1512,28 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
 
     convert_objectids_to_strings(raw_doc_copy)
 
+    # Resolve the display projection through canonical hasName relations before
+    # reconstructing Markdown.  Raw concept documents commonly omit names now,
+    # and identifier humanisation cannot recover authored acronyms or Unicode.
+    # Keep the legacy accessor as a fail-soft compatibility fallback.
+    resolved_display_name = get_concept_display_name_with_names_fallback(doc)
+    if resolve_display_name:
+        try:
+            from ..services.concept_service import resolve_concept_display_names
+
+            concept_id = doc.get("concept_id")
+            canonical_name = resolve_concept_display_names(
+                [doc], preferred_language=_get_cached_preferred_language()
+            ).get(concept_id)
+            if isinstance(canonical_name, str) and canonical_name.strip():
+                resolved_display_name = canonical_name
+        except Exception as display_name_err:
+            logger.debug(
+                "Canonical display-name projection failed for '%s'; using legacy fallback: %s",
+                identifier,
+                display_name_err,
+            )
+
     md_content = doc.get("md_content")
 
     if md_content is None and reconstruct_md:
@@ -1511,9 +1541,6 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
             "Markdown content (md_content) missing for '%s'. Reconstructing basic version.",
             identifier,
         )
-        # Try to get name from multiple possible locations, with human-readable fallback
-        # Prefer names[] "NL" entry only.
-        name = get_concept_display_name_with_names_fallback(doc)
         # Use accessor functions for description and notes
         description = get_concept_description(doc)
         notes = get_concept_notes(doc)
@@ -1521,7 +1548,7 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
         # NOTE: Older versions reconstructed md_content with boilerplate metadata
         # (Source Concept/SubConcept Of/Instance Of). Those placeholders are noisy
         # and redundant with UI fields, so keep the fallback minimal.
-        md_content = f"# {name}\n\n"
+        md_content = f"# {resolved_display_name}\n\n"
 
         if description:
             md_content += f"## Description\n\n{description}\n\n"
@@ -1579,7 +1606,7 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
     # Callers must use 'display_name' (preferred) or inspect names[] inside raw_doc.
     payload = {
         "content_html": html,
-        "display_name": get_concept_display_name_with_names_fallback(doc),
+        "display_name": resolved_display_name,
         "concept_id": doc.get("concept_id"),
         "path": doc.get("path"),
         # Top-level 'description' intentionally suppressed globally (JVNAUTOSCI-573 rollout)
