@@ -2,13 +2,14 @@
 
 import {
     addNewName,
+    deleteName,
     displayConceptNames,
     executeConceptIdRename,
     fetchSubtypesWithSuffix,
     loadConceptNames,
     previewConceptIdRename,
 } from "../../src/frontend/web/von_interface/static/js/conceptTab.js";
-import { getJson, patchJson, postJson } from "../../src/frontend/web/von_interface/static/js/apiService.js";
+import { deleteJson, getJson, patchJson, postJson } from "../../src/frontend/web/von_interface/static/js/apiService.js";
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     deleteJson: jest.fn(),
@@ -173,6 +174,7 @@ describe('conceptTab name resolution', () => {
         ['博士研究生', 'zh'],
         ['طالبة دكتوراه', 'ar'],
         ['E\u0301tudiante en IA', 'fr'],
+        ['\u00a0विद्यार्थी E\u0301\u00a0', 'hi'],
     ])('opens the name editor without reformatting %s', async (storedName, language) => {
         document.body.innerHTML = `
             <div class="tab-content" id="conceptTab_alpha" data-concept-id="#V#doctoral_student">
@@ -202,6 +204,117 @@ describe('conceptTab name resolution', () => {
         await Promise.resolve();
 
         expect(patchJson).not.toHaveBeenCalled();
+    });
+
+    test('deletes a relation-backed name only by its exact relation id', async () => {
+        deleteJson.mockResolvedValue({ success: true });
+        await displayConceptNames([
+            {
+                name: 'Relation-backed name',
+                language: 'en-NZ',
+                type: 'NL',
+                storage_kind: 'text_relation',
+                relation_id: 'relation/name:1',
+            },
+            {
+                name: 'Name to retain',
+                language: 'en-NZ',
+                type: 'NL',
+                storage_kind: 'text_relation',
+                relation_id: 'relation-2',
+            },
+        ], 'alpha');
+
+        await deleteName(0, 'alpha');
+
+        expect(deleteJson).toHaveBeenCalledTimes(1);
+        expect(deleteJson).toHaveBeenCalledWith(
+            '/api/concepts/%23V%23concept_alpha/texts/relation%2Fname%3A1'
+        );
+    });
+
+    test('forwards an exact legacy selector unchanged while preserving Unicode display text', async () => {
+        const conceptId = '#V#študent_博士';
+        document.body.innerHTML = `
+            <div class="tab-content" id="conceptTab_alpha" data-concept-id="${conceptId}">
+              <div id="namesList_alpha"></div>
+              <span id="namesStatus_alpha"></span>
+            </div>
+        `;
+        const selector = Object.freeze({
+            concept_id: conceptId,
+            ordinal: 0,
+            entry_sha256: 'a'.repeat(64),
+            names_snapshot_sha256: 'b'.repeat(64),
+        });
+        const storedName = 'Študentka 博士研究生 — طالبة دكتوراه';
+        deleteJson.mockResolvedValue({ success: true });
+
+        await displayConceptNames([
+            {
+                name: storedName,
+                language: 'sl',
+                type: 'NL',
+                storage_kind: 'legacy_inline',
+                legacy_name_selector: selector,
+            },
+            {
+                name: 'Canonical name',
+                language: 'en-NZ',
+                type: 'NL',
+                storage_kind: 'text_relation',
+                relation_id: 'relation-2',
+            },
+        ], 'alpha');
+
+        const legacyText = Array.from(document.querySelectorAll('#namesList_alpha .name-text'))
+            .find((element) => element.textContent === storedName);
+        expect(legacyText).toBeDefined();
+        expect(legacyText.dir).toBe('auto');
+        expect(legacyText.title).toContain('remove this name and add a canonical name');
+        legacyText.click();
+        expect(document.querySelector('#namesList_alpha .name-edit-input')).toBeNull();
+
+        const renderedCartouches = Array.from(document.querySelectorAll('#namesList_alpha .name-cartouche'));
+        const legacyIndex = renderedCartouches.indexOf(legacyText.closest('.name-cartouche'));
+        await deleteName(legacyIndex, 'alpha');
+
+        expect(deleteJson).toHaveBeenCalledTimes(1);
+        expect(deleteJson.mock.calls[0][0]).toBe(
+            '/api/concepts/%23V%23%C5%A1tudent_%E5%8D%9A%E5%A3%AB/legacy-names'
+        );
+        expect(deleteJson.mock.calls[0][1]).toEqual({ legacy_name_selector: selector });
+        expect(deleteJson.mock.calls[0][1].legacy_name_selector).toBe(selector);
+    });
+
+    test('fails locally when a name has neither an exact relation id nor an exact legacy selector', async () => {
+        await displayConceptNames([
+            {
+                name: 'Unidentifiable legacy name',
+                language: 'en-NZ',
+                type: 'NL',
+                storage_kind: 'legacy_inline',
+                legacy_name_selector: {
+                    concept_id: '#V#concept_alpha',
+                    ordinal: 0,
+                    entry_sha256: 'incomplete',
+                },
+            },
+            {
+                name: 'Name to retain',
+                language: 'en-NZ',
+                type: 'NL',
+                storage_kind: 'text_relation',
+                relation_id: 'relation-2',
+            },
+        ], 'alpha');
+
+        await deleteName(0, 'alpha');
+
+        expect(deleteJson).not.toHaveBeenCalled();
+        expect(document.getElementById('namesStatus_alpha').textContent).toBe(
+            'Cannot remove this name safely because its exact storage identifier is unavailable'
+        );
     });
 
     test('previews concept ID rename and enables execution only after a successful preview', async () => {

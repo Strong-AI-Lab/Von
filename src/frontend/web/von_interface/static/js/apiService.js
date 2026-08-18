@@ -238,11 +238,15 @@ export async function patchJson(url, data, opts = {}) {
   return res.json();
 }
 
-export async function deleteJson(url) {
-  const res = await fetch(url, {
+export async function deleteJson(url, data) {
+  const options = {
     method: 'DELETE',
     headers: buildHeaders()
-  });
+  };
+  if (data !== undefined) {
+    options.body = JSON.stringify(data);
+  }
+  const res = await fetch(url, options);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
