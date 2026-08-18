@@ -2,11 +2,13 @@
 
 import {
     addNewName,
+    displayConceptNames,
     executeConceptIdRename,
+    fetchSubtypesWithSuffix,
     loadConceptNames,
     previewConceptIdRename,
 } from "../../src/frontend/web/von_interface/static/js/conceptTab.js";
-import { postJson } from "../../src/frontend/web/von_interface/static/js/apiService.js";
+import { getJson, patchJson, postJson } from "../../src/frontend/web/von_interface/static/js/apiService.js";
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     deleteJson: jest.fn(),
@@ -72,7 +74,10 @@ function okJson(data) {
 
 describe('conceptTab name resolution', () => {
     beforeEach(() => {
+        jest.clearAllMocks();
         selectedConceptState.selected = '#V#concept_beta';
+        localStorage.clear();
+        localStorage.setItem('von_preferred_language', 'en-NZ');
         document.body.innerHTML = `
             <div class="tab-content" id="conceptTab_alpha" data-concept-id="#V#concept_alpha">
               <div id="namesSection_alpha">
@@ -141,6 +146,62 @@ describe('conceptTab name resolution', () => {
 
         const namesList = document.getElementById('namesList_alpha');
         expect(namesList.textContent).toContain('Person Name Two');
+    });
+
+    test('renders subtype names verbatim with automatic text direction', async () => {
+        document.body.innerHTML = '<ul id="subtypesList_alpha"></ul>';
+        getJson.mockResolvedValue({
+            children: [
+                { id: '#V#doctoral_student', name: 'طالبة دكتوراه' },
+                { id: '#V#phd_student', name: 'Current UoA SAIL PhD Student' },
+            ],
+        });
+
+        await fetchSubtypesWithSuffix('#V#student', 'alpha');
+
+        const buttons = Array.from(document.querySelectorAll('#subtypesList_alpha button'));
+        expect(buttons.map((button) => button.textContent)).toEqual([
+            'طالبة دكتوراه',
+            'Current UoA SAIL PhD Student',
+        ]);
+        expect(buttons.every((button) => button.dir === 'auto')).toBe(true);
+    });
+
+    test.each([
+        ['Current UoA SAIL PhD Student', 'en-NZ'],
+        ['Študentka doktorskega študija', 'sl'],
+        ['博士研究生', 'zh'],
+        ['طالبة دكتوراه', 'ar'],
+        ['E\u0301tudiante en IA', 'fr'],
+    ])('opens the name editor without reformatting %s', async (storedName, language) => {
+        document.body.innerHTML = `
+            <div class="tab-content" id="conceptTab_alpha" data-concept-id="#V#doctoral_student">
+              <div id="namesList_alpha"></div>
+              <span id="namesStatus_alpha"></span>
+            </div>
+        `;
+
+        await displayConceptNames([
+            {
+                name: storedName,
+                language,
+                type: 'NL',
+                relation_id: 'name-relation-1',
+            },
+        ], 'alpha');
+
+        const nameText = document.querySelector('#namesList_alpha .name-text');
+        expect(nameText.textContent).toBe(storedName);
+        expect(nameText.dir).toBe('auto');
+        nameText.click();
+
+        const input = document.querySelector('#namesList_alpha .name-edit-input');
+        expect(input.value).toBe(storedName);
+        expect(input.dir).toBe('auto');
+        input.blur();
+        await Promise.resolve();
+
+        expect(patchJson).not.toHaveBeenCalled();
     });
 
     test('previews concept ID rename and enables execution only after a successful preview', async () => {

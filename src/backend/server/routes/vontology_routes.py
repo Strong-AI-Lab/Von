@@ -48,6 +48,7 @@ from ...services.concept_predicate_metadata_service import get_relationship_kind
 from ...services.concept_service import (
     get_concept_by_id,
     ConceptNotFoundError,
+    resolve_concept_display_names,
     update_concept_description,
 )
 from ...services.text_value_service import get_texts_for_concept
@@ -3158,71 +3159,15 @@ def get_node_children():
             sort=[("name", 1)],
         )
 
+        child_docs = list(children_cursor)
+        display_names = resolve_concept_display_names(child_docs)
+
         children = []
-        for doc in children_cursor:
-            # Compute display name with fallback
-            resolved_name = (
-                get_concept_display_name_with_names_fallback(doc)
-                or doc.get("name", "")
-                or (doc.get("concept_id") or "")
-            )
-
-            # Opportunistically persist derived NL name if doc lacks top-level name and has no NL entry
-            try:
-                top_name = doc.get("name")
-                names = doc.get("names")
-                cid = doc.get("concept_id")
-                if cid and (not isinstance(top_name, str) or not top_name.strip()):
-                    has_matching_nl = False
-                    has_any_nl = False
-                    if isinstance(names, list):
-                        for entry in names:
-                            if not isinstance(entry, dict):
-                                continue
-                            if entry.get("type") == "NL":
-                                has_any_nl = True
-                                nm = str(entry.get("name", "")).strip()
-                                lang = entry.get("language")
-                                if nm == resolved_name and (
-                                    lang in (None, "", "en-NZ")
-                                ):
-                                    has_matching_nl = True
-                                    break
-                    # Only persist if we actually derived a human name and it's not already present
-                    if (
-                        (not has_matching_nl)
-                        and isinstance(resolved_name, str)
-                        and resolved_name
-                        and not resolved_name.startswith("#V#")
-                        and resolved_name != "Unnamed Concept"
-                    ):
-                        new_entry = {
-                            "name": resolved_name,
-                            "language": "en-NZ",
-                            "type": "NL",
-                        }
-                        if (
-                            isinstance(names, list)
-                            and len(names) > 0
-                            and not has_any_nl
-                        ):
-                            # Append only when there's no NL yet
-                            repo.update_one(
-                                {"concept_id": cid}, {"$push": {"names": new_entry}}
-                            )
-                        elif not isinstance(names, list) or len(names) == 0:
-                            repo.update_one(
-                                {"concept_id": cid}, {"$set": {"names": [new_entry]}}
-                            )
-            except Exception:
-                current_app.logger.debug(
-                    "Failed to persist derived NL name for child %s",
-                    doc.get("concept_id"),
-                    exc_info=True,
-                )
-
+        for doc in child_docs:
+            concept_id = doc.get("concept_id")
+            resolved_name = display_names.get(concept_id) or concept_id or ""
             child_data = {
-                "id": doc.get("concept_id"),
+                "id": concept_id,
                 "name": resolved_name,
                 "path": doc.get("path", ""),
                 # 'description' suppressed (JVNAUTOSCI-573 global removal); resolve via relations if needed
@@ -3301,68 +3246,15 @@ def get_node_instances():
             sort=[("name", 1)],
         )
 
+        instance_docs = list(instances_cursor)
+        display_names = resolve_concept_display_names(instance_docs)
+
         instances = []
-        for doc in instances_cursor:
-            resolved_name = (
-                get_concept_display_name_with_names_fallback(doc)
-                or doc.get("name", "")
-                or (doc.get("concept_id") or "")
-            )
-
-            # Opportunistically persist derived NL name if doc lacks top-level name and has no NL entry
-            try:
-                top_name = doc.get("name")
-                names = doc.get("names")
-                cid = doc.get("concept_id")
-                if cid and (not isinstance(top_name, str) or not top_name.strip()):
-                    has_matching_nl = False
-                    has_any_nl = False
-                    if isinstance(names, list):
-                        for entry in names:
-                            if not isinstance(entry, dict):
-                                continue
-                            if entry.get("type") == "NL":
-                                has_any_nl = True
-                                nm = str(entry.get("name", "")).strip()
-                                lang = entry.get("language")
-                                if nm == resolved_name and (
-                                    lang in (None, "", "en-NZ")
-                                ):
-                                    has_matching_nl = True
-                                    break
-                    if (
-                        (not has_matching_nl)
-                        and isinstance(resolved_name, str)
-                        and resolved_name
-                        and not resolved_name.startswith("#V#")
-                        and resolved_name != "Unnamed Concept"
-                    ):
-                        new_entry = {
-                            "name": resolved_name,
-                            "language": "en-NZ",
-                            "type": "NL",
-                        }
-                        if (
-                            isinstance(names, list)
-                            and len(names) > 0
-                            and not has_any_nl
-                        ):
-                            repo.update_one(
-                                {"concept_id": cid}, {"$push": {"names": new_entry}}
-                            )
-                        elif not isinstance(names, list) or len(names) == 0:
-                            repo.update_one(
-                                {"concept_id": cid}, {"$set": {"names": [new_entry]}}
-                            )
-            except Exception:
-                current_app.logger.debug(
-                    "Failed to persist derived NL name for instance %s",
-                    doc.get("concept_id"),
-                    exc_info=True,
-                )
-
+        for doc in instance_docs:
+            concept_id = doc.get("concept_id")
+            resolved_name = display_names.get(concept_id) or concept_id or ""
             instance_data = {
-                "id": doc.get("concept_id"),
+                "id": concept_id,
                 "name": resolved_name,
                 "notes": get_concept_notes(doc) or "",
                 # 'description' suppressed (JVNAUTOSCI-573 global removal); resolve via relations if needed

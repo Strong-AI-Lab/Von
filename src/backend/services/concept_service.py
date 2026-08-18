@@ -77,7 +77,11 @@ from .feature_flags import (
     get_event_workflow_integration_enabled,
     get_workflow_discovery_cache_invalidation_enabled,
 )
-from .text_value_service import get_texts_for_concept, upsert_text_for_concept
+from .text_value_service import (
+    get_texts_for_concept,
+    get_texts_for_concepts,
+    upsert_text_for_concept,
+)
 from ..db.repositories.text_value_repository import TextRelationsRepository
 
 # Setup logger
@@ -1268,6 +1272,12 @@ def enrich_concept_with_text_relations(
             )
             existing_name_keys.add(key)
 
+    # Keep the convenience field consistent with the canonical relation-backed
+    # names just attached above. Do not reformat authored text.
+    relation_backed_name = get_concept_display_name_with_names_fallback(concept)
+    if isinstance(relation_backed_name, str) and relation_backed_name.strip():
+        concept["name"] = relation_backed_name.strip()
+
     # Ensure CODE identifiers are present for UI/debugging (JVNAUTOSCI-938):
     # Some concepts may not have had CODE names persisted historically, but users
     # expect to see IDs (e.g., #V#..., db ObjectId, stable guid) in the Names section.
@@ -1782,6 +1792,109 @@ def _cascade_delete_text_relations(concept_id: str) -> tuple[int, int]:
     return (removed, tv_removed)
 
 
+def resolve_concept_display_names(
+    concept_docs: Iterable[Dict[str, Any]],
+    *,
+    preferred_language: Optional[str] = None,
+) -> Dict[str, str]:
+    """Resolve display names from canonical ``hasName`` relations in one batch.
+
+    Authored names are returned verbatim apart from surrounding whitespace.
+    Legacy embedded names and ID-derived labels are compatibility fallbacks
+    only: an ID cannot faithfully reconstruct acronym boundaries or
+    non-English display text.
+    """
+
+    docs_by_id: Dict[str, Dict[str, Any]] = {}
+    for concept_doc in concept_docs:
+        if not isinstance(concept_doc, dict):
+            continue
+        concept_id = concept_doc.get("concept_id")
+        if isinstance(concept_id, str) and concept_id.strip():
+            docs_by_id[concept_id.strip()] = concept_doc
+
+    if not docs_by_id:
+        return {}
+
+    language = str(preferred_language or "").strip()
+    if not language:
+        try:
+            from .settings_service import get_preferred_language
+
+            language = str(get_preferred_language() or "").strip()
+        except Exception:
+            language = ""
+    language = language or "en-NZ"
+    preferred_token = language.casefold()
+    preferred_base = preferred_token.split("-", 1)[0]
+
+    try:
+        rows_by_concept = get_texts_for_concepts(
+            list(docs_by_id),
+            predicate="hasName",
+            limit_per_concept=100,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Canonical display-name batch read failed; using legacy fallbacks: %s",
+            exc,
+            exc_info=True,
+        )
+        rows_by_concept = {}
+
+    def _language_rank(candidate_language: Any) -> int:
+        candidate = str(candidate_language or "").strip().casefold()
+        if candidate == preferred_token:
+            return 0
+        candidate_base = candidate.split("-", 1)[0] if candidate else ""
+        if candidate_base and candidate_base == preferred_base:
+            return 1
+        return 2 if candidate else 3
+
+    type_rank = {"NL": 0, "ABBR": 1}
+    resolved: Dict[str, str] = {}
+    for concept_id, concept_doc in docs_by_id.items():
+        candidates: list[tuple[tuple[int, int, str, str], str]] = []
+        for row in rows_by_concept.get(concept_id, []):
+            if not isinstance(row, dict):
+                continue
+            text = row.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            context = row.get("context")
+            name_type = (
+                str(context.get("name_type") or "NL").strip().upper()
+                if isinstance(context, dict)
+                else "NL"
+            )
+            if name_type not in type_rank:
+                continue
+            exact_text = text.strip()
+            relation_id = str(row.get("relation_id") or "~")
+            candidates.append(
+                (
+                    (
+                        _language_rank(row.get("lang")),
+                        type_rank[name_type],
+                        relation_id,
+                        exact_text.casefold(),
+                    ),
+                    exact_text,
+                )
+            )
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            resolved[concept_id] = candidates[0][1]
+            continue
+
+        fallback = get_concept_display_name_with_names_fallback(concept_doc)
+        if isinstance(fallback, str) and fallback.strip():
+            resolved[concept_id] = fallback.strip()
+
+    return resolved
+
+
 def list_concepts(
     concept_id: Optional[str] = None,
     vontology_path: Optional[str] = None,
@@ -1891,8 +2004,38 @@ def list_concepts(
             query, sort=sort_criteria, skip=skip_amount, limit=per_page
         )
 
+        concept_docs = list(concepts_cursor)
+        primary_type_ids: list[str] = []
+        for concept_doc in concept_docs:
+            relationships = concept_doc.get("relationships", {}) or {}
+            raw_instance_of = relationships.get("is_an_instance_of", [])
+            if isinstance(raw_instance_of, str):
+                candidate_type_ids = [raw_instance_of]
+            elif isinstance(raw_instance_of, list):
+                candidate_type_ids = raw_instance_of
+            else:
+                candidate_type_ids = []
+            if candidate_type_ids and isinstance(candidate_type_ids[0], str):
+                primary_type_ids.append(candidate_type_ids[0])
+
+        unique_type_ids = list(dict.fromkeys(primary_type_ids))
+        type_docs: list[Dict[str, Any]] = []
+        if unique_type_ids:
+            type_docs = list(
+                ConceptsRepository.find(
+                    apply_concept_query_filter(
+                        {"concept_id": {"$in": unique_type_ids}}
+                    ),
+                    {"concept_id": 1, "name": 1, "names": 1},
+                    limit=len(unique_type_ids),
+                )
+            )
+        display_names = resolve_concept_display_names(
+            [*concept_docs, *type_docs]
+        )
+
         concepts_list = []
-        for concept_doc in concepts_cursor:
+        for concept_doc in concept_docs:
             concept_doc["_id"] = str(concept_doc["_id"])  # Convert ObjectId for JSON
             # Convert datetime objects to ISO format strings for JSON
             if isinstance(concept_doc.get("created_at"), datetime):
@@ -1900,21 +2043,12 @@ def list_concepts(
             if isinstance(concept_doc.get("updated_at"), datetime):
                 concept_doc["updated_at"] = concept_doc["updated_at"].isoformat()
 
-            # Ensure display name present for frontend using names[] accessor with fallbacks
-            try:
-                from ..vontology.utils_vontology import (
-                    get_concept_display_name_with_names_fallback,
-                )
-
-                resolved = get_concept_display_name_with_names_fallback(concept_doc)
+            # Canonical relation-backed names preserve acronyms and Unicode exactly.
+            own_concept_id = concept_doc.get("concept_id")
+            if isinstance(own_concept_id, str):
+                resolved = display_names.get(own_concept_id)
                 if resolved:
                     concept_doc["name"] = resolved
-            except Exception:
-                # Legacy fallback from concept_id
-                if not concept_doc.get("name"):
-                    cid = concept_doc.get("concept_id")
-                    if isinstance(cid, str) and cid.startswith("#V#"):
-                        concept_doc["name"] = cid[3:].replace("_", " ").title()
 
             # Get concept type from relationships.is_an_instance_of
             relationships = concept_doc.get("relationships", {})
@@ -1949,32 +2083,18 @@ def list_concepts(
                     concept_doc["direct_concept_id"] = ""
                 # Don't overwrite the concept's own concept_id - that stays as-is
 
-                # Look up the proper name/title for the TYPE (what goes in parentheses)
-                try:
-                    type_name = get_concept_name_by_id(str(primary_type_id))
-                    if type_name:
-                        concept_doc["direct_concept_name"] = type_name
-                    else:
-                        # Fallback: Extract readable name from type concept_id like "#V#person" -> "Person"
-                        if isinstance(
-                            primary_type_id, str
-                        ) and primary_type_id.startswith("#V#"):
-                            type_name = primary_type_id[3:].replace("_", " ").title()
-                            concept_doc["direct_concept_name"] = type_name
-                        else:
-                            concept_doc["direct_concept_name"] = str(primary_type_id)
-                except Exception as e:
-                    logger.warning(
-                        f"Could not lookup name for type {primary_type_id}: {e}"
+                # Resolve all direct type names in the same canonical batch.
+                primary_type_text = str(primary_type_id)
+                type_name = display_names.get(primary_type_text)
+                if not type_name:
+                    type_name = (
+                        get_concept_display_name_with_names_fallback(
+                            {"concept_id": primary_type_text}
+                        )
+                        if primary_type_text.startswith("#V#")
+                        else primary_type_text
                     )
-                    # Fallback: Extract readable name from type concept_id
-                    if isinstance(primary_type_id, str) and primary_type_id.startswith(
-                        "#V#"
-                    ):
-                        type_name = primary_type_id[3:].replace("_", " ").title()
-                        concept_doc["direct_concept_name"] = type_name
-                    else:
-                        concept_doc["direct_concept_name"] = str(primary_type_id)
+                concept_doc["direct_concept_name"] = type_name
 
             concepts_list.append(concept_doc)
 
