@@ -152,7 +152,9 @@ def test_dual_user_org_create_is_rejected_and_org_publication_is_explicit(
     monkeypatch,
 ) -> None:
     from src.backend.services import ontology_mutation_command_service as command
-    from src.backend.services import ontology_publication_authority_service as authority
+    from src.backend.services import (
+        ontology_publication_authority_service as authority,
+    )
 
     monkeypatch.setattr(
         "src.backend.services.create_concepts_parent_resolution_service."
@@ -411,6 +413,68 @@ def test_failed_create_readback_never_follows_an_existing_concept_id(
     )
 
     assert readback["concepts"] == []
+
+
+def test_create_readback_resolves_string_text_value_references(
+    monkeypatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    concept_id = "#V#represented_article"
+    text_value_id = "507f1f77bcf86cd799439011"
+    observed_text_value_ids: list[Any] = []
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        command.ConceptsRepository,
+        "find_one",
+        lambda _query: {
+            "concept_id": concept_id,
+            "relationships": {
+                "#V#specific_to_user": ["#V#member"],
+                "is_an_instance_of": ["#V#scholarly_article"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        command.TextRelationsRepository,
+        "find",
+        lambda _query: [
+            {
+                "subject_concept_id": concept_id,
+                "predicate": "hasName",
+                "object_text_id": text_value_id,
+                "context": {"name_type": "NL"},
+            }
+        ],
+    )
+
+    def find_text_value(value: Any) -> dict[str, Any]:
+        observed_text_value_ids.append(value)
+        return {"_id": text_value_id, "text": "Represented article", "lang": "en-NZ"}
+
+    monkeypatch.setattr(
+        command.TextValuesRepository,
+        "find_one_by_id",
+        find_text_value,
+    )
+    monkeypatch.setattr(
+        command,
+        "concept_publication_context",
+        lambda _concept_id: authority.PublicationContext.user("#V#member"),
+    )
+
+    readback = command._concept_read_back(concept_id)
+
+    assert observed_text_value_ids == [text_value_id]
+    assert readback["text_relations"] == [
+        {
+            "predicate": "hasName",
+            "text": "Represented article",
+            "language": "en-NZ",
+            "context": {"name_type": "NL"},
+        }
+    ]
 
 
 def test_later_create_postcondition_reuses_the_original_immutable_intent(

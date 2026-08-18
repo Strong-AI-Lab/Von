@@ -689,11 +689,14 @@ def _scope_stable_external_concept_id(
     ):
         return base_id
 
-    visibility_scope = (
-        f"organisation:{canonical_org_id}"
-        if canonical_org_id
-        else f"user:{canonical_user_id}"
-    )
+    if normalised_scope_mode == "user_only_default" and canonical_user_id:
+        visibility_scope = f"user:{canonical_user_id}"
+    else:
+        visibility_scope = (
+            f"organisation:{canonical_org_id}"
+            if canonical_org_id
+            else f"user:{canonical_user_id}"
+        )
     scope_digest = hashlib.sha256(
         visibility_scope.casefold().encode("utf-8")
     ).hexdigest()[:10]

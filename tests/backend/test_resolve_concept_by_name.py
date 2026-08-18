@@ -677,3 +677,109 @@ def test_resolve_concept_by_name_audit_counts_only_actor_accessible_candidates(
         for item in actor_a_result["audit"]
         if item.get("stage") == "candidate_generation"
     )
+
+
+def test_resolve_concept_by_name_can_require_actor_private_publication(
+    monkeypatch,
+) -> None:
+    from src.backend.services.ontology_publication_authority_service import (
+        PublicationContext,
+    )
+
+    private_concept_id = "#V#private_article"
+    shared_concept_id = "#V#shared_article"
+    title = "A Shared Scholarly Article Title"
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda *_args, **_kwargs: {private_concept_id, shared_concept_id},
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda candidate_ids: set(candidate_ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": private_concept_id},
+            {"concept_id": shared_concept_id},
+        ],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "concept_publication_context",
+        lambda concept_id: (
+            PublicationContext.user("#V#actor")
+            if concept_id == private_concept_id
+            else PublicationContext.organisation("#V#organisation")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {
+            concept_id: [
+                {
+                    "text": title,
+                    "lang": "en-NZ",
+                    "predicate": "hasName",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+            for concept_id in concept_ids
+        },
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.TextRelationsRepository,
+        "find",
+        lambda *_args, **_kwargs: [],
+    )
+
+    with override_current_actor("#V#actor", "#V#organisation"):
+        result = resolve_concept_by_name(
+            name=title,
+            match_code_strings=False,
+            require_actor_private=True,
+        )
+
+    assert result["status"] == "resolved"
+    assert result["resolved_concept_id"] == private_concept_id
+    assert {
+        item.get("method"): (item.get("before"), item.get("after"))
+        for item in result["audit"]
+        if item.get("stage") == "filter"
+    }["actor_private"] == (2, 1)
+
+
+def test_resolve_concept_by_name_catalogue_forwards_actor_private_requirement(
+    monkeypatch,
+) -> None:
+    from src.backend.integrations.internal_mcp import catalogue
+
+    captured: dict[str, object] = {}
+
+    def resolve(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "status": "not_found",
+            "resolved_concept_id": None,
+            "candidates": [],
+            "audit": [],
+        }
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "resolve_concept_by_name",
+        resolve,
+    )
+
+    result = catalogue._resolve_concept_by_name(
+        name="Private article",
+        require_actor_private=True,
+    )
+
+    assert result["status"] == "not_found"
+    assert captured["require_actor_private"] is True
