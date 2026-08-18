@@ -12,6 +12,7 @@ gateway.  See ``set_fallback_handler`` and JVNAUTOSCI-922 Phase 3.1.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Callable, Dict, Mapping, Sequence
@@ -51,6 +52,13 @@ def normalise_action_outcome(status: str | None) -> str:
 @dataclass
 class WorkflowExecutionScope:
     """Ephemeral state shared only by one top-level workflow execution."""
+
+    effect_scope_id: str = field(
+        default_factory=lambda: str(uuid.uuid4()),
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     _nested_workflow_resolution_cache: Dict[
         tuple[str, str | None, str | None, str | None],

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
-
 
 _REDACT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"api[_-]?key", re.IGNORECASE),
@@ -24,9 +25,74 @@ _SAFE_TOKEN_COUNT_KEYS: frozenset[str] = frozenset(
     }
 )
 
+WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY = "workflow_effect_root_instance_id"
+WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY = "workflow_effect_path_sha256"
+WORKFLOW_EFFECT_PATH_DEPTH_METADATA_KEY = "workflow_effect_path_depth"
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def build_child_workflow_effect_identity_metadata(
+    parent_trace: Any,
+    *,
+    invocation_kind: str,
+    parent_workflow_id: str | None,
+    parent_state_id: str | None,
+    child_workflow_id: str,
+    discriminator: Any,
+) -> dict[str, Any]:
+    """Bind a child invocation to its stable path under one durable instance.
+
+    Child traces have fresh execution UUIDs on every replay. Those UUIDs are
+    useful telemetry but cannot identify an idempotent ontology effect. This
+    metadata instead chains the durable root instance with server-derived
+    workflow/state/branch or item coordinates. The path is hashed so authored
+    labels cannot make receipt keys unbounded or disclose their content.
+    """
+
+    parent_metadata = getattr(parent_trace, "metadata", None)
+    parent_metadata = parent_metadata if isinstance(parent_metadata, Mapping) else {}
+    root_instance_id = str(
+        getattr(parent_trace, "instance_id", None)
+        or parent_metadata.get(WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY)
+        or ""
+    ).strip()
+    if not root_instance_id:
+        return {}
+
+    parent_path_sha256 = str(
+        parent_metadata.get(WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY) or ""
+    ).strip()
+    try:
+        parent_depth = max(
+            0,
+            int(parent_metadata.get(WORKFLOW_EFFECT_PATH_DEPTH_METADATA_KEY) or 0),
+        )
+    except (TypeError, ValueError):
+        parent_depth = 0
+    path_payload = {
+        "parent_path_sha256": parent_path_sha256 or None,
+        "invocation_kind": str(invocation_kind or "nested").strip() or "nested",
+        "parent_workflow_id": str(parent_workflow_id or "").strip() or None,
+        "parent_state_id": str(parent_state_id or "").strip() or None,
+        "child_workflow_id": str(child_workflow_id or "").strip(),
+        "discriminator": str(discriminator),
+    }
+    path_sha256 = hashlib.sha256(
+        json.dumps(
+            path_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY: root_instance_id,
+        WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY: path_sha256,
+        WORKFLOW_EFFECT_PATH_DEPTH_METADATA_KEY: parent_depth + 1,
+    }
 
 
 def sanitise_for_trace_storage(

@@ -67,7 +67,10 @@ from ..subworkflow_contracts import (
 from ..tool_invocation_evidence import (
     derive_tool_invocation_records_from_step_envelopes,
 )
-from ..trace_model import WorkflowExecutionTrace
+from ..trace_model import (
+    WorkflowExecutionTrace,
+    build_child_workflow_effect_identity_metadata,
+)
 from ..vontology_loader import load_workflow_definition_from_vontology
 from ..workflow_launch_input_contracts import (
     WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS,
@@ -687,6 +690,14 @@ def _build_subworkflow_handler(
                 "invocation_count": invocation_count + 1,
                 "invocation_limit": invocation_limit,
                 "authority_resolution": authority_resolution.to_projection(),
+                **build_child_workflow_effect_identity_metadata(
+                    request.trace,
+                    invocation_kind="subworkflow",
+                    parent_workflow_id=parent_workflow_id,
+                    parent_state_id=parent_state_id,
+                    child_workflow_id=child_workflow_id,
+                    discriminator=invocation_count + 1,
+                ),
             },
         )
         executor = WorkflowExecutor(

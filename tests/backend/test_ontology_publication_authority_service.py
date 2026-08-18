@@ -491,3 +491,183 @@ def test_agent_without_delegation_and_raw_payload_actor_fail_closed(
     with service.override_current_actor("#V#spoofed_admin", None):
         spoofed = service.authorise_ontology_mutation(_intent(service))
     assert spoofed.reason_code == "client_supplied_identity_is_not_authority"
+
+
+def test_admitted_actor_bound_workflow_retains_exact_private_authority(
+    authority_stores,
+    monkeypatch,
+):
+    service, _delegations, _receipts = authority_stores
+    monkeypatch.setattr(
+        service,
+        "_gateway_actor_trust_source",
+        lambda: "preexisting_authenticated_or_workflow_context",
+    )
+    intent = service.OntologyMutationIntent(
+        operation="concept.create",
+        publication_context=service.PublicationContext.user("#V#actor"),
+        source_contexts=(service.PublicationContext.user("#V#actor"),),
+        target_concept_ids=("#V#paper",),
+        tool_name="create_concepts",
+        delta={"names": ["A paper"]},
+    )
+
+    with (
+        service.override_current_actor("#V#actor", "#V#organisation"),
+        service.bind_ontology_invocation(
+            surface="workflow",
+            executing_agent_concept_id="#V#von_system",
+            audience="workflow",
+            effect_id="workflow:paper:create",
+            workflow_id="#V#paper_workflow",
+            actor_bound_workflow_effect=True,
+        ),
+    ):
+        decision = service.authorise_ontology_mutation(intent)
+
+    assert decision.allowed is True
+    assert decision.reason_code == "semantic_ontology_authority_verified"
+    assert decision.actor_concept_id == "#V#actor"
+    assert decision.executing_agent_concept_id == "#V#von_system"
+    assert decision.trust_source == "preexisting_authenticated_or_workflow_context"
+
+
+@pytest.mark.parametrize(
+    "publication_context,source_contexts",
+    (
+        ("other_user", ()),
+        ("organisation", ()),
+        ("global", ()),
+        ("historical", ()),
+        ("private", ("other_user",)),
+    ),
+)
+def test_actor_bound_workflow_cannot_cross_private_context_boundary(
+    authority_stores,
+    monkeypatch,
+    publication_context,
+    source_contexts,
+):
+    service, _delegations, _receipts = authority_stores
+    monkeypatch.setattr(
+        service,
+        "_gateway_actor_trust_source",
+        lambda: "preexisting_authenticated_or_workflow_context",
+    )
+    contexts = {
+        "private": service.PublicationContext.user("#V#actor"),
+        "other_user": service.PublicationContext.user("#V#other_actor"),
+        "organisation": service.PublicationContext.organisation("#V#organisation"),
+        "global": service.PublicationContext.global_context(),
+        "historical": service.PublicationContext(
+            service.PublicationContextKind.HISTORICAL,
+            source="legacy_visibility",
+        ),
+    }
+    intent = service.OntologyMutationIntent(
+        operation="relationship.add",
+        publication_context=contexts[publication_context],
+        source_contexts=tuple(contexts[item] for item in source_contexts),
+        target_concept_ids=("#V#source", "#V#target"),
+        tool_name="add_relationship",
+        predicate="#V#is_a_type_of",
+        delta={"target": "#V#target"},
+    )
+
+    with (
+        service.override_current_actor("#V#actor", "#V#organisation"),
+        service.bind_ontology_invocation(
+            surface="workflow",
+            executing_agent_concept_id="#V#von_system",
+            audience="workflow",
+            effect_id="workflow:paper:cross-scope",
+            workflow_id="#V#paper_workflow",
+            actor_bound_workflow_effect=True,
+        ),
+    ):
+        decision = service.authorise_ontology_mutation(intent)
+
+    assert decision.allowed is False
+    assert decision.reason_code == "ontology_agent_delegation_required"
+
+
+def test_actor_bound_workflow_marker_requires_workflow_and_gateway_trust(
+    authority_stores,
+    monkeypatch,
+):
+    service, _delegations, _receipts = authority_stores
+    private_intent = _intent(
+        service,
+        context=service.PublicationContext.user("#V#actor"),
+    )
+
+    for surface, audience, trust_source, marker in (
+        ("workflow", "workflow", None, True),
+        ("workflow", "workflow", "tool_payload_fallback", True),
+        (
+            "internal_mcp",
+            "internal_mcp",
+            "preexisting_authenticated_or_workflow_context",
+            True,
+        ),
+        (
+            "workflow",
+            "workflow",
+            "preexisting_authenticated_or_workflow_context",
+            False,
+        ),
+    ):
+        monkeypatch.setattr(
+            service,
+            "_gateway_actor_trust_source",
+            lambda trust_source=trust_source: trust_source,
+        )
+        with (
+            service.override_current_actor("#V#actor", None),
+            service.bind_ontology_invocation(
+                surface=surface,
+                executing_agent_concept_id="#V#von_system",
+                audience=audience,
+                effect_id="effect-untrusted-marker",
+                actor_bound_workflow_effect=marker,
+            ),
+        ):
+            decision = service.authorise_ontology_mutation(private_intent)
+        assert decision.allowed is False
+        assert decision.reason_code == "ontology_agent_delegation_required"
+
+
+def test_actor_bound_private_workflow_does_not_bypass_governance_predicates(
+    authority_stores,
+    monkeypatch,
+):
+    service, _delegations, _receipts = authority_stores
+    monkeypatch.setattr(
+        service,
+        "_gateway_actor_trust_source",
+        lambda: "preexisting_authenticated_or_workflow_context",
+    )
+    intent = service.OntologyMutationIntent(
+        operation="relationship.add",
+        publication_context=service.PublicationContext.user("#V#actor"),
+        source_contexts=(service.PublicationContext.user("#V#actor"),),
+        target_concept_ids=("#V#source", "#V#role"),
+        tool_name="add_relationship",
+        predicate=service.AUTHORITY_ROLE_PREDICATE,
+        delta={"target": "#V#role"},
+    )
+
+    with (
+        service.override_current_actor("#V#actor", None),
+        service.bind_ontology_invocation(
+            surface="workflow",
+            executing_agent_concept_id="#V#von_system",
+            audience="workflow",
+            effect_id="workflow:paper:reserved-predicate",
+            actor_bound_workflow_effect=True,
+        ),
+    ):
+        decision = service.authorise_ontology_mutation(intent)
+
+    assert decision.allowed is False
+    assert decision.reason_code == "dedicated_ontology_governance_operation_required"

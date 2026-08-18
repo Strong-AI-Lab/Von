@@ -369,7 +369,7 @@ def _ontology_invocation_context(
     request: WorkflowActionRequest,
     resolved_tool_name: str,
 ):
-    """Bind workflow-agent provenance even when no delegation was supplied."""
+    """Bind provenance for a workflow write admitted by its mutation ceiling."""
 
     from ..services.ontology_mutation_command_service import (
         is_ontology_mutation_method,
@@ -383,7 +383,37 @@ def _ontology_invocation_context(
 
     workflow_id = _clean_text(request.workflow_id) or None
     state_id = _clean_text(request.workflow_state_id) or "unbound_state"
-    effect_id = f"workflow:{workflow_id or 'unbound_workflow'}:{state_id}:{resolved_tool_name}"
+    trace = request.trace
+    trace_metadata = getattr(trace, "metadata", None)
+    trace_metadata = trace_metadata if isinstance(trace_metadata, Mapping) else {}
+    from .trace_model import (
+        WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY,
+        WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY,
+    )
+
+    nested_effect_path_sha256 = _clean_text(
+        trace_metadata.get(WORKFLOW_EFFECT_PATH_SHA256_METADATA_KEY)
+    )
+    if nested_effect_path_sha256:
+        workflow_execution_id = _clean_text(
+            trace_metadata.get(WORKFLOW_EFFECT_ROOT_INSTANCE_ID_METADATA_KEY)
+        )
+    else:
+        workflow_execution_id = _clean_text(getattr(trace, "instance_id", None))
+    if not workflow_execution_id:
+        workflow_execution_id = _clean_text(getattr(trace, "execution_id", None))
+    if not workflow_execution_id:
+        workflow_execution_id = _clean_text(
+            getattr(request.execution_scope, "effect_scope_id", None)
+        )
+    workflow_execution_id = workflow_execution_id or "unbound_execution"
+    effect_scope = workflow_execution_id
+    if nested_effect_path_sha256:
+        effect_scope = f"{effect_scope}:nested:{nested_effect_path_sha256}"
+    effect_id = (
+        f"workflow:{workflow_id or 'unbound_workflow'}:{effect_scope}:"
+        f"{state_id}:{resolved_tool_name}"
+    )
     return bind_ontology_invocation(
         surface="workflow",
         executing_agent_concept_id="#V#von_system",
@@ -395,6 +425,7 @@ def _ontology_invocation_context(
         ),
         effect_id=effect_id,
         workflow_id=workflow_id,
+        actor_bound_workflow_effect=True,
     )
 
 

@@ -699,11 +699,11 @@ def test_only_the_exact_grantor_can_revoke_a_delegation_without_disclosure(
     assert revoked["status"] == "revoked"
 
 
-def test_workflow_and_internal_gateway_surfaces_bind_the_same_agent_authority_contract(
+def test_workflow_and_internal_gateway_surfaces_deny_global_effect_without_delegation(
     authority_service,
     monkeypatch,
 ) -> None:
-    """Both routes must deny a canonical mutation without an exact delegation."""
+    """Neither route acquires shared publication authority from actor context."""
 
     service, _delegations, _receipts = authority_service
     global_role = _role(service, role=service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE)
@@ -736,6 +736,40 @@ def test_workflow_and_internal_gateway_surfaces_bind_the_same_agent_authority_co
         assert decision.reason_code == "ontology_agent_delegation_required"
 
 
+def test_actor_bound_workflow_private_effect_uses_live_direct_authority(
+    authority_service,
+    monkeypatch,
+) -> None:
+    service, _delegations, _receipts = authority_service
+    monkeypatch.setattr(
+        service,
+        "_gateway_actor_trust_source",
+        lambda: "preexisting_authenticated_or_workflow_context",
+    )
+    intent = _intent(
+        service,
+        context=service.PublicationContext.user("#V#actor"),
+        source_contexts=(service.PublicationContext.user("#V#actor"),),
+    )
+    with (
+        service.override_current_actor("#V#actor", None),
+        service.bind_ontology_invocation(
+            surface="workflow",
+            executing_agent_concept_id="#V#von_system",
+            audience="workflow",
+            effect_id="workflow:fixture:private:add_relationship",
+            workflow_id="#V#fixture_workflow",
+            actor_bound_workflow_effect=True,
+        ),
+    ):
+        decision = service.authorise_ontology_mutation(intent)
+
+    assert decision.allowed is True
+    assert decision.delegation_id is None
+    assert decision.reason_code == "semantic_ontology_authority_verified"
+    assert decision.trust_source == "preexisting_authenticated_or_workflow_context"
+
+
 def test_workflow_binds_a_stable_effect_identity_and_passes_the_grant_opaquely() -> (
     None
 ):
@@ -746,6 +780,7 @@ def test_workflow_binds_a_stable_effect_identity_and_passes_the_grant_opaquely()
         WorkflowActionRequest,
         WorkflowEnvironment,
     )
+    from src.backend.workflows.trace_model import WorkflowExecutionTrace
     from src.backend.workflows.workflow_mcp_tool_actions import (
         _ontology_invocation_context,
     )
@@ -758,6 +793,11 @@ def test_workflow_binds_a_stable_effect_identity_and_passes_the_grant_opaquely()
             ontology_delegation_id="server-issued-only",
         ),
         data={},
+        trace=WorkflowExecutionTrace(
+            workflow_id="#V#publication_workflow",
+            execution_id="execution-that-may-change-after-resume",
+            instance_id="durable-instance-123",
+        ),
         workflow_id="#V#publication_workflow",
         workflow_state_id="publish-edge",
     )
@@ -771,9 +811,223 @@ def test_workflow_binds_a_stable_effect_identity_and_passes_the_grant_opaquely()
     assert invocation.audience == "workflow"
     assert invocation.delegation_id == "server-issued-only"
     assert invocation.effect_id == (
-        "workflow:#V#publication_workflow:publish-edge:add_relationship"
+        "workflow:#V#publication_workflow:durable-instance-123:"
+        "publish-edge:add_relationship"
     )
     assert invocation.workflow_id == "#V#publication_workflow"
+    assert invocation.actor_bound_workflow_effect is True
+
+
+def test_workflow_effect_identity_is_stable_per_instance_and_distinct_between_instances() -> (
+    None
+):
+    from src.backend.services.ontology_publication_authority_service import (
+        current_ontology_invocation,
+    )
+    from src.backend.workflows.action_registry import (
+        WorkflowActionRequest,
+        WorkflowEnvironment,
+    )
+    from src.backend.workflows.trace_model import WorkflowExecutionTrace
+    from src.backend.workflows.workflow_mcp_tool_actions import (
+        _ontology_invocation_context,
+    )
+
+    def _effect_id(*, instance_id: str, execution_id: str) -> str:
+        request = WorkflowActionRequest(
+            action_id="workflow_mcp.invoke_tool",
+            inputs={},
+            environment=WorkflowEnvironment(llm_client=object()),
+            data={},
+            trace=WorkflowExecutionTrace(
+                workflow_id="#V#publication_workflow",
+                execution_id=execution_id,
+                instance_id=instance_id,
+            ),
+            workflow_id="#V#publication_workflow",
+            workflow_state_id="publish-edge",
+        )
+        with _ontology_invocation_context(
+            request=request,
+            resolved_tool_name="add_relationship",
+        ):
+            invocation = current_ontology_invocation()
+        assert invocation is not None
+        assert invocation.effect_id is not None
+        return invocation.effect_id
+
+    first = _effect_id(instance_id="instance-a", execution_id="execution-a")
+    resumed = _effect_id(instance_id="instance-a", execution_id="execution-b")
+    separate = _effect_id(instance_id="instance-b", execution_id="execution-a")
+
+    assert resumed == first
+    assert separate != first
+
+
+def test_workflow_effect_identity_is_distinct_for_untraced_top_level_executions() -> (
+    None
+):
+    from src.backend.services.ontology_publication_authority_service import (
+        current_ontology_invocation,
+    )
+    from src.backend.workflows.action_registry import (
+        WorkflowActionRequest,
+        WorkflowEnvironment,
+        WorkflowExecutionScope,
+    )
+    from src.backend.workflows.workflow_mcp_tool_actions import (
+        _ontology_invocation_context,
+    )
+
+    def _effect_id(scope: WorkflowExecutionScope) -> str:
+        request = WorkflowActionRequest(
+            action_id="workflow_mcp.invoke_tool",
+            inputs={},
+            environment=WorkflowEnvironment(llm_client=object()),
+            data={},
+            workflow_id="#V#publication_workflow",
+            workflow_state_id="publish-edge",
+            execution_scope=scope,
+        )
+        with _ontology_invocation_context(
+            request=request,
+            resolved_tool_name="add_relationship",
+        ):
+            invocation = current_ontology_invocation()
+        assert invocation is not None
+        assert invocation.effect_id is not None
+        return invocation.effect_id
+
+    first_scope = WorkflowExecutionScope()
+    second_scope = WorkflowExecutionScope()
+
+    first = _effect_id(first_scope)
+    repeated = _effect_id(first_scope)
+    separate = _effect_id(second_scope)
+
+    assert repeated == first
+    assert separate != first
+
+
+def test_nested_durable_effect_replay_after_write_reuses_the_exact_receipt(
+    authority_service,
+    monkeypatch,
+) -> None:
+    """A child replay before checkpoint persistence must not repeat its write."""
+
+    from src.backend.services.ontology_publication_authority_service import (
+        current_ontology_invocation,
+    )
+    from src.backend.workflows.action_registry import (
+        WorkflowActionRequest,
+        WorkflowEnvironment,
+    )
+    from src.backend.workflows.trace_model import (
+        WorkflowExecutionTrace,
+        build_child_workflow_effect_identity_metadata,
+    )
+    from src.backend.workflows.workflow_mcp_tool_actions import (
+        _ontology_invocation_context,
+    )
+
+    def _nested_effect_id(
+        *,
+        root_instance_id: str,
+        child_execution_id: str,
+        item_index: int,
+    ) -> str:
+        parent_trace = WorkflowExecutionTrace(
+            workflow_id="#V#reference_set_workflow",
+            execution_id=f"root-execution-for-{child_execution_id}",
+            instance_id=root_instance_id,
+        )
+        child_trace = WorkflowExecutionTrace(
+            workflow_id="#V#reference_item_workflow",
+            execution_id=child_execution_id,
+            metadata=build_child_workflow_effect_identity_metadata(
+                parent_trace,
+                invocation_kind="for_each",
+                parent_workflow_id="#V#reference_set_workflow",
+                parent_state_id="dispatch_reference_items",
+                child_workflow_id="#V#reference_item_workflow",
+                discriminator=item_index,
+            ),
+        )
+        request = WorkflowActionRequest(
+            action_id="workflow_mcp.invoke_tool",
+            inputs={},
+            environment=WorkflowEnvironment(llm_client=object()),
+            data={},
+            trace=child_trace,
+            workflow_id="#V#reference_item_workflow",
+            workflow_state_id="create_article",
+        )
+        with _ontology_invocation_context(
+            request=request,
+            resolved_tool_name="create_concepts",
+        ):
+            invocation = current_ontology_invocation()
+        assert invocation is not None
+        assert invocation.effect_id is not None
+        return invocation.effect_id
+
+    first_effect_id = _nested_effect_id(
+        root_instance_id="durable-root-instance",
+        child_execution_id="child-execution-before-crash",
+        item_index=0,
+    )
+    replay_effect_id = _nested_effect_id(
+        root_instance_id="durable-root-instance",
+        child_execution_id="child-execution-after-resume",
+        item_index=0,
+    )
+    sibling_effect_id = _nested_effect_id(
+        root_instance_id="durable-root-instance",
+        child_execution_id="child-execution-sibling",
+        item_index=1,
+    )
+    other_instance_effect_id = _nested_effect_id(
+        root_instance_id="other-durable-root-instance",
+        child_execution_id="child-execution-before-crash",
+        item_index=0,
+    )
+
+    assert replay_effect_id == first_effect_id
+    assert sibling_effect_id != first_effect_id
+    assert other_instance_effect_id != first_effect_id
+
+    service, _delegations, receipts = authority_service
+    global_role = _role(service, role=service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE)
+    monkeypatch.setattr(
+        service, "resolve_live_semantic_roles", lambda _actor: (global_role,)
+    )
+    first_intent = _intent(service, idempotency_key=first_effect_id)
+    replay_intent = _intent(service, idempotency_key=replay_effect_id)
+    mutation_calls = {"count": 0}
+
+    def mutate() -> dict[str, Any]:
+        mutation_calls["count"] += 1
+        return {"success": True, "changed": True}
+
+    with service.override_current_actor("#V#semantic_admin", None):
+        first = service.execute_authorised_ontology_mutation(
+            intent=first_intent,
+            mutate=mutate,
+            read_before=lambda: {"present": False},
+            read_back=lambda: {"present": True},
+        )
+        replay = service.execute_authorised_ontology_mutation(
+            intent=replay_intent,
+            mutate=mutate,
+            read_before=lambda: {"present": False},
+            read_back=lambda: {"present": True},
+        )
+
+    assert first["success"] is True
+    assert replay["success"] is True
+    assert replay["idempotent_replay"] is True
+    assert mutation_calls["count"] == 1
+    assert receipts.count_documents({}) == 1
 
 
 def test_concurrent_same_idempotency_key_executes_the_canonical_effect_once(

@@ -148,6 +148,62 @@ def test_prebound_trusted_invocation_cannot_be_overridden_by_gateway_payload() -
     }
 
 
+def test_gateway_preserves_actor_bound_private_workflow_authority() -> None:
+    from src.backend.services.ontology_publication_authority_service import (
+        OntologyMutationIntent,
+        PublicationContext,
+        authorise_ontology_mutation,
+        bind_ontology_invocation,
+        override_current_actor,
+    )
+
+    def handler(**_kwargs):
+        decision = authorise_ontology_mutation(
+            OntologyMutationIntent(
+                operation="relationship.add",
+                publication_context=PublicationContext.user("#V#trusted_actor"),
+                source_contexts=(PublicationContext.user("#V#trusted_actor"),),
+                target_concept_ids=("#V#source", "#V#target"),
+                tool_name="add_relationship",
+                predicate="#V#is_a",
+                delta={"target_concept_id": "#V#target"},
+            )
+        )
+        return {
+            "success": decision.allowed,
+            "reason_code": decision.reason_code,
+            "actor_concept_id": decision.actor_concept_id,
+            "trust_source": decision.trust_source,
+        }
+
+    with (
+        override_current_actor("#V#trusted_actor", "#V#trusted_org"),
+        bind_ontology_invocation(
+            surface="workflow",
+            executing_agent_concept_id="#V#von_system",
+            audience="workflow",
+            effect_id="workflow:paper:add_relationship",
+            workflow_id="#V#paper_workflow",
+            actor_bound_workflow_effect=True,
+        ),
+    ):
+        result = (
+            _gateway(handler)
+            .invoke(
+                "add_relationship",
+                {"user_concept_id": "#V#forged_other_actor"},
+            )
+            .payload
+        )
+
+    assert result == {
+        "success": True,
+        "reason_code": "semantic_ontology_authority_verified",
+        "actor_concept_id": "#V#trusted_actor",
+        "trust_source": "preexisting_authenticated_or_workflow_context",
+    }
+
+
 def test_prebound_direct_human_invocation_is_preserved() -> None:
     from src.backend.services.ontology_publication_authority_service import (
         bind_ontology_invocation,
