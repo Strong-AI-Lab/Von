@@ -210,4 +210,114 @@ describe('task panel concept links', () => {
         expect(document.querySelector('.task-inspector-card[data-task-id="#V#task_1282"]')).toBeTruthy();
         expect(document.querySelector('#globalTaskInspector')?.textContent || '').toContain('Detail toggle check');
     });
+
+    test('renders only safe open-resource task actions in the inspector', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const task = {
+            task_concept_id: '#V#task_1283',
+            title: 'External resource actions',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+            external_resource_actions: [
+                {
+                    kind: 'open_resource',
+                    label: 'Open source mail',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/gmail.open_source',
+                },
+                {
+                    kind: 'open_resource',
+                    label: 'Open calendar event',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/calendar-event',
+                },
+                {
+                    label: 'Missing action kind',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/missing-kind',
+                },
+                {
+                    kind: 'submit_resource',
+                    label: 'Unsupported action kind',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/ignored-kind',
+                },
+                {
+                    kind: 'open_resource',
+                    label: 'Unsafe remote link',
+                    href: 'https://example.test/resource',
+                },
+                {
+                    kind: 'open_resource',
+                    label: '<script>Unsafe label</script>',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/unsafe-label',
+                },
+                {
+                    kind: 'open_resource',
+                    label: 'Malformed local link',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/',
+                },
+                {
+                    kind: 'open_resource',
+                    label: 'Encoded path escape',
+                    href: '/api/tasks/%23V%23task_1283/external-resource-actions/%2Funsafe',
+                },
+                null,
+            ],
+        };
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
+                return Promise.resolve({ tasks: [task] });
+            }
+            if (url === '/api/tasks/%23V%23task_1283') {
+                return Promise.resolve(task);
+            }
+            if (url === '/api/tasks/%23V%23task_1283/comments?limit=100') {
+                return Promise.resolve({ comments: [] });
+            }
+            if (url === '/api/tasks/%23V%23task_1283/attachments?limit=100') {
+                return Promise.resolve({ attachments: [] });
+            }
+            if (url === '/api/tasks/%23V%23task_1283/history?limit=200') {
+                return Promise.resolve({ history: [] });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        document.querySelector('.task-detail-toggle-btn').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        const actions = Array.from(document.querySelectorAll('.task-external-resource-action'));
+        expect(actions).toHaveLength(3);
+        expect(actions.map((action) => action.textContent.trim())).toEqual([
+            'Open source mail',
+            'Open calendar event',
+            '<script>Unsafe label</script>',
+        ]);
+        expect(actions.map((action) => action.getAttribute('href'))).toEqual([
+            '/api/tasks/%23V%23task_1283/external-resource-actions/gmail.open_source',
+            '/api/tasks/%23V%23task_1283/external-resource-actions/calendar-event',
+            '/api/tasks/%23V%23task_1283/external-resource-actions/unsafe-label',
+        ]);
+        actions.forEach((action) => {
+            expect(action.getAttribute('target')).toBe('_blank');
+            expect(action.getAttribute('rel')).toBe('noopener noreferrer');
+        });
+        expect(document.querySelector('script')).toBeNull();
+        expect(document.querySelector('#globalTaskInspector')?.textContent || '')
+            .not.toContain('Unsupported action kind');
+        expect(document.querySelector('#globalTaskInspector')?.textContent || '')
+            .not.toContain('Missing action kind');
+        expect(document.querySelector('#globalTaskInspector')?.textContent || '')
+            .not.toContain('Unsafe remote link');
+        expect(document.querySelector('#globalTaskInspector')?.textContent || '')
+            .not.toContain('Malformed local link');
+        expect(document.querySelector('#globalTaskInspector')?.textContent || '')
+            .not.toContain('Encoded path escape');
+    });
 });

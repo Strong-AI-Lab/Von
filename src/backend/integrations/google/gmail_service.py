@@ -893,6 +893,86 @@ def get_message(
     return request.execute() or {}
 
 
+def resolve_message_thread_navigation_target(
+    profile_id: str,
+    message_id: str,
+    *,
+    profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
+) -> dict[str, str]:
+    """Read the smallest Gmail state needed to open a message's thread.
+
+    Gmail's REST message identifier is a stable API handle, not a browser
+    permalink.  Resolve its parent thread with a ``minimal`` partial response,
+    then return the authenticated mailbox address needed by a browser caller to
+    select the right Gmail account.  This helper performs no label or message
+    mutation and never returns message content, headers, or credentials.
+    """
+
+    cleaned_message_id = message_id.strip() if isinstance(message_id, str) else ""
+    if not cleaned_message_id:
+        raise ValueError("message_id is required to resolve a Gmail thread link")
+
+    profile = get_profile(profile_id, profiles)
+    _log_gmail_audit(
+        "resolve_message_thread_navigation_target",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        message_id=cleaned_message_id,
+    )
+    service = get_service(profile.profile_id, profiles)
+    message = (
+        service.users()
+        .messages()
+        .get(
+            userId=profile.user_id,
+            id=cleaned_message_id,
+            format="minimal",
+            fields="threadId",
+        )
+        .execute()
+        or {}
+    )
+    thread_id = message.get("threadId") if isinstance(message, Mapping) else None
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise RuntimeError("Gmail did not return a thread ID for the message")
+
+    authorised_email: str | None = None
+    if callable(_get_agent_gmail_token_status):
+        try:
+            status = _get_agent_gmail_token_status(profile.profile_id)
+            candidate = getattr(status, "authorised_email", None)
+            if isinstance(candidate, str) and candidate.strip():
+                authorised_email = candidate.strip()
+        except Exception as exc:  # provider identity fallback is bounded
+            logger.debug(
+                "[gmail_service] token-status identity lookup failed for %s: %s",
+                profile.profile_id,
+                type(exc).__name__,
+            )
+
+    if authorised_email is None:
+        profile_payload = (
+            service.users().getProfile(userId=profile.user_id).execute() or {}
+        )
+        candidate = (
+            profile_payload.get("emailAddress")
+            if isinstance(profile_payload, Mapping)
+            else None
+        )
+        if isinstance(candidate, str) and candidate.strip():
+            authorised_email = candidate.strip()
+    if authorised_email is None:
+        raise RuntimeError("Gmail did not return an authorised mailbox address")
+
+    return {
+        "profile_id": profile.profile_id,
+        "message_id": cleaned_message_id,
+        "thread_id": thread_id.strip(),
+        "authorised_email": authorised_email,
+    }
+
+
 def get_attachment(
     profile_id: str,
     message_id: str,

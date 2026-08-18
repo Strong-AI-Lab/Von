@@ -52,6 +52,7 @@ const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
 const TASK_LIST_LIMIT = '500';
 const GLOBAL_TASK_PAGE_SIZE = 50;
 const TASK_PANEL_LOAD_TELEMETRY_SCHEMA_VERSION = 'task_panel_load_telemetry.v1';
+const TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN = /^\/api\/tasks\/[A-Za-z0-9%_-]+\/external-resource-actions\/[A-Za-z0-9._%-]+$/;
 
 // Constants
 const TASK_STATUS_OPTIONS = [
@@ -1990,6 +1991,52 @@ function renderTaskTimeline(detailState, task) {
     `;
 }
 
+function isSafeTaskExternalResourceActionHref(href) {
+    if (typeof href !== 'string' || !TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN.test(href)) {
+        return false;
+    }
+    try {
+        const segments = href.split('/');
+        return [segments[3], segments[5]].every((segment) => {
+            const decoded = decodeURIComponent(segment);
+            return decoded && decoded !== '.' && decoded !== '..' && !/[\\/]/.test(decoded);
+        });
+    } catch (_error) {
+        return false;
+    }
+}
+
+function getTaskExternalResourceActions(task) {
+    const rawActions = Array.isArray(task?.external_resource_actions)
+        ? task.external_resource_actions
+        : [];
+    return rawActions.filter((action) => {
+        if (!action || typeof action !== 'object') return false;
+        if (action.kind !== 'open_resource') return false;
+        return typeof action.label === 'string'
+            && action.label.trim()
+            && isSafeTaskExternalResourceActionHref(action.href);
+    });
+}
+
+function renderTaskExternalResourceActions(task) {
+    const actions = getTaskExternalResourceActions(task);
+    if (actions.length === 0) return '';
+    return `
+        <div class="task-inspector-row">
+            <div class="task-inspector-label">External resources</div>
+            <div class="task-inspector-value">
+                ${actions.map((action) => `
+                    <a class="task-external-resource-action"
+                       href="${escapeHtml(action.href)}"
+                       target="_blank"
+                       rel="noopener noreferrer">${escapeHtml(action.label.trim())}</a>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
 function renderTaskInspector(task, detailState) {
     const detailTask = detailState?.task || task;
     const taskId = getTaskId(detailTask);
@@ -2042,6 +2089,7 @@ function renderTaskInspector(task, detailState) {
                 <div class="task-inspector-row"><div class="task-inspector-label">Title</div><div class="task-inspector-value">${escapeHtml(detailTask.title || 'Untitled task')}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Type</div><div class="task-inspector-value">${taskTypes.length > 0 ? taskTypes.map((item) => `<span class="task-type-chip">${escapeHtml(item.label || item.concept_id || 'Typed')}</span>`).join('') : '<span class="task-empty-inline">Unspecified</span>'}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Source</div><div class="task-inspector-value">${sourceSummary ? `<span class="task-source-chip">${escapeHtml(sourceSummary.label)}</span>` : '<span class="task-empty-inline">Unspecified</span>'}</div></div>
+                ${renderTaskExternalResourceActions(detailTask)}
                 <div class="task-inspector-row"><div class="task-inspector-label">Priority</div><div class="task-inspector-value">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Owner</div><div class="task-inspector-value">${renderTaskConceptValue(detailTask.assignee_concept_id)}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Report to</div><div class="task-inspector-value">${renderTaskConceptValue(detailTask.report_to_concept_id)}</div></div>
