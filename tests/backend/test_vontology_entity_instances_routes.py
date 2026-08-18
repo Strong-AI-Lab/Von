@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from flask import Flask
 
 from src.backend.server.routes.vontology_routes import vontology_bp
@@ -147,6 +148,16 @@ def test_instances_route_uses_structural_pure_instance_filter(monkeypatch):
         "src.backend.server.routes.vontology_routes.ConceptsRepository.find",
         _fake_find,
     )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.resolve_concept_display_names",
+        lambda instance_docs: {
+            doc["concept_id"]: doc["name"] for doc in instance_docs
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.update_one",
+        lambda *_args, **_kwargs: pytest.fail("GET /instances must not write names"),
+    )
 
     resp = client.get(
         "/vontology/api/vontology/instances?node_id=%23V%23mammal&include_subtypes=true"
@@ -157,3 +168,40 @@ def test_instances_route_uses_structural_pure_instance_filter(monkeypatch):
     ids = [item["id"] for item in payload["instances"]]
     assert ids == ["#V#alice", "#V#chimp"]
     assert "#V#mammal_kind" not in ids
+
+
+def test_children_route_uses_canonical_unicode_name_without_writing(monkeypatch):
+    client = _create_client()
+    child_doc = {
+        "concept_id": "#V#doctoral_student",
+        "name": "Doctoral Student legacy",
+        "path": "",
+    }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find",
+        lambda *_args, **_kwargs: [child_doc],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.resolve_concept_display_names",
+        lambda child_docs: {
+            child_docs[0]["concept_id"]: "طالبة دكتوراه"
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.update_one",
+        lambda *_args, **_kwargs: pytest.fail("GET /children must not write names"),
+    )
+
+    response = client.get(
+        "/vontology/api/vontology/children?node_id=%23V%23student"
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["children"] == [
+        {
+            "id": "#V#doctoral_student",
+            "name": "طالبة دكتوراه",
+            "path": "",
+        }
+    ]

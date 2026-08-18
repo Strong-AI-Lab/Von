@@ -2722,6 +2722,7 @@ export async function fetchConceptListWithSuffix(conceptType, suffix) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'concept-item-button';
+        btn.dir = 'auto';
         btn.classList.add('individual'); // Visual cue: individual (pure instance)
         btn.style.display = 'inline-block';
         btn.style.padding = '2px 6px';
@@ -2797,6 +2798,7 @@ export async function fetchConceptListWithSuffix(conceptType, suffix) {
           const typeBtn = document.createElement('button');
           typeBtn.type = 'button';
           typeBtn.className = 'concept-item-button type'; // Visual cue: type
+          typeBtn.dir = 'auto';
           typeBtn.style.display = 'inline-block';
           typeBtn.style.padding = '2px 6px';
           typeBtn.style.margin = '2px 0 2px 6px';
@@ -2867,6 +2869,7 @@ export async function fetchSubtypesWithSuffix(conceptId, suffix) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'concept-item-button';
+      btn.dir = 'auto';
       // Safety fallback: if no name, derive from concept_id like "#V#some_type" -> "Some Type"
       const fallback = (child.id || child.node_id || child._id || '').toString().replace(/^#V#/, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
       const pretty = fallback ? (fallback.charAt(0).toUpperCase() + fallback.slice(1)) : 'Type';
@@ -2910,6 +2913,7 @@ export async function fetchInstancesWithSuffix(conceptId, suffix) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'concept-item-button';
+      btn.dir = 'auto';
       // Safety fallback for instances
       const fallback = (inst.id || inst._id || '').toString().replace(/^#V#/, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
       const pretty = fallback ? (fallback.charAt(0).toUpperCase() + fallback.slice(1)) : 'Individual';
@@ -3125,31 +3129,9 @@ export async function displayConceptNames(names = [], suffix = '') {
     // Name text (click to edit)
     const nameText = document.createElement('span');
     nameText.className = 'name-text';
+    nameText.dir = 'auto';
     nameText.textContent = nameObj.name || nameObj.text || '';
     nameText.title = nameObj.name || nameObj.text || '';
-
-    // Helpers for gated CamelCase spacing
-    const isLatinLanguageCode = (code) => {
-      if (!code) return false;
-      const c = String(code).toLowerCase();
-      // Allow en, en-nz, es, fr, mi (Māori uses Latin script)
-      return c === 'en' || c === 'en-nz' || c === 'es' || c === 'fr' || c === 'mi';
-    };
-    const containsCJKorHangul = (s) => {
-      if (!s) return false;
-      // CJK Unified Ideographs, Hiragana, Katakana, Hangul
-      const cjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f]/;
-      const hangul = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/;
-      return cjk.test(s) || hangul.test(s);
-    };
-    // Auto-insert spaces for CamelCase/PascalCase when proposing edits
-    const autoSpaceCamelCase = (s) => {
-      if (!s) return s;
-      // Insert space between lowercase-to-uppercase and between acronyms followed by words
-      let spaced = s.replace(/([a-z])([A-Z])/g, '$1 $2');
-      spaced = spaced.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
-      return spaced;
-    };
 
     const isCodeName = (nameObj.type || '').toString().trim().toUpperCase() === 'CODE';
 
@@ -3157,14 +3139,13 @@ export async function displayConceptNames(names = [], suffix = '') {
     if (!isCodeName) nameText.addEventListener('click', () => {
       try {
         const original = nameObj.name || nameObj.text || '';
-        // Only propose CamelCase spacing for Latin languages and when text looks Latin-script
-        const lang = (nameObj.language || '').toString();
-        const shouldSpace = isLatinLanguageCode(lang) && !containsCJKorHangul(original);
-        const proposed = shouldSpace ? autoSpaceCamelCase(original) : original;
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'name-edit-input';
-        input.value = proposed !== original ? proposed : original;
+        input.dir = 'auto';
+        // Natural-language names are data, not identifiers to humanise. Keep
+        // acronyms, combining marks, and every Unicode script unchanged.
+        input.value = original;
         input.setAttribute('aria-label', 'Edit name text');
         // Keep badges and delete button; replace only the text span
         cartouche.replaceChild(input, nameText);
