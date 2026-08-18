@@ -536,6 +536,60 @@ describe('notes and content editor markup hygiene', () => {
 });
 
 describe('newly-created concept description hydration', () => {
+    const mountDescriptionElements = (suffix) => {
+        document.body.insertAdjacentHTML('beforeend', `
+            <div id="conceptStep1_${suffix}">
+                <div id="typeDescriptionSection_${suffix}">
+                    <div class="type-description-wrapper">
+                        <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description"></div>
+                        <textarea id="typeDescriptionTextarea_${suffix}"></textarea>
+                        <button id="typeEditDescriptionButton_${suffix}"></button>
+                        <button id="typeEditDescriptionSave_${suffix}"></button>
+                        <button id="typeEditDescriptionCancel_${suffix}"></button>
+                        <button id="typeDeleteDescriptionButton_${suffix}"></button>
+                        <div id="typeDescriptionEditActions_${suffix}"></div>
+                        <span id="typeDescriptionStatus_${suffix}"></span>
+                    </div>
+                </div>
+            </div>
+        `);
+    };
+
+    const mockDescriptionFallbackFetch = (nodeContent) => {
+        global.fetch.mockImplementation(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.includes('/texts?predicate=hasDescription')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ texts: [], count: 0 })
+                };
+            }
+            if (requestUrl.includes('/vontology/api/vontology/text_relations')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ text_relations: [], count: 0 })
+                };
+            }
+            if (requestUrl.startsWith('/api/concepts/')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ description: null })
+                };
+            }
+            if (requestUrl.includes('/vontology/api/vontology/node_content')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => nodeContent
+                };
+            }
+            throw new Error(`Unexpected fetch: ${requestUrl}`);
+        });
+    };
+
     beforeEach(() => {
         document.body.innerHTML = `
             <div id="tabContainer" class="tab-container">
@@ -567,22 +621,7 @@ describe('newly-created concept description hydration', () => {
         });
         const suffix = tabId.replace(/^conceptTab_/, '');
 
-        document.body.insertAdjacentHTML('beforeend', `
-            <div id="conceptStep1_${suffix}">
-                <div id="typeDescriptionSection_${suffix}">
-                    <div class="type-description-wrapper">
-                        <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description"></div>
-                        <textarea id="typeDescriptionTextarea_${suffix}"></textarea>
-                        <button id="typeEditDescriptionButton_${suffix}"></button>
-                        <button id="typeEditDescriptionSave_${suffix}"></button>
-                        <button id="typeEditDescriptionCancel_${suffix}"></button>
-                        <button id="typeDeleteDescriptionButton_${suffix}"></button>
-                        <div id="typeDescriptionEditActions_${suffix}"></div>
-                        <span id="typeDescriptionStatus_${suffix}"></span>
-                    </div>
-                </div>
-            </div>
-        `);
+        mountDescriptionElements(suffix);
 
         await new Promise((resolve) => setTimeout(resolve, 0));
         global.fetch.mockClear();
@@ -604,6 +643,58 @@ describe('newly-created concept description hydration', () => {
         expect(urls).toHaveLength(1);
         expect(urls[0]).toContain('/texts?predicate=hasDescription');
         expect(document.getElementById(`typeDescriptionDisplay_${suffix}`).textContent).toContain('No description available.');
+    });
+
+    test('does not present reconstructed node-content title as a description', async () => {
+        const { populateTypeDescription } = require(dynamicTabsModulePath);
+        const conceptId = '#V#uo_acs_ph_d_student';
+        const suffix = 'synthetic_description';
+        mountDescriptionElements(suffix);
+
+        mockDescriptionFallbackFetch({
+            md_content: '# Uo Acs Ph D Student\n\n',
+            content_html: '<h1>Uo Acs Ph D Student</h1>',
+            raw_doc: {}
+        });
+
+        await populateTypeDescription(conceptId, suffix);
+
+        const display = document.getElementById(`typeDescriptionDisplay_${suffix}`);
+        const textarea = document.getElementById(`typeDescriptionTextarea_${suffix}`);
+        expect(display.textContent).toContain('No description available.');
+        expect(display.textContent).not.toContain('Uo Acs Ph D Student');
+        expect(display.dir).toBe('auto');
+        expect(textarea.dir).toBe('auto');
+    });
+
+    test('preserves genuinely persisted legacy node-content Markdown', async () => {
+        const { populateTypeDescription } = require(dynamicTabsModulePath);
+        const conceptId = '#V#legacy_markdown_concept';
+        const suffix = 'persisted_description';
+        const persistedMarkdown = '# Živjo — E\u0301tudiante — طالبة دكتوراه\n\nLegacy body.';
+        mountDescriptionElements(suffix);
+
+        mockDescriptionFallbackFetch({
+            md_content: persistedMarkdown,
+            content_html: '<h1>Živjo — E\u0301tudiante — طالبة دكتوراه</h1><p>Legacy body.</p>',
+            raw_doc: { md_content: persistedMarkdown }
+        });
+
+        await populateTypeDescription(conceptId, suffix);
+
+        const display = document.getElementById(`typeDescriptionDisplay_${suffix}`);
+        const textarea = document.getElementById(`typeDescriptionTextarea_${suffix}`);
+        expect(display.dataset.rawText).toBe(persistedMarkdown);
+        expect(textarea.value).toBe(persistedMarkdown);
+        expect(display.textContent).toBe(persistedMarkdown);
+        expect(Array.from(display.dataset.rawText, (char) => char.codePointAt(0))).toEqual(
+            Array.from(persistedMarkdown, (char) => char.codePointAt(0))
+        );
+        expect(Array.from(textarea.value, (char) => char.codePointAt(0))).toEqual(
+            Array.from(persistedMarkdown, (char) => char.codePointAt(0))
+        );
+        expect(display.dir).toBe('auto');
+        expect(textarea.dir).toBe('auto');
     });
 });
 

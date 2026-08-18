@@ -286,7 +286,11 @@ def _lookup_concept_entry(
     """Return (entry, direct_parent_ids_for_types)."""
 
     try:
-        node = get_vontology_node_content(concept_id, reconstruct_md=False)
+        node = get_vontology_node_content(
+            concept_id,
+            reconstruct_md=False,
+            resolve_display_name=False,
+        )
     except Exception:
         node = {"error": "lookup_failed"}
 

@@ -4332,6 +4332,8 @@ async function populateTypeDescription(conceptId, suffix) {
         const saveBtn = document.getElementById(`typeEditDescriptionSave_${suffix}`);
         const cancelBtn = document.getElementById(`typeEditDescriptionCancel_${suffix}`);
         const statusEl = document.getElementById(`typeDescriptionStatus_${suffix}`);
+        if (display) display.dir = 'auto';
+        if (textarea) textarea.dir = 'auto';
         const ensureDescriptionMetadataContainer = () => {
             let meta = document.getElementById(`typeDescriptionMetadata_${suffix}`);
             if (meta) return meta;
@@ -4558,32 +4560,29 @@ async function populateTypeDescription(conceptId, suffix) {
                     }
                 }
 
-                // Final fallback: node_content (may provide md_content; if only HTML, convert carefully).
+                // Final persisted legacy fallback: node_content.
                 const legacyUrl = `/vontology/api/vontology/node_content?identifier=${encodedId}`;
                 res = await fetch(legacyUrl);
                 if (res.ok) {
                     data = await res.json().catch(() => ({}));
-                    const legacyRaw = data.description || data.md_content || null;
+                    // node_content reconstructs a title-only Markdown document when
+                    // no md_content is stored.  That derived document is not an
+                    // authored description.  Preserve only genuinely persisted
+                    // legacy Markdown (or an explicit description if one is ever
+                    // restored to this compatibility response).
+                    const explicitLegacyDescription = typeof data.description === 'string'
+                        ? data.description
+                        : null;
+                    const persistedLegacyMarkdown = typeof data?.raw_doc?.md_content === 'string'
+                        ? data.raw_doc.md_content
+                        : null;
+                    const legacyRaw = explicitLegacyDescription ?? persistedLegacyMarkdown;
                     if (legacyRaw !== null) {
                         applyRawDescription(legacyRaw);
                         textarea.value = legacyRaw || '';
                         relationId = null;
                         renderDescriptionMetadata(null);
                         console.debug('[dynamicTabs] Description loaded (legacy node_content raw text)', { conceptId });
-                        return;
-                    }
-
-                    // Last-resort: if the backend only provided rendered HTML, derive a paragraph-preserving
-                    // editable representation using DOM parsing.
-                    if (data.content_html) {
-                        const tmp = document.createElement('div');
-                        tmp.innerHTML = data.content_html;
-                        const plain = extractDescriptionPlainText(tmp);
-                        applyRawDescription(plain);
-                        textarea.value = plain;
-                        relationId = null;
-                        renderDescriptionMetadata(null);
-                        console.debug('[dynamicTabs] Description loaded (legacy node_content html->plain)', { conceptId });
                         return;
                     }
                 }

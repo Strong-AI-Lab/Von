@@ -1183,7 +1183,9 @@ def get_node_content_route():
     if not identifier:
         return jsonify({"error": "Missing 'identifier' parameter."}), 400
     try:
-        data = get_vontology_node_content(identifier)
+        data = get_vontology_node_content(
+            identifier, resolve_display_name=not raw_only
+        )
 
         # Heuristic: strip trailing punctuation accidentally attached to #V# identifiers.
         # This reduces noisy 404s when IDs appear at sentence boundaries (e.g. "#V#foo.").
@@ -1194,7 +1196,9 @@ def get_node_content_route():
         ):
             stripped = identifier.rstrip(".,:;!?)]}…")
             if stripped != identifier and stripped.startswith("#V#"):
-                retry = get_vontology_node_content(stripped)
+                retry = get_vontology_node_content(
+                    stripped, resolve_display_name=not raw_only
+                )
                 if "error" not in retry:
                     data = retry
 

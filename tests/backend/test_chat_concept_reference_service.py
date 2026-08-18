@@ -8,7 +8,17 @@ from src.backend.services.chat_concept_reference_service import (
 def test_build_context_concept_reference_metadata_classifies_and_marks_missing(
     monkeypatch,
 ):
-    def _stub_node_content(concept_id: str, *, reconstruct_md: bool = True):
+    node_content_calls = []
+
+    def _stub_node_content(
+        concept_id: str,
+        *,
+        reconstruct_md: bool = True,
+        resolve_display_name: bool = True,
+    ):
+        node_content_calls.append(
+            (concept_id, reconstruct_md, resolve_display_name)
+        )
         if concept_id == "#V#person":
             return {
                 "concept_id": concept_id,
@@ -80,10 +90,20 @@ def test_build_context_concept_reference_metadata_classifies_and_marks_missing(
     assert by_id["#V#missing"]["exists"] is False
     assert by_id["#V#missing"]["kind"] is None
     assert by_id["#V#missing"]["name"] is None
+    assert node_content_calls == [
+        ("#V#person", False, False),
+        ("#V#has_email", False, False),
+        ("#V#missing", False, False),
+    ]
 
 
 def test_build_context_concept_reference_metadata_enforces_concept_cap(monkeypatch):
-    def _stub_node_content(concept_id: str, *, reconstruct_md: bool = True):
+    def _stub_node_content(
+        concept_id: str,
+        *,
+        reconstruct_md: bool = True,
+        resolve_display_name: bool = True,
+    ):
         return {
             "concept_id": concept_id,
             "display_name": concept_id,
@@ -121,7 +141,12 @@ def test_build_context_concept_reference_metadata_enforces_concept_cap(monkeypat
 def test_build_context_concept_reference_metadata_attaches_stats_when_available(
     monkeypatch,
 ):
-    def _stub_node_content(concept_id: str, *, reconstruct_md: bool = True):
+    def _stub_node_content(
+        concept_id: str,
+        *,
+        reconstruct_md: bool = True,
+        resolve_display_name: bool = True,
+    ):
         return {
             "concept_id": concept_id,
             "display_name": concept_id,
