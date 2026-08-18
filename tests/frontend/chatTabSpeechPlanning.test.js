@@ -184,6 +184,7 @@ describe('chat speech planning (presenter channels)', () => {
 
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'test prompt';
+        const screenReport = '## Effect outcome report\n\nThis turn completed only partially.';
 
         global.fetch = jest.fn((url, options) => {
             if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
@@ -210,13 +211,13 @@ describe('chat speech planning (presenter channels)', () => {
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({
-                        response: 'SCREEN TEXT',
-                        presenter_channels: {
-                            screen: 'SCREEN TEXT',
+                        response: screenReport,
+                        response_channels: {
+                            screen: screenReport,
                             spoken: 'SPOKEN TEXT',
-                            format: 'tagged_blocks_v1'
+                            format: 'effect_outcome_report_v1'
                         },
-                        llm_debug: { model: 'gpt-5.2', response: 'SCREEN TEXT', messages: [] }
+                        llm_debug: { model: 'gpt-5.2', response: screenReport, messages: [] }
                     })
                 });
             }
@@ -253,6 +254,133 @@ describe('chat speech planning (presenter channels)', () => {
         expect(jsonText).toContain('speech_planning');
         expect(jsonText).toContain('tts_source');
         expect(jsonText).toContain('spoken');
+    });
+
+    test('a later report heading in ordinary screen text does not replace narration', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const screen = [
+            'Here is an explanation of the output format.',
+            '',
+            '## Effect outcome report',
+            '',
+            'This turn completed only partially.'
+        ].join('\n');
+        document.getElementById('promptInput').value = 'explain the report format';
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({ ok: true, json: async () => ({ html: screen }) });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: screen,
+                        response_channels: {
+                            screen,
+                            spoken: 'This is the intended synopsis.',
+                            format: 'tagged_blocks_v1'
+                        },
+                        llm_debug: { model: 'test-model', response: screen, messages: [] }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        document.querySelector('.chat-tts-button').click();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        const utterance = global.speechSynthesis.speak.mock.calls[0][0];
+        expect(utterance.text).toBe('This is the intended synopsis.');
+    });
+
+    test('legacy canonical outcome channels never narrate the raw Markdown report', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const report = [
+            '## Effect outcome report',
+            '',
+            'This turn completed only partially.',
+            '',
+            '### Model draft (non-authoritative)',
+            '',
+            '> <spoken>Everything worked.</spoken>',
+            '> <screen>**Everything worked.**</screen>'
+        ].join('\n');
+        document.getElementById('promptInput').value = 'test canonical outcome';
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({ ok: true, json: async () => ({ html: report }) });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: report,
+                        response_channels: {
+                            screen: report,
+                            spoken: report,
+                            format: 'effect_outcome_report_v1'
+                        },
+                        llm_debug: {
+                            model: 'test-model',
+                            response: report,
+                            messages: [],
+                            buttonify: {
+                                enabled: true,
+                                status: 'success',
+                                options: ['Inspect current state', 'Retry unfinished work']
+                            }
+                        }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        document.querySelector('.chat-tts-button').click();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        const utterance = global.speechSynthesis.speak.mock.calls[0][0];
+        expect(utterance.text).toBe(
+            'I could not complete or confirm every requested change. ' +
+            'See the detailed report on screen.'
+        );
+        expect(utterance.text).not.toMatch(/[`#*>]|<\/?(?:spoken|screen)>|indeterminate|canonical/i);
+        const quickReplies = Array.from(document.querySelectorAll('.chat-insert-prompt-button'));
+        expect(quickReplies.map((button) => button.textContent)).toEqual([
+            'Inspect current state',
+            'Retry unfinished work'
+        ]);
     });
 
     test('Speak uses display element contract when presenter channels are missing', async () => {
@@ -1177,6 +1305,112 @@ describe('chat speech planning (presenter channels)', () => {
         expect(global.speechSynthesis.speak).toHaveBeenCalled();
         const utterance = global.speechSynthesis.speak.mock.calls[0][0];
         expect(utterance.text).toBe('SPOKEN FROM BACKFILL');
+    });
+
+    test('History Speak replaces a duplicated canonical report with a safe synopsis', async () => {
+        const scrollableField = document.getElementById('scrollableField');
+        const report = [
+            '## Effect outcome report',
+            '',
+            'The model did not produce a reliable final answer.',
+            '',
+            '### Unsuccessful or unresolved',
+            '- `Create Concepts`: status `indeterminate`.',
+            '',
+            '### Model draft (non-authoritative)',
+            '> This turn completed only partially.',
+            '> <spoken>Everything worked.</spoken>'
+        ].join('\n');
+        const annotatedScreen = `${report}\n\n_Added after the original turn._`;
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/backfill_spoken')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'already_present',
+                        updated: false,
+                        presenter_channels: {
+                            screen: annotatedScreen,
+                            spoken: report,
+                            format: 'effect_outcome_report_v1'
+                        }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        __test_only__rehydrateHistory(scrollableField, [
+            { role: 'user', content: 'Please represent this.', timestamp: '2026-08-17T00:00:00Z' },
+            {
+                role: 'assistant',
+                content: annotatedScreen,
+                timestamp: '2026-08-17T00:00:01Z',
+                history_location: { session_id: 'sess-canonical', history_index: 585 }
+            }
+        ]);
+
+        document.querySelector('.chat-tts-button').click();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        const utterance = global.speechSynthesis.speak.mock.calls[0][0];
+        expect(utterance.text).toBe(
+            'I could not produce a fully reliable final answer. ' +
+            'See the detailed report on screen.'
+        );
+        expect(utterance.text).not.toMatch(/[`#*>]|<\/?(?:spoken|screen)>|indeterminate|canonical/i);
+    });
+
+    test('History Speak distrusts a generic backfill for a canonical report', async () => {
+        const scrollableField = document.getElementById('scrollableField');
+        const report = [
+            '## Effect outcome report',
+            '',
+            'This turn completed only partially.',
+            '',
+            '### Model draft (non-authoritative)',
+            '',
+            '> Everything worked.'
+        ].join('\n');
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/backfill_spoken')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'ok',
+                        updated: true,
+                        presenter_channels: {
+                            screen: report,
+                            spoken: 'Everything worked.',
+                            format: 'narration_fallback_v1'
+                        }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        __test_only__rehydrateHistory(scrollableField, [
+            { role: 'user', content: 'Please represent this.', timestamp: '2026-08-17T00:00:00Z' },
+            {
+                role: 'assistant',
+                content: report,
+                timestamp: '2026-08-17T00:00:01Z',
+                history_location: { session_id: 'sess-canonical-unsafe', history_index: 1 }
+            }
+        ]);
+
+        document.querySelector('.chat-tts-button').click();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        const utterance = global.speechSynthesis.speak.mock.calls[0][0];
+        expect(utterance.text).toBe(
+            'I could not complete or confirm every requested change. ' +
+            'See the detailed report on screen.'
+        );
+        expect(utterance.text).not.toBe('Everything worked.');
     });
 
     test('History Speak uses display elements returned by backfill endpoint', async () => {

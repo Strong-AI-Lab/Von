@@ -13980,14 +13980,101 @@ function deriveNarrationFromScreenText(screenText, options = {}) {
     return slice.trim() + '…';
 }
 
+const LEGACY_CANONICAL_OUTCOME_FORMATS = new Set([
+    'effect_outcome_report_v1',
+    'effect_finality_fallback_v1'
+]);
+
+const LEGACY_CANONICAL_OUTCOME_NARRATIONS = new Map([
+    [
+        'This turn completed only partially.',
+        'I could not complete or confirm every requested change.'
+    ],
+    [
+        'This turn has at least one unresolved effect outcome.',
+        'I could not verify every result of the requested work.'
+    ],
+    [
+        'This turn did not complete all requested effects.',
+        'I could not complete all of the requested work.'
+    ],
+    [
+        'At least one requested effect was not started.',
+        'I could not start all of the requested work.'
+    ],
+    [
+        'The model did not produce a reliable final answer.',
+        'I could not produce a fully reliable final answer.'
+    ],
+    [
+        'The model did not produce a usable final answer.',
+        'I could not produce a useful final answer.'
+    ]
+]);
+
+function getLegacyCanonicalOutcomeReportLead(screenText) {
+    const screen = typeof screenText === 'string' ? screenText : '';
+    const authoritativeScreen = screen.split(
+        /\r?\n\r?\n### Model draft \(non-authoritative\)\r?\n\r?\n/,
+        1
+    )[0];
+    const reportLines = authoritativeScreen.replace(/\r\n?/g, '\n').split('\n');
+    const firstNonEmptyIndex = reportLines.findIndex((line) => line.trim());
+    const headingIsFirst = firstNonEmptyIndex >= 0
+        && reportLines[firstNonEmptyIndex].trim() === '## Effect outcome report';
+    if (!headingIsFirst) {
+        return null;
+    }
+    const reportLead = (
+        reportLines.slice(firstNonEmptyIndex + 1).find((line) => line.trim()) || ''
+    ).trim();
+    return LEGACY_CANONICAL_OUTCOME_NARRATIONS.has(reportLead)
+        ? reportLead
+        : null;
+}
+
+function deriveLegacyCanonicalOutcomeNarration(screenText) {
+    const reportLead = getLegacyCanonicalOutcomeReportLead(screenText);
+    const synopsis = reportLead
+        ? LEGACY_CANONICAL_OUTCOME_NARRATIONS.get(reportLead)
+        : 'This result needs attention.';
+    return `${synopsis} See the detailed report on screen.`;
+}
+
 function normalisePresenterChannels(value) {
     if (!value || typeof value !== 'object') {
         return null;
     }
 
     const screen = typeof value.screen === 'string' ? value.screen : null;
-    const spoken = typeof value.spoken === 'string' ? value.spoken : null;
+    let spoken = typeof value.spoken === 'string' ? value.spoken : null;
     const format = typeof value.format === 'string' ? value.format : null;
+
+    const canonicalReport = Boolean(
+        screen
+        && (
+            LEGACY_CANONICAL_OUTCOME_FORMATS.has(String(format || '').trim())
+            || getLegacyCanonicalOutcomeReportLead(screen)
+        )
+    );
+    const spokenLooksLikeCanonicalReport = Boolean(
+        spoken && spoken.includes('## Effect outcome report')
+    );
+    const trustedCurrentCanonicalNarration = (
+        String(format || '').trim() === 'effect_outcome_report_v1'
+        && spoken
+        && !spokenLooksLikeCanonicalReport
+        && screen.trim() !== spoken.trim()
+    );
+    if (
+        canonicalReport
+        && (
+            !trustedCurrentCanonicalNarration
+            || String(format || '').trim() === 'effect_finality_fallback_v1'
+        )
+    ) {
+        spoken = deriveLegacyCanonicalOutcomeNarration(screen);
+    }
 
     const hasAny = (screen && screen.trim()) || (spoken && spoken.trim());
     if (!hasAny) {
@@ -33660,6 +33747,7 @@ async function handleSendPrompt(options = {}) {
                     }
                 } : {}),
                 presenter_mode: presenterMode,
+                skip_buttonify: false,
                 thinking_card_mode: getThinkingCardMode()
             })
         });
@@ -34245,7 +34333,9 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 if (!String(desiredText ?? '').trim() && !wantsScreen) {
                     const failure = turnId ? historySpokenBackfillFailures.get(turnId) : null;
                     const reason = failure?.error ? ` (talk track unavailable: ${failure.error})` : '';
-                    desiredText = deriveNarrationFromScreenText(screenTextForTurn);
+                    desiredText = getLegacyCanonicalOutcomeReportLead(screenTextForTurn)
+                        ? deriveLegacyCanonicalOutcomeNarration(screenTextForTurn)
+                        : deriveNarrationFromScreenText(screenTextForTurn);
                     speakButton.title = `Speaking a derived narration${reason}. Shift+click speaks the on-screen text.`;
 
                     if (failure && typeof failure === 'object') {

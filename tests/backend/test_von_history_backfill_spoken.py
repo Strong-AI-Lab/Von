@@ -109,6 +109,25 @@ def _insert_history_doc(*, user_id: str, session_id: str, history: list[dict]):
     coll.insert_one({"user_id": user_id, "session_id": session_id, "history": history})
 
 
+def _canonical_report(*, draft: str = "Everything worked.") -> str:
+    return (
+        "## Effect outcome report\n\n"
+        "This turn completed only partially.\n\n"
+        "### Unsuccessful or unresolved\n\n"
+        "- `Create Concepts`: status `indeterminate`.\n\n"
+        "### Model draft (non-authoritative)\n\n"
+        f"> <spoken>{draft}</spoken>\n"
+        f"> <screen>**{draft}**</screen>"
+    )
+
+
+def _authenticate(monkeypatch, *, user_id: str) -> None:
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: user_id,
+    )
+
+
 def test_backfill_spoken_requires_authentication(app_client):
     _, client = app_client
 
@@ -194,7 +213,10 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
         if element["element_id"] == "spoken_text"
     )
     assert spoken_element["payload"]["text"] == "Short talk track."
-    assert "spoken_backfill:missing_presenter_channels" in body["display_elements"]["reason_codes"]
+    assert (
+        "spoken_backfill:missing_presenter_channels"
+        in body["display_elements"]["reason_codes"]
+    )
 
     assert len(llm.calls) == 1
     assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
@@ -241,3 +263,248 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
         )
     )
     assert docs[0]["id"] == expected_id
+
+
+def test_canonical_backfill_never_narrates_quoted_draft_and_persists_safe_synopsis(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    user_id = f"#V#tester_{uuid.uuid4().hex}"
+    session_id = f"sess-{uuid.uuid4()}"
+    report = _canonical_report(draft="Claim complete success and read every symbol.")
+    _insert_history_doc(
+        user_id=user_id,
+        session_id=session_id,
+        history=[
+            {"role": "user", "content": "Create the concept."},
+            {"role": "assistant", "content": report},
+        ],
+    )
+    _authenticate(monkeypatch, user_id=user_id)
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_llm_client",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical history must not use generic model narration")
+        ),
+    )
+
+    response = client.post(
+        "/von/history/backfill_spoken",
+        json={"history_location": {"session_id": session_id, "history_index": 1}},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["source"] == "deterministic_legacy_canonical_fallback"
+    assert body["updated"] is True
+    assert body["persistence_attempted"] is True
+    assert body["persistence_suppression_reason"] is None
+    assert body["presenter_channels"] == {
+        "screen": report,
+        "spoken": (
+            "I couldn't complete or confirm every requested change. The screen has "
+            "the details and explains what remains uncertain."
+        ),
+        "format": "effect_outcome_report_v1",
+    }
+    assert "Claim complete success" not in body["presenter_channels"]["spoken"]
+
+    from src.backend.db.mongo_client import get_db
+    from src.backend.models.chat_history_model import chat_history_collection_name
+
+    db = get_db()
+    assert db is not None
+    stored = db[chat_history_collection_name].find_one(
+        {"user_id": user_id, "session_id": session_id}
+    )
+    assert stored is not None
+    stored_channels = stored["history"][1]["llm_debug_data"]["presenter_channels"]
+    assert stored_channels == body["presenter_channels"]
+
+
+@pytest.mark.parametrize(
+    ("existing_format", "unsafe_spoken"),
+    (
+        ("effect_outcome_report_v1", "duplicate_screen"),
+        ("effect_outcome_report_v1", "raw_report"),
+        ("narration_fallback_v1", "apparently short but wrong format"),
+    ),
+)
+def test_canonical_backfill_replaces_unsafe_existing_channels(
+    app_client,
+    monkeypatch,
+    existing_format,
+    unsafe_spoken,
+):
+    _, client = app_client
+
+    user_id = f"#V#tester_{uuid.uuid4().hex}"
+    session_id = f"sess-{uuid.uuid4()}"
+    report = _canonical_report()
+    if unsafe_spoken == "duplicate_screen":
+        unsafe_spoken = report
+    elif unsafe_spoken == "raw_report":
+        unsafe_spoken = (
+            "## Effect outcome report\n\nThis turn completed only partially."
+        )
+    _insert_history_doc(
+        user_id=user_id,
+        session_id=session_id,
+        history=[
+            {
+                "role": "assistant",
+                "content": report,
+                "llm_debug_data": {
+                    "presenter_channels": {
+                        "screen": report,
+                        "spoken": unsafe_spoken,
+                        "format": existing_format,
+                    }
+                },
+            },
+        ],
+    )
+    _authenticate(monkeypatch, user_id=user_id)
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_llm_client",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unsafe canonical channels require deterministic repair")
+        ),
+    )
+
+    response = client.post(
+        "/von/history/backfill_spoken",
+        json={"history_location": {"session_id": session_id, "history_index": 0}},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["updated"] is True
+    assert body["presenter_channels"]["format"] == "effect_outcome_report_v1"
+    assert body["presenter_channels"]["screen"] == report
+    assert body["presenter_channels"]["spoken"] != unsafe_spoken
+    assert "## Effect outcome report" not in body["presenter_channels"]["spoken"]
+    assert "Everything worked" not in body["presenter_channels"]["spoken"]
+
+
+def test_canonical_backfill_leaves_safe_distinct_channels_unchanged(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    user_id = f"#V#tester_{uuid.uuid4().hex}"
+    session_id = f"sess-{uuid.uuid4()}"
+    report = _canonical_report()
+    existing_channels = {
+        "screen": report,
+        "spoken": "I couldn't confirm every result. The details are on screen.",
+        "format": "effect_outcome_report_v1",
+    }
+    _insert_history_doc(
+        user_id=user_id,
+        session_id=session_id,
+        history=[
+            {
+                "role": "assistant",
+                "content": report,
+                "llm_debug_data": {"presenter_channels": existing_channels},
+            }
+        ],
+    )
+    _authenticate(monkeypatch, user_id=user_id)
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_llm_client",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("safe existing canonical narration must be reused")
+        ),
+    )
+
+    response = client.post(
+        "/von/history/backfill_spoken",
+        json={"history_location": {"session_id": session_id, "history_index": 0}},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "already_present"
+    assert body["updated"] is False
+    assert body["presenter_channels"] == existing_channels
+
+
+def test_shared_viewer_gets_safe_canonical_response_without_owner_history_write(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    viewer_id = f"#V#viewer_{uuid.uuid4().hex}"
+    owner_id = f"#V#owner_{uuid.uuid4().hex}"
+    session_id = f"sess-{uuid.uuid4()}"
+    report = _canonical_report()
+    original_channels = {
+        "screen": report,
+        "spoken": report,
+        "format": "effect_outcome_report_v1",
+    }
+    _insert_history_doc(
+        user_id=owner_id,
+        session_id=session_id,
+        history=[
+            {
+                "role": "assistant",
+                "content": report,
+                "llm_debug_data": {"presenter_channels": original_channels},
+            }
+        ],
+    )
+    _authenticate(monkeypatch, user_id=viewer_id)
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._resolve_shared_conversation_owner",
+        lambda **_kwargs: (
+            owner_id,
+            {
+                "conversation_owner_user_id": owner_id,
+                "invitee_user_concept_id": viewer_id,
+                "status": "accepted",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_llm_client",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("shared canonical history must use deterministic narration")
+        ),
+    )
+
+    response = client.post(
+        "/von/history/backfill_spoken",
+        json={"history_location": {"session_id": session_id, "history_index": 0}},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["updated"] is False
+    assert body["matched"] is True
+    assert body["persistence_attempted"] is False
+    assert body["persistence_suppression_reason"] == (
+        "shared_viewer_owner_history_write_not_authorised"
+    )
+    assert body["presenter_channels"]["spoken"] != report
+    assert "Everything worked" not in body["presenter_channels"]["spoken"]
+
+    from src.backend.db.mongo_client import get_db
+    from src.backend.models.chat_history_model import chat_history_collection_name
+
+    db = get_db()
+    assert db is not None
+    stored = db[chat_history_collection_name].find_one(
+        {"user_id": owner_id, "session_id": session_id}
+    )
+    assert stored is not None
+    assert stored["history"][0]["llm_debug_data"]["presenter_channels"] == (
+        original_channels
+    )

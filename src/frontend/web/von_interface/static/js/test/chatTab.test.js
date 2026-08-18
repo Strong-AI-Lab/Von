@@ -8958,7 +8958,8 @@ describe('chat request resource-scope isolation', () => {
             prompt: 'Could you check recent email?',
             user_id: 'user',
             org_id: 'org',
-            language: 'en-NZ'
+            language: 'en-NZ',
+            skip_buttonify: false
         }));
         expect(generateBody).not.toHaveProperty('gmail_profile');
     });
