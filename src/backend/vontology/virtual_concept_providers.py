@@ -19,10 +19,20 @@ Resolution rules:
 - A provider must declare ``serves_public_concepts``. Claiming a concept
   currently grants unconditional visibility in access control, so a provider
   serving scoped content must not use this seam until visibility is modelled.
+- ``owns`` must be cheap and self-contained. Access control calls it, so
+  anything it reaches that consults access control, tool metadata, or Vontology
+  closes a loop back into resolution. That cycle already shipped once: the tool
+  provider built the contract registry in ``owns``, which loaded metadata, which
+  ran an access check, which asked again. ``lru_cache`` does not guard
+  re-entrancy, so each level rebuilt from scratch and a single fetch never
+  returned. ``owning_provider`` now refuses to recurse and logs when it does,
+  but the guard only bounds the damage — it does not make such a provider
+  correct, because the suppressed call answers "not virtual".
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, runtime_checkable
 
@@ -51,16 +61,38 @@ class VirtualConceptProvider(Protocol):
     def serves_public_concepts(self) -> bool:
         """Whether every concept served is readable by any actor."""
 
-    def owns(self, concept_id: str) -> bool: ...
+    def owns(self, concept_id: str) -> bool:
+        """Whether this provider is authoritative for the id.
+
+        Must be cheap and self-contained. Access control asks this question, so
+        anything reached from here that itself consults access control, tool
+        metadata, or Vontology closes a loop back into resolution. Decide from
+        the id's shape and an in-memory set; do not build registries, read the
+        database, or resolve contracts. ``get`` may do the expensive work,
+        because it runs only after ``owns`` has already said yes.
+        """
 
     def get(self, concept_id: str) -> Optional[Dict[str, Any]]: ...
 
     def iter_concepts(self) -> Iterable[Dict[str, Any]]: ...
 
 
+logger = logging.getLogger(__name__)
+
 _providers: List[VirtualConceptProvider] = []
 _lock = threading.RLock()
 _resolving = threading.local()
+_guard_trips = 0
+
+
+def guard_trip_count() -> int:
+    """How often resolution has refused to recurse.
+
+    Expected to stay at zero. A non-zero count means some provider's ``owns``
+    is not self-contained; see the re-entrancy rule in the module docstring.
+    """
+    with _lock:
+        return _guard_trips
 
 
 def register_provider(provider: VirtualConceptProvider) -> None:
@@ -122,8 +154,21 @@ def owning_provider(concept_id: str) -> Optional[VirtualConceptProvider]:
         return None
     # A provider may reach code that asks about virtual concepts again — access
     # control and tool metadata call into each other. Refuse to recurse rather
-    # than rebuild the world at every level.
+    # than rebuild the world at every level. This bounds the damage but does not
+    # repair it: the suppressed call answers "not virtual", which can surface as
+    # a missing concept, so it is recorded loudly rather than swallowed.
     if getattr(_resolving, "active", False):
+        global _guard_trips
+        with _lock:
+            _guard_trips += 1
+        logger.warning(
+            "[virtual_concepts] Re-entered resolution while resolving %r; "
+            "refusing to recurse and answering 'not virtual'. A provider's "
+            "owns() reached code that consults access control, tool metadata, "
+            "or Vontology. Make that owns() decide from the id shape and an "
+            "in-memory set.",
+            concept_id,
+        )
         return None
     _resolving.active = True
     try:
