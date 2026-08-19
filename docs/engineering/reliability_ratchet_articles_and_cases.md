@@ -263,9 +263,10 @@ with the evidence; it is not a compulsory schema.
 
 ### RR-001 — A valid authority invariant fossilised into a broken workflow-route requirement
 
-- **Observed:** 18 August 2026
-- **Status:** Open — diagnosis established; no runtime repair was made by this
-  documentation change
+- **Observed:** 18 August 2026; scope widened 19 August 2026
+- **Status:** Open — diagnosis established and since broadened from a
+  workflow-route requirement to a delegation-transport gap seen on three
+  unrelated routes; no runtime repair was made by this documentation change
 - **Delivery tracking:** [JVNAUTOSCI-2649](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2649)
   owns repair alternatives, the current delivery decision, acceptance evidence,
   and implementation status
@@ -403,6 +404,49 @@ corresponding decision.
 The enforcement is also route-dependent: governed generic actions fail while
 custom handlers can bypass it. That is evidence that the current mechanism is
 not yet identical with the intended security invariant.
+
+#### Scope widened — 19 August 2026
+
+The original framing above, "workflow-route requirement", is too narrow. The
+same missing issuer was met on two further, unrelated routes while attempting an
+explicitly authorised ontology repair tracked by
+[JVNAUTOSCI-2651](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2651):
+reclassifying twelve workflow action contracts wrongly recorded as instances of
+`#V#mcp_tool`.
+
+| Route | Result |
+|---|---|
+| Durable workflow executor | Supplies no delegation; the original RR-001 observation |
+| `add_relationship` on direct stdio | `ontology_sessionless_delegation_not_supported` |
+| `von_chat_run` | `von_chat_run_read_only`; an explicit `allow_writes=true` is rejected outright |
+
+Three unrelated routes, one absent issuer. The defect is therefore in the
+delegation transport rather than in the security invariant, which is a stronger
+claim than this record originally supported.
+
+The `von_chat_run` observation is distinctive and worth separating from the
+others. Its own access profile reports `write_mode:
+enabled_canonical_primary_with_explicit_approval` and
+`write_category_tools_allowed: true`, while the entry point is unconditionally
+read-only. Write capability is configured for the profile and unreachable
+through it. Configuration that describes an affordance the code will never grant
+is a quieter failure than a denial, because nothing contradicts it until someone
+tries.
+
+The blocked effect had every property that should make authorisation easy:
+method known, arguments known, targets known, prior state captured, fully
+reversible, and explicitly approved by the repository owner. No surface
+distinguishes that case from an open-ended grant, so both are refused
+identically. The stated reason for closing sessionless mutation is sound —
+binding a grantor before caller arguments are matched to a stored exact intent
+would expose a private read oracle — but that reasoning does not apply to an
+exact specified effect, and no route exists that can tell the two apart.
+
+This widening was recorded rather than opened as a separate case. The phenomenon
+is one missing issuer observed three times, and splitting it across records would
+make a systemic gap read as several local ones. A case log that accumulates an
+entry per instance while nothing consolidates them is the ratchet operating on
+the evidence log itself.
 
 #### Evidence that would change this record
 
