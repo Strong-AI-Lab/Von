@@ -21,13 +21,19 @@ Resolution rules:
   serving scoped content must not use this seam until visibility is modelled.
 - ``owns`` must be cheap and self-contained. Access control calls it, so
   anything it reaches that consults access control, tool metadata, or Vontology
-  closes a loop back into resolution. That cycle already shipped once: the tool
-  provider built the contract registry in ``owns``, which loaded metadata, which
-  ran an access check, which asked again. ``lru_cache`` does not guard
-  re-entrancy, so each level rebuilt from scratch and a single fetch never
-  returned. ``owning_provider`` now refuses to recurse and logs when it does,
-  but the guard only bounds the damage — it does not make such a provider
-  correct, because the suppressed call answers "not virtual".
+  closes a loop back into resolution. That cycle shipped once: the tool provider
+  built the contract registry in ``owns``, which loaded metadata, which ran an
+  access check, which asked again. ``lru_cache`` does not guard re-entrancy, so
+  each level rebuilt from scratch and a single fetch never returned.
+
+  There is deliberately no runtime guard against this. One was added and then
+  removed (RR-002): it answered "not virtual" for a concept that is virtual,
+  which in access control means falling through to rules a virtual concept
+  cannot satisfy, so a defence against a hypothetical fault could itself deny a
+  real one. Without it the fault is loud and self-diagnosing — the traceback
+  names the cycle. The rule is enforced where it is cheap to enforce: this
+  contract, and a test asserting no provider's ``owns`` reaches the machinery
+  that closes the loop.
 """
 
 from __future__ import annotations
@@ -81,18 +87,6 @@ logger = logging.getLogger(__name__)
 
 _providers: List[VirtualConceptProvider] = []
 _lock = threading.RLock()
-_resolving = threading.local()
-_guard_trips = 0
-
-
-def guard_trip_count() -> int:
-    """How often resolution has refused to recurse.
-
-    Expected to stay at zero. A non-zero count means some provider's ``owns``
-    is not self-contained; see the re-entrancy rule in the module docstring.
-    """
-    with _lock:
-        return _guard_trips
 
 
 def register_provider(provider: VirtualConceptProvider) -> None:
@@ -152,37 +146,15 @@ def _iter_providers() -> Iterator[VirtualConceptProvider]:
 def owning_provider(concept_id: str) -> Optional[VirtualConceptProvider]:
     if not isinstance(concept_id, str) or not concept_id:
         return None
-    # A provider may reach code that asks about virtual concepts again — access
-    # control and tool metadata call into each other. Refuse to recurse rather
-    # than rebuild the world at every level. This bounds the damage but does not
-    # repair it: the suppressed call answers "not virtual", which can surface as
-    # a missing concept, so it is recorded loudly rather than swallowed.
-    if getattr(_resolving, "active", False):
-        global _guard_trips
-        with _lock:
-            _guard_trips += 1
-        logger.warning(
-            "[virtual_concepts] Re-entered resolution while resolving %r; "
-            "refusing to recurse and answering 'not virtual'. A provider's "
-            "owns() reached code that consults access control, tool metadata, "
-            "or Vontology. Make that owns() decide from the id shape and an "
-            "in-memory set.",
-            concept_id,
-        )
-        return None
-    _resolving.active = True
-    try:
-        for provider in _iter_providers():
-            try:
-                if provider.owns(concept_id):
-                    return provider
-            except Exception:
-                # One broken provider must not make every virtual concept
-                # unresolvable.
-                continue
-        return None
-    finally:
-        _resolving.active = False
+    for provider in _iter_providers():
+        try:
+            if provider.owns(concept_id):
+                return provider
+        except Exception:
+            # One broken provider must not make every virtual concept
+            # unresolvable.
+            continue
+    return None
 
 
 def is_virtual_concept_id(concept_id: str) -> bool:

@@ -7,10 +7,10 @@
   authority, or current implementation evidence.
 - **Authority scope:** Reliability-ratchet analysis in Von engineering work
 - **Owner:** Von maintainers
-- **Last reviewed:** 18 August 2026
+- **Last reviewed:** 19 August 2026
 - **Review trigger:** A new tracked case, a material source correction, or new
   evidence that changes a recorded diagnosis or status
-- **State or evidence as of:** 18 August 2026
+- **State or evidence as of:** 19 August 2026
 - **Open questions:** Which recorded diagnoses remain supported, need narrowing,
   or should be reclassified after outcome-level validation?
 
@@ -429,3 +429,104 @@ tracking concerns owned by
 The case remains open as historical evidence until a dated outcome-level result
 supports reclassification; that status does not prescribe which repair must be
 used.
+
+### RR-002 — A correct fix that grew a surplus guard, and the guard's own defence
+
+- **Observed:** 19 August 2026
+- **Status:** Closed by subtraction — the surplus mechanism was removed the same
+  day, before it had ever fired
+- **Related work:** [JVNAUTOSCI-2650](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2650),
+  PRs #402 and #403, reversal in this change
+- **User outcome:** Resolve MCP tool concepts from code instead of stale copies
+  in MongoDB
+- **Distinguishing feature:** Unlike RR-001, the causal diagnosis here was
+  correct and evidenced by a stack trace. The pathology is in what was built
+  *on top of* a correct repair.
+
+#### What was observed
+
+While implementing virtual concept providers, a single `fetch_concept` never
+returned. A `faulthandler` stack dump showed an unbounded cycle: access control
+asked whether a concept was virtual, the tool provider answered by building the
+contract registry, building contracts loaded tool metadata from Vontology,
+loading that metadata ran an access-control check, which asked again.
+`lru_cache` does not guard re-entrancy, so each level rebuilt from scratch.
+
+#### The repair, and the surplus
+
+The no-new-mechanism fix was to make `owns` decide from a cheap in-memory name
+set. That alone resolved the failure completely.
+
+A thread-local re-entrancy guard was then added *on top*, refusing to recurse if
+the cycle were ever reintroduced. It was justified by a hypothetical future
+provider rather than an observed failure class, it had no removal condition, and
+it degraded a loud failure into a quiet one: the suppressed call answers "not
+virtual" for a concept that is virtual, which in access control means falling
+through to rules a virtual concept cannot satisfy. A defence against a
+hypothetical fault could therefore have denied a real one.
+
+#### The revealing second turn
+
+Asked whether the hazard was documented well enough to prevent recurrence, the
+implementing agent answered by adding more machinery — a trip counter, a log
+line, a `guard_trip_count` accessor and a further test — and shipped it as
+"Make the re-entrancy rule enforceable". It never asked whether the guard should
+exist. That is the article's "when a neighbouring case fails, another mechanism
+is added outside the first", occurring inside a change whose stated purpose was
+to harden a guardrail.
+
+#### What was kept and what was removed
+
+Removed: the guard, its counter, its logging and the two tests that existed only
+to exercise it.
+
+Kept: the rule stated on the `VirtualConceptProvider.owns` contract where an
+implementer reads it, and a structural test asserting that no registered
+provider's `owns` reaches `get_canonical_tool_registry`, `get_tool_metadata`,
+`_load_from_vontology` or `can_access_concept`.
+
+That test is itself worth recording, because two earlier versions of it were
+useless. A version asserting the guard-trip count stayed at zero passed with the
+bug deliberately reintroduced, because the contract registry was already warm.
+A version that cleared the caches first also passed, because closing the cycle
+needs stored concepts for the access check to run on. Only tripwires on the
+forbidden calls failed against the reintroduced bug. Two coherent, plausible
+regression tests provided no evidence at all, which is the first article's point
+about a conjecture repeated in executable form.
+
+#### A dual path this case declined to remove
+
+The same programme left 52 materialised `#V#mcp_tool` rows coexisting with
+virtual resolution, with materialised winning and no removal condition — the
+"permanent dual paths" warning. Removing them was attempted and **declined on
+evidence**:
+
+- 12 of the 52 are not MCP tools at all. They have empty attributes, no
+  `mcp_tool_name`, and are each the target of `#V#invokesAction` from an
+  `#V#entity_representation_*_step`. They are workflow step actions
+  misclassified as instances of `#V#mcp_tool`, and deleting them would be data
+  loss with no replacement. They need an ontology repair, not a deletion.
+- The remaining 40 carry operational metadata the virtual provider does not
+  serve: `display_template` on 34, `user_salience` on 34, `planner_hint`, and
+  evidence-contract wiring on 8.
+
+The rows are therefore not redundant with the virtual path. They are a second
+copy of a *different* class of data whose code defaults already exist in
+`_DEFAULT_TOOL_METADATA`, and which has silently diverged in both directions:
+20 of 39 named tools match their code defaults exactly, and 19 differ, some
+where the code appears newer and some where only the database holds a value.
+
+Deleting them would have destroyed the only copy of 19 tools' curated values.
+Recording this as a declined action matters more than the deletion would have:
+the "obvious cleanup" was itself a candidate ratchet move, removing machinery on
+a tidiness argument rather than evidence.
+
+#### Evidence that would change this record
+
+- The removed guard proves necessary because a provider reaches the cycle
+  through a path the documented rule and structural test do not cover.
+- The structural test is shown to pass against some other realisation of the
+  same cycle, indicating it recognises one incident rather than a failure class.
+- Reconciliation of the 19 divergent tool-metadata entries shows the database
+  values were stale rather than curated, making the rows straightforwardly
+  deletable after the values move into code.
