@@ -1207,11 +1207,9 @@ stop_python_processes_by_script() {
     local script_path="${ROOT}/${script_relative_path}"
     local killed
     killed="$("$py" -c 'import os,sys,psutil
-target=os.path.normcase(os.path.normpath(sys.argv[1]))
+target=os.path.normcase(os.path.realpath(sys.argv[1]))
 exclude=int(sys.argv[2]) if len(sys.argv) > 2 else 0
 current=os.getpid()
-fragment=target.lower().replace("\\\\","/")
-name=os.path.basename(target).lower()
 killed=[]
 for proc in psutil.process_iter(["pid","cmdline"]):
     try:
@@ -1221,9 +1219,23 @@ for proc in psutil.process_iter(["pid","cmdline"]):
         cmdline=[str(part) for part in (proc.info.get("cmdline") or [])]
         if not cmdline:
             continue
-        joined=" ".join(cmdline)
-        norm=joined.lower().replace("\\\\","/")
-        if fragment not in norm and name not in norm:
+        try:
+            cwd=proc.cwd()
+        except Exception:
+            cwd=None
+        matched=False
+        for part in cmdline:
+            if not part:
+                continue
+            candidate=part
+            if not os.path.isabs(candidate):
+                if not cwd:
+                    continue
+                candidate=os.path.join(cwd,candidate)
+            if os.path.normcase(os.path.realpath(candidate)) == target:
+                matched=True
+                break
+        if not matched:
             continue
         try:
             proc.terminate()
