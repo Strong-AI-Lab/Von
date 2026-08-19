@@ -324,295 +324,307 @@ def _contract_from_method_definition(
     )
 
 
-def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract]:
-    supplemental_specs: dict[str, dict[str, Any]] = {
-        "find_subconcepts": {
-            "family": "vontology",
-            "category": "read",
-            "description": "Finds all direct subconcepts (children) of a given concept in the Vontology hierarchy",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to find children of",
-                    }
-                },
-                "required": ["concept_id"],
+_SUPPLEMENTAL_SURFACE_ONLY_SPECS: dict[str, dict[str, Any]] = {
+    "find_subconcepts": {
+        "family": "vontology",
+        "category": "read",
+        "description": "Finds all direct subconcepts (children) of a given concept in the Vontology hierarchy",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "concept_id": {
+                    "type": "string",
+                    "description": "The concept ID to find children of",
+                }
             },
+            "required": ["concept_id"],
         },
-        "find_concepts_by_name": {
-            "family": "vontology",
-            "category": "read",
-            "description": "Searches for concepts in the Vontology by name substring",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The name substring to search for",
-                    }
-                },
-                "required": ["name"],
+    },
+    "find_concepts_by_name": {
+        "family": "vontology",
+        "category": "read",
+        "description": "Searches for concepts in the Vontology by name substring",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name substring to search for",
+                }
             },
+            "required": ["name"],
         },
-        "audit_concept_text_relations": {
-            "family": "vontology",
-            "category": "read",
-            "description": (
-                "Audit all text relations attached to a concept. Reports accessibility status for each relation "
-                "and whether the concept can be safely renamed. Use before rename operations to identify and "
-                "resolve blocking inaccessible relations."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to audit",
-                    },
-                    "include_text_preview": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "Include truncated text preview in results",
-                    },
-                    "max_preview_length": {
-                        "type": "integer",
-                        "default": 100,
-                        "description": "Maximum length for text previews",
-                    },
+    },
+    "audit_concept_text_relations": {
+        "family": "vontology",
+        "category": "read",
+        "description": (
+            "Audit all text relations attached to a concept. Reports accessibility status for each relation "
+            "and whether the concept can be safely renamed. Use before rename operations to identify and "
+            "resolve blocking inaccessible relations."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "concept_id": {
+                    "type": "string",
+                    "description": "The concept ID to audit",
                 },
-                "required": ["concept_id"],
-            },
-        },
-        "get_concept_index_status": {
-            "family": "vontology",
-            "category": "read",
-            "description": (
-                "Get statistics about the concept embedding index. Shows counts by status (pending, indexed, "
-                "stale, failed), concepts needing indexing, and index namespace."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "Optional: get status for a specific concept instead of aggregate stats",
-                    }
+                "include_text_preview": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include truncated text preview in results",
                 },
-                "required": [],
+                "max_preview_length": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Maximum length for text previews",
+                },
             },
+            "required": ["concept_id"],
         },
-        "von_chat_run": {
-            "family": "internal",
-            "category": "read",
-            "description": (
-                "Run one thin adaptive read-only Von turn and return its response, "
-                "bounded evidence index, and redacted observational trace. The model "
-                "may choose among delegated read capabilities; writes require an "
-                "explicit authorised effect tool or workflow."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "prompt": {"type": "string", "description": "User prompt text"},
-                    "context": {
-                        "type": "array",
-                        "description": "Optional prior messages [{role, content}]",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "role": {
-                                    "type": "string",
-                                    "description": "system|user|assistant|tool",
-                                },
-                                "content": {"type": "string"},
+    },
+    "get_concept_index_status": {
+        "family": "vontology",
+        "category": "read",
+        "description": (
+            "Get statistics about the concept embedding index. Shows counts by status (pending, indexed, "
+            "stale, failed), concepts needing indexing, and index namespace."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "concept_id": {
+                    "type": "string",
+                    "description": "Optional: get status for a specific concept instead of aggregate stats",
+                }
+            },
+            "required": [],
+        },
+    },
+    "von_chat_run": {
+        "family": "internal",
+        "category": "read",
+        "description": (
+            "Run one thin adaptive read-only Von turn and return its response, "
+            "bounded evidence index, and redacted observational trace. The model "
+            "may choose among delegated read capabilities; writes require an "
+            "explicit authorised effect tool or workflow."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "User prompt text"},
+                "context": {
+                    "type": "array",
+                    "description": "Optional prior messages [{role, content}]",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {
+                                "type": "string",
+                                "description": "system|user|assistant|tool",
                             },
-                            "required": ["role", "content"],
+                            "content": {"type": "string"},
                         },
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Optional model override",
-                    },
-                    "user_namespace": {
-                        "type": "string",
-                        "description": "Optional namespace claim accepted only from a trusted operator context; it never authenticates itself",
-                    },
-                    "gmail_profile": {
-                        "type": "string",
-                        "description": "Optional trusted-operator Gmail profile binding",
-                    },
-                    "auxiliary_system_prompt": {
-                        "type": "string",
-                        "description": "Optional caller-supplied supplementary context; treated as untrusted user context, not a system authority",
-                    },
-                    "timeout_seconds": {
-                        "type": "number",
-                        "default": 90,
-                        "description": "Legacy alias for advisory_seconds",
-                    },
-                    "advisory_seconds": {
-                        "type": "number",
-                        "default": 90,
-                        "description": (
-                            "Elapsed-time advisory for the adaptive turn; crossing "
-                            "it does not discard the result"
-                        ),
-                    },
-                    "max_string_chars": {
-                        "type": "integer",
-                        "default": 8000,
-                        "description": "Max characters retained for any string in the trace",
-                    },
-                    "turn_id": {
-                        "type": "string",
-                        "description": "Optional caller correlation identifier for this ephemeral read-only turn",
+                        "required": ["role", "content"],
                     },
                 },
-                "required": ["prompt"],
-            },
-        },
-        "create_task": {
-            "family": "task",
-            "category": "write",
-            "description": (
-                "Create a task from a conversation. Tasks are stored as Vontology concepts with rich metadata. "
-                "Optionally links to the originating conversation."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Brief task title (required)",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Detailed task description",
-                    },
-                    "assignee_concept_id": {
-                        "type": "string",
-                        "description": "Assignee's concept ID (e.g., '#V#user_abc')",
-                    },
-                    "creator_concept_id": {
-                        "type": "string",
-                        "description": "Creator's concept ID (e.g., '#V#user_abc')",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Chat session_id to link task to conversation",
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "ISO 8601 date string for due date",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["low", "medium", "high", "critical"],
-                        "default": "medium",
-                        "description": "Task priority level",
-                    },
-                    "organisation_concept_id": {
-                        "type": "string",
-                        "description": "Organisation context for the task",
-                    },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override",
                 },
-                "required": ["title", "description"],
-            },
-        },
-        "get_task": {
-            "family": "task",
-            "category": "read",
-            "description": "Get details of a specific task by its concept ID.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "task_concept_id": {
-                        "type": "string",
-                        "description": "The task's concept ID (e.g., '#V#task_abc123')",
-                    }
+                "user_namespace": {
+                    "type": "string",
+                    "description": "Optional namespace claim accepted only from a trusted operator context; it never authenticates itself",
                 },
-                "required": ["task_concept_id"],
-            },
-        },
-        "list_my_tasks": {
-            "family": "task",
-            "category": "read",
-            "description": "List tasks assigned to a user, optionally filtered by status.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "user_concept_id": {
-                        "type": "string",
-                        "description": "User's concept ID to get tasks for",
-                    },
-                    "status_filter": {
-                        "type": "string",
-                        "enum": [
-                            "pending",
-                            "in_progress",
-                            "completed",
-                            "cancelled",
-                            "blocked",
-                        ],
-                        "description": "Optional status filter",
-                    },
-                    "include_created": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "If true, also include tasks created by the user (not just assigned)",
-                    },
+                "gmail_profile": {
+                    "type": "string",
+                    "description": "Optional trusted-operator Gmail profile binding",
                 },
-                "required": ["user_concept_id"],
-            },
-        },
-        "update_task_status": {
-            "family": "task",
-            "category": "write",
-            "description": "Update the status of a task.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "task_concept_id": {
-                        "type": "string",
-                        "description": "The task's concept ID",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": [
-                            "pending",
-                            "in_progress",
-                            "completed",
-                            "cancelled",
-                            "blocked",
-                        ],
-                        "description": "New task status",
-                    },
+                "auxiliary_system_prompt": {
+                    "type": "string",
+                    "description": "Optional caller-supplied supplementary context; treated as untrusted user context, not a system authority",
                 },
-                "required": ["task_concept_id", "status"],
-            },
-        },
-        "assign_task": {
-            "family": "task",
-            "category": "write",
-            "description": "Assign or reassign a task to a user.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "task_concept_id": {
-                        "type": "string",
-                        "description": "The task's concept ID",
-                    },
-                    "assignee_concept_id": {
-                        "type": "string",
-                        "description": "The assignee's concept ID",
-                    },
+                "timeout_seconds": {
+                    "type": "number",
+                    "default": 90,
+                    "description": "Legacy alias for advisory_seconds",
                 },
-                "required": ["task_concept_id", "assignee_concept_id"],
+                "advisory_seconds": {
+                    "type": "number",
+                    "default": 90,
+                    "description": (
+                        "Elapsed-time advisory for the adaptive turn; crossing "
+                        "it does not discard the result"
+                    ),
+                },
+                "max_string_chars": {
+                    "type": "integer",
+                    "default": 8000,
+                    "description": "Max characters retained for any string in the trace",
+                },
+                "turn_id": {
+                    "type": "string",
+                    "description": "Optional caller correlation identifier for this ephemeral read-only turn",
+                },
             },
+            "required": ["prompt"],
         },
-    }
+    },
+    "create_task": {
+        "family": "task",
+        "category": "write",
+        "description": (
+            "Create a task from a conversation. Tasks are stored as Vontology concepts with rich metadata. "
+            "Optionally links to the originating conversation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Brief task title (required)",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed task description",
+                },
+                "assignee_concept_id": {
+                    "type": "string",
+                    "description": "Assignee's concept ID (e.g., '#V#user_abc')",
+                },
+                "creator_concept_id": {
+                    "type": "string",
+                    "description": "Creator's concept ID (e.g., '#V#user_abc')",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Chat session_id to link task to conversation",
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "ISO 8601 date string for due date",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"],
+                    "default": "medium",
+                    "description": "Task priority level",
+                },
+                "organisation_concept_id": {
+                    "type": "string",
+                    "description": "Organisation context for the task",
+                },
+            },
+            "required": ["title", "description"],
+        },
+    },
+    "get_task": {
+        "family": "task",
+        "category": "read",
+        "description": "Get details of a specific task by its concept ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_concept_id": {
+                    "type": "string",
+                    "description": "The task's concept ID (e.g., '#V#task_abc123')",
+                }
+            },
+            "required": ["task_concept_id"],
+        },
+    },
+    "list_my_tasks": {
+        "family": "task",
+        "category": "read",
+        "description": "List tasks assigned to a user, optionally filtered by status.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_concept_id": {
+                    "type": "string",
+                    "description": "User's concept ID to get tasks for",
+                },
+                "status_filter": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "in_progress",
+                        "completed",
+                        "cancelled",
+                        "blocked",
+                    ],
+                    "description": "Optional status filter",
+                },
+                "include_created": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, also include tasks created by the user (not just assigned)",
+                },
+            },
+            "required": ["user_concept_id"],
+        },
+    },
+    "update_task_status": {
+        "family": "task",
+        "category": "write",
+        "description": "Update the status of a task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_concept_id": {
+                    "type": "string",
+                    "description": "The task's concept ID",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "in_progress",
+                        "completed",
+                        "cancelled",
+                        "blocked",
+                    ],
+                    "description": "New task status",
+                },
+            },
+            "required": ["task_concept_id", "status"],
+        },
+    },
+    "assign_task": {
+        "family": "task",
+        "category": "write",
+        "description": "Assign or reassign a task to a user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_concept_id": {
+                    "type": "string",
+                    "description": "The task's concept ID",
+                },
+                "assignee_concept_id": {
+                    "type": "string",
+                    "description": "The assignee's concept ID",
+                },
+            },
+            "required": ["task_concept_id", "assignee_concept_id"],
+        },
+    },
+}
+
+
+def supplemental_tool_names() -> frozenset[str]:
+    """Names of surface-only contracts, without constructing them.
+
+    Constructing them resolves metadata and exposure, which reads Vontology
+    and runs access control. Callers that only need membership must use this.
+    """
+    return frozenset(_SUPPLEMENTAL_SURFACE_ONLY_SPECS)
+
+
+def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract]:
+    supplemental_specs = _SUPPLEMENTAL_SURFACE_ONLY_SPECS
 
     contracts: dict[str, CanonicalMCPToolContract] = {}
     for name, spec in supplemental_specs.items():
