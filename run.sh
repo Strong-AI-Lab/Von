@@ -56,6 +56,7 @@ DISABLE_LOG_READY=0
 HEALTH_DEBUG=0
 SHOW_RELATION_COVERAGE=0
 STATUS_RUN_MAINTENANCE=0
+RUNTIME_WORKTREE_PATH=""
 BACKUP_FLAGS_SET=0
 READY_LOG_PATTERNS=("Running with Waitress" "Press CTRL+C to quit" "Flask app running")
 
@@ -99,6 +100,7 @@ while [ $# -gt 0 ]; do
         -HealthDebug) HEALTH_DEBUG=1; shift ;;
         -ShowRelationCoverage) SHOW_RELATION_COVERAGE=1; shift ;;
         -StatusRunMaintenance) STATUS_RUN_MAINTENANCE=1; shift ;;
+        -RuntimeWorktree|--RuntimeWorktree|--runtime-worktree) RUNTIME_WORKTREE_PATH="$2"; shift 2 ;;
         -BackupDryRun) BACKUP_DRY_RUN=1; BACKUP_FLAGS_SET=1; shift ;;
         -BackupTag) BACKUP_TAG="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
         -BackupOutDir) BACKUP_OUT_DIR="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
@@ -1413,8 +1415,8 @@ start_rag_worker_bg() {
 
     log "Starting RAG Indexing Worker..."
     rm -f "$RAG_LOG_FILE" "$RAG_ERR_LOG_FILE" 2>/dev/null || true
-    nohup "$py" -u "${ROOT}/src/backend/utilities/rag_indexing_worker.py" >> "$RAG_LOG_FILE" 2>> "$RAG_ERR_LOG_FILE" &
-    local pid=$!
+    local pid=""
+    pid="$(start_python_worker_detached "$py" "${ROOT}/src/backend/utilities/rag_indexing_worker.py" "$RAG_LOG_FILE" "$RAG_ERR_LOG_FILE")" || return 1
     printf 'PID=%s\nSTART=%s\n' "$pid" "$(date -Iseconds 2>/dev/null || date)" > "$RAG_PID_FILE"
     log "RAG Worker started (PID=$pid). Logs: $RAG_LOG_FILE, $RAG_ERR_LOG_FILE"
 }
@@ -1465,8 +1467,8 @@ start_concept_index_worker_bg() {
 
     log "Starting Concept Index Worker..."
     rm -f "$CONCEPT_INDEX_LOG_FILE" "$CONCEPT_INDEX_ERR_LOG_FILE" 2>/dev/null || true
-    nohup "$py" -u "$script_path" >> "$CONCEPT_INDEX_LOG_FILE" 2>> "$CONCEPT_INDEX_ERR_LOG_FILE" &
-    local pid=$!
+    local pid=""
+    pid="$(start_python_worker_detached "$py" "$script_path" "$CONCEPT_INDEX_LOG_FILE" "$CONCEPT_INDEX_ERR_LOG_FILE")" || return 1
     printf 'PID=%s\nSTART=%s\n' "$pid" "$(date -Iseconds 2>/dev/null || date)" > "$CONCEPT_INDEX_PID_FILE"
     log "Concept Index Worker started (PID=$pid). Logs: $CONCEPT_INDEX_LOG_FILE, $CONCEPT_INDEX_ERR_LOG_FILE"
 }
@@ -3556,11 +3558,56 @@ run_autoupdate() {
     done
 }
 
+start_python_worker_detached() {
+    local py="$1"
+    local script_path="$2"
+    local stdout_path="$3"
+    local stderr_path="$4"
+    "$py" - "$py" "$script_path" "$ROOT" "$stdout_path" "$stderr_path" <<'PY'
+import os
+import subprocess
+import sys
+
+python, script, cwd, stdout_path, stderr_path = sys.argv[1:]
+with open(stdout_path, "ab", buffering=0) as stdout_handle, open(
+    stderr_path, "ab", buffering=0
+) as stderr_handle:
+    process = subprocess.Popen(
+        [python, "-u", script],
+        cwd=cwd,
+        env=os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=stdout_handle,
+        stderr=stderr_handle,
+        start_new_session=True,
+        close_fds=True,
+    )
+print(process.pid)
+PY
+}
+
+deploy_main() {
+    local py=""
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        log "ERROR: No Python executable found for deploy-main."
+        return 1
+    fi
+    local runtime_path="$RUNTIME_WORKTREE_PATH"
+    if [ -z "$runtime_path" ]; then
+        runtime_path="${VON_RUNTIME_WORKTREE:-$(dirname "$ROOT")/Von-runtime-main}"
+    fi
+    "$py" "${ROOT}/scripts/deploy_local_main.py" \
+        --primary-root "$ROOT" \
+        --runtime-worktree "$runtime_path" \
+        --health-timeout-seconds "$HEALTH_TIMEOUT_SEC"
+}
+
 show_help() {
     cat <<'TXT'
 Von Launcher Help
     Usage: ./run.sh [action] [options]
-    Actions: start | foreground | stop | status | restart | logs | check | backup | scheduled-backup | restore-backup | autoupdate | rag-worker | help
+    Actions: start | foreground | stop | status | restart | deploy-main | logs | check | backup | scheduled-backup | restore-backup | autoupdate | rag-worker | help
     Options:
         -Port <int>            Server port (default 5001 on macOS, 5000 elsewhere; -AgentTest defaults to 5010)
         -AgentTest             Isolated coding-agent test instance mode
@@ -3579,6 +3626,7 @@ Von Launcher Help
         -DisableLogReady
         -HealthDebug
         -StatusRunMaintenance
+        -RuntimeWorktree <path> Dedicated runtime worktree for deploy-main
         -ShowRelationCoverage
         -NoBackupMigrate
 
@@ -3608,6 +3656,7 @@ Von Launcher Help
         ./run.sh start
         ./run.sh restart -ForceBrowser
         ./run.sh restart -AgentTest -HealthTimeoutSec 180
+        ./run.sh deploy-main
         ./run.sh logs -Tail 200 -Follow
         ./run.sh backup -BackupDryRun
         ./run.sh scheduled-backup -NoBackupMigrate
@@ -3636,6 +3685,9 @@ case "$ACTION" in
     restart)
         stop_server
         start_server 1
+        ;;
+    deploy-main)
+        deploy_main
         ;;
     logs)
         show_logs

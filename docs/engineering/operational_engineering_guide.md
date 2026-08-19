@@ -63,7 +63,31 @@ Prefer:
 If a simple read stalls, retry a smaller probe. If that also stalls, inspect the
 tool host or transport before blaming repository code.
 
-### 3.2 Start Von through the repository launcher
+### 3.2 Deploy and start Von through the repository launcher
+
+For the normal local deployed instance, run this from the clean primary
+checkout on `main`:
+
+```sh
+./run.sh deploy-main
+```
+
+This is the canonical local deployment operation. It fetches `origin/main`,
+fast-forwards a clean primary `main`, checks out the exact commit detached in
+the dedicated sibling `Von-runtime-main` worktree, restarts that runtime, and
+verifies the running commit, clean-build marker, durable workflow services,
+and both background indexing workers. It refuses a dirty, divergent, wrong-
+branch, or unrelated runtime checkout. Set `VON_RUNTIME_WORKTREE` or pass
+`-RuntimeWorktree <path>` only when the runtime worktree intentionally lives
+elsewhere.
+
+The primary checkout owns the local `main` branch. The runtime worktree is
+deliberately detached at the deployed commit; it must not maintain a second
+long-lived local branch. A detached runtime is therefore expected, whereas a
+detached primary checkout is not.
+
+Use a direct restart only when the runtime checkout is already intentionally
+selected and no Git deployment is required:
 
 Normal local restart:
 
