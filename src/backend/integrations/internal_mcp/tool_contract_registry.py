@@ -26,6 +26,7 @@ from ...services.tool_metadata_service import (
     get_tool_family,
     get_tool_operation_category,
     get_tool_surface_exposure_metadata,
+    is_usable_tool_capability_description,
 )
 
 SURFACE_INTERNAL_CATALOGUE = "internal_catalogue"
@@ -259,6 +260,18 @@ def _build_exposure(name: str, *, internal: bool) -> ToolSurfaceExposure:
     )
 
 
+def _usable_contract_description(description: str | None) -> str | None:
+    """Return a code-registered description only when it says something real.
+
+    Guards against a bare placeholder in a MethodDefinition silently becoming
+    the published contract text.
+    """
+    cleaned = str(description or "").strip()
+    if not cleaned:
+        return None
+    return cleaned if is_usable_tool_capability_description(cleaned) else None
+
+
 def _contract_from_method_definition(
     definition: MethodDefinition,
 ) -> CanonicalMCPToolContract:
@@ -270,20 +283,22 @@ def _contract_from_method_definition(
             fallback_family=_infer_tool_family(definition.name),
             allow_registry_fallback=False,
         ),
+        # The published contract is code-authoritative. Vontology metadata may
+        # fill a gap the code leaves, but must not redefine what a registered
+        # tool claims to do or whether it reads or writes. #V#mcp_tool concepts
+        # record their description once at first bootstrap and are never
+        # refreshed, so preferring them froze stale text over later code
+        # improvements and made this surface vary with database state.
         category=(
-            get_tool_operation_category(
+            definition.category
+            or get_tool_operation_category(
                 definition.name,
-                fallback_operation_category=definition.category,
                 allow_registry_fallback=False,
             )
-            or definition.category
         ),
         description=(
-            get_tool_description(
-                definition.name,
-                fallback_description=definition.description
-                or f"Execute {definition.name}.",
-            )
+            _usable_contract_description(definition.description)
+            or get_tool_description(definition.name)
             or f"Execute {definition.name}."
         ),
         input_schema=_with_stdio_ontology_delegation_contract(
