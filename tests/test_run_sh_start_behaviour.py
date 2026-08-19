@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1013,6 +1014,42 @@ PY
     assert payload["takeovers"] == ["4242"]
     assert not any("Already running" in line for line in payload["logs"])
     assert "browser opened" not in payload["logs"]
+
+
+def test_stale_server_cleanup_does_not_match_deploy_local_main_by_basename(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "main.py"
+    controller = tmp_path / "deploy_local_main.py"
+    body = "import time\ntime.sleep(30)\n"
+    target.write_text(body, encoding="utf-8")
+    controller.write_text(body, encoding="utf-8")
+    target_process = subprocess.Popen([sys.executable, str(target)])
+    controller_process = subprocess.Popen([sys.executable, str(controller)])
+    try:
+        time.sleep(0.2)
+        command = f"""
+set -euo pipefail
+cd {shlex_quote(str(REPO_ROOT))}
+. ./run.sh help -NoBackupMigrate >/dev/null
+ROOT={shlex_quote(str(tmp_path))}
+python_cmd() {{ printf '%s' {shlex_quote(sys.executable)}; }}
+stop_python_processes_by_script main.py test-server
+""".strip()
+        cleanup = subprocess.run(
+            ["bash", "-c", command],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert "Stopped stale test-server process(es)" in cleanup.stdout
+        target_process.wait(timeout=5)
+        assert controller_process.poll() is None
+    finally:
+        for process in (target_process, controller_process):
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
 
 
 def test_run_sh_workflow_purity_check_respects_daily_success_ttl() -> None:
