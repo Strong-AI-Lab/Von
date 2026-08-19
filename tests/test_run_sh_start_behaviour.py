@@ -76,6 +76,42 @@ PY
     assert payload == {"health_timeout_seconds": 180}
 
 
+def test_run_sh_accepts_an_explicit_existing_launcher_root(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required for run.sh launcher-path tests")
+    env = os.environ.copy()
+    env["VON_LAUNCHER_ROOT"] = str(tmp_path)
+    result = subprocess.run(
+        [bash, "-c", ". ./run.sh help -NoBackupMigrate >/dev/null; printf '%s' \"$ROOT\""],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout == str(tmp_path.resolve())
+
+
+def test_run_sh_rejects_a_missing_launcher_root(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required for run.sh launcher-path tests")
+    missing = tmp_path / "missing"
+    env = os.environ.copy()
+    env["VON_LAUNCHER_ROOT"] = str(missing)
+    result = subprocess.run(
+        [bash, "./run.sh", "help", "-NoBackupMigrate"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "VON_LAUNCHER_ROOT is not a directory" in result.stderr
+
+
 def test_run_sh_labels_ssh_tunnel_fallback_as_remote_atlas() -> None:
     output = _run_bash_text_probe(r"""
 curl() {

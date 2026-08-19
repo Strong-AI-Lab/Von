@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${VON_LAUNCHER_ROOT:-$SCRIPT_ROOT}"
+if [ ! -d "$ROOT" ]; then
+    echo "ERROR: VON_LAUNCHER_ROOT is not a directory: $ROOT" >&2
+    exit 2
+fi
+ROOT="$(cd "$ROOT" && pwd -P)"
 
 log() {
     # Match run.ps1: lightweight timestamped console logs.
