@@ -36,6 +36,7 @@ def _run(
     cwd: Path | None = None,
     check: bool = True,
     capture_output: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [os.fspath(value) for value in args]
     result = subprocess.run(
@@ -43,6 +44,7 @@ def _run(
         cwd=cwd,
         text=True,
         capture_output=capture_output,
+        env=env,
         check=False,
     )
     if check and result.returncode != 0:
@@ -268,19 +270,24 @@ def deploy(
     primary_root = primary_root.resolve()
     runtime_root = runtime_root.resolve()
     target_commit = _prepare_primary(primary_root, remote=remote, branch=branch)
-    launcher = runtime_root / "run.sh"
-    if not launcher.is_file():
-        raise DeploymentError(f"Runtime launcher missing: {launcher}")
+    current_launcher = primary_root / "run.sh"
+    if not current_launcher.is_file():
+        raise DeploymentError(f"Current launcher missing: {current_launcher}")
 
     # Validate before stopping, then change code only while the server is down.
     _validate_runtime(primary_root, runtime_root)
+    stop_environment = os.environ.copy()
+    stop_environment["VON_LAUNCHER_ROOT"] = str(runtime_root)
     _run(
-        ["bash", launcher, "stop", "-NoBrowser"],
+        ["bash", current_launcher, "stop", "-NoBrowser"],
         cwd=runtime_root,
         capture_output=False,
+        env=stop_environment,
     )
     _prepare_runtime(primary_root, runtime_root, target_commit)
     launcher = runtime_root / "run.sh"
+    if not launcher.is_file():
+        raise DeploymentError(f"Runtime launcher missing after checkout: {launcher}")
     _run(
         [
             "bash",
