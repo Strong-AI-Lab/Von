@@ -268,8 +268,14 @@ with the evidence; it is not a compulsory schema.
   workflow-route requirement to a delegation-transport gap seen on three
   unrelated routes; no runtime repair was made by this documentation change
 - **Delivery tracking:** [JVNAUTOSCI-2649](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2649)
-  owns repair alternatives, the current delivery decision, acceptance evidence,
-  and implementation status
+  owned the repair for the durable workflow route and is Done. It deliberately
+  scoped to that route: its ship criteria require that sessionless and internal
+  MCP effects remain denied. The remaining routes recorded in the 19 August 2026
+  widening are owned by
+  [JVNAUTOSCI-2653](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2653),
+  which holds the open decision on whether an authorised operator repair should
+  have any route at all. Repair alternatives, delivery decisions, acceptance
+  evidence, and implementation status belong to those tickets, not here.
 - **User outcome:** Represent a scholarly article and its metadata in the
   authenticated user's private Vontology context
 - **Observed impact:** The represented workflow was launched twice and both
