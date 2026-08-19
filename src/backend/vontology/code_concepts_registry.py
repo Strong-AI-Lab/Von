@@ -399,9 +399,24 @@ def get_code_concept(concept_id: str) -> Optional[CodeConcept]:
 
 
 def build_virtual_concept_doc(concept_id: str) -> Optional[dict]:
-    """Return a Mongo-shaped concept document for a registered code concept.
+    """Return a Mongo-shaped document for any virtual concept, or None.
+
+    Resolves through the provider registry, so this now also serves sources
+    beyond the code registry, such as the MCP tool catalogue. Callers are all
+    miss-path fallbacks, so a materialised concept still wins.
+    """
+
+    from .virtual_concept_providers import resolve_virtual_concept
+
+    return resolve_virtual_concept(concept_id)
+
+
+def build_code_concept_doc(concept_id: str) -> Optional[dict]:
+    """Return a Mongo-shaped document for a registered code concept.
 
     The shape is intentionally compatible with `is_predicate()` and similar helpers.
+    This is the raw builder behind the code-registry provider; general callers
+    want `build_virtual_concept_doc`.
     """
 
     cc = get_code_concept(concept_id)

@@ -170,11 +170,11 @@ class AccessEvaluator:
         # considered visible, even when no MongoDB concept document exists.
         # This supports UI navigation and text-relations (e.g., adding hasName).
         try:
-            from ..vontology.code_concepts_registry import (  # local import avoids cycles
-                is_code_concept_id,
+            from ..vontology.virtual_concept_providers import (  # local import avoids cycles
+                is_virtual_concept_id,
             )
 
-            if is_code_concept_id(normalised):
+            if is_virtual_concept_id(normalised):
                 self._cache[normalised] = True
                 return True
         except Exception:
@@ -260,10 +260,10 @@ class AccessEvaluator:
         if uncached:
             code_concepts: set[str] = set()
             try:
-                from ..vontology.code_concepts_registry import is_code_concept_id
+                from ..vontology.virtual_concept_providers import is_virtual_concept_id
 
                 for concept_id in tuple(uncached):
-                    if is_code_concept_id(concept_id):
+                    if is_virtual_concept_id(concept_id):
                         code_concepts.add(concept_id)
             except Exception:
                 code_concepts = set()
@@ -558,9 +558,9 @@ def describe_concept_access(concept_id: Any) -> Dict[str, Any]:
         return details
 
     try:
-        from ..vontology.code_concepts_registry import is_code_concept_id
+        from ..vontology.virtual_concept_providers import is_virtual_concept_id
 
-        if is_code_concept_id(normalised):
+        if is_virtual_concept_id(normalised):
             details.update(
                 {
                     "exists": True,
