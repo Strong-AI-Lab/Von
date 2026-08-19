@@ -299,6 +299,89 @@ def test_owns_never_builds_the_contract_registry(monkeypatch):
     assert provider.owns("#V#no_such_tool_tool") is False
 
 
+def test_no_registered_provider_re_enters_resolution(monkeypatch):
+    """Generic cover for the cycle that shipped once.
+
+    The specific regression tests pin McpToolConceptProvider. This one holds for
+    any provider added later.
+
+    Tested structurally rather than by reproducing the hang. The cycle only
+    closes when the metadata load finds concepts to run access checks on, so it
+    depends on database state and does not reproduce in a unit test — an
+    earlier dynamic version of this test passed happily with the bug
+    reintroduced. Tripwires on the forbidden calls encode the rule directly.
+    """
+    from src.backend.integrations.internal_mcp import tool_contract_registry
+    from src.backend.security import access_control
+    import src.backend.services.tool_metadata_service as tms
+
+    reached = []
+
+    def _tripwire(label):
+        def _raise(*args, **kwargs):
+            reached.append(label)
+            raise AssertionError(f"owns() reached {label}")
+
+        return _raise
+
+    # Providers use call-time imports, so patching the module attribute catches
+    # them wherever they import from.
+    monkeypatch.setattr(
+        tool_contract_registry,
+        "get_canonical_tool_registry",
+        _tripwire("get_canonical_tool_registry"),
+    )
+    monkeypatch.setattr(tms, "get_tool_metadata", _tripwire("get_tool_metadata"))
+    monkeypatch.setattr(
+        tms, "_load_from_vontology", _tripwire("_load_from_vontology")
+    )
+    monkeypatch.setattr(
+        access_control, "can_access_concept", _tripwire("can_access_concept")
+    )
+
+    probes = [
+        _a_code_concept_id(),
+        tool_concept_id("fetch_concept"),
+        tool_concept_id("find_subconcepts"),
+        "#V#person",
+        "#V#no_such_thing_tool",
+        "not-a-concept-id",
+    ]
+
+    vcp.registered_source_ids()  # ensure providers are bootstrapped
+    offenders = []
+    for provider in tuple(vcp._providers):
+        for concept_id in probes:
+            try:
+                provider.owns(concept_id)
+            except AssertionError as exc:
+                offenders.append(f"{provider.source_id}: {exc}")
+
+    assert not offenders, (
+        "owns() must decide from the id shape and an in-memory set, never by "
+        "building registries or reading Vontology:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_guard_is_observable_when_it_trips(monkeypatch, stub_registered):
+    """A tripped guard must be countable, not silent.
+
+    The guard answers 'not virtual', which can present as a missing concept, so
+    a reintroduced cycle has to leave a trace someone can find.
+    """
+
+    def _reentrant(concept_id):
+        vcp.is_virtual_concept_id("#V#stub_thing")
+        return False
+
+    monkeypatch.setattr(stub_registered, "owns", _reentrant)
+
+    before = vcp.guard_trip_count()
+    vcp.owning_provider("#V#stub_thing")
+
+    assert vcp.guard_trip_count() > before
+
+
 def test_cheap_tool_name_set_matches_the_full_registry():
     """The name set used by owns() must not drift from the built contracts."""
     from src.backend.integrations.internal_mcp.tool_contract_registry import (
