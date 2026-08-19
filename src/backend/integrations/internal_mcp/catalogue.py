@@ -23294,6 +23294,24 @@ def _jira_get_issue_input_schema() -> Schema:
     )
 
 
+def _jira_get_comments_input_schema() -> Schema:
+    return Schema(
+        required={"issue_key": str},
+        optional={
+            "start_at": (int,),
+            "max_results": (int,),
+            "order_by": (str,),
+            "body_format": (str,),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_get_comments input: issue_key (str, required) plus optional "
+            "start_at, max_results, order_by ('created' or '-created'), and "
+            "body_format ('text' default, or 'adf' for the raw node tree)."
+        ),
+    )
+
+
 def _jira_get_project_issue_types_input_schema() -> Schema:
     return Schema(
         required={"project_key": str},
@@ -29870,6 +29888,57 @@ def _jira_get_issue(**kwargs):
 
     try:
         return _run_async_compat(_async_get_issue)
+    except JiraProxyError as exc:
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+
+
+def _jira_get_comments(**kwargs):
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    issue_key = kwargs.get("issue_key")
+    if not issue_key:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: issue_key",
+            details={"missing": ["issue_key"]},
+            suggestions=["Provide a Jira issue key (e.g., PROJ-123)"],
+        )
+
+    body_format = kwargs.get("body_format")
+    if body_format is not None and body_format not in ("text", "adf"):
+        return make_error_response(
+            "invalid_parameter",
+            "Invalid body_format. Supported values: text, adf.",
+            details={"body_format": body_format},
+            suggestions=["Omit body_format for flattened text, or pass 'adf'"],
+        )
+
+    order_by = kwargs.get("order_by")
+    if order_by is not None and order_by not in ("created", "-created"):
+        return make_error_response(
+            "invalid_parameter",
+            "Invalid order_by. Supported values: created, -created.",
+            details={"order_by": order_by},
+            suggestions=["Use 'created' for oldest first or '-created' for newest"],
+        )
+
+    async def _async_get_comments():
+        proxy = await get_jira_proxy()
+        return await proxy.get_comments(
+            issue_key=issue_key,
+            start_at=kwargs.get("start_at"),
+            max_results=kwargs.get("max_results"),
+            order_by=order_by,
+            body_format=body_format,
+        )
+
+    try:
+        return _run_async_compat(_async_get_comments)
     except JiraProxyError as exc:
         return make_error_response(
             "jira_proxy_error",
@@ -38687,6 +38756,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
 ]:
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
+    jira_get_comments_output_schema = _jira_generic_output_schema("get_comments")
     jira_get_project_issue_types_output_schema = (
         _jira_get_project_issue_types_output_schema()
     )
@@ -38968,6 +39038,22 @@ def _build_default_catalogue_external_integration_definitions() -> List[
                 "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). "
                 "Use when you need issue fields, summary, status, metadata, or "
                 "expanded sections such as changelog."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_get_comments",
+            handler=_jira_get_comments,
+            input_schema=_jira_get_comments_input_schema(),
+            output_schema=jira_get_comments_output_schema,
+            category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
+            timeout_sec=15.0,
+            description=(
+                "Read comments on a Jira issue one page at a time, with "
+                "start_at/max_results pagination and comment bodies flattened to "
+                "text by default. Prefer this over jira_get_issue with "
+                "fields=['comment'], which returns every comment at once and can "
+                "exceed the response size limit on heavily commented issues."
             ),
         ),
         MethodDefinition(

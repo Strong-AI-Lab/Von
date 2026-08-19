@@ -3438,6 +3438,35 @@
             }
         },
         {
+            "name": "jira_get_comments",
+            "description": "Read comments on a Jira issue one page at a time, with start_at/max_results pagination and comment bodies flattened to text by default. Prefer this over jira_get_issue with fields=['comment'], which returns every comment at once and can exceed the response size limit on heavily commented issues.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "start_at": {
+                        "type": "integer"
+                    },
+                    "max_results": {
+                        "type": "integer"
+                    },
+                    "order_by": {
+                        "type": "string"
+                    },
+                    "body_format": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "issue_key"
+                ],
+                "additionalProperties": true,
+                "description": "jira_get_comments input: issue_key (str, required) plus optional start_at, max_results, order_by ('created' or '-created'), and body_format ('text' default, or 'adf' for the raw node tree)."
+            }
+        },
+        {
             "name": "jira_get_issue",
             "description": "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, metadata, or expanded sections such as changelog.",
             "inputSchema": {
