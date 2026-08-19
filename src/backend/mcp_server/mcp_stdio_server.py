@@ -82,6 +82,7 @@ if TYPE_CHECKING:
         _jira_delete_issue_link,
         _jira_get_auth_config,
         _jira_get_bulk_operation_progress,
+        _jira_get_comments,
         _jira_get_issue,
         _jira_get_project_issue_types,
         _jira_get_myself,
@@ -322,6 +323,7 @@ _bind_imports(
         "_jira_delete_issue_link",
         "_jira_get_auth_config",
         "_jira_get_bulk_operation_progress",
+        "_jira_get_comments",
         "_jira_get_issue",
         "_jira_get_project_issue_types",
         "_jira_get_myself",
@@ -1220,7 +1222,9 @@ def _get_stdio_max_response_chars() -> int:
 
 
 def _json_text(payload: Any) -> TextContent:
-    text = json.dumps(payload, indent=2, default=str)
+    # Compact separators: indentation is pure transport cost on a machine-read
+    # channel and roughly doubles payload size against the guard below.
+    text = json.dumps(payload, separators=(",", ":"), default=str)
     max_response_chars = _get_stdio_max_response_chars()
     if len(text) <= max_response_chars:
         return TextContent(type="text", text=text)
@@ -1239,12 +1243,13 @@ def _json_text(payload: Any) -> TextContent:
         suggestions=[
             "For live turn progress, call turn_execution_get_live_progress without a section for the bounded snapshot.",
             "For live turn progress details, call turn_execution_get_live_progress with section, limit, and offset.",
+            "For Jira comments, call jira_get_comments with start_at and max_results instead of jira_get_issue with fields=['comment'].",
             "Use a narrower query or paginated detail tool for large read results.",
         ],
     )
     return TextContent(
         type="text",
-        text=json.dumps(guarded_payload, indent=2, default=str),
+        text=json.dumps(guarded_payload, separators=(",", ":"), default=str),
     )
 
 
@@ -3430,6 +3435,15 @@ async def _handle_jira_search(arguments: dict[str, Any]) -> list[TextContent]:
     )
 
 
+async def _handle_jira_get_comments(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_comments,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
 async def _handle_jira_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_get_issue,
@@ -4610,6 +4624,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_backfill_from_chat_history": _handle_turn_execution_backfill_from_chat_history,
     "turn_execution_namespace_coverage_report": _handle_turn_execution_namespace_coverage_report,
     "jira_search": _handle_jira_search,
+    "jira_get_comments": _handle_jira_get_comments,
     "jira_get_issue": _handle_jira_get_issue,
     "jira_get_project_issue_types": _handle_jira_get_project_issue_types,
     "jira_get_bulk_operation_progress": _handle_jira_get_bulk_operation_progress,

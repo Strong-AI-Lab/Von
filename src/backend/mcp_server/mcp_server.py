@@ -792,6 +792,195 @@ def _ensure_adf(value: Any) -> Dict[str, Any] | Any:
     return value
 
 
+def _tool_json(payload: Any) -> str:
+    """Serialise tool output for the wire.
+
+    Compact separators only: this text is parsed by the calling proxy, never
+    read by a human, and indentation roughly doubles the byte count.
+    """
+    return json.dumps(payload, separators=(",", ":"), default=str)
+
+
+def _adf_marks_to_text(text: str, marks: Any) -> str:
+    """Re-apply ADF inline marks as Markdown so flattening stays faithful."""
+    if not isinstance(marks, list):
+        return text
+    for mark in marks:
+        if not isinstance(mark, dict):
+            continue
+        mark_type = mark.get("type")
+        if mark_type == "code":
+            text = f"`{text}`"
+        elif mark_type == "strong":
+            text = f"**{text}**"
+        elif mark_type == "em":
+            text = f"*{text}*"
+        elif mark_type == "link":
+            href = (mark.get("attrs") or {}).get("href")
+            if href:
+                text = f"[{text}]({href})"
+    return text
+
+
+def _adf_inline_to_text(nodes: Any) -> str:
+    """Render ADF inline nodes to a single line of Markdown-ish text."""
+    parts: List[str] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("type")
+        attrs = node.get("attrs") or {}
+        if node_type == "text":
+            parts.append(
+                _adf_marks_to_text(str(node.get("text") or ""), node.get("marks"))
+            )
+        elif node_type == "hardBreak":
+            parts.append("\n")
+        elif node_type == "emoji":
+            parts.append(str(attrs.get("text") or attrs.get("shortName") or ""))
+        elif node_type == "mention":
+            parts.append(str(attrs.get("text") or attrs.get("id") or ""))
+        elif node_type == "inlineCard":
+            parts.append(str(attrs.get("url") or ""))
+        elif node_type == "date":
+            parts.append(str(attrs.get("timestamp") or ""))
+        elif node_type == "status":
+            parts.append(str(attrs.get("text") or ""))
+        else:
+            parts.append(_adf_inline_to_text(node.get("content")))
+    return "".join(parts)
+
+
+def _adf_table_to_text(rows: Any) -> List[str]:
+    """Render an ADF table as Markdown-style pipe rows."""
+    rendered: List[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("type") != "tableRow":
+            continue
+        cells: List[str] = []
+        for cell in row.get("content") or []:
+            if not isinstance(cell, dict):
+                continue
+            cell_text = " ".join(
+                block.strip()
+                for block in _adf_blocks_to_text(cell.get("content"))
+                if block.strip()
+            )
+            cells.append(cell_text.replace("|", "\\|"))
+        if cells:
+            rendered.append("| " + " | ".join(cells) + " |")
+    return rendered
+
+
+def _adf_blocks_to_text(nodes: Any, *, depth: int = 0) -> List[str]:
+    """Render ADF block nodes to a list of Markdown-ish blocks."""
+    blocks: List[str] = []
+    pad = "  " * depth
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("type")
+        children = node.get("content") or []
+        attrs = node.get("attrs") or {}
+
+        if node_type == "paragraph":
+            blocks.append(pad + _adf_inline_to_text(children))
+        elif node_type == "heading":
+            level = attrs.get("level")
+            level = level if isinstance(level, int) and 1 <= level <= 6 else 1
+            blocks.append(f"{'#' * level} {_adf_inline_to_text(children)}")
+        elif node_type == "codeBlock":
+            language = attrs.get("language") or ""
+            blocks.append(f"```{language}\n{_adf_inline_to_text(children)}\n```")
+        elif node_type == "rule":
+            blocks.append("---")
+        elif node_type in ("bulletList", "orderedList"):
+            ordered = node_type == "orderedList"
+            for index, item in enumerate(children, start=1):
+                if not isinstance(item, dict):
+                    continue
+                marker = f"{index}." if ordered else "-"
+                item_blocks = _adf_blocks_to_text(item.get("content"), depth=depth + 1)
+                if item_blocks:
+                    blocks.append(f"{pad}{marker} {item_blocks[0].lstrip()}")
+                    blocks.extend(item_blocks[1:])
+                else:
+                    blocks.append(f"{pad}{marker}")
+        elif node_type == "blockquote":
+            quoted = "\n\n".join(_adf_blocks_to_text(children, depth=depth))
+            blocks.extend(f"> {line}" for line in quoted.split("\n"))
+        elif node_type == "table":
+            blocks.extend(_adf_table_to_text(children))
+        elif node_type in ("mediaGroup", "mediaSingle", "media"):
+            blocks.append(pad + "[media]")
+        else:
+            nested = _adf_blocks_to_text(children, depth=depth)
+            if nested:
+                blocks.extend(nested)
+            else:
+                inline = _adf_inline_to_text(children)
+                if inline:
+                    blocks.append(pad + inline)
+    return blocks
+
+
+def _adf_to_text(body: Any) -> str:
+    """Flatten an ADF document to Markdown-ish text.
+
+    Inverse of _markdown_to_adf. Jira returns comment and description bodies as
+    node trees costing roughly twice their prose size, so read paths that only
+    need the words flatten here rather than shipping the tree to the client.
+    """
+    if isinstance(body, str):
+        return body
+    if not isinstance(body, dict):
+        return ""
+    blocks = _adf_blocks_to_text(body.get("content"))
+    return "\n\n".join(block for block in blocks if block.strip())
+
+
+def _jira_author_summary(author: Any) -> Dict[str, Any] | None:
+    """Keep author identity but drop the avatar URL set, which dominates size."""
+    if not isinstance(author, dict):
+        return None
+    return {
+        "accountId": author.get("accountId"),
+        "displayName": author.get("displayName"),
+        "emailAddress": author.get("emailAddress"),
+        "active": author.get("active"),
+    }
+
+
+def _flatten_comment_page(page: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a Jira comment page to text bodies and identity-only authors.
+
+    Visibility is preserved verbatim: it marks role-restricted comments and
+    must not be dropped by a size optimisation.
+    """
+    comments = page.get("comments")
+    if not isinstance(comments, list):
+        return page
+    return {
+        "startAt": page.get("startAt"),
+        "maxResults": page.get("maxResults"),
+        "total": page.get("total"),
+        "body_format": "text",
+        "comments": [
+            {
+                "id": comment.get("id"),
+                "author": _jira_author_summary(comment.get("author")),
+                "updateAuthor": _jira_author_summary(comment.get("updateAuthor")),
+                "created": comment.get("created"),
+                "updated": comment.get("updated"),
+                "visibility": comment.get("visibility"),
+                "body": _adf_to_text(comment.get("body")),
+            }
+            for comment in comments
+            if isinstance(comment, dict)
+        ],
+    }
+
+
 # ---------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------
@@ -850,6 +1039,46 @@ async def list_tools() -> List[types.Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional Jira expand tokens (e.g. ['changelog']).",
+                    },
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        types.Tool(
+            name="jira_get_comments",
+            description=(
+                "Read comments on a Jira issue, one page at a time. Prefer this "
+                "over jira_get_issue with fields=['comment'], which returns every "
+                "comment at once and can exceed the response size limit."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key, e.g. JVNAUTOSCI-371",
+                    },
+                    "start_at": {
+                        "type": "integer",
+                        "description": "Zero-based index of the first comment to return.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum comments to return (default 50, Jira max 100).",
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "enum": ["created", "-created"],
+                        "description": "Sort order: 'created' oldest first, '-created' newest first.",
+                    },
+                    "body_format": {
+                        "type": "string",
+                        "enum": ["text", "adf"],
+                        "description": (
+                            "'text' (default) flattens comment bodies to Markdown "
+                            "and omits avatar metadata; 'adf' returns the raw "
+                            "Atlassian Document Format node tree."
+                        ),
                     },
                 },
                 "required": ["issue_key"],
@@ -1115,7 +1344,7 @@ async def call_tool(
                 "success": False,
                 "error": "Deprecated pagination parameter: start_at. Use next_page_token instead.",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
 
         next_page_token = arguments.get("next_page_token")
         if isinstance(next_page_token, str) and next_page_token.strip():
@@ -1127,7 +1356,7 @@ async def call_tool(
 
         # Jira Cloud is deprecating GET /search?jql=... for some usage; prefer POST /search/jql.
         result = jira_post("search/jql", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_issue":
@@ -1142,13 +1371,32 @@ async def call_tool(
                 issue_params = {}
             issue_params["expand"] = ",".join(str(item) for item in expand)
         result = jira_get(f"issue/{issue_key}", params=issue_params)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_get_comments":
+        issue_key = arguments["issue_key"]
+        comment_params: Dict[str, Any] = {}
+        max_results = arguments.get("max_results")
+        comment_params["maxResults"] = (
+            max_results if isinstance(max_results, int) and max_results > 0 else 50
+        )
+        start_at = arguments.get("start_at")
+        if isinstance(start_at, int) and start_at > 0:
+            comment_params["startAt"] = start_at
+        order_by = arguments.get("order_by")
+        if order_by in ("created", "-created"):
+            comment_params["orderBy"] = order_by
+        result = jira_get(f"issue/{issue_key}/comment", params=comment_params)
+        if arguments.get("body_format") != "adf":
+            result = _flatten_comment_page(result)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_watchers":
         issue_key = arguments["issue_key"]
         result = jira_get(f"issue/{issue_key}/watchers")
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_attachment_content":
@@ -1167,13 +1415,13 @@ async def call_tool(
             attachment_id=str(attachment_id),
             max_size_bytes=max_size_bytes,
         )
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_transitions":
         issue_key = arguments["issue_key"]
         result = jira_get(f"issue/{issue_key}/transitions")
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_add_comment":
@@ -1182,7 +1430,7 @@ async def call_tool(
         # Jira Cloud requires ADF for comment body
         payload = {"body": _ensure_adf(comment)}
         result = jira_post(f"issue/{issue_key}/comment", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_add_attachment":
@@ -1202,7 +1450,7 @@ async def call_tool(
                 "success": False,
                 "error": f"Missing required parameters: {', '.join(missing)}",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
 
         try:
             content_bytes = base64.b64decode(str(content_base64), validate=True)
@@ -1211,7 +1459,7 @@ async def call_tool(
                 "success": False,
                 "error": "Invalid content_base64 payload",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
 
         upload_result = jira_add_attachment(
             issue_key=str(issue_key).strip(),
@@ -1221,7 +1469,7 @@ async def call_tool(
         )
 
         if isinstance(upload_result, dict) and upload_result.get("success") is False:
-            text = json.dumps(upload_result, indent=2)
+            text = _tool_json(upload_result)
             return [types.TextContent(type="text", text=text)]
 
         attachments: List[Dict[str, Any]] = []
@@ -1250,7 +1498,7 @@ async def call_tool(
                 response["comment_added"] = True
                 response["comment_result"] = comment_result
 
-        text = json.dumps(response, indent=2)
+        text = _tool_json(response)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_transition":
@@ -1258,24 +1506,24 @@ async def call_tool(
         transition_id = arguments["transition_id"]
         payload = {"transition": {"id": transition_id}}
         result = jira_post(f"issue/{issue_key}/transitions", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_myself":
         result = jira_get("myself")
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_project_issue_types":
         project_key = arguments["project_key"]
         result = jira_get_project_issue_types(str(project_key))
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_bulk_operation_progress":
         task_id = arguments["task_id"]
         result = jira_get_bulk_operation_progress(str(task_id))
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_create_issue":
@@ -1285,7 +1533,7 @@ async def call_tool(
                 "success": False,
                 "error": "payload must be an object",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
         # Convert description to ADF if present and is a string
         if "fields" in payload and isinstance(payload["fields"], dict):
             if "description" in payload["fields"]:
@@ -1293,7 +1541,7 @@ async def call_tool(
                     payload["fields"]["description"]
                 )
         result = jira_post("issue", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_update_issue":
@@ -1304,7 +1552,7 @@ async def call_tool(
                 "success": False,
                 "error": "payload must be an object",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
         # Convert description to ADF if present and is a string
         if "fields" in payload and isinstance(payload["fields"], dict):
             if "description" in payload["fields"]:
@@ -1312,7 +1560,7 @@ async def call_tool(
                     payload["fields"]["description"]
                 )
         result = jira_put(f"issue/{issue_key}", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_move_issue":
@@ -1322,9 +1570,9 @@ async def call_tool(
                 "success": False,
                 "error": "payload must be an object",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
         result = jira_post("bulk/issues/move", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_link_issue":
@@ -1334,9 +1582,9 @@ async def call_tool(
                 "success": False,
                 "error": "payload must be an object",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
         result = jira_post("issueLink", payload)
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_delete_issue_link":
@@ -1346,9 +1594,9 @@ async def call_tool(
                 "success": False,
                 "error": "issue_link_id is required",
             }
-            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+            return [types.TextContent(type="text", text=_tool_json(error))]
         result = jira_delete(f"issueLink/{issue_link_id}")
-        text = json.dumps(result, indent=2)
+        text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
     else:

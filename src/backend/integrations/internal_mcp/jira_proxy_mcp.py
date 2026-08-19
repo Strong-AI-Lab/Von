@@ -137,6 +137,26 @@ class JiraMCPProxy:
             arguments["expand"] = expand
         return await self._call("jira_get_issue", arguments)
 
+    async def get_comments(
+        self,
+        *,
+        issue_key: str,
+        start_at: Optional[int] = None,
+        max_results: Optional[int] = None,
+        order_by: Optional[str] = None,
+        body_format: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {"issue_key": issue_key}
+        if isinstance(start_at, int):
+            arguments["start_at"] = start_at
+        if isinstance(max_results, int):
+            arguments["max_results"] = max_results
+        if isinstance(order_by, str) and order_by.strip():
+            arguments["order_by"] = order_by.strip()
+        if isinstance(body_format, str) and body_format.strip():
+            arguments["body_format"] = body_format.strip()
+        return await self._call("jira_get_comments", arguments)
+
     async def get_watchers(self, *, issue_key: str) -> Dict[str, Any]:
         return await self._call("jira_get_watchers", {"issue_key": issue_key})
 

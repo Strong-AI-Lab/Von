@@ -550,6 +550,19 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "identifier_max_count": 1,
         "identifier_normalise": "upper",
     },
+    "jira_get_comments": {
+        "salience": "medium",
+        "category": "jira",
+        "display_template": "Comments: {issue_key}",
+        "dispatch_surface_family": "jira",
+        "evidence_surface_family": "jira",
+        "external_surface": True,
+        "identifier_argument_name": "issue_key",
+        "identifier_pattern": r"\b[A-Z][A-Z0-9]+-\d+\b",
+        "identifier_source": "user_text",
+        "identifier_max_count": 1,
+        "identifier_normalise": "upper",
+    },
     "jira_get_project_issue_types": {
         "salience": "medium",
         "category": "jira",
@@ -1200,6 +1213,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "jira_delete_issue_link",
     "jira_get_auth_config",
     "jira_get_bulk_operation_progress",
+    "jira_get_comments",
     "jira_get_issue",
     "jira_get_project_issue_types",
     "jira_get_myself",
@@ -1330,6 +1344,7 @@ _DEFAULT_VONRAG_STDIO_EXPOSED_TOOL_NAMES = {
 
 _DEFAULT_JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES = {
     "jira_add_comment",
+    "jira_get_comments",
     "jira_get_issue",
     "jira_get_transitions",
     "jira_search",
@@ -1432,6 +1447,7 @@ _DEFAULT_VERIFICATION_READ_TOOL_NAMES = {
     "get_text_relations_summary",
     "get_tree",
     "issue_read",
+    "jira_get_comments",
     "jira_get_issue",
     "jira_get_bulk_operation_progress",
     "jira_get_project_issue_types",
