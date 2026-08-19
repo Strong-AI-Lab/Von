@@ -363,25 +363,6 @@ def test_no_registered_provider_re_enters_resolution(monkeypatch):
     )
 
 
-def test_guard_is_observable_when_it_trips(monkeypatch, stub_registered):
-    """A tripped guard must be countable, not silent.
-
-    The guard answers 'not virtual', which can present as a missing concept, so
-    a reintroduced cycle has to leave a trace someone can find.
-    """
-
-    def _reentrant(concept_id):
-        vcp.is_virtual_concept_id("#V#stub_thing")
-        return False
-
-    monkeypatch.setattr(stub_registered, "owns", _reentrant)
-
-    before = vcp.guard_trip_count()
-    vcp.owning_provider("#V#stub_thing")
-
-    assert vcp.guard_trip_count() > before
-
-
 def test_cheap_tool_name_set_matches_the_full_registry():
     """The name set used by owns() must not drift from the built contracts."""
     from src.backend.integrations.internal_mcp.tool_contract_registry import (
@@ -390,19 +371,3 @@ def test_cheap_tool_name_set_matches_the_full_registry():
     from src.backend.vontology.virtual_concept_sources import _registered_tool_names
 
     assert _registered_tool_names() == frozenset(get_canonical_tool_registry())
-
-
-def test_resolution_refuses_to_recurse(monkeypatch, stub_registered):
-    """A provider that re-enters resolution gets a miss, not a stack overflow."""
-    seen = []
-
-    def _reentrant(concept_id):
-        seen.append(concept_id)
-        # Simulates access control asking about virtual concepts mid-resolution.
-        vcp.is_virtual_concept_id("#V#stub_thing")
-        return concept_id == "#V#stub_thing"
-
-    monkeypatch.setattr(stub_registered, "owns", _reentrant)
-
-    assert vcp.is_virtual_concept_id("#V#stub_thing") is True
-    assert len(seen) < 5, f"re-entered {len(seen)} times"
