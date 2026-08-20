@@ -62,6 +62,80 @@ RELATIONSHIP_KINDS: tuple[str, ...] = (
     "#V#has_author",
 )
 
+_EMBEDDING_STATUS_PENDING = "pending"
+_EMBEDDING_STATUS_STALE = "stale"
+_EMBEDDING_INPUT_FIELD_PREFIXES: tuple[str, ...] = (
+    "concept_id",
+    "guid",
+    "name",
+    "names",
+    "description",
+    "notes",
+    "relationships",
+    "system_tags",
+    "attributes.description",
+    "attributes.notes",
+    # Preserve the former updated_at > embedding_updated_at fallback without
+    # making every queue poll perform a collection scan.
+    "updated_at",
+)
+
+
+def _field_affects_concept_embedding(field_name: Any) -> bool:
+    if not isinstance(field_name, str) or not field_name:
+        return False
+    return any(
+        field_name == prefix or field_name.startswith(f"{prefix}.")
+        for prefix in _EMBEDDING_INPUT_FIELD_PREFIXES
+    )
+
+
+def _prepare_concept_embedding_status(update: Dict[str, Any]) -> Dict[str, Any]:
+    """Materialise embedding queue state for supported concept mutations.
+
+    The concept embedding worker must be able to select work through an index.
+    Semantic updates and updates that advance ``updated_at`` therefore mark the
+    concept stale at write time. Explicit embedding-status mutations remain
+    authoritative so the worker can publish ``indexed`` without immediately
+    turning its own write back into work.
+    """
+
+    if not update:
+        return update
+
+    modifier_update = any(str(key).startswith("$") for key in update)
+    if modifier_update:
+        modified_fields: set[str] = set()
+        for payload in update.values():
+            if isinstance(payload, Mapping):
+                modified_fields.update(
+                    field for field in payload if isinstance(field, str)
+                )
+
+        if any(
+            field == "embedding_status" or field.startswith("embedding_status.")
+            for field in modified_fields
+        ):
+            return update
+        if not any(
+            _field_affects_concept_embedding(field) for field in modified_fields
+        ):
+            return update
+
+        prepared = dict(update)
+        set_payload = dict(prepared.get("$set") or {})
+        set_payload["embedding_status"] = _EMBEDDING_STATUS_STALE
+        prepared["$set"] = set_payload
+        return prepared
+
+    if "embedding_status" in update:
+        return update
+    if not any(_field_affects_concept_embedding(field) for field in update):
+        return update
+    prepared = dict(update)
+    prepared["embedding_status"] = _EMBEDDING_STATUS_STALE
+    return prepared
+
 
 class _AccessControlledCursor:
     """Wrap a PyMongo cursor to sanitise concept documents on iteration."""
@@ -165,7 +239,9 @@ class ConceptsRepository:
         coll = ConceptsRepository.collection()
         if coll is None:
             raise RuntimeError("Concepts collection not available")
-        return coll.insert_one(document)
+        prepared = dict(document)
+        prepared.setdefault("embedding_status", _EMBEDDING_STATUS_PENDING)
+        return coll.insert_one(prepared)
 
     @staticmethod
     def update_one(
@@ -175,6 +251,7 @@ class ConceptsRepository:
         if coll is None:
             raise RuntimeError("Concepts collection not available")
         update = _sanitize_update_payload(update)
+        update = _prepare_concept_embedding_status(update)
         query = apply_concept_query_filter(filter or {})
         return coll.update_one(query, update, upsert=upsert)
 
@@ -184,6 +261,7 @@ class ConceptsRepository:
         if coll is None:
             raise RuntimeError("Concepts collection not available")
         update = _sanitize_update_payload(update)
+        update = _prepare_concept_embedding_status(update)
         query = apply_concept_query_filter(filter or {})
         return coll.update_many(query, update)
 
@@ -195,6 +273,7 @@ class ConceptsRepository:
         if coll is None:
             return None
         update = _sanitize_update_payload(update)
+        update = _prepare_concept_embedding_status(update)
         query = apply_concept_query_filter(filter or {})
         result = coll.find_one_and_update(
             query, update, return_document=return_document

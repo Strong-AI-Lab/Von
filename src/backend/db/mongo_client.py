@@ -1727,6 +1727,11 @@ def _ensure_concepts_collection_indexes(concepts_coll: Collection) -> None:
         concepts_coll.create_index([("timestamps.created_at", DESCENDING)])
     if "timestamps.updated_at_-1" not in existing_indexes:
         concepts_coll.create_index([("timestamps.updated_at", DESCENDING)])
+    if "embedding_status_updated_at_desc" not in existing_indexes:
+        concepts_coll.create_index(
+            [("embedding_status", ASCENDING), ("updated_at", DESCENDING)],
+            name="embedding_status_updated_at_desc",
+        )
     if "updated_at_-1" not in existing_indexes:
         concepts_coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 

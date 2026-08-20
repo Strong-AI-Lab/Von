@@ -38,6 +38,12 @@ EMBEDDING_STATUS_INDEXED = "indexed"
 EMBEDDING_STATUS_STALE = "stale"
 EMBEDDING_STATUS_FAILED = "failed"
 
+EMBEDDING_QUEUE_STATUSES = (
+    EMBEDDING_STATUS_PENDING,
+    EMBEDDING_STATUS_STALE,
+    EMBEDDING_STATUS_FAILED,
+)
+
 # Namespace for concept embeddings
 CONCEPT_EMBEDDING_NAMESPACE = "concepts"
 
@@ -547,14 +553,28 @@ def mark_concept_embedding_stale(concept_id: str) -> bool:
         return False
 
 
+def _embedding_queue_query() -> Dict[str, Any]:
+    """Return the index-targetable materialised embedding queue predicate.
+
+    A non-sparse ``embedding_status`` index represents missing fields as null,
+    so including ``None`` keeps legacy never-indexed concepts eligible without
+    an unindexed ``$exists`` or field-to-field ``$expr`` branch.
+    """
+
+    return {
+        "embedding_status": {
+            "$in": [None, *EMBEDDING_QUEUE_STATUSES],
+        }
+    }
+
+
 def get_concepts_needing_indexing(
     batch_size: int = 50,
 ) -> List[Dict[str, Any]]:
     """Get concepts that need (re)indexing.
 
-    Returns concepts where:
-    - embedding_status is not "indexed", OR
-    - updated_at > embedding_updated_at
+    Returns concepts whose materialised embedding status is missing, pending,
+    stale, or failed.
 
     Args:
         batch_size: Maximum number of concepts to return
@@ -563,30 +583,8 @@ def get_concepts_needing_indexing(
         List of concept documents needing indexing
     """
     try:
-        # Query for concepts needing indexing
-        # This includes:
-        # 1. No embedding_status field (never indexed)
-        # 2. embedding_status = "pending" or "stale" or "failed"
-        # 3. updated_at > embedding_updated_at (changed since last index)
-
-        query = {
-            "$or": [
-                {"embedding_status": {"$exists": False}},
-                {
-                    "embedding_status": {
-                        "$in": [
-                            EMBEDDING_STATUS_PENDING,
-                            EMBEDDING_STATUS_STALE,
-                            EMBEDDING_STATUS_FAILED,
-                        ]
-                    }
-                },
-                {"$expr": {"$gt": ["$updated_at", "$embedding_updated_at"]}},
-            ]
-        }
-
         cursor = ConceptsRepository.find(
-            query,
+            _embedding_queue_query(),
             sort=[("updated_at", -1)],  # Most recently updated first
             limit=batch_size,
         )
@@ -605,23 +603,7 @@ def count_concepts_needing_indexing() -> int:
         Count of concepts needing indexing
     """
     try:
-        query = {
-            "$or": [
-                {"embedding_status": {"$exists": False}},
-                {
-                    "embedding_status": {
-                        "$in": [
-                            EMBEDDING_STATUS_PENDING,
-                            EMBEDDING_STATUS_STALE,
-                            EMBEDDING_STATUS_FAILED,
-                        ]
-                    }
-                },
-                {"$expr": {"$gt": ["$updated_at", "$embedding_updated_at"]}},
-            ]
-        }
-
-        return ConceptsRepository.count_documents(query)
+        return ConceptsRepository.count_documents(_embedding_queue_query())
 
     except Exception as e:
         logger.error(f"Error counting concepts needing indexing: {e}")
