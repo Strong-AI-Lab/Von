@@ -1,0 +1,58 @@
+name: Backend Tests
+
+# Backend pytest has never run in CI. Red tests accumulated on main unnoticed:
+# test_mcp_manifest_parity was failing for an unknown period and was found only
+# by accident. This gate exists so that stops being possible.
+#
+# It runs without a database. Of the 3769 cost_normal tests, 3561 pass with no
+# database at all in under 14 minutes, so the gate is deliberately hermetic
+# rather than provisioning Mongo: a gate that needs credentials is a gate that
+# gets disabled. Tests needing a database are deselected via
+# ci/known_test_failures.txt along with the recorded backlog.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  backend-cost-normal:
+    name: Backend cost_normal suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    env:
+      # No database is provisioned. An unroutable address with a short timeout
+      # keeps a test that reaches for Mongo failing fast rather than hanging.
+      MONGO_URI: "mongodb://127.0.0.1:1/ci?serverSelectionTimeoutMS=200"
+      MONGO_DNS_FALLBACK_URI: "mongodb://127.0.0.1:1/ci?serverSelectionTimeoutMS=200"
+      MONGO_ALLOW_LOCAL_FALLBACK: "0"
+      # Import-time requirements in the Jira MCP surface. Deliberately invalid:
+      # nothing in this gate may reach a real external service.
+      ATLASSIAN_BASE_URL: "https://example.invalid"
+      ATLASSIAN_EMAIL: "ci@example.invalid"
+      ATLASSIAN_API_TOKEN: "ci-placeholder-not-a-credential"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Verify the known-failure list is current
+        run: python scripts/run_ci_backend_suite.py --check-list
+
+      - name: Run backend cost_normal suite
+        run: python scripts/run_ci_backend_suite.py
