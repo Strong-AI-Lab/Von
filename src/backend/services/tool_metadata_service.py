@@ -320,6 +320,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "display_template": "Renamed: {old_name} → {new_name}",
     },
     # Task tools (HIGH salience)
+    "create_task": {
+        "salience": "high",
+        "category": "task",
+        "display_template": "Created task: {task_id}",
+    },
     "task_create": {
         "salience": "high",
         "category": "task",
@@ -452,12 +457,12 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "finalise_cached_paper": {
         "salience": "high",
         "category": "arxiv",
-        "display_template": "Finalised: {arxiv_id}",
+        "display_template": "Finalised: {filename}",
     },
     "materialise_scholarly_representation_for_file_copy": {
         "salience": "high",
         "category": "arxiv",
-        "display_template": "Materialised paper: {paper_concept_id}",
+        "display_template": "Materialised paper representation",
     },
     # Owner-scoped LinkedIn export tools
     "linkedin_index_status": {
@@ -927,7 +932,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "read_paper": {
         "salience": "medium",
         "category": "arxiv",
-        "display_template": "Read: {arxiv_id}",
+        "display_template": "Read: {title}",
     },
     "context_search": {
         "salience": "medium",
@@ -1744,12 +1749,23 @@ def _refresh_cache_if_needed() -> None:
                 new_cache[tool_name] = ToolMetadata(
                     tool_name=tool_name,
                     concept_id=metadata.concept_id or default_metadata.concept_id,
-                    salience=metadata.salience or default_metadata.salience,
+                    # Presentation and planning metadata is code-authoritative
+                    # (JVNAUTOSCI-2652). These concepts record their values once at
+                    # bootstrap and are never refreshed, so a stored copy silently
+                    # outranked every later change in code. Vontology may still fill
+                    # a gap the code leaves; it no longer overrides one.
+                    salience=default_metadata.salience or metadata.salience,
                     display_template=(
-                        metadata.display_template or default_metadata.display_template
+                        default_metadata.display_template or metadata.display_template
                     ),
                     description=metadata.description or default_metadata.description,
-                    category=metadata.category or default_metadata.category,
+                    category=default_metadata.category or metadata.category,
+                    # planner_hint is deliberately NOT inverted. It is model-facing
+                    # guidance rather than presentation, so runtime curation is
+                    # defensible, and alias inheritance of represented hints is an
+                    # existing tested contract. The cost is recorded on
+                    # JVNAUTOSCI-2652: a stale represented hint still outranks a
+                    # better one in code, and correcting that needs a write route.
                     planner_hint=metadata.planner_hint or default_metadata.planner_hint,
                     dispatch_surface_family=(
                         metadata.dispatch_surface_family
