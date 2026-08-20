@@ -26,6 +26,7 @@ is a small change if branch protection is introduced.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -58,6 +59,54 @@ def observed_failures(output: str) -> set[str]:
         if match:
             found.add(match.group(1))
     return found
+
+
+def _write_summary(
+    observed: set[str],
+    new_failures: list[str],
+    now_passing: list[str],
+    *,
+    full_run: bool,
+) -> None:
+    """Render the result into the GitHub run page.
+
+    A report nobody reads is decorative. This makes the outcome visible on the
+    run itself rather than only in scrolled-past log output.
+    """
+    target = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not target:
+        return
+
+    lines = ["# Backend test drift", ""]
+    if new_failures:
+        lines.append(f"**{len(new_failures)} newly failing.** These are the signal.")
+        lines.append("")
+        lines += [f"- `{entry}`" for entry in new_failures[:50]]
+        if len(new_failures) > 50:
+            lines.append(f"- ... and {len(new_failures) - 50} more")
+        lines.append("")
+        lines.append(
+            "Fix or revert them. Adding them to `ci/known_test_failures.txt` is "
+            "not a remedy: that list may only shrink."
+        )
+    else:
+        lines.append("No newly failing tests.")
+    lines.append("")
+    lines.append(f"Observed failures: {len(observed)}")
+    if full_run and now_passing:
+        lines.append("")
+        lines.append(
+            f"**{len(now_passing)} recorded entries now pass** and should be "
+            "removed from `ci/known_test_failures.txt`, lowering `BASELINE_COUNT`."
+        )
+        lines += [f"- `{entry}`" for entry in now_passing[:50]]
+        if len(now_passing) > 50:
+            lines.append(f"- ... and {len(now_passing) - 50} more")
+
+    try:
+        Path(target).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def main() -> int:
@@ -136,7 +185,10 @@ def main() -> int:
             "\nFix or revert them. Adding them to the backlog is not a remedy: "
             "that list may only shrink."
         )
+        _write_summary(observed, new_failures, now_passing, full_run=paths == [TEST_PATH])
         return 1
+
+    _write_summary(observed, new_failures, now_passing, full_run=paths == [TEST_PATH])
 
     print("\nno new failures")
     return 0
