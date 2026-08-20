@@ -59,6 +59,15 @@ def check_list() -> int:
     collected = _pytest(
         TEST_PATH, "-m", MARKER, "--collect-only", "-q", "-p", "no:cacheprovider"
     )
+    if collected.returncode != 0:
+        # Without this the failure below is unreadable: a collection error makes
+        # every recorded entry look as though it no longer exists. The first CI
+        # run of this gate reported 110 missing entries when the real cause was
+        # that pytest was not installed.
+        print("collection failed, so the known-failure list cannot be checked:")
+        print((collected.stderr or collected.stdout or "").strip()[-2000:])
+        return 1
+
     available = set()
     for line in collected.stdout.splitlines():
         if "::" in line:
@@ -83,6 +92,11 @@ def run_gate(extra: list[str]) -> int:
         args += ["--deselect", entry]
     args += extra
 
+    if not known:
+        print(
+            "known-failure list is empty. If that is unexpected, the list failed "
+            "to load rather than the backlog being cleared."
+        )
     print(
         f"running {TEST_PATH} -m {MARKER}, deselecting {len(known)} recorded failures"
     )
