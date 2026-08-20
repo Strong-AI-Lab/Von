@@ -18,9 +18,16 @@ on:
 
 jobs:
   backend-cost-normal:
-    name: Backend cost_normal suite
+    name: Backend cost_normal ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
+    # Sharded because the whole lane takes over 35 minutes on a 2-core runner,
+    # against 13m48s locally. The lanes cannot be used to split it:
+    # lane_backend_core holds 3488 of 3776 cost_normal tests.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     permissions:
       contents: read
 
@@ -57,7 +64,8 @@ jobs:
             pytest pytest-mock pytest-cov pytest-asyncio mongomock blinker anyio
 
       - name: Verify the known-failure list is current
+        if: matrix.shard == '1/4'
         run: python scripts/run_ci_backend_suite.py --check-list
 
       - name: Run backend cost_normal suite
-        run: python scripts/run_ci_backend_suite.py
+        run: python scripts/run_ci_backend_suite.py --shard "${{ matrix.shard }}"

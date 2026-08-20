@@ -85,9 +85,54 @@ def check_list() -> int:
     return 0
 
 
-def run_gate(extra: list[str]) -> int:
+def _shard_files(index: int, count: int) -> list[str]:
+    """Split test files into balanced shards by test count.
+
+    Sharding by file rather than by test keeps per-module fixtures intact, and
+    balancing by count matters because the files are very uneven. The lanes
+    cannot be used for this: lane_backend_core holds 3488 of 3776 cost_normal
+    tests, so a lane matrix runs at the speed of one lane.
+    """
+    collected = _pytest(
+        TEST_PATH, "-m", MARKER, "--collect-only", "-q", "-p", "no:cacheprovider"
+    )
+    if collected.returncode != 0:
+        raise SystemExit(
+            "collection failed while sharding:\n"
+            + (collected.stderr or collected.stdout or "").strip()[-2000:]
+        )
+
+    per_file: dict[str, int] = {}
+    for line in collected.stdout.splitlines():
+        if "::" in line:
+            per_file[line.split("::", 1)[0].strip()] = (
+                per_file.get(line.split("::", 1)[0].strip(), 0) + 1
+            )
+
+    # Largest-first greedy bin packing: deterministic, and good enough given the
+    # spread. Ties break on filename so shards are stable across runs.
+    buckets: list[list[str]] = [[] for _ in range(count)]
+    sizes = [0] * count
+    for path, size in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
+        target = sizes.index(min(sizes))
+        buckets[target].append(path)
+        sizes[target] += size
+
+    print(f"shard {index}/{count}: {len(buckets[index - 1])} files, ~{sizes[index - 1]} tests")
+    return sorted(buckets[index - 1])
+
+
+def run_gate(extra: list[str], shard: str | None = None) -> int:
     known = load_known_failures()
-    args = [TEST_PATH, "-m", MARKER, "-q", "--no-header", "-p", "no:cacheprovider"]
+    if shard:
+        index, _, count = shard.partition("/")
+        targets = _shard_files(int(index), int(count))
+        if not targets:
+            print("shard is empty; nothing to run")
+            return 0
+    else:
+        targets = [TEST_PATH]
+    args = [*targets, "-m", MARKER, "-q", "--no-header", "-p", "no:cacheprovider"]
     for entry in known:
         args += ["--deselect", entry]
     args += extra
@@ -97,9 +142,8 @@ def run_gate(extra: list[str]) -> int:
             "known-failure list is empty. If that is unexpected, the list failed "
             "to load rather than the backlog being cleared."
         )
-    print(
-        f"running {TEST_PATH} -m {MARKER}, deselecting {len(known)} recorded failures"
-    )
+    scope = TEST_PATH if targets == [TEST_PATH] else f"{len(targets)} sharded files"
+    print(f"running {scope} -m {MARKER}, deselecting {len(known)} recorded failures")
     result = subprocess.run([sys.executable, "-m", "pytest", *args], cwd=REPO_ROOT)
     if result.returncode == 0:
         print("gate passed")
@@ -114,12 +158,18 @@ def run_gate(extra: list[str]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--shard",
+        help='run one shard, as "index/count" with index starting at 1',
+    )
+    parser.add_argument(
         "--check-list",
         action="store_true",
         help="verify the known-failure list is current instead of running the gate",
     )
     parsed, extra = parser.parse_known_args()
-    return check_list() if parsed.check_list else run_gate(extra)
+    if parsed.check_list:
+        return check_list()
+    return run_gate(extra, shard=parsed.shard)
 
 
 if __name__ == "__main__":
