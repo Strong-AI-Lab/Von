@@ -176,3 +176,55 @@ def test_description_precedence_is_unchanged(stored_override):
     stored_override("read_paper", description="from the row")
 
     assert get_tool_metadata("read_paper").description == "from the row"
+
+
+# ---------------------------------------------------------
+# Templates must name fields their tool actually returns
+# ---------------------------------------------------------
+
+
+def test_no_template_names_a_field_absent_from_its_output_schema():
+    """A template naming an input argument or an invented field is dead.
+
+    The renderer discards a template when fewer than half its placeholders
+    resolve, and falls through to a hardcoded handler, so the failure never
+    surfaces. Six templates were dead this way, including one naming
+    ``issue_key`` — an argument the result payload never carries.
+
+    Only schemas specific enough to judge are checked; a generic
+    success/error schema cannot disprove a field.
+    """
+    import re
+
+    from src.backend.integrations.internal_mcp.catalogue import build_default_catalogue
+    from src.backend.integrations.internal_mcp.tool_contract_registry import (
+        schema_to_json_schema,
+    )
+
+    # Names the renderer derives rather than reading directly from the payload.
+    derived = {
+        "count", "name", "title", "query", "query_label", "names", "action",
+        "exists", "target", "source", "predicate", "key", "status", "url",
+        "answer", "subject", "filename",
+    }
+
+    definitions = build_default_catalogue()._definitions
+    offenders = []
+    for tool, entry in _DEFAULT_TOOL_METADATA.items():
+        template = entry.get("display_template")
+        placeholders = set(re.findall(r"\{(\w+)\}", template or ""))
+        definition = definitions.get(tool)
+        if not placeholders or definition is None or definition.output_schema is None:
+            continue
+        properties = set(
+            (schema_to_json_schema(definition.output_schema).get("properties") or {})
+        )
+        if len(properties) <= 3:
+            continue  # generic envelope; not specific enough to judge
+        unknown = placeholders - properties - derived
+        if unknown:
+            offenders.append(f"{tool} {template!r} missing={sorted(unknown)}")
+
+    assert not offenders, "display templates naming absent fields: " + "; ".join(
+        offenders
+    )
