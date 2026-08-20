@@ -16,6 +16,7 @@ import {
   vontologyTreeData
 } from './state.js';
 import { finishBackgroundTask, startBackgroundTask } from './backgroundTaskTracker.js';
+import { initialiseResizableViewport } from './utils/resizableViewport.js';
 import { createAnnotatedFragment, createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
 
 // Search configuration constants
@@ -4253,6 +4254,20 @@ export function initializeVontologyTab() {
 
   // Initialize DOM elements since the tab content is loaded dynamically
   initializeVontologyTabDomElements();
+  initialiseResizableViewport(
+    elements.vontologyTreeContainer,
+    document.getElementById('vontologyTreeResizeControls'),
+    {
+      defaultHeightPx: 420,
+      minHeightPx: 180,
+      maxHeightPx: 900,
+      stepPx: 80,
+      minWidthPx: 320,
+      widthStepPx: 120,
+      viewportOffsetPx: 160,
+      resizeAxis: 'both'
+    }
+  );
   const loadTreeButton = document.getElementById('loadVontologyTreeButton');
 
   // Wire up show only key concepts checkbox

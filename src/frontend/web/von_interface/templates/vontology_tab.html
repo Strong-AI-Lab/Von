@@ -2,7 +2,25 @@
 <!-- JVNAUTOSCI-322: Dynamic Concept Tabs on Vontology Selection -->
 <div class="vontology-container">
   <!-- Title & search moved to global header (JVNAUTOSCI-550) -->
-  <div id="vontologyTreeContainer">
+  <div class="von-resizable-panel-header vontology-tree-header">
+    <span class="von-resizable-panel-label">Tree viewport</span>
+    <div id="vontologyTreeResizeControls" class="von-resize-controls" role="group"
+      aria-label="Vontology tree viewport size" aria-controls="vontologyTreeContainer">
+      <button type="button" class="von-resize-button" data-resize-action="decrease"
+        aria-label="Show fewer Vontology tree rows" title="Show fewer tree rows">−</button>
+      <button type="button" class="von-resize-button" data-resize-action="increase"
+        aria-label="Show more Vontology tree rows" title="Show more tree rows">+</button>
+      <button type="button" class="von-resize-button von-resize-reset" data-resize-action="reset"
+        aria-label="Reset Vontology tree height" title="Reset Vontology tree height">Reset</button>
+      <button type="button" class="von-resize-button" data-resize-action="decrease-width"
+        aria-label="Make Vontology tree narrower" title="Make tree narrower">←</button>
+      <button type="button" class="von-resize-button" data-resize-action="increase-width"
+        aria-label="Make Vontology tree wider" title="Make tree wider">→</button>
+      <button type="button" class="von-resize-button von-resize-reset" data-resize-action="reset-width"
+        aria-label="Fit Vontology tree to available width" title="Fit tree to available width">Fit</button>
+    </div>
+  </div>
+  <div id="vontologyTreeContainer" class="von-resizable-viewport" data-resize-axis="both">
     <!-- Tree will be rendered here by JavaScript -->
     <p>Loading Vontology tree...</p>
   </div>
