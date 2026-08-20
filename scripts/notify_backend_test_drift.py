@@ -7,7 +7,8 @@ an accident of authorship rather than a decision. This sends the result to a
 named recipient instead.
 
 Sends only when there is something to act on: newly failing tests, or a run that
-broke before it could report. A nightly that mails on success trains its reader
+broke before it could report. The "test" status is the exception, triggered
+deliberately to prove the path works before it is needed. A nightly that mails on success trains its reader
 to ignore it.
 
 Credentials come from the environment and are never logged. If they are absent
@@ -51,6 +52,7 @@ def build_message(status: str, body: str) -> EmailMessage:
     subject = {
         "new_failures": f"[{repo}] Nightly backend tests: new failures",
         "broken": f"[{repo}] Nightly backend tests: the run itself failed",
+        "test": f"[{repo}] Nightly backend tests: notification path test",
     }.get(status, f"[{repo}] Nightly backend tests: {status}")
 
     message = EmailMessage()

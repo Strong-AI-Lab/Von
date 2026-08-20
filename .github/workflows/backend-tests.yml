@@ -20,6 +20,11 @@ on:
     # introduced during the working day is reported before the next one.
     - cron: "0 15 * * *"
   workflow_dispatch:
+    inputs:
+      test_notification:
+        description: "Send a test email and skip the suite, to prove the path works"
+        type: boolean
+        default: false
 
 jobs:
   drift-report:
@@ -66,7 +71,19 @@ jobs:
           pip install --group dev || pip install \
             pytest pytest-mock pytest-cov pytest-asyncio mongomock blinker anyio
 
+      # Without this the notification path is only exercised the night something
+      # actually breaks, which is when you least want to discover a bad secret.
+      - name: Send a test notification
+        if: inputs.test_notification
+        env:
+          NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
+          NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
+        run: |
+          echo "Test notification requested; the suite is not run." > /tmp/drift.txt
+          python scripts/notify_backend_test_drift.py test /tmp/drift.txt
+
       - name: Report drift against the recorded backlog
+        if: ${{ !inputs.test_notification }}
         id: drift
         run: |
           set +e
