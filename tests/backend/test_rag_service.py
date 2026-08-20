@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import shutil
@@ -57,6 +58,82 @@ def test_base_rag_candidate_rechecks_subject_and_predicate_visibility(
     )
 
 
+def test_standalone_rag_candidate_uses_live_audience_status_and_revision(
+    monkeypatch,
+):
+    import mongomock
+
+    from src.backend.services import scoped_rag_authority_service as authority
+
+    collection = mongomock.MongoClient()["von_test"]["scoped_knowledge_assertions"]
+    collection.insert_one(
+        {
+            "assertion_id": "ska_raw",
+            "assertion_form": "standalone_text",
+            "assertion_revision": 3,
+            "status": "asserted",
+            "object_kind": "text",
+            "scope": {"audience_keys": ["user:#V#user"]},
+        }
+    )
+    monkeypatch.setattr(
+        authority,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+
+    def _concept_visibility_must_not_gate_raw_text(_concept_ids):
+        raise AssertionError("raw assertion authority must not require a concept")
+
+    monkeypatch.setattr(
+        authority,
+        "filter_accessible_concept_ids",
+        _concept_visibility_must_not_gate_raw_text,
+    )
+    metadata = {
+        "type": "scoped_knowledge_assertion",
+        "assertion_id": "ska_raw",
+        "assertion_form": "standalone_text",
+        "assertion_revision": 3,
+        "subject_concept_id": None,
+        "predicate": None,
+    }
+    key = ("scoped_knowledge_assertion", "ska_raw")
+    assert authority.current_authorised_rag_candidate_keys(
+        [metadata],
+        user_concept_id="#V#user",
+        organisation_concept_id=None,
+    ) == {key}
+    assert (
+        authority.current_authorised_rag_candidate_keys(
+            [{**metadata, "assertion_revision": 2}],
+            user_concept_id="#V#user",
+            organisation_concept_id=None,
+        )
+        == set()
+    )
+    assert (
+        authority.current_authorised_rag_candidate_keys(
+            [metadata],
+            user_concept_id="#V#other",
+            organisation_concept_id=None,
+        )
+        == set()
+    )
+    collection.update_one(
+        {"assertion_id": "ska_raw"},
+        {"$set": {"status": "retracted", "assertion_revision": 4}},
+    )
+    assert (
+        authority.current_authorised_rag_candidate_keys(
+            [metadata],
+            user_concept_id="#V#user",
+            organisation_concept_id=None,
+        )
+        == set()
+    )
+
+
 # Mock LlamaIndex components to avoid real API calls and dependencies during unit tests
 @pytest.fixture
 def mock_llamaindex():
@@ -64,12 +141,8 @@ def mock_llamaindex():
         patch(
             "src.backend.services.rag_backends.llamaindex_backend.VectorStoreIndex"
         ) as mock_index_cls,
-        patch(
-            "src.backend.services.rag_backends.llamaindex_backend.ServiceContext"
-        ),
-        patch(
-            "src.backend.services.rag_backends.llamaindex_backend.StorageContext"
-        ),
+        patch("src.backend.services.rag_backends.llamaindex_backend.ServiceContext"),
+        patch("src.backend.services.rag_backends.llamaindex_backend.StorageContext"),
         patch(
             "src.backend.services.rag_backends.llamaindex_backend.load_index_from_storage"
         ) as mock_load,
@@ -167,6 +240,192 @@ def test_upsert_documents(mock_llamaindex, monkeypatch, workspace_tmp_path):
     assert failed == 0
 
 
+def test_standalone_assertion_embedding_uses_exact_body_without_metadata(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from llama_index.core.schema import MetadataMode
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    exact_text = "  Exact assertion body.\n"
+    service.upsert_documents(
+        [
+            {
+                "id": "scoped_assertion:ska_raw",
+                "text": exact_text,
+                "metadata": {
+                    "type": "scoped_knowledge_assertion",
+                    "assertion_form": "standalone_text",
+                    "assertion_id": "ska_raw",
+                    "assertion_revision": 1,
+                    "audience_keys": ["user:#V#member"],
+                    "user_id": "#V#member",
+                },
+            }
+        ],
+        namespace="#V#member",
+    )
+
+    document = mock_llamaindex["index_cls"].from_documents.call_args.args[0][0]
+    assert document.get_content(metadata_mode=MetadataMode.EMBED) == exact_text
+    assert document.metadata["assertion_id"] == "ska_raw"
+    assert set(document.excluded_embed_metadata_keys) == set(document.metadata)
+    assert set(document.excluded_llm_metadata_keys) == set(document.metadata)
+
+
+def test_upsert_refreshes_stable_document_id_and_propagates_persist_failure(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    service.upsert_documents([{"id": "stable", "text": "revision one", "metadata": {}}])
+    success, failed = service.upsert_documents(
+        [{"id": "stable", "text": "revision two", "metadata": {}}]
+    )
+
+    assert (success, failed) == (1, 0)
+    refreshed = mock_llamaindex["index"].refresh_ref_docs.call_args.args[0]
+    assert [doc.doc_id for doc in refreshed] == ["stable"]
+    assert [doc.text for doc in refreshed] == ["revision two"]
+    mock_llamaindex["index"].insert_documents.assert_not_called()
+
+    mock_llamaindex["index"].storage_context.persist.side_effect = RuntimeError(
+        "disk unavailable"
+    )
+    with pytest.raises(RuntimeError, match="disk unavailable"):
+        service.upsert_documents(
+            [{"id": "stable", "text": "revision three", "metadata": {}}]
+        )
+
+
+def test_namespace_generation_reloads_stale_cache_before_next_mutation(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    persistence_dir = str(workspace_tmp_path / "rag_storage")
+    writer = LlamaIndexRAGService(persistence_dir=persistence_dir)
+    sibling = LlamaIndexRAGService(persistence_dir=persistence_dir)
+    namespace = "#V#member@org"
+    writer.upsert_documents(
+        [{"id": "writer", "text": "writer revision one"}],
+        namespace=namespace,
+    )
+
+    sibling_v1 = MagicMock()
+    sibling_v2 = MagicMock()
+    mock_llamaindex["load"].side_effect = [sibling_v1, sibling_v2]
+    assert sibling._maybe_load_index(namespace) is sibling_v1
+    first_generation = sibling._index_cache_generations[namespace]
+
+    writer.upsert_documents(
+        [{"id": "writer", "text": "writer revision two"}],
+        namespace=namespace,
+    )
+    assert writer._index_cache_generations[namespace] != first_generation
+
+    assert sibling.upsert_documents(
+        [{"id": "sibling", "text": "sibling assertion"}],
+        namespace=namespace,
+    ) == (1, 0)
+    sibling_v1.refresh_ref_docs.assert_not_called()
+    refreshed = sibling_v2.refresh_ref_docs.call_args.args[0]
+    assert [doc.doc_id for doc in refreshed] == ["sibling"]
+    with open(
+        sibling._namespace_metadata_path(namespace),
+        encoding="utf-8",
+    ) as handle:
+        current_generation = json.load(handle)["index_generation"]
+    assert sibling._index_cache_generations[namespace] == current_generation
+
+
+def test_reset_evicts_sibling_persisted_cache_before_recreate(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    persistence_dir = str(workspace_tmp_path / "rag_storage")
+    resetter = LlamaIndexRAGService(persistence_dir=persistence_dir)
+    sibling = LlamaIndexRAGService(persistence_dir=persistence_dir)
+    namespace = "#V#member@org"
+    resetter.upsert_documents(
+        [{"id": "old", "text": "old assertion"}],
+        namespace=namespace,
+    )
+    assert sibling._maybe_load_index(namespace) is mock_llamaindex["index"]
+    assert namespace in sibling._persisted_index_cache_namespaces
+
+    resetter.reset_namespace(namespace)
+
+    assert sibling.query("old", namespace=namespace) == []
+    assert namespace not in sibling._indices
+    assert sibling.upsert_documents(
+        [{"id": "new", "text": "new assertion"}],
+        namespace=namespace,
+    ) == (1, 0)
+    rebuilt_documents = mock_llamaindex["index_cls"].from_documents.call_args.args[0]
+    assert [doc.doc_id for doc in rebuilt_documents] == ["new"]
+    assert [doc.text for doc in rebuilt_documents] == ["new assertion"]
+
+
+def test_initial_index_failure_does_not_publish_incomplete_namespace(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    final_dir = service._namespace_persist_dir("chat_history")
+
+    def _partial_persist(*, persist_dir):
+        os.makedirs(persist_dir, exist_ok=True)
+        partial_path = os.path.join(persist_dir, "partial")
+        with open(partial_path, "w", encoding="utf-8") as handle:
+            handle.write("incomplete")
+        raise RuntimeError("initial persist failed")
+
+    mock_llamaindex["index"].storage_context.persist.side_effect = _partial_persist
+    with pytest.raises(RuntimeError, match="initial persist failed"):
+        service.upsert_documents([{"id": "stable", "text": "content"}])
+    assert not os.path.exists(final_dir)
+
+    mock_llamaindex["index"].storage_context.persist.side_effect = None
+    assert service.upsert_documents([{"id": "stable", "text": "content"}]) == (1, 0)
+    assert os.path.isfile(os.path.join(final_dir, "index_metadata.json"))
+
+
 def test_query(mock_llamaindex):
     service = get_rag_service("llamaindex")
     results = service.query("test query")
@@ -190,9 +449,7 @@ def test_query_honours_workflow_capability_retrieval_candidate_limit(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     rag.upsert_documents(
         [
             {
@@ -231,9 +488,7 @@ def test_concepts_mode_includes_current_scoped_assertion_candidates(
     )
     from src.backend.services import scoped_rag_authority_service
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     rag.upsert_documents(
         [
             {
@@ -252,14 +507,18 @@ def test_concepts_mode_includes_current_scoped_assertion_candidates(
         "subject_concept_id": "#V#subject",
         "predicate": "hasDescription",
         "user_id": "#V#user",
-        "organisation_concept_id": "#V#org",
+        # User-scoped canonical knowledge remains valid in an organisation
+        # turn even though its assertion audience is not organisation-scoped.
+        "organisation_concept_id": None,
     }
     authority_calls = []
     monkeypatch.setattr(
         scoped_rag_authority_service,
         "current_authorised_rag_candidate_keys",
-        lambda rows, **kwargs: authority_calls.append((rows, kwargs))
-        or {("scoped_knowledge_assertion", "ska_1")},
+        lambda rows, **kwargs: (
+            authority_calls.append((rows, kwargs))
+            or {("scoped_knowledge_assertion", "ska_1")}
+        ),
     )
 
     results = rag.query(
@@ -284,6 +543,79 @@ def test_concepts_mode_includes_current_scoped_assertion_candidates(
     ]
 
 
+def test_concepts_mode_returns_live_standalone_user_assertion_in_org_turn(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    import mongomock
+
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services import scoped_rag_authority_service
+    from src.backend.services.knowledge_assertion_rag_service import (
+        build_standalone_text_assertion_rag_document,
+    )
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    assertion = {
+        "assertion_id": "ska_raw_live",
+        "assertion_form": "standalone_text",
+        "assertion_revision": 2,
+        "status": "asserted",
+        "object_kind": "text",
+        "object_text": {"text": "Exact raw evidence.", "language": "en-NZ"},
+        "scope": {
+            "mode": "user",
+            "user_concept_id": "#V#user",
+            "organisation_concept_id": None,
+            "audience_keys": ["user:#V#user"],
+        },
+        "assertion_context": {
+            "context_id": "intake:user:#V#user",
+            "selection": "implicit",
+        },
+    }
+    collection = mongomock.MongoClient()["von_test"]["scoped_knowledge_assertions"]
+    collection.insert_one(assertion)
+    monkeypatch.setattr(
+        scoped_rag_authority_service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+
+    def _concept_visibility_must_not_run(_concept_ids):
+        raise AssertionError("linkless text authority has no concept dependency")
+
+    monkeypatch.setattr(
+        scoped_rag_authority_service,
+        "filter_accessible_concept_ids",
+        _concept_visibility_must_not_run,
+    )
+    rag_doc = build_standalone_text_assertion_rag_document(assertion)
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
+    rag.upsert_documents([rag_doc], namespace="#V#user@org")
+    node = mock_llamaindex["index"].as_retriever.return_value.retrieve.return_value[0]
+    node.node.ref_doc_id = rag_doc["id"]
+    node.node.metadata = rag_doc["metadata"]
+    node.node.get_content.return_value = rag_doc["text"]
+
+    results = rag.query(
+        "raw evidence",
+        namespace="#V#user@org",
+        permissions_context={
+            "mode": "concepts",
+            "user_id": "#V#user",
+            "organisation_concept_id": "#V#org",
+        },
+    )
+
+    assert [(row["id"], row["text"]) for row in results] == [
+        ("scoped_assertion:ska_raw_live", "Exact raw evidence.")
+    ]
+
+
 def test_scoped_rag_hit_is_live_filtered_after_assertion_revocation(
     mock_llamaindex,
     monkeypatch,
@@ -297,9 +629,7 @@ def test_scoped_rag_hit_is_live_filtered_after_assertion_revocation(
     )
     from src.backend.services import scoped_rag_authority_service
 
-    collection = mongomock.MongoClient()["von_test"][
-        "scoped_knowledge_assertions"
-    ]
+    collection = mongomock.MongoClient()["von_test"]["scoped_knowledge_assertions"]
     collection.insert_one(
         {
             "assertion_id": "ska_live",
@@ -322,9 +652,7 @@ def test_scoped_rag_hit_is_live_filtered_after_assertion_revocation(
         lambda concept_ids: set(concept_ids) & visible_concepts,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     rag.upsert_documents(
         [
             {
@@ -351,13 +679,16 @@ def test_scoped_rag_hit_is_live_filtered_after_assertion_revocation(
         "organisation_concept_id": "#V#org",
     }
 
-    assert len(
-        rag.query(
-            "programme context",
-            namespace="#V#user@org",
-            permissions_context=permissions,
+    assert (
+        len(
+            rag.query(
+                "programme context",
+                namespace="#V#user@org",
+                permissions_context=permissions,
+            )
         )
-    ) == 1
+        == 1
+    )
 
     collection.update_one(
         {"assertion_id": "ska_live"},
@@ -423,6 +754,80 @@ def test_delete_documents(mock_llamaindex):
     assert count >= 0
 
 
+def test_delete_documents_propagates_backend_failure(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    service.upsert_documents([{"id": "doc1", "text": "content"}])
+    mock_llamaindex["index"].delete_ref_doc.side_effect = RuntimeError("delete failed")
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        service.delete_documents(["doc1"])
+
+
+def test_delete_publishes_new_namespace_generation(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    service.upsert_documents([{"id": "doc1", "text": "content"}])
+    initial_generation = service._index_cache_generations["chat_history"]
+
+    assert service.delete_documents(["doc1"]) == 1
+    with open(
+        service._namespace_metadata_path("chat_history"),
+        encoding="utf-8",
+    ) as handle:
+        deleted_generation = json.load(handle)["index_generation"]
+    assert deleted_generation != initial_generation
+    assert service._index_cache_generations["chat_history"] == deleted_generation
+
+
+def test_delete_does_not_report_absence_when_existing_index_cannot_load(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    persist_dir = (
+        workspace_tmp_path
+        / "rag_storage"
+        / "namespaces"
+        / service._namespace_dirname("chat_history")
+    )
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    (persist_dir / "unreadable_state").write_text("present", encoding="utf-8")
+    service._write_namespace_metadata("chat_history")
+    mock_llamaindex["load"].side_effect = RuntimeError("load failed")
+
+    with pytest.raises(RuntimeError, match="could not be loaded"):
+        service.delete_documents(["doc1"])
+
+
 def test_llamaindex_servicecontext_deprecation_falls_back_to_settings(
     workspace_tmp_path,
     monkeypatch,
@@ -472,9 +877,9 @@ def test_llamaindex_servicecontext_deprecation_falls_back_to_settings(
         assert rag.service_context is None
         assert rag.llamaindex_settings is fake_settings
         assert rag.get_runtime_embed_model() is fake_settings.embed_model
-        assert rag.get_runtime_configuration_summary()["embedding_signature"]["model"] == (
-            "text-embedding-3-small"
-        )
+        assert rag.get_runtime_configuration_summary()["embedding_signature"][
+            "model"
+        ] == ("text-embedding-3-small")
 
 
 def test_llamaindex_runtime_configuration_tracks_embedding_signature_and_mismatch(
@@ -488,9 +893,7 @@ def test_llamaindex_runtime_configuration_tracks_embedding_signature_and_mismatc
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     summary = rag.get_runtime_configuration_summary()
 
     assert summary["embedding_signature"] == {
@@ -566,9 +969,7 @@ def test_llamaindex_upsert_rejects_unresolved_embedder_before_index_mutation(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     # LlamaIndex may expose a truthy MockEmbedding when no real embedder was
     # resolved. Mutation authority comes from the resolved configuration, not
     # from that compatibility fallback object.
@@ -599,9 +1000,7 @@ def test_llamaindex_upsert_requires_explicit_rebuild_for_incompatible_signature(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     rag.upsert_documents(
         [{"id": "doc1", "text": "first", "metadata": {}}],
         namespace="#V#user@org",
@@ -673,9 +1072,9 @@ def test_llamaindex_metadata_uses_embedder_captured_before_index_creation(
         rag.invalidate_runtime_configuration_cache()
         return mock_llamaindex["index"]
 
-    mock_llamaindex["index_cls"].from_documents.side_effect = (
-        _create_index_after_configuration_change
-    )
+    mock_llamaindex[
+        "index_cls"
+    ].from_documents.side_effect = _create_index_after_configuration_change
 
     rag.upsert_documents(
         [{"id": "doc1", "text": "content", "metadata": {}}],
@@ -705,9 +1104,7 @@ def test_llamaindex_metadata_write_retries_transient_sharing_violation(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     namespace = "workflow_capabilities"
     metadata_path = workspace_tmp_path / "rag_storage" / "namespaces"
 
@@ -735,6 +1132,57 @@ def test_llamaindex_metadata_write_retries_transient_sharing_violation(
     assert payload["embedding_signature"]["model"] == "text-embedding-3-small"
 
 
+def test_namespace_process_lock_windows_retries_only_contention(
+    monkeypatch,
+    workspace_tmp_path,
+) -> None:
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends import llamaindex_backend as backend
+
+    rag = backend.LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    fake_msvcrt = MagicMock()
+    fake_msvcrt.LK_NBLCK = 1
+    fake_msvcrt.LK_UNLCK = 2
+    fake_msvcrt.locking.side_effect = [
+        OSError(errno.EACCES, "lock busy"),
+        None,
+        None,
+    ]
+    monkeypatch.setattr(backend, "_fcntl", None)
+    monkeypatch.setattr(backend, "_msvcrt", fake_msvcrt)
+    monkeypatch.setattr(backend.time, "sleep", lambda _seconds: None)
+
+    with rag._namespace_process_lock("#V#member@org"):
+        pass
+
+    assert [call.args[1] for call in fake_msvcrt.locking.call_args_list] == [1, 1, 2]
+
+
+def test_namespace_process_lock_windows_propagates_non_contention_error(
+    monkeypatch,
+    workspace_tmp_path,
+) -> None:
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends import llamaindex_backend as backend
+
+    rag = backend.LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    fake_msvcrt = MagicMock()
+    fake_msvcrt.LK_NBLCK = 1
+    fake_msvcrt.LK_UNLCK = 2
+    fake_msvcrt.locking.side_effect = OSError(errno.EINVAL, "unsupported lock")
+    monkeypatch.setattr(backend, "_fcntl", None)
+    monkeypatch.setattr(backend, "_msvcrt", fake_msvcrt)
+
+    with pytest.raises(OSError, match="unsupported lock"):
+        with rag._namespace_process_lock("#V#member@org"):
+            pass
+    assert fake_msvcrt.locking.call_count == 1
+
+
 def test_llamaindex_reset_namespace_retries_transient_sharing_violation(
     monkeypatch,
     workspace_tmp_path,
@@ -745,11 +1193,14 @@ def test_llamaindex_reset_namespace_retries_transient_sharing_violation(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     namespace = "workflow_capabilities"
-    persist_dir = workspace_tmp_path / "rag_storage" / "namespaces" / rag._namespace_dirname(namespace)
+    persist_dir = (
+        workspace_tmp_path
+        / "rag_storage"
+        / "namespaces"
+        / rag._namespace_dirname(namespace)
+    )
     persist_dir.mkdir(parents=True, exist_ok=True)
     (persist_dir / "index_metadata.json").write_text("{}", encoding="utf-8")
 
@@ -793,9 +1244,7 @@ def test_namespace_runtime_state_is_non_blocking_under_lock_contention(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     namespace = "workflow_capabilities"
 
     holder_acquired = threading.Event()
@@ -843,9 +1292,7 @@ def test_namespace_runtime_state_strict_blocks_until_lock_released(
         LlamaIndexRAGService,
     )
 
-    rag = LlamaIndexRAGService(
-        persistence_dir=str(workspace_tmp_path / "rag_storage")
-    )
+    rag = LlamaIndexRAGService(persistence_dir=str(workspace_tmp_path / "rag_storage"))
     namespace = "workflow_capabilities"
 
     holder_acquired = threading.Event()

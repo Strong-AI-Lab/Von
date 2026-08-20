@@ -201,8 +201,10 @@ As observed on 20 August 2026, related capabilities are distributed across:
   metadata plus the route to that carrier-bearing read;
 - base concept and text relations in `concept_service.py`,
   `concept_relation_service.py`, and `text_value_service.py`;
-- actor- and organisation-visible assertion deltas in
-  `scoped_assertion_service.py`;
+- actor- and organisation-visible relation assertions and standalone exact-text
+  assertion occurrences in `scoped_assertion_service.py`, with optional
+  qualified concept links, a distinct assertion-context envelope, lifecycle,
+  and durable revision-aware RAG maintenance;
 - local assertions, lifecycle, diff, promotion, rollback, and stored inclusion
   identifiers in `testing_theory_service.py`;
 - evidence, hypotheses, branches, and theory references in
@@ -217,11 +219,20 @@ Material current limitations include:
 
 - base text relations require one subject concept and predicate, while their
   shared text values are deduplicated separately from assertion occurrence;
-- neither base nor scoped text assertions carry queryable links to an open set
-  of other concepts mentioned or involved in the assertion;
+- base text relations do not carry queryable links to an open set of other
+  concepts mentioned or involved in their text;
+- standalone text assertions can carry explicit qualified concept links, but
+  automatic analysis and complete linking are deliberately not admission or
+  retrieval requirements;
 - secondary-argument retrieval for base text currently recognises a concept
   only when its literal `#V#` identifier occurs in the text;
-- the scoped-assertion audience currently doubles as an implicit context;
+- the first standalone-assertion slice selects a distinct implicit intake
+  context from the audience when no context is supplied; this is not yet a
+  general microtheory selection or inheritance mechanism;
+- semantic RAG maintenance currently targets the writer's physical namespace:
+  canonical organisation-visible reads work across members, but organisation-
+  wide cross-member vector fan-out and user-scope portability between physical
+  organisation namespaces are not yet provided;
 - Testing Theory inclusion identifiers do not yet constitute a general
   inherited query model;
 - storage-specific metadata is exposed by compatibility adapters; and

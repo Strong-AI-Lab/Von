@@ -508,6 +508,100 @@ def test_relation_lookup_uses_actor_effective_text_without_fabricated_id(
     assert metadata["row_kind"] == "scoped_assertion"
 
 
+def test_relation_lookup_returns_explicitly_linked_standalone_text_alongside_relations(
+    monkeypatch,
+):
+    from src.backend.services import concept_relation_service
+    from src.backend.services import scoped_assertion_service
+
+    monkeypatch.setattr(
+        concept_relation_service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        concept_relation_service,
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {concept_id: [] for concept_id in concept_ids},
+    )
+    monkeypatch.setattr(
+        concept_relation_service.TextValuesRepository,
+        "find",
+        lambda *_args, **_kwargs: [],
+    )
+    observed = []
+
+    def _list_linked(**kwargs):
+        observed.append(kwargs)
+        return {
+            "items": [
+                {
+                    "assertion_id": "ska_raw",
+                    "assertion_revision": 2,
+                    "assertion_form": "standalone_text",
+                    "object_kind": "text",
+                    "object_text": {
+                        "text": "Susan hosted gatherings in Svalbard.",
+                        "language": "en-NZ",
+                    },
+                    "concept_links": [
+                        {
+                            "link_id": "skl_susan",
+                            "concept_id": "#V#susan",
+                            "role": "about",
+                            "status": "active",
+                            "method": "explicit_user_link",
+                            "spans": [{"start": 0, "end": 5}],
+                        }
+                    ],
+                    "assertion_context": {
+                        "context_id": "intake:user:#V#member"
+                    },
+                    "scope": {"mode": "user"},
+                    "provenance": {"turn_id": "turn-1"},
+                }
+            ],
+            "has_more": False,
+            "counts_are_lower_bounds": False,
+        }
+
+    monkeypatch.setattr(
+        scoped_assertion_service,
+        "list_visible_scoped_assertions_page",
+        _list_linked,
+    )
+    payload = concept_relation_service.find_relations_with_argument(
+        "#V#susan",
+        argument_index="any",
+        relation_kind="text",
+        include_text_snippets=True,
+        include_concept_preview=False,
+        context_view="actor_effective",
+    )
+
+    assert observed == [
+        {
+            "argument_concept_id": "#V#susan",
+            "object_kind": "text",
+            "assertion_form": "standalone_text",
+            "limit": 501,
+        }
+    ]
+    assert payload["total_hits"] == 1
+    hit = payload["hits"][0]
+    assert hit["relation_kind"] == "text"
+    assert hit["target_value"] == "Susan hosted gatherings in Svalbard."
+    assert hit["predicate_concept_id"] is None
+    metadata = hit["relation_metadata"]
+    assert metadata["relation_id"] is None
+    assert metadata["assertion_id"] == "ska_raw"
+    assert metadata["row_kind"] == "text_assertion"
+    assert metadata["link_id"] == "skl_susan"
+    assert metadata["link_role"] == "about"
+    assert metadata["match_type"] == "explicit_concept_link"
+    assert metadata["canonical_publication"] is False
+
+
 def test_relation_lookup_propagates_scoped_page_completeness(monkeypatch):
     from src.backend.services import concept_relation_service
     from src.backend.services import scoped_assertion_service

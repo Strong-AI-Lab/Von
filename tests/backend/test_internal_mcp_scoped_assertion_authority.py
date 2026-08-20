@@ -411,6 +411,8 @@ def test_scoped_list_forwards_offset_and_reports_bounded_page(
                 "predicates": ["hasDescription"],
                 "object_kind": "text",
                 "languages": ["en-NZ"],
+                "assertion_form": "standalone_text",
+                "context_id": "project:salons",
                 "limit": 2,
                 "offset": 40,
             },
@@ -435,6 +437,8 @@ def test_scoped_list_forwards_offset_and_reports_bounded_page(
     forwarded = calls["list"][-1]
     assert forwarded["offset"] == 40
     assert forwarded["languages"] == ["en-NZ"]
+    assert forwarded["assertion_form"] == "standalone_text"
+    assert forwarded["context_id"] == "project:salons"
     assert forwarded["_actor"] == (TRUSTED_USER, TRUSTED_ORG)
 
 
@@ -690,6 +694,184 @@ def test_text_assertion_receipt_includes_derived_maintenance_schedule(
         "durable": False,
         "success": True,
         "scheduled": True,
+    }
+
+
+def test_standalone_text_tool_binds_actor_and_admits_before_link_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.backend.security.access_control import override_current_actor
+
+    captured: dict[str, Any] = {}
+    assertion = {
+        "assertion_id": "ska_raw",
+        "assertion_form": "standalone_text",
+        "assertion_revision": 1,
+        "object_kind": "text",
+        "object_text": {
+            "text": "  Susan hosted gatherings in Svalbard.\n",
+            "language": "en-NZ",
+        },
+        "concept_links": [],
+        "canonical_publication": False,
+        "rag_index": {"status": "pending"},
+    }
+
+    def store(**kwargs):
+        captured["store"] = kwargs
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": "ska_raw",
+            "assertion": assertion,
+            "canonical_read_back": assertion,
+            "canonical_publication": False,
+            "derived_maintenance": {
+                "durable": True,
+                "rag_index": {"status": "pending"},
+            },
+        }
+
+    def reject_links(**kwargs):
+        captured["links"] = kwargs
+        raise ValueError("one proposed concept is unresolved")
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.store_text_assertion",
+        store,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service."
+        "add_text_assertion_concept_links",
+        reject_links,
+    )
+    with override_current_actor(TRUSTED_USER, TRUSTED_ORG):
+        result = _gateway().invoke(
+            "store_text_assertion",
+            {
+                "text": "  Susan hosted gatherings in Svalbard.\n",
+                "source_occurrence_key": "source:7",
+                "concept_links": [
+                    {"concept_id": "#V#unresolved", "role": "involves"}
+                ],
+            },
+        ).payload
+
+    assert result["success"] is True
+    assert result["effect_status"] == "succeeded"
+    assert result["canonical_read_back"] == assertion
+    assert result["enrichment"] == {
+        "success": False,
+        "changed": False,
+        "links_added": 0,
+        "retryable": True,
+        "error_code": "invalid_concept_links",
+        "error": "one proposed concept is unresolved",
+    }
+    assert captured["store"] == {
+        "text": "  Susan hosted gatherings in Svalbard.\n",
+        "language": "en-NZ",
+        "scope_mode": "user",
+        "context_id": None,
+        "source_event_id": "source:7",
+        "evidence": None,
+        "acting_user_concept_id": TRUSTED_USER,
+        "organisation_concept_id": TRUSTED_ORG,
+        "namespace": TRUSTED_NAMESPACE,
+        "turn_id": None,
+        "canonical_publication": False,
+    }
+    assert captured["links"]["acting_user_concept_id"] == TRUSTED_USER
+    assert captured["links"]["organisation_concept_id"] == TRUSTED_ORG
+    assert captured["links"]["namespace"] == TRUSTED_NAMESPACE
+
+
+def test_standalone_text_tool_rejects_payload_identity_without_actor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    called = False
+
+    def store(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("actorless payload must not reach storage")
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.store_text_assertion",
+        store,
+    )
+    result = _gateway().invoke(
+        "store_text_assertion",
+        {
+            "text": "Payload-claimed private assertion.",
+            "acting_user_concept_id": CLAIMED_USER,
+            "organisation_concept_id": CLAIMED_ORG,
+            "namespace": CLAIMED_NAMESPACE,
+        },
+    ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "authenticated_actor_context_required"
+    assert called is False
+
+
+def test_later_text_assertion_link_enrichment_uses_trusted_actor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.backend.security.access_control import override_current_actor
+
+    captured: dict[str, Any] = {}
+
+    def add_links(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": "ska_raw",
+            "links_added": 1,
+            "assertion": {
+                "assertion_id": "ska_raw",
+                "assertion_form": "standalone_text",
+                "concept_links": [{"concept_id": "#V#svalbard"}],
+            },
+            "canonical_publication": False,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service."
+        "add_text_assertion_concept_links",
+        add_links,
+    )
+    with override_current_actor(TRUSTED_USER, TRUSTED_ORG):
+        result = _gateway().invoke(
+            "add_text_assertion_concept_links",
+            {
+                "assertion_id": "ska_raw",
+                "links": [
+                    {
+                        "concept_id": "#V#svalbard",
+                        "role": "involves",
+                    }
+                ],
+            },
+        ).payload
+
+    assert result["success"] is True
+    assert result["links_added"] == 1
+    assert captured == {
+        "assertion_id": "ska_raw",
+        "links": [
+            {
+                "concept_id": "#V#svalbard",
+                "role": "involves",
+            }
+        ],
+        "acting_user_concept_id": TRUSTED_USER,
+        "organisation_concept_id": TRUSTED_ORG,
+        "namespace": TRUSTED_NAMESPACE,
+        "turn_id": None,
     }
 
 

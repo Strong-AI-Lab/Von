@@ -807,6 +807,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "before treating another filler as the requested entity; co-participation "
             "alone does not establish that role. A numeric object index selects one "
             "stored slot, not the whole object side."
+            " Actor-effective text hits may also be standalone assertions matched "
+            "through an explicit concept link; inspect row_kind, assertion_id, "
+            "link_role, context, provenance, and publication state rather than "
+            "treating them as ground binary predicates."
         ),
     },
     "find_concepts_by_name": {
@@ -954,7 +958,39 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "planner_hint": (
             "Use for represented-knowledge lookup over indexed content in the user's "
             "namespace, especially when answering questions about an entity and its "
-            "related facts, artefacts, or relationships."
+            "related facts, artefacts, or relationships. This includes raw text "
+            "assertions with no known concepts or predicates; use their assertion ID, "
+            "context, provenance, lifecycle, and publication metadata when weighing "
+            "them as evidence."
+        ),
+    },
+    "store_text_assertion": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Stored text assertion",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "write",
+        "planner_hint": (
+            "Use when exact natural-language knowledge should survive even though its "
+            "subject, predicate, or related concepts are incomplete or unknown. Store "
+            "first; optional links and semantic analysis are enrichment, never an "
+            "admission prerequisite."
+        ),
+    },
+    "add_text_assertion_concept_links": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Linked text assertion",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "write",
+        "planner_hint": (
+            "Use after a standalone assertion is already stored when later analysis "
+            "identifies visible related concepts. Links enrich retrieval but never "
+            "replace, reinterpret, or gate the exact text assertion."
         ),
     },
     "task_get": {

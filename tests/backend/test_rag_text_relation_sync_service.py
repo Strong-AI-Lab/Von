@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import mongomock
+import pytest
 from bson import ObjectId
 
 
@@ -53,6 +54,15 @@ class _StubRAG:
         self.delete_batches.append(batch)
         self.deletes.extend(batch)
         return len(batch)
+
+
+def test_text_relation_sync_requires_a_canonical_actor_namespace():
+    from src.backend.services import rag_text_relation_sync_service as svc
+
+    assert svc._parse_namespace("#V#user") == ("#V#user", "")
+    assert svc._parse_namespace("#V#user@org") == ("#V#user", "#V#org")
+    with pytest.raises(ValueError, match="canonical"):
+        svc._parse_namespace("user@org")
 
 
 def test_one_pass_iterator_opens_each_store_once_and_batches_visibility(
@@ -754,6 +764,70 @@ def test_scoped_projection_requires_current_subject_and_predicate_visibility(
 
     assert docs == []
     assert checked == [{"#V#subject", "#V#private_predicate"}]
+
+
+def test_collect_indexes_linkless_standalone_assertion_as_exact_body(monkeypatch):
+    from src.backend.services import rag_text_relation_sync_service as svc
+
+    monkeypatch.setattr(
+        svc.TextRelationsRepository,
+        "find",
+        lambda *_args, **_kwargs: [],
+    )
+    scoped_collection = mongomock.MongoClient()["von_test"][
+        "scoped_knowledge_assertions"
+    ]
+    exact_text = "  Susan hosted gatherings in Svalbard.\n"
+    scoped_collection.insert_one(
+        {
+            "assertion_id": "ska_raw",
+            "assertion_form": "standalone_text",
+            "assertion_revision": 1,
+            "subject_concept_id": None,
+            "predicate": None,
+            "object_kind": "text",
+            "object_text": {"text": exact_text, "language": "en-NZ"},
+            "concept_links": [],
+            "assertion_context": {
+                "context_id": "intake:user:#V#user",
+                "selection": "implicit",
+            },
+            "scope": {
+                "user_concept_id": "#V#user",
+                "organisation_concept_id": None,
+                "audience_keys": ["user:#V#user"],
+            },
+            "provenance": {"asserted_by_user_concept_id": "#V#user"},
+            "status": "asserted",
+            "updated_at": datetime(2026, 8, 20, tzinfo=timezone.utc),
+        }
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: scoped_collection,
+    )
+
+    def _concept_visibility_must_not_run(*_args, **_kwargs):
+        raise AssertionError("raw assertion indexing must not require concepts")
+
+    monkeypatch.setattr(
+        svc,
+        "_visible_concept_ids_in_namespace",
+        _concept_visibility_must_not_run,
+    )
+    docs = svc.collect_text_relation_docs_for_namespace(
+        namespace="#V#user",
+        limit=10,
+    )
+
+    assert len(docs) == 1
+    assert docs[0].doc_id == "scoped_assertion:ska_raw"
+    assert docs[0].text == exact_text
+    assert docs[0].metadata["row_kind"] == "text_assertion"
+    assert docs[0].metadata["assertion_revision"] == 1
+    assert docs[0].metadata["subject_concept_id"] is None
+    assert "concept_links" not in docs[0].metadata
 
 
 def test_collect_limit_zero_does_not_query_either_store(monkeypatch):

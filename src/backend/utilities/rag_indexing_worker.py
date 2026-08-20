@@ -256,6 +256,39 @@ def process_pending_interactions(loop_iteration: int) -> int:
     return success_count + skipped_count
 
 
+def process_pending_text_assertions() -> int:
+    """Run one bounded durable assertion-index batch in this worker process."""
+
+    try:
+        from src.backend.services.knowledge_assertion_rag_service import (
+            process_pending_assertion_rag_jobs,
+            reconcile_assertion_rag_state,
+        )
+
+        # Reconciliation is storage-only and bounded. It repairs records from
+        # interrupted/older writers before the claim loop attempts RAG work.
+        reconcile_assertion_rag_state(limit=BATCH_SIZE)
+        report = process_pending_assertion_rag_jobs(
+            limit=BATCH_SIZE,
+            worker_id=f"rag-index-worker:{os.getpid()}",
+        )
+        claimed = int(report.get("claimed") or 0)
+        if claimed:
+            logger.info(
+                "Assertion RAG batch claimed=%s succeeded=%s failed=%s superseded=%s",
+                claimed,
+                report.get("succeeded"),
+                report.get("failed"),
+                report.get("superseded"),
+            )
+        return int(report.get("succeeded") or 0)
+    except Exception as exc:
+        # The next worker iteration is the recovery boundary. Never stop chat
+        # indexing because derived assertion maintenance is unavailable.
+        logger.warning("Assertion RAG batch failed: %s", exc)
+        return 0
+
+
 def main():
     global _shutdown_requested
     print("[stdout] RAG Indexing Worker starting...")  # direct stdout banner
@@ -271,7 +304,11 @@ def main():
     while not _shutdown_requested:
         iteration += 1
         try:
-            processed_count = process_pending_interactions(iteration)
+            assertion_processed_count = process_pending_text_assertions()
+            processed_count = (
+                process_pending_interactions(iteration)
+                + assertion_processed_count
+            )
         except KeyboardInterrupt:
             logger.info("Worker stopped by user")
             _flush()

@@ -30,6 +30,10 @@ from src.backend.security.access_control import (
     override_current_user,
 )
 from src.backend.services.rag_service import RAGBackendUnavailable, get_rag_service
+from src.backend.services.namespace_service import (
+    derive_actor_context_from_namespace,
+    resolve_canonical_namespace,
+)
 from src.backend.services.text_relation_predicate_validation_service import (
     predicate_concept_id_for_storage,
 )
@@ -239,30 +243,19 @@ def get_text_relation_preview(
 
 
 def _parse_namespace(namespace: str) -> Tuple[str, str]:
-    """Parse a namespace of the form '#V#user@org' into (user_id, organisation_id)."""
+    """Parse a canonical user or user-at-organisation RAG namespace."""
     if not isinstance(namespace, str) or not namespace.strip():
         raise ValueError("namespace is required")
-
     cleaned = namespace.strip()
-    if "@" not in cleaned:
+    canonical = resolve_canonical_namespace(cleaned)
+    if canonical is None or canonical != cleaned:
         raise ValueError(
-            "namespace must be of the form '#V#user@org' (missing '@' separator)"
+            "namespace must use canonical #V#user or #V#user@organisation form"
         )
-
-    user_part, org_part = cleaned.split("@", 1)
-    user_id = user_part.strip()
-    org_id = org_part.strip()
-
-    if not user_id:
-        raise ValueError("namespace user part is empty")
-    if not org_id:
-        raise ValueError("namespace organisation part is empty")
-
-    # Ensure org is a concept id.
-    if not org_id.startswith("#V#"):
-        org_id = f"#V#{org_id}"
-
-    return user_id, org_id
+    user_id, org_id = derive_actor_context_from_namespace(canonical)
+    if user_id is None:
+        raise ValueError("namespace has no valid user concept ID")
+    return user_id, org_id or ""
 
 
 def _safe_object_id(value: Any) -> ObjectId | None:
@@ -482,6 +475,20 @@ def _scoped_assertion_to_rag_doc(
 ) -> TextRelationRagDoc | None:
     if not isinstance(assertion, dict):
         return None
+    if assertion.get("assertion_form") == "standalone_text":
+        try:
+            from .knowledge_assertion_rag_service import (
+                build_standalone_text_assertion_rag_document,
+            )
+
+            payload = build_standalone_text_assertion_rag_document(assertion)
+        except (TypeError, ValueError):
+            return None
+        return TextRelationRagDoc(
+            doc_id=str(payload["id"]),
+            text=str(payload["text"]),
+            metadata=dict(payload["metadata"]),
+        )
     object_text = assertion.get("object_text")
     if not isinstance(object_text, dict):
         return None

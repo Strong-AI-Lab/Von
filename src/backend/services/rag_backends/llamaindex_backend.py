@@ -13,6 +13,7 @@ Namespace behaviour:
     allow defensive filtering.
 """
 
+import errno
 import hashlib
 import importlib
 import json
@@ -23,8 +24,20 @@ import shutil
 import tempfile
 import time
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable, Dict, Any, Optional, List, Tuple, Mapping
+from uuid import uuid4
+
+try:  # pragma: no cover - platform-specific import
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None
+
+try:  # pragma: no cover - platform-specific import
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    _msvcrt = None
 
 from ..rag_service import RAGQueryResults, RAGService, build_rag_retrieval_state
 from ...utils.concept_id_utils import normalise_concept_id_for_compare
@@ -136,7 +149,9 @@ try:  # pragma: no cover
     load_index_from_storage = getattr(core, "load_index_from_storage")
     Settings = getattr(core, "Settings", Settings)
     try:
-        embeddings_mod = importlib.import_module("llama_index.core.base.embeddings.base")
+        embeddings_mod = importlib.import_module(
+            "llama_index.core.base.embeddings.base"
+        )
         BaseEmbedding = getattr(embeddings_mod, "BaseEmbedding", BaseEmbedding)
     except Exception:
         pass
@@ -173,7 +188,9 @@ except Exception:  # pragma: no cover
         try:
             llms_mod = importlib.import_module("llama_index.llms")
             CustomLLM = getattr(llms_mod, "CustomLLM", CustomLLM)
-            CompletionResponse = getattr(llms_mod, "CompletionResponse", CompletionResponse)
+            CompletionResponse = getattr(
+                llms_mod, "CompletionResponse", CompletionResponse
+            )
             LLMMetadata = getattr(llms_mod, "LLMMetadata", LLMMetadata)
         except Exception:
             pass
@@ -260,6 +277,8 @@ class LlamaIndexRAGService(RAGService):
 
         # Cache of namespace -> index instance
         self._indices: Dict[str, Any] = {}
+        self._index_cache_generations: Dict[str, str] = {}
+        self._persisted_index_cache_namespaces: set[str] = set()
         self._namespace_runtime_state: Dict[str, Dict[str, Any]] = {}
         self._namespace_retrieval_states: Dict[str, Dict[str, Any]] = {}
         self._retrieval_state_lock = threading.Lock()
@@ -294,7 +313,9 @@ class LlamaIndexRAGService(RAGService):
             and "Settings" in message
         )
 
-    def _build_service_context(self, *, embed_model: Any = None, llm: Any = None) -> Any:
+    def _build_service_context(
+        self, *, embed_model: Any = None, llm: Any = None
+    ) -> Any:
         from_defaults = getattr(ServiceContext, "from_defaults", None)
         if not callable(from_defaults):
             return None
@@ -334,7 +355,9 @@ class LlamaIndexRAGService(RAGService):
             pass
 
     @staticmethod
-    def _normalise_runtime_entry(entry: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _normalise_runtime_entry(
+        entry: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
         if not isinstance(entry, Mapping):
             return None
         provider = str(entry.get("provider") or "").strip().lower()
@@ -382,7 +405,9 @@ class LlamaIndexRAGService(RAGService):
         )
         if effective is None:
             return None
-        selection_source = str(resolution.get("selection_source") or "").strip() or "unknown"
+        selection_source = (
+            str(resolution.get("selection_source") or "").strip() or "unknown"
+        )
         if kind == "embedder":
             return _ConfiguredEmbeddingModel(
                 provider=effective["provider"],
@@ -404,7 +429,10 @@ class LlamaIndexRAGService(RAGService):
             self._runtime_configuration_refreshed_monotonic = 0.0
 
     def _refresh_runtime_configuration(self, *, force: bool = False) -> None:
-        from ..settings_service import resolve_rag_embedder_setting, resolve_rag_llm_setting
+        from ..settings_service import (
+            resolve_rag_embedder_setting,
+            resolve_rag_llm_setting,
+        )
 
         with self._runtime_configuration_lock:
             now = time.monotonic()
@@ -413,9 +441,8 @@ class LlamaIndexRAGService(RAGService):
                 and self._runtime_configuration is not None
                 and self._runtime_configuration_serialized is not None
                 and self._runtime_configuration_refreshed_monotonic > 0.0
-                and (
-                    now - self._runtime_configuration_refreshed_monotonic
-                ) < _RUNTIME_CONFIGURATION_CACHE_TTL_SECONDS
+                and (now - self._runtime_configuration_refreshed_monotonic)
+                < _RUNTIME_CONFIGURATION_CACHE_TTL_SECONDS
             ):
                 return
 
@@ -504,7 +531,10 @@ class LlamaIndexRAGService(RAGService):
         previous: Dict[str, Any] = {}
         settings_changed = False
         current_retries = getattr(embed_model, "max_retries", None)
-        if isinstance(current_retries, int) and current_retries > _QUERY_EMBED_MAX_RETRIES:
+        if (
+            isinstance(current_retries, int)
+            and current_retries > _QUERY_EMBED_MAX_RETRIES
+        ):
             previous["max_retries"] = current_retries
             setattr(embed_model, "max_retries", _QUERY_EMBED_MAX_RETRIES)
             settings_changed = True
@@ -553,7 +583,9 @@ class LlamaIndexRAGService(RAGService):
         if getattr(exc, "winerror", None) == 32:
             return True
         message = str(exc).strip().lower()
-        return "used by another process" in message or "cannot access the file" in message
+        return (
+            "used by another process" in message or "cannot access the file" in message
+        )
 
     def _get_namespace_lock(self, namespace: str) -> threading.RLock:
         with self._namespace_locks_guard:
@@ -562,6 +594,60 @@ class LlamaIndexRAGService(RAGService):
                 lock = threading.RLock()
                 self._namespace_locks[namespace] = lock
             return lock
+
+    @staticmethod
+    def _is_windows_lock_contention(exc: OSError) -> bool:
+        return getattr(exc, "winerror", None) in {32, 33} or exc.errno in {
+            errno.EACCES,
+            errno.EAGAIN,
+            errno.EDEADLK,
+        }
+
+    @contextmanager
+    def _namespace_process_lock(self, namespace: str):
+        """Serialise one namespace mutation across worker/app processes."""
+
+        lock_root = os.path.join(self.persistence_dir, ".namespace_locks")
+        os.makedirs(lock_root, exist_ok=True)
+        lock_path = os.path.join(
+            lock_root,
+            f"{self._namespace_dirname(namespace)}.lock",
+        )
+        with open(lock_path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+            elif _msvcrt is not None:  # pragma: no cover - Windows
+                while True:
+                    try:
+                        _msvcrt.locking(handle.fileno(), _msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if not self._is_windows_lock_contention(exc):
+                            raise
+                        time.sleep(_WINDOWS_NAMESPACE_IO_RETRY_DELAY_SECONDS)
+            else:  # pragma: no cover - unsupported platform
+                raise RuntimeError(
+                    "No inter-process file-lock implementation is available"
+                )
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if _fcntl is not None:
+                    _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                elif _msvcrt is not None:  # pragma: no cover - Windows
+                    _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+
+    @contextmanager
+    def _namespace_mutation_lock(self, namespace: str):
+        with self._get_namespace_lock(namespace):
+            with self._namespace_process_lock(namespace):
+                yield
 
     def _run_namespace_io(
         self,
@@ -596,9 +682,11 @@ class LlamaIndexRAGService(RAGService):
         metadata_path = self._namespace_metadata_path(namespace)
         if not os.path.isfile(metadata_path):
             return None
+
         def _read_payload() -> Any:
             with open(metadata_path, "r", encoding="utf-8") as handle:
                 return json.load(handle)
+
         try:
             with self._get_namespace_lock(namespace):
                 payload = self._run_namespace_io(
@@ -645,7 +733,8 @@ class LlamaIndexRAGService(RAGService):
         namespace: str,
         *,
         runtime_summary: Mapping[str, Any] | None = None,
-    ) -> None:
+        persist_dir_override: str | None = None,
+    ) -> str:
         if runtime_summary is None:
             runtime_summary, _, _ = self._capture_embedding_runtime(namespace)
         embedding_signature = runtime_summary.get("embedding_signature")
@@ -653,15 +742,17 @@ class LlamaIndexRAGService(RAGService):
             raise RuntimeError(
                 "RAG index metadata requires a resolved embedding signature."
             )
+        index_generation = str(uuid4())
         payload = {
             "schema_version": "rag_index_metadata.v1",
             "namespace": namespace,
+            "index_generation": index_generation,
             "written_at_utc": datetime.now(timezone.utc).isoformat(),
             "embedding_signature": dict(embedding_signature),
             "llm_signature": runtime_summary.get("llm_signature"),
         }
-        persist_dir = self._namespace_persist_dir(namespace)
-        metadata_path = self._namespace_metadata_path(namespace)
+        persist_dir = persist_dir_override or self._namespace_persist_dir(namespace)
+        metadata_path = os.path.join(persist_dir, _INDEX_METADATA_FILENAME)
         with self._get_namespace_lock(namespace):
             os.makedirs(persist_dir, exist_ok=True)
             fd, temp_path = tempfile.mkstemp(
@@ -688,6 +779,27 @@ class LlamaIndexRAGService(RAGService):
                         os.remove(temp_path)
                     except OSError:
                         pass
+        return index_generation
+
+    def _advance_namespace_generation(self, namespace: str) -> str:
+        """Publish a new cache generation without changing index semantics."""
+
+        existing = self._read_namespace_metadata(namespace)
+        embedding_signature = (
+            existing.get("embedding_signature")
+            if isinstance(existing, Mapping)
+            else None
+        )
+        runtime_summary: Mapping[str, Any] | None = None
+        if isinstance(embedding_signature, Mapping):
+            runtime_summary = {
+                "embedding_signature": dict(embedding_signature),
+                "llm_signature": existing.get("llm_signature"),
+            }
+        return self._write_namespace_metadata(
+            namespace,
+            runtime_summary=runtime_summary,
+        )
 
     def _require_namespace_mutation_compatible(
         self,
@@ -941,10 +1053,41 @@ class LlamaIndexRAGService(RAGService):
                 if not bool(state.get("compatible", False)):
                     return None
 
-            if namespace in self._indices:
-                return self._indices[namespace]
-
             persist_dir = self._namespace_persist_dir(namespace)
+            try:
+                has_persisted_state = os.path.isdir(persist_dir) and bool(
+                    os.listdir(persist_dir)
+                )
+            except OSError:
+                has_persisted_state = os.path.isdir(persist_dir)
+            metadata = (
+                self._read_namespace_metadata(namespace)
+                if has_persisted_state
+                else None
+            )
+            disk_generation = (
+                str(metadata.get("index_generation") or "").strip()
+                if isinstance(metadata, Mapping)
+                else ""
+            )
+            if namespace in self._indices:
+                # Ephemeral/test indices have no persisted state. Persisted
+                # caches are reusable only while their generation still
+                # matches the version published by the last process holding
+                # the namespace mutation lock.
+                cache_was_persisted = (
+                    namespace in self._persisted_index_cache_namespaces
+                    or bool(self._index_cache_generations.get(namespace))
+                )
+                if (not has_persisted_state and not cache_was_persisted) or (
+                    disk_generation
+                    and self._index_cache_generations.get(namespace) == disk_generation
+                ):
+                    return self._indices[namespace]
+                self._indices.pop(namespace, None)
+                self._index_cache_generations.pop(namespace, None)
+                self._persisted_index_cache_namespaces.discard(namespace)
+
             if not os.path.isdir(persist_dir):
                 return None
 
@@ -968,6 +1111,9 @@ class LlamaIndexRAGService(RAGService):
                 return None
 
             self._indices[namespace] = index
+            self._persisted_index_cache_namespaces.add(namespace)
+            if disk_generation:
+                self._index_cache_generations[namespace] = disk_generation
             return index
 
     def _get_or_create_index(
@@ -997,17 +1143,34 @@ class LlamaIndexRAGService(RAGService):
                 return index
 
             persist_dir = self._namespace_persist_dir(namespace)
-            os.makedirs(persist_dir, exist_ok=True)
-            index = VectorStoreIndex.from_documents(
-                documents, **dict(runtime_index_kwargs)
+            namespaces_root = os.path.dirname(persist_dir)
+            os.makedirs(namespaces_root, exist_ok=True)
+            staging_dir = tempfile.mkdtemp(
+                prefix=f".{self._namespace_dirname(namespace)}.creating.",
+                dir=namespaces_root,
             )
-            index.storage_context.persist(persist_dir=persist_dir)
-            self._write_namespace_metadata(
-                namespace,
-                runtime_summary=runtime_summary,
-            )
-            self._indices[namespace] = index
-            return index
+            try:
+                index = VectorStoreIndex.from_documents(
+                    documents, **dict(runtime_index_kwargs)
+                )
+                index.storage_context.persist(persist_dir=staging_dir)
+                index_generation = self._write_namespace_metadata(
+                    namespace,
+                    runtime_summary=runtime_summary,
+                    persist_dir_override=staging_dir,
+                )
+                # The whole initial index, including its verified embedding
+                # signature, becomes visible as one same-volume directory
+                # rename. A failed build leaves no misleading final namespace.
+                os.rename(staging_dir, persist_dir)
+                staging_dir = ""
+                self._indices[namespace] = index
+                self._index_cache_generations[namespace] = index_generation
+                self._persisted_index_cache_namespaces.add(namespace)
+                return index
+            finally:
+                if staging_dir and os.path.isdir(staging_dir):
+                    shutil.rmtree(staging_dir)
 
     def upsert_documents(
         self,
@@ -1016,11 +1179,7 @@ class LlamaIndexRAGService(RAGService):
         namespace: Optional[str] = None,
         allow_partial_failures: bool = True,
     ) -> Tuple[int, int]:
-        """
-        Upsert documents into the index.
-        LlamaIndex 0.9.x simple index doesn't support granular updates easily without a vector store.
-        For this implementation, we will convert dicts to Documents and insert them.
-        """
+        """Idempotently insert or refresh documents and durably persist them."""
         effective_namespace = self._resolve_effective_namespace(namespace)
         runtime_summary, _, runtime_index_kwargs = self._capture_embedding_runtime(
             effective_namespace
@@ -1046,14 +1205,25 @@ class LlamaIndexRAGService(RAGService):
             # Stamp namespace into metadata to support filtering/debugging.
             if not isinstance(metadata, dict):
                 metadata = {}
+            else:
+                metadata = dict(metadata)
             metadata["namespace"] = effective_namespace
             l_doc.metadata = metadata
+            if metadata.get("assertion_form") == "standalone_text":
+                # The raw assertion body is the entire semantic embedding
+                # input. Keep authority, lifecycle, context, and provenance
+                # metadata in the docstore for live filtering and reasoning,
+                # but do not send operational tenant identifiers to an
+                # external embedder or let them distort similarity.
+                excluded_keys = sorted(metadata)
+                l_doc.excluded_embed_metadata_keys = excluded_keys
+                l_doc.excluded_llm_metadata_keys = excluded_keys
             llama_docs.append(l_doc)
 
         if not llama_docs:
             return (0, 0)
 
-        with self._get_namespace_lock(effective_namespace):
+        with self._namespace_mutation_lock(effective_namespace):
             self._require_namespace_mutation_compatible(
                 effective_namespace,
                 embedding_signature=embedding_signature,
@@ -1079,40 +1249,46 @@ class LlamaIndexRAGService(RAGService):
                 index.storage_context.persist(
                     persist_dir=self._namespace_persist_dir(effective_namespace)
                 )
-                self._write_namespace_metadata(
+                generation = self._write_namespace_metadata(
                     effective_namespace,
                     runtime_summary=runtime_summary,
                 )
+                self._index_cache_generations[effective_namespace] = generation
+                self._persisted_index_cache_namespaces.add(effective_namespace)
 
-            # Prefer bulk insertion when supported (significantly faster for
-            # embedding-backed indices).
-            try:
-                insert_documents = getattr(index, "insert_documents", None)
-                if callable(insert_documents):
-                    insert_documents(llama_docs)
-                    success = len(llama_docs)
-                    _persist()
-                    return (success, failed)
-            except Exception:
-                # Fall back to per-document insertion below.
-                pass
-
-            # Fallback: per-document insertion, optionally allowing partial failures.
-            for l_doc in llama_docs:
+            # ``refresh_ref_docs`` compares each stable document ID and updates
+            # changed text/metadata instead of accumulating duplicate nodes on
+            # retries or assertion revisions. It also inserts missing IDs.
+            refresh_ref_docs = getattr(index, "refresh_ref_docs", None)
+            if callable(refresh_ref_docs):
                 try:
-                    index.insert(l_doc)
-                    success += 1
+                    refresh_ref_docs(llama_docs)
+                    success = len(llama_docs)
                 except Exception:
-                    failed += 1
                     if not allow_partial_failures:
                         raise
+                    failed = len(llama_docs)
+            else:
+                # Compatibility path for an older index implementation: update
+                # each stable ref-doc ID (delete plus insert), never append it.
+                update_ref_doc = getattr(index, "update_ref_doc", None)
+                if not callable(update_ref_doc):
+                    raise RuntimeError(
+                        "RAG index does not support stable document refresh"
+                    )
+                for l_doc in llama_docs:
+                    try:
+                        update_ref_doc(l_doc)
+                        success += 1
+                    except Exception:
+                        failed += 1
+                        if not allow_partial_failures:
+                            raise
 
             if success > 0:
-                try:
-                    _persist()
-                except Exception:
-                    # Persist failures should not mask successful indexing.
-                    pass
+                # A persistence failure means the durable effect is unknown;
+                # propagate it so the assertion queue remains retryable.
+                _persist()
 
             return (success, failed)
 
@@ -1127,38 +1303,53 @@ class LlamaIndexRAGService(RAGService):
         Note: Simple VectorStoreIndex delete might be limited depending on the store.
         """
         effective_namespace = self._resolve_effective_namespace(namespace)
-        index = self._maybe_load_index(effective_namespace)
-        if not index:
-            return 0
+        with self._namespace_mutation_lock(effective_namespace):
+            index = self._maybe_load_index(effective_namespace)
+            if not index:
+                persist_dir = self._namespace_persist_dir(effective_namespace)
+                try:
+                    namespace_has_state = os.path.isdir(persist_dir) and bool(
+                        os.listdir(persist_dir)
+                    )
+                except OSError as exc:
+                    raise RuntimeError(
+                        "RAG namespace state could not be inspected for deletion"
+                    ) from exc
+                if namespace_has_state:
+                    raise RuntimeError(
+                        "Existing RAG namespace could not be loaded for deletion"
+                    )
+                return 0
 
-        count = 0
-        for doc_id in ids:
-            try:
+            count = 0
+            for doc_id in ids:
                 index.delete_ref_doc(doc_id, delete_from_docstore=True)
                 count += 1
-            except Exception:
-                pass
-
-        if count > 0:
-            with self._get_namespace_lock(effective_namespace):
+            if count > 0:
                 index.storage_context.persist(
                     persist_dir=self._namespace_persist_dir(effective_namespace)
                 )
-
-        return count
+                generation = self._advance_namespace_generation(effective_namespace)
+                self._index_cache_generations[effective_namespace] = generation
+                self._persisted_index_cache_namespaces.add(effective_namespace)
+            return count
 
     def reset_namespace(
         self,
         namespace: Optional[str] = None,
     ) -> None:
         effective_namespace = self._resolve_effective_namespace(namespace)
-        with self._get_namespace_lock(effective_namespace):
+        with self._namespace_mutation_lock(effective_namespace):
             self._indices.pop(effective_namespace, None)
+            self._index_cache_generations.pop(effective_namespace, None)
+            self._persisted_index_cache_namespaces.discard(effective_namespace)
             self._namespace_runtime_state.pop(effective_namespace, None)
             with self._retrieval_state_lock:
                 self._namespace_retrieval_states.pop(effective_namespace, None)
 
-            persist_dir = os.path.abspath(self._namespace_persist_dir(effective_namespace))
+            persist_dir = os.path.abspath(
+                self._namespace_persist_dir(effective_namespace)
+            )
             namespaces_root = os.path.abspath(
                 os.path.join(self.persistence_dir, "namespaces")
             )
@@ -1290,7 +1481,9 @@ class LlamaIndexRAGService(RAGService):
             else max(top_k * 10, top_k)
         )
         start = time.perf_counter()
-        embed_model, previous_embed_settings = self._temporarily_bound_query_embed_model()
+        embed_model, previous_embed_settings = (
+            self._temporarily_bound_query_embed_model()
+        )
         try:
             retriever = index.as_retriever(similarity_top_k=similarity_top_k)
             nodes = retriever.retrieve(query_text)
@@ -1339,8 +1532,7 @@ class LlamaIndexRAGService(RAGService):
                 dict,
             )
             and (
-                metadata.get("type")
-                in {"text_relation", "scoped_knowledge_assertion"}
+                metadata.get("type") in {"text_relation", "scoped_knowledge_assertion"}
                 or metadata.get("source")
                 in {
                     "vontology_text_relation",
@@ -1365,12 +1557,10 @@ class LlamaIndexRAGService(RAGService):
                 else None
             )
             try:
-                authorised_knowledge_keys = (
-                    current_authorised_rag_candidate_keys(
-                        knowledge_candidate_metadata,
-                        user_concept_id=actor_user_id,
-                        organisation_concept_id=actor_org_id,
-                    )
+                authorised_knowledge_keys = current_authorised_rag_candidate_keys(
+                    knowledge_candidate_metadata,
+                    user_concept_id=actor_user_id,
+                    organisation_concept_id=actor_org_id,
                 )
             except Exception as exc:
                 # Knowledge rows fail closed when their live authority surface
@@ -1420,6 +1610,11 @@ class LlamaIndexRAGService(RAGService):
             if not isinstance(metadata, dict):
                 return False
             actual_type = metadata.get("type")
+            metadata_source = metadata.get("source")
+            is_live_authorised_scoped_assertion = bool(
+                actual_type == "scoped_knowledge_assertion"
+                or metadata_source == "scoped_knowledge_assertion"
+            )
             if not permissions_context:
                 return True
 
@@ -1480,19 +1675,24 @@ class LlamaIndexRAGService(RAGService):
                     if metadata.get("predicate") not in allow:
                         return False
 
-            user_id = permissions_context.get("user_id")
-            if user_id:
-                if normalise_concept_id_for_compare(
-                    metadata.get("user_id")
-                ) != normalise_concept_id_for_compare(user_id):
-                    return False
+            # Knowledge rows have already passed the canonical live authority
+            # check above. Re-applying generic creator metadata equality would
+            # incorrectly reject user-scoped knowledge in an organisation turn
+            # and organisation-scoped knowledge written by another member.
+            if not is_live_authorised_scoped_assertion:
+                user_id = permissions_context.get("user_id")
+                if user_id:
+                    if normalise_concept_id_for_compare(
+                        metadata.get("user_id")
+                    ) != normalise_concept_id_for_compare(user_id):
+                        return False
 
-            org_id = permissions_context.get("organisation_concept_id")
-            if org_id:
-                if normalise_concept_id_for_compare(
-                    metadata.get("organisation_concept_id")
-                ) != normalise_concept_id_for_compare(org_id):
-                    return False
+                org_id = permissions_context.get("organisation_concept_id")
+                if org_id:
+                    if normalise_concept_id_for_compare(
+                        metadata.get("organisation_concept_id")
+                    ) != normalise_concept_id_for_compare(org_id):
+                        return False
 
             return True
 

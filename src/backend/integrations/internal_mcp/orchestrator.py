@@ -21210,13 +21210,77 @@ class InternalMCPChatOrchestrator:
             if isinstance(score, (int, float)):
                 compact_hit["score"] = round(float(score), 3)
 
+            relation_metadata = hit.get("relation_metadata")
+            if isinstance(relation_metadata, Mapping):
+                for field_name in (
+                    "assertion_id",
+                    "row_kind",
+                    "assertion_form",
+                    "link_id",
+                    "link_role",
+                    "linked_concept_id",
+                    "link_method",
+                    "lang",
+                    "match_type",
+                    "storage_surface",
+                ):
+                    field_value = relation_metadata.get(field_name)
+                    if isinstance(field_value, str) and field_value.strip():
+                        compact_hit[field_name] = field_value.strip()
+                assertion_revision = relation_metadata.get(
+                    "assertion_revision"
+                )
+                if isinstance(assertion_revision, (int, float)):
+                    compact_hit["assertion_revision"] = int(
+                        assertion_revision
+                    )
+                link_confidence = relation_metadata.get("link_confidence")
+                if isinstance(link_confidence, (int, float)):
+                    compact_hit["link_confidence"] = round(
+                        float(link_confidence), 3
+                    )
+                if isinstance(
+                    relation_metadata.get("canonical_publication"), bool
+                ):
+                    compact_hit["canonical_publication"] = relation_metadata[
+                        "canonical_publication"
+                    ]
+                assertion_context = relation_metadata.get("assertion_context")
+                if isinstance(assertion_context, Mapping):
+                    compact_context = {
+                        key: assertion_context.get(key)
+                        for key in ("context_id", "selection", "kind")
+                        if isinstance(assertion_context.get(key), str)
+                        and str(assertion_context.get(key)).strip()
+                    }
+                    if compact_context:
+                        compact_hit["assertion_context"] = compact_context
+                provenance = relation_metadata.get("provenance")
+                if isinstance(provenance, Mapping):
+                    compact_provenance = {
+                        key: provenance.get(key)
+                        for key in (
+                            "asserted_by_user_concept_id",
+                            "organisation_concept_id",
+                            "source_event_id",
+                            "turn_id",
+                            "capability_name",
+                        )
+                        if provenance.get(key) is not None
+                    }
+                    if compact_provenance:
+                        compact_hit["provenance"] = compact_provenance
+
             target_preview = hit.get("target_concept_preview")
             target_concept_id = _preview_concept_id(target_preview)
             target_name = _preview_name(target_preview)
             target_value = hit.get("target_value")
             if target_concept_id:
                 compact_hit["target_concept_id"] = target_concept_id
-            elif isinstance(target_value, str) and target_value.strip():
+            elif (
+                isinstance(target_value, str)
+                and target_value.strip().startswith("#V#")
+            ):
                 compact_hit["target_concept_id"] = target_value.strip()
             if target_name:
                 compact_hit["target_name"] = target_name
@@ -21715,14 +21779,53 @@ class InternalMCPChatOrchestrator:
                         "item_kind",
                         "source_system",
                         "type",
+                        "row_kind",
+                        "payload_kind",
+                        "assertion_form",
+                        "assertion_id",
                         "predicate",
                         "concept_id",
                         "subject_concept_id",
                         "target_concept_id",
+                        "language",
+                        "context_id",
+                        "context_selection",
                     ):
                         field_value = metadata_map.get(field_name)
                         if isinstance(field_value, str) and field_value.strip():
                             compact_row[field_name] = field_value.strip()
+                    assertion_revision = metadata_map.get(
+                        "assertion_revision"
+                    )
+                    if isinstance(assertion_revision, (int, float)):
+                        compact_row["assertion_revision"] = int(
+                            assertion_revision
+                        )
+                    if isinstance(
+                        metadata_map.get("canonical_publication"), bool
+                    ):
+                        compact_row["canonical_publication"] = metadata_map[
+                            "canonical_publication"
+                        ]
+                    assertion_provenance = metadata_map.get(
+                        "assertion_provenance"
+                    )
+                    if isinstance(assertion_provenance, Mapping):
+                        compact_provenance = {
+                            key: assertion_provenance.get(key)
+                            for key in (
+                                "asserted_by_user_concept_id",
+                                "organisation_concept_id",
+                                "source_event_id",
+                                "turn_id",
+                                "capability_name",
+                            )
+                            if assertion_provenance.get(key) is not None
+                        }
+                        if compact_provenance:
+                            compact_row["assertion_provenance"] = (
+                                compact_provenance
+                            )
                 _bump(source_system_counts, metadata_map.get("source_system"))
                 _bump(item_kind_counts, metadata_map.get("item_kind"))
                 _bump(type_counts, metadata_map.get("type"))
