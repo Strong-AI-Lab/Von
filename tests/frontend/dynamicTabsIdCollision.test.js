@@ -93,9 +93,132 @@ describe('dynamic concept tab IDs', () => {
 
         const contents = Array.from(document.querySelectorAll('.tab-content-area .tab-content'));
         expect(contents).toHaveLength(2);
+        expect(contents.every((el) => el.classList.contains('dynamic-concept-tab'))).toBe(true);
 
         const contentIds = contents.map((el) => el.id);
         expect(new Set(contentIds).size).toBe(2);
+    });
+
+    test('clamps and applies accessible concept page width controls', () => {
+        const originalInnerWidth = window.innerWidth;
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1400 });
+        const {
+            clampConceptPageWidthPx,
+            createOrActivateConceptTab,
+            initialiseConceptPageResizeUI
+        } = require(dynamicTabsModulePath);
+        const tabId = createOrActivateConceptTab('#V#resizable', 'Resizable', false, { kind: 'type' });
+        const tabContent = document.getElementById(tabId);
+        const contentArea = document.querySelector('.tab-content-area');
+        contentArea.getBoundingClientRect = () => ({ width: window.innerWidth });
+        tabContent.innerHTML = `
+            <div class="concept-page-resize-controls" role="group" aria-label="Concept page width">
+                <button type="button" data-concept-width-action="decrease">−</button>
+                <button type="button" data-concept-width-action="increase">+</button>
+                <button type="button" data-concept-width-action="fit">Fit</button>
+                <span class="concept-page-resize-handle" role="separator" tabindex="0"></span>
+            </div>
+        `;
+
+        expect(clampConceptPageWidthPx(500, 1400)).toBe(640);
+        expect(clampConceptPageWidthPx(1700, 1400)).toBe(1400);
+        expect(clampConceptPageWidthPx(960, 1400)).toBe(960);
+
+        const cleanup = initialiseConceptPageResizeUI(tabContent);
+        const decreaseButton = tabContent.querySelector('[data-concept-width-action="decrease"]');
+        const fitButton = tabContent.querySelector('[data-concept-width-action="fit"]');
+        const handle = tabContent.querySelector('.concept-page-resize-handle');
+        expect(tabContent.style.getPropertyValue('--von-concept-page-width')).toBe('1400px');
+        expect(handle.getAttribute('aria-controls')).toBe(tabId);
+
+        decreaseButton.click();
+        expect(tabContent.style.getPropertyValue('--von-concept-page-width')).toBe('1280px');
+        handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+        expect(tabContent.style.getPropertyValue('--von-concept-page-width')).toBe('1160px');
+        handle.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 100, bubbles: true }));
+        handle.dispatchEvent(new MouseEvent('pointermove', { clientX: 160, bubbles: true }));
+        handle.dispatchEvent(new MouseEvent('pointerup', { clientX: 160, bubbles: true }));
+        expect(tabContent.style.getPropertyValue('--von-concept-page-width')).toBe('1220px');
+        fitButton.click();
+        expect(tabContent.style.getPropertyValue('--von-concept-page-width')).toBe('1400px');
+        expect(tabContent.dataset.conceptPageWidthUserSet).toBe('false');
+
+        cleanup();
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+    });
+
+    test('keeps a desktop width preference while disabling width changes on narrow viewports', () => {
+        const originalInnerWidth = window.innerWidth;
+        let availableWidth = 1400;
+        Object.defineProperty(window, 'innerWidth', { configurable: true, get: () => availableWidth });
+        const { createOrActivateConceptTab, initialiseConceptPageResizeUI } = require(dynamicTabsModulePath);
+        const tabId = createOrActivateConceptTab('#V#responsive', 'Responsive', false, { kind: 'type' });
+        const tabContent = document.getElementById(tabId);
+        document.querySelector('.tab-content-area').getBoundingClientRect = () => ({ width: availableWidth });
+        tabContent.innerHTML = `
+            <div class="concept-page-resize-controls">
+                <button type="button" data-concept-width-action="decrease">−</button>
+                <button type="button" data-concept-width-action="increase">+</button>
+                <button type="button" data-concept-width-action="fit">Fit</button>
+                <span class="concept-page-resize-handle" role="separator" tabindex="0"></span>
+            </div>
+        `;
+        const cleanup = initialiseConceptPageResizeUI(tabContent);
+        tabContent.querySelector('[data-concept-width-action="decrease"]').click();
+        expect(tabContent.dataset.conceptPageWidthPx).toBe('1280');
+
+        availableWidth = 390;
+        window.dispatchEvent(new Event('resize'));
+        expect(tabContent.dataset.conceptPageWidthPx).toBe('1280');
+        expect(tabContent.querySelector('[data-concept-width-action="decrease"]').disabled).toBe(true);
+        expect(tabContent.querySelector('.concept-page-resize-handle').tabIndex).toBe(-1);
+
+        availableWidth = 1400;
+        window.dispatchEvent(new Event('resize'));
+        expect(tabContent.dataset.conceptPageWidthPx).toBe('1280');
+        expect(tabContent.querySelector('[data-concept-width-action="decrease"]').disabled).toBe(false);
+
+        cleanup();
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+    });
+
+    test('cleans removed panel listeners and rebinds replacement controls after a failed load', () => {
+        const originalInnerWidth = window.innerWidth;
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1400 });
+        const {
+            createOrActivateConceptTab,
+            destroyConceptTabResizeUI,
+            initialiseConceptPageResizeUI
+        } = require(dynamicTabsModulePath);
+        const tabId = createOrActivateConceptTab('#V#retry_resize', 'Retry resize', false, { kind: 'type' });
+        const tabContent = document.getElementById(tabId);
+        document.querySelector('.tab-content-area').getBoundingClientRect = () => ({ width: 1400 });
+        const controlsMarkup = `
+            <div class="concept-page-resize-controls">
+                <button type="button" data-concept-width-action="decrease">−</button>
+                <button type="button" data-concept-width-action="increase">+</button>
+                <button type="button" data-concept-width-action="fit">Fit</button>
+                <span class="concept-page-resize-handle" role="separator" tabindex="0"></span>
+            </div>
+        `;
+        tabContent.innerHTML = `${controlsMarkup}<div class="von-resizable-viewport"></div>`;
+        const childDestroy = jest.fn();
+        tabContent.querySelector('.von-resizable-viewport').__vonResizableViewportController = {
+            destroy: childDestroy
+        };
+        initialiseConceptPageResizeUI(tabContent);
+
+        destroyConceptTabResizeUI(tabContent);
+        expect(childDestroy).toHaveBeenCalledTimes(1);
+        expect(tabContent.__vonConceptPageResizeCleanup).toBeUndefined();
+
+        tabContent.innerHTML = controlsMarkup;
+        const retryCleanup = initialiseConceptPageResizeUI(tabContent);
+        tabContent.querySelector('[data-concept-width-action="decrease"]').click();
+        expect(tabContent.style.getPropertyValue('--von-concept-page-width')).toBe('1280px');
+
+        retryCleanup();
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
     });
 
     test('marks and clears concept tab loading state accessibly', () => {
@@ -195,6 +318,96 @@ describe('relationship dropdown enter selection precedence', () => {
 
         const selected = chooseDropdownEnterSelection(items, -1, 'unknown');
         expect(selected).toEqual(items[0]);
+    });
+});
+
+describe('Relation Extent resize persistence', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <section id="relationshipsSection_resize_test" class="concept-list-subsection">
+                <div class="von-resizable-panel-header">
+                    <h3>Relation Extent</h3>
+                    <div class="von-resize-controls" role="group">
+                        <button type="button" data-resize-action="decrease">−</button>
+                        <button type="button" data-resize-action="increase">+</button>
+                        <button type="button" data-resize-action="reset">Reset</button>
+                    </div>
+                </div>
+                <div id="relationshipsContent_resize_test" class="relationship-extent-viewport"></div>
+            </section>
+        `;
+        global.ResizeObserver = undefined;
+        global.fetch = jest.fn(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.startsWith('/vontology/api/vontology/relationships/extent?')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        rows: [{
+                            relation_id: 'rel-1',
+                            role: 'arg1',
+                            predicate_id: 'related_to',
+                            arg1_value: 'left literal',
+                            arg2_value: 'right literal',
+                            relation_state: 'asserted',
+                            is_asserted: true,
+                            source: 'structured',
+                            updated_at: '2026-08-20T10:00:00Z'
+                        }]
+                    })
+                };
+            }
+            if (requestUrl.startsWith('/api/concepts/')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ kind: 'predicate', display_name: 'Related to' })
+                };
+            }
+            return { ok: false, status: 404, json: async () => ({}) };
+        });
+    });
+
+    afterEach(() => {
+        document.querySelector('#relationshipsContent_resize_test')
+            ?.__vonResizableViewportController?.destroy?.();
+        global.ResizeObserver = undefined;
+        delete global.fetch;
+        jest.resetModules();
+    });
+
+    test('keeps the stable viewport height through sort and state-filter rerenders', async () => {
+        const { initializeRelationshipsUI } = require(dynamicTabsModulePath);
+        await initializeRelationshipsUI('#V#resize_test', 'resize_test', 'type');
+
+        const content = document.getElementById('relationshipsContent_resize_test');
+        const increaseButton = document.querySelector('[data-resize-action="increase"]');
+        expect(content.classList.contains('von-resizable-viewport-active')).toBe(true);
+        expect(content.style.height).toBe('440px');
+        increaseButton.click();
+        expect(content.style.height).toBe('520px');
+
+        const firstTableWrapper = content.querySelector('.predicate-extent-table-container');
+        const sortSelect = document.getElementById('relationshipSortBy_resize_test');
+        sortSelect.value = 'recency_asc';
+        sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const secondTableWrapper = content.querySelector('.predicate-extent-table-container');
+        expect(content.style.height).toBe('520px');
+        expect(firstTableWrapper.isConnected).toBe(false);
+        expect(secondTableWrapper).not.toBe(firstTableWrapper);
+
+        const filterSelect = document.getElementById('relationshipUncertaintyFilter_resize_test');
+        filterSelect.value = 'asserted_only';
+        filterSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(content.style.height).toBe('520px');
+        expect(secondTableWrapper.isConnected).toBe(false);
+        expect(content.querySelector('.predicate-extent-table-container')).not.toBe(secondTableWrapper);
     });
 });
 

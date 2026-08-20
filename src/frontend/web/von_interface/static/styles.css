@@ -565,7 +565,8 @@ body {
 
 /* Annotation Advanced Layout */
 .annotation-layout {
-    max-width: 1200px;
+    max-width: none;
+    width: 100%;
 }
 
 .annotation-toolbar {
@@ -1032,6 +1033,12 @@ body {
 @media (max-width: 1100px) {
     .annotation-columns {
         flex-direction: column;
+    }
+
+    .annotation-left,
+    .annotation-right {
+        min-width: 0;
+        width: 100%;
     }
 
     .annotation-right {
@@ -6598,10 +6605,10 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     /* Force display */
 }
 
-/* --- Tab Content General Styles (for Chat, Vontology, Entity, Settings) --- */
+/* --- Tab Content General Styles --- */
 .tab-content {
-    max-width: 900px;
-    /* Center content with max width */
+    max-width: none;
+    /* Work surfaces use the available width; readable inner content opts into its own measure. */
     margin-left: auto;
     /* Center horizontally */
     margin-right: auto;
@@ -6617,6 +6624,25 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     min-height: 400px !important;
     /* Force minimum height */
     position: relative;
+}
+
+.tab-content.dynamic-concept-tab {
+    width: min(100%, var(--von-concept-page-width, 100%)) !important;
+}
+
+/* Keep description actions inside a full-width concept surface. The legacy
+ * placement used left: 100%, which was only safe while the whole tab was
+ * artificially capped and caused body-level overflow once that cap was
+ * removed. Reserve the action strip's desktop width so it never covers text. */
+.dynamic-concept-tab .type-description-wrapper {
+    box-sizing: border-box;
+    padding-right: 172px;
+}
+
+.dynamic-concept-tab .type-description-wrapper > .desc-actions {
+    left: auto;
+    right: 0;
+    margin-left: 0;
 }
 
 .tab-content.concept-tab-loading {
@@ -6730,6 +6756,30 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     min-height: 0 !important;
 }
 
+@media (max-width: 760px) {
+    .tab-content-area {
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .tab-content {
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .tab-content.dynamic-concept-tab {
+        width: 100% !important;
+    }
+
+    .dynamic-concept-tab .type-description-wrapper {
+        padding-right: 40px;
+    }
+
+    .dynamic-concept-tab .type-description-wrapper > .desc-actions {
+        flex-direction: column;
+    }
+}
+
 /* Concept interaction panel: ensure follow-up question wraps and does not overflow */
 #followUpQuestion {
     word-break: break-word;
@@ -6752,10 +6802,9 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     /* Text aligns to top by default. Padding and min-height are inherited or can be set. */
 }
 
-/* Constrain the overall width of the tab content and center it */
+/* Vontology uses the shared full-width work surface. */
 #vontologyTab {
-    max-width: 800px;
-    /* Adjust as needed */
+    max-width: none;
     margin-left: auto;
     margin-right: auto;
     padding: 15px;
@@ -6900,20 +6949,110 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     min-width: 200px;
     height: 300px;
     /* Initial height */
-    max-height: 600px;
+    max-height: 900px;
     width: 100%;
-    max-width: 1000px;
+    max-width: 100%;
     overflow: auto;
     margin-bottom: 15px;
     background-color: #fff;
     /* White background for the tree */
-    resize: both;
-    /* Allow user to resize vertically and horizontally */
     box-sizing: border-box;
     display: block !important;
     /* Force display */
     position: relative !important;
     /* Force positioning context */
+}
+
+/* Shared opt-in sizing for dense scroll viewports. */
+.von-resizable-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
+
+.von-resizable-panel-label {
+    color: #475569;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.von-resize-controls,
+.concept-page-resize-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.von-resize-button {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 3px 8px;
+    border: 1px solid #94a3b8;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #334155;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.von-resize-button:hover:not(:disabled),
+.von-resize-button:focus-visible {
+    border-color: #2563eb;
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+
+.von-resize-button:focus-visible,
+.concept-page-resize-handle:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+.von-resize-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.42;
+}
+
+.von-resize-button.von-resize-reset {
+    padding-left: 9px;
+    padding-right: 9px;
+    font-weight: 600;
+}
+
+.von-resizable-viewport {
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow: auto;
+    resize: none;
+}
+
+.von-resizable-viewport.von-resizable-viewport-active {
+    min-height: 180px;
+    max-height: min(900px, calc(100vh - 160px));
+    overscroll-behavior: contain;
+}
+
+@media (pointer: fine) {
+    .von-resizable-viewport.von-resizable-viewport-active[data-resize-axis="vertical"] {
+        resize: vertical;
+    }
+
+    .von-resizable-viewport.von-resizable-viewport-active[data-resize-axis="both"] {
+        resize: both;
+    }
+}
+
+@media (pointer: coarse), (max-width: 760px) {
+    .von-resizable-viewport.von-resizable-viewport-active {
+        max-width: 100% !important;
+        resize: none !important;
+    }
 }
 
 /* Vontology top-of-page search UI */
@@ -7061,10 +7200,28 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     min-height: 0;
 }
 
-/* Chat needs a bit more horizontal room than other tabs. */
+/* Chat's outer work surface is full width, with a deliberate ultrawide inner measure. */
 #chatTab>.content-wrapper {
     max-width: 1600px;
     width: min(100%, calc(100vw - 32px));
+}
+
+/* Annotation is a dense two-column work surface, not a reading column. */
+#annotationTab > .content-wrapper.annotation-layout {
+    max-width: none;
+    width: 100%;
+}
+
+/* Keep explanatory copy readable without constraining Import/Export controls or previews. */
+#importExportTab .import-export-description,
+#importExportTab .import-export-direct-management > p,
+#importExportTab .import-export-card > p {
+    max-width: 78ch;
+}
+
+#importExportTab .import-export-small-text {
+    display: block;
+    max-width: 78ch;
 }
 
 .main-title {
@@ -11986,6 +12143,41 @@ button.prompt-vontology-cartouche {
     /* use gap instead of relying on ad-hoc margins */
 }
 
+.concept-page-resize-controls {
+    margin-left: auto;
+    order: 100;
+}
+
+.concept-page-resize-handle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px dashed #64748b;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #334155;
+    cursor: ew-resize;
+    font-size: 0.95rem;
+    line-height: 1;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+@media (pointer: coarse) {
+    .concept-page-resize-handle {
+        display: none;
+    }
+}
+
+@media (max-width: 760px) {
+    .concept-page-resize-controls {
+        display: none;
+    }
+}
+
 .concept-header .kind-badge:first-child {
     margin-left: 0 !important;
 }
@@ -14681,6 +14873,24 @@ body.settings-body {
     margin-bottom: 16px;
 }
 
+.relationship-extent-header {
+    margin-top: 2px;
+}
+
+.relationship-extent-viewport.von-resizable-viewport-active {
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    background: #ffffff;
+}
+
+.relationship-extent-viewport > .predicate-extent-table-container {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    margin-bottom: 0;
+}
+
 .relationships-toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -14728,6 +14938,13 @@ body.settings-body {
     font-weight: 600;
     color: #495057;
     white-space: nowrap;
+}
+
+.relationship-extent-viewport .predicate-extent-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background-color: #e9ecef;
 }
 
 .predicate-extent-table th.sortable {

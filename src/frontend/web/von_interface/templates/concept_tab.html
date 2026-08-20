@@ -3,6 +3,16 @@
   <span id="conceptTypeDisplayNamePluralElement" class="concept-type-header"></span>
   <button id="refreshConceptButton" class="round-icon-button" title="Refresh concept data"
     aria-label="Refresh concept data" data-icon="refresh"></button>
+  <div class="concept-page-resize-controls" role="group" aria-label="Concept page width">
+    <button type="button" class="von-resize-button" data-concept-width-action="decrease"
+      aria-label="Narrow concept page" title="Narrow concept page">−</button>
+    <button type="button" class="von-resize-button" data-concept-width-action="increase"
+      aria-label="Widen concept page" title="Widen concept page">+</button>
+    <button type="button" class="von-resize-button von-resize-reset" data-concept-width-action="fit"
+      aria-label="Fit concept page to available width" title="Fit concept page to available width">Fit</button>
+    <span class="concept-page-resize-handle" role="separator" tabindex="0" aria-orientation="vertical"
+      aria-label="Resize concept page width" title="Drag or use Left and Right arrow keys to resize">↔</span>
+  </div>
 </div>
 
 <!-- Step 1: Initial Input -->
@@ -187,8 +197,20 @@
 
 <!-- Relationships section (shown for both Type and Individual tabs) -->
 <div id="relationshipsSection" class="concept-list-subsection">
-  <h3 class="concept-list-title">Relation Extent</h3>
-  <div id="relationshipsContent">
+  <div class="von-resizable-panel-header relationship-extent-header">
+    <h3 class="concept-list-title">Relation Extent</h3>
+    <div id="relationshipExtentResizeControls" class="von-resize-controls" role="group"
+      aria-label="Relation Extent height">
+      <button type="button" class="von-resize-button" data-resize-action="decrease"
+        aria-label="Show fewer Relation Extent rows" title="Show fewer rows">−</button>
+      <button type="button" class="von-resize-button" data-resize-action="increase"
+        aria-label="Show more Relation Extent rows" title="Show more rows">+</button>
+      <button type="button" class="von-resize-button von-resize-reset" data-resize-action="reset"
+        aria-label="Reset Relation Extent height" title="Reset Relation Extent height">Reset</button>
+    </div>
+  </div>
+  <div id="relationshipsContent" class="relationship-extent-viewport von-resizable-viewport"
+    data-resize-axis="vertical">
     <!-- Populated dynamically -->
   </div>
   <div id="relationshipsAddForm" class="mt-2 flex gap-2 ai-center flex-wrap">

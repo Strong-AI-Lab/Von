@@ -27,6 +27,7 @@ import {
     getSessionScopedNamespace,
     getSessionScopedOrgId
 } from './utils/sessionScopedStorage.js';
+import { initialiseResizableViewport } from './utils/resizableViewport.js';
 import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge } from './vontology.js';
 
 // Track dynamically created concept tabs
@@ -42,6 +43,9 @@ const CONCEPT_TAB_BUCKET_ORDER = ['type', 'individual', 'predicate'];
 const CONCEPT_TAB_KIND_CLASS_NAMES = ['type-tab', 'individual-tab', 'predicate-tab'];
 const CONCEPT_TAB_LOADING_CLASS = 'concept-tab-loading';
 const CONCEPT_TAB_BUTTON_LOADING_CLASS = 'is-loading';
+const CONCEPT_PAGE_MIN_WIDTH_PX = 640;
+const CONCEPT_PAGE_WIDTH_STEP_PX = 120;
+const CONCEPT_PAGE_NARROW_BREAKPOINT_PX = 760;
 // Singleton context menu element for tab operations (created lazily)
 let tabContextMenu = null;
 let currentContextMenuTarget = null; // The tab button element for which menu opened
@@ -51,6 +55,216 @@ let suppressConceptTabPersistence = false;
 let dynamicConceptTabRecencyCounter = 0;
 let conceptTabLoadingSequence = 0;
 const expandedConceptTabBuckets = new Set();
+
+export function clampConceptPageWidthPx(requestedWidthPx, availableWidthPx) {
+    const available = Number(availableWidthPx);
+    const safeAvailable = Number.isFinite(available) && available > 0
+        ? available
+        : CONCEPT_PAGE_MIN_WIDTH_PX;
+    const minimum = Math.min(CONCEPT_PAGE_MIN_WIDTH_PX, safeAvailable);
+    const requested = Number(requestedWidthPx);
+    const safeRequested = Number.isFinite(requested) && requested > 0
+        ? requested
+        : safeAvailable;
+    return Math.round(Math.min(safeAvailable, Math.max(minimum, safeRequested)));
+}
+
+function getConceptPageAvailableWidthPx(tabContent) {
+    const parent = tabContent?.parentElement;
+    let available = Number(parent?.getBoundingClientRect?.().width) || Number(parent?.clientWidth);
+    if (!Number.isFinite(available) || available <= 0) {
+        available = Number(globalThis?.window?.innerWidth) || CONCEPT_PAGE_MIN_WIDTH_PX;
+    }
+    try {
+        const styles = globalThis?.window?.getComputedStyle?.(parent);
+        const horizontalPadding = (Number.parseFloat(styles?.paddingLeft || '') || 0)
+            + (Number.parseFloat(styles?.paddingRight || '') || 0);
+        available -= horizontalPadding;
+    } catch (_) { /* use the unadjusted parent width */ }
+    return Math.max(1, Math.round(available));
+}
+
+function isNarrowConceptPageViewport(availableWidthPx) {
+    const viewportWidth = Number(globalThis?.window?.innerWidth);
+    return (Number.isFinite(viewportWidth) && viewportWidth <= CONCEPT_PAGE_NARROW_BREAKPOINT_PX)
+        || availableWidthPx < CONCEPT_PAGE_MIN_WIDTH_PX;
+}
+
+function hasCoarsePrimaryPointer() {
+    try {
+        return !!globalThis?.window?.matchMedia?.('(pointer: coarse)')?.matches;
+    } catch (_) {
+        return false;
+    }
+}
+
+function getConceptPagePreferredWidthPx(tabContent, availableWidthPx) {
+    const stored = Number.parseFloat(tabContent?.dataset?.conceptPageWidthPx || '');
+    return clampConceptPageWidthPx(stored, availableWidthPx);
+}
+
+function updateConceptPageResizeControls(tabContent) {
+    const controls = tabContent?.querySelector?.('.concept-page-resize-controls');
+    if (!controls) return;
+    const availableWidthPx = getConceptPageAvailableWidthPx(tabContent);
+    const currentWidthPx = getConceptPagePreferredWidthPx(tabContent, availableWidthPx);
+    const narrowViewport = isNarrowConceptPageViewport(availableWidthPx);
+    const decreaseButton = controls.querySelector('[data-concept-width-action="decrease"]');
+    const increaseButton = controls.querySelector('[data-concept-width-action="increase"]');
+    const fitButton = controls.querySelector('[data-concept-width-action="fit"]');
+    const handle = controls.querySelector('.concept-page-resize-handle');
+
+    if (decreaseButton) {
+        decreaseButton.disabled = narrowViewport || currentWidthPx <= Math.min(CONCEPT_PAGE_MIN_WIDTH_PX, availableWidthPx);
+    }
+    if (increaseButton) {
+        increaseButton.disabled = narrowViewport || currentWidthPx >= availableWidthPx;
+    }
+    if (fitButton) {
+        fitButton.disabled = narrowViewport
+            || (tabContent.dataset.conceptPageWidthUserSet !== 'true' && currentWidthPx >= availableWidthPx);
+    }
+    controls.setAttribute('aria-disabled', narrowViewport ? 'true' : 'false');
+
+    if (handle) {
+        const directResizeEnabled = !narrowViewport && !hasCoarsePrimaryPointer();
+        handle.tabIndex = directResizeEnabled ? 0 : -1;
+        handle.setAttribute('aria-hidden', directResizeEnabled ? 'false' : 'true');
+        handle.setAttribute('aria-valuemin', String(Math.min(CONCEPT_PAGE_MIN_WIDTH_PX, availableWidthPx)));
+        handle.setAttribute('aria-valuemax', String(availableWidthPx));
+        handle.setAttribute('aria-valuenow', String(currentWidthPx));
+    }
+}
+
+function applyConceptPageWidthPx(tabContent, requestedWidthPx, { userSet = true } = {}) {
+    const availableWidthPx = getConceptPageAvailableWidthPx(tabContent);
+    const widthPx = clampConceptPageWidthPx(requestedWidthPx, availableWidthPx);
+    tabContent.dataset.conceptPageWidthPx = String(widthPx);
+    tabContent.dataset.conceptPageWidthUserSet = userSet ? 'true' : 'false';
+    tabContent.style.setProperty('--von-concept-page-width', `${widthPx}px`);
+    updateConceptPageResizeControls(tabContent);
+    return widthPx;
+}
+
+export function destroyConceptTabResizeUI(tabContent) {
+    if (!tabContent) return;
+    try {
+        tabContent.__vonConceptPageResizeCleanup?.();
+    } catch (_) { /* continue cleaning child controllers */ }
+    tabContent.querySelectorAll?.('.von-resizable-viewport')?.forEach((viewport) => {
+        try {
+            viewport.__vonResizableViewportController?.destroy?.();
+        } catch (_) { /* best-effort cleanup for a removed tab/template */ }
+    });
+}
+
+export function initialiseConceptPageResizeUI(tabContent) {
+    if (!tabContent?.classList?.contains('dynamic-concept-tab')) return null;
+    const controls = tabContent.querySelector('.concept-page-resize-controls');
+    if (!controls) return null;
+    if (tabContent.__vonConceptPageResizeCleanup) {
+        if (tabContent.__vonConceptPageResizeControls === controls && controls.isConnected) {
+            return tabContent.__vonConceptPageResizeCleanup;
+        }
+        destroyConceptTabResizeUI(tabContent);
+    }
+
+    controls.querySelectorAll('button, .concept-page-resize-handle').forEach((control) => {
+        if (tabContent.id) control.setAttribute('aria-controls', tabContent.id);
+    });
+    applyConceptPageWidthPx(tabContent, getConceptPageAvailableWidthPx(tabContent), { userSet: false });
+
+    const adjustWidth = (deltaPx) => {
+        const availableWidthPx = getConceptPageAvailableWidthPx(tabContent);
+        const currentWidthPx = getConceptPagePreferredWidthPx(tabContent, availableWidthPx);
+        applyConceptPageWidthPx(tabContent, currentWidthPx + deltaPx);
+    };
+    const onDecrease = () => adjustWidth(-CONCEPT_PAGE_WIDTH_STEP_PX);
+    const onIncrease = () => adjustWidth(CONCEPT_PAGE_WIDTH_STEP_PX);
+    const onFit = () => applyConceptPageWidthPx(
+        tabContent,
+        getConceptPageAvailableWidthPx(tabContent),
+        { userSet: false }
+    );
+    const decreaseButton = controls.querySelector('[data-concept-width-action="decrease"]');
+    const increaseButton = controls.querySelector('[data-concept-width-action="increase"]');
+    const fitButton = controls.querySelector('[data-concept-width-action="fit"]');
+    const handle = controls.querySelector('.concept-page-resize-handle');
+    decreaseButton?.addEventListener('click', onDecrease);
+    increaseButton?.addEventListener('click', onIncrease);
+    fitButton?.addEventListener('click', onFit);
+
+    let pointerStartX = null;
+    let pointerStartWidthPx = null;
+    const onPointerDown = (event) => {
+        if (event.button !== undefined && event.button !== 0) return;
+        if (isNarrowConceptPageViewport(getConceptPageAvailableWidthPx(tabContent)) || hasCoarsePrimaryPointer()) return;
+        pointerStartX = Number(event.clientX) || 0;
+        pointerStartWidthPx = getConceptPagePreferredWidthPx(
+            tabContent,
+            getConceptPageAvailableWidthPx(tabContent)
+        );
+        handle?.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+    };
+    const onPointerMove = (event) => {
+        if (pointerStartX === null || pointerStartWidthPx === null) return;
+        applyConceptPageWidthPx(tabContent, pointerStartWidthPx + ((Number(event.clientX) || 0) - pointerStartX));
+        event.preventDefault();
+    };
+    const onPointerEnd = (event) => {
+        if (pointerStartX === null) return;
+        pointerStartX = null;
+        pointerStartWidthPx = null;
+        handle?.releasePointerCapture?.(event.pointerId);
+    };
+    const onHandleKeyDown = (event) => {
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            onDecrease();
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            onIncrease();
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            applyConceptPageWidthPx(tabContent, CONCEPT_PAGE_MIN_WIDTH_PX);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            onFit();
+        }
+    };
+    handle?.addEventListener('pointerdown', onPointerDown);
+    handle?.addEventListener('pointermove', onPointerMove);
+    handle?.addEventListener('pointerup', onPointerEnd);
+    handle?.addEventListener('pointercancel', onPointerEnd);
+    handle?.addEventListener('keydown', onHandleKeyDown);
+
+    const onWindowResize = () => {
+        if (tabContent.dataset.conceptPageWidthUserSet !== 'true') {
+            applyConceptPageWidthPx(tabContent, getConceptPageAvailableWidthPx(tabContent), { userSet: false });
+        } else {
+            updateConceptPageResizeControls(tabContent);
+        }
+    };
+    globalThis?.window?.addEventListener?.('resize', onWindowResize);
+
+    const cleanup = () => {
+        decreaseButton?.removeEventListener('click', onDecrease);
+        increaseButton?.removeEventListener('click', onIncrease);
+        fitButton?.removeEventListener('click', onFit);
+        handle?.removeEventListener('pointerdown', onPointerDown);
+        handle?.removeEventListener('pointermove', onPointerMove);
+        handle?.removeEventListener('pointerup', onPointerEnd);
+        handle?.removeEventListener('pointercancel', onPointerEnd);
+        handle?.removeEventListener('keydown', onHandleKeyDown);
+        globalThis?.window?.removeEventListener?.('resize', onWindowResize);
+        delete tabContent.__vonConceptPageResizeCleanup;
+        delete tabContent.__vonConceptPageResizeControls;
+    };
+    tabContent.__vonConceptPageResizeCleanup = cleanup;
+    tabContent.__vonConceptPageResizeControls = controls;
+    return cleanup;
+}
 
 function getOpenConceptTabsStorageKey(namespace = null) {
     return buildNamespaceScopedStorageKey(OPEN_CONCEPT_TABS_STORAGE_PREFIX, namespace);
@@ -1743,7 +1957,7 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
 function createTabContent(tabId, conceptId, kind) {
     const tabContent = document.createElement('div');
     tabContent.id = tabId;
-    tabContent.className = 'tab-content';
+    tabContent.className = 'tab-content dynamic-concept-tab';
     tabContent.dataset.conceptId = conceptId;
     applyConceptTabKindPresentation(tabContent, kind);
 
@@ -1813,6 +2027,8 @@ export function closeDynamicConceptTab(conceptId, options = {}) {
             tabInfo.namesObserver.disconnect();
         }
     } catch (_) { /* ignore */ }
+
+    destroyConceptTabResizeUI(tabInfo.content);
 
     // Clean up predicate view if present
     try {
@@ -1983,7 +2199,9 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
         const headerSpanRegex = new RegExp(`(<span[^>]*id="${headerIdWithSuffix}")`);
         modifiedHtml = modifiedHtml.replace(headerSpanRegex, `$1 data-concept-id="${conceptId}"`);
 
+        destroyConceptTabResizeUI(tabInfo.content);
         tabInfo.content.innerHTML = modifiedHtml;
+        initialiseConceptPageResizeUI(tabInfo.content);
 
         // Add a small kind badge and an ID copy chip to the header if available.
         // Fallback inference: if tabInfo.kind is absent (regression / legacy dispatch), infer from node content.
@@ -2119,6 +2337,7 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
 
     } catch (error) {
         console.error(`[dynamicTabs] Error loading content for ${tabId}:`, error);
+        destroyConceptTabResizeUI(tabInfo.content);
         tabInfo.content.innerHTML = `<div class="error">Error loading concept tab content. Please try again.</div>`;
     } finally {
         delete tabInfo.loadingPromise;
@@ -5737,6 +5956,24 @@ function setRelationshipExtentUiState(conceptId, suffix, patch = {}) {
     return state;
 }
 
+function setRelationshipExtentResizeEnabled(content, suffix, enabled) {
+    if (!content) return null;
+    const section = document.getElementById(`relationshipsSection_${suffix}`)
+        || content.closest?.('.concept-list-subsection');
+    const controls = section?.querySelector?.('.von-resize-controls') || null;
+    const controller = initialiseResizableViewport(content, controls, {
+        defaultHeightPx: 440,
+        minHeightPx: 180,
+        maxHeightPx: 800,
+        stepPx: 80,
+        viewportOffsetPx: 180,
+        resizeAxis: 'vertical',
+        enabled
+    });
+    controller?.setEnabled(enabled);
+    return controller;
+}
+
 export function deriveRelationshipExtentQuery(uncertaintyFilter = 'all') {
     const selected = RELATIONSHIP_UNCERTAINTY_FILTERS[String(uncertaintyFilter || 'all')] || RELATIONSHIP_UNCERTAINTY_FILTERS.all;
     return {
@@ -5886,6 +6123,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
         const content = document.getElementById(`relationshipsContent_${suffix}`) || document.getElementById('relationshipsContent');
         if (content) {
             content.innerHTML = '<div class="relationships-loading">Loading relationships...</div>';
+            setRelationshipExtentResizeEnabled(content, suffix, false);
         }
 
         const container = document.getElementById(`relationshipsSection_${suffix}`) || document.getElementById('relationshipsSection');
@@ -6989,6 +7227,7 @@ async function renderRelationships(conceptId, suffix, kind) {
         }
         if (!rows.length) {
             content.innerHTML = '<i>No relationships yet.</i>';
+            setRelationshipExtentResizeEnabled(content, suffix, false);
             return;
         }
         rows = sortRelationshipExtentRows(rows, uiState.sortBy);
@@ -7298,8 +7537,10 @@ async function renderRelationships(conceptId, suffix, kind) {
         tableContainer.appendChild(table);
         content.innerHTML = '';
         content.appendChild(tableContainer);
+        setRelationshipExtentResizeEnabled(content, suffix, true);
     } catch (e) {
         content.innerHTML = `<span class="relationships-error">Failed to load relationships (${e.message})</span>`;
+        setRelationshipExtentResizeEnabled(content, suffix, false);
     }
 }
 // Helper: Add analysis and relationship buttons next to JSON button
