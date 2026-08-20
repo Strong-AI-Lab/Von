@@ -46,6 +46,8 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     methods = set(catalogue.list_methods())
 
     assert "add_relationship" in methods
+    assert "add_text_assertion_concept_links" in methods
+    assert "store_text_assertion" in methods
     assert "upsert_scoped_assertion" in methods
     assert "retract_scoped_assertion" in methods
     assert "list_scoped_assertions" in methods
@@ -233,6 +235,8 @@ def test_frequent_gmail_and_scoped_assertion_paths_use_advisory_only_timing():
         "gmail_import_attachment": 20.0,
         "gmail_list_labels": 15.0,
         "upsert_scoped_assertion": 20.0,
+        "add_text_assertion_concept_links": 20.0,
+        "store_text_assertion": 20.0,
         "list_scoped_assertions": 20.0,
     }
 
@@ -343,11 +347,13 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }.isdisjoint(actor_mail_reads)
     assert delegated_effects == {
         "create_concepts",
+        "add_text_assertion_concept_links",
         "change_concept_publication_scope",
         "record_source_processing_marker",
         "preview_concept_publication_scope_change",
-        "retract_scoped_assertion",
-        "upsert_scoped_assertion",
+            "retract_scoped_assertion",
+            "store_text_assertion",
+            "upsert_scoped_assertion",
         "upsert_text_relation",
         "upsert_uncertain_relationship_assertion",
         "add_relationship",
@@ -447,6 +453,27 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "canonical_publication": False,
     }
     assert scoped_definition.ordinary_turn_mutation_subject_argument is None
+    text_assertion_definition = catalogue.get("store_text_assertion")
+    assert text_assertion_definition.ordinary_turn_trusted_argument_bindings == {
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "namespace": "turn_namespace",
+        "turn_id": "turn_id",
+    }
+    assert text_assertion_definition.ordinary_turn_fixed_arguments == {
+        "canonical_publication": False,
+    }
+    assert text_assertion_definition.ordinary_turn_effect is True
+    assert text_assertion_definition.ordinary_turn_mutation_subject_argument is None
+    link_definition = catalogue.get("add_text_assertion_concept_links")
+    assert link_definition.ordinary_turn_trusted_argument_bindings == {
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "namespace": "turn_namespace",
+        "turn_id": "turn_id",
+    }
+    assert link_definition.ordinary_turn_effect is True
+    assert link_definition.ordinary_turn_mutation_subject_argument is None
     uncertain_definition = catalogue.get("upsert_uncertain_relationship_assertion")
     assert uncertain_definition.ordinary_turn_effect is True
     assert uncertain_definition.ordinary_turn_mutation_subject_argument == "source_id"

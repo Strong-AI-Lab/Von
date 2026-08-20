@@ -17,6 +17,7 @@ from ..security.access_control import (
 from .text_relation_predicate_validation_service import (
     predicate_concept_id_for_storage,
 )
+from .scoped_assertion_service import STANDALONE_TEXT_ASSERTION_FORM
 
 
 def _clean_concept_id(value: Any) -> str | None:
@@ -101,6 +102,7 @@ def current_authorised_rag_candidate_keys(
         tuple[str, str],
         tuple[str, str, str],
     ] = {}
+    current_standalone_revisions: dict[str, int] = {}
     concept_ids: set[str] = set()
 
     if relation_metadata:
@@ -116,6 +118,8 @@ def current_authorised_rag_candidate_keys(
                 "_id": 1,
                 "subject_concept_id": 1,
                 "predicate": 1,
+                "assertion_form": 1,
+                "assertion_revision": 1,
             },
         )
         for relation in relations:
@@ -158,6 +162,8 @@ def current_authorised_rag_candidate_keys(
             {
                 "_id": 0,
                 "assertion_id": 1,
+                "assertion_form": 1,
+                "assertion_revision": 1,
                 "subject_concept_id": 1,
                 "predicate": 1,
             },
@@ -168,6 +174,14 @@ def current_authorised_rag_candidate_keys(
             assertion_id = _clean_assertion_id(
                 assertion.get("assertion_id")
             )
+            if assertion.get("assertion_form") == STANDALONE_TEXT_ASSERTION_FORM:
+                try:
+                    revision = int(assertion.get("assertion_revision") or 0)
+                except (TypeError, ValueError):
+                    revision = 0
+                if assertion_id and revision > 0:
+                    current_standalone_revisions[assertion_id] = revision
+                continue
             subject_id = _clean_concept_id(
                 assertion.get("subject_concept_id")
             )
@@ -187,10 +201,24 @@ def current_authorised_rag_candidate_keys(
             )
             concept_ids.update((subject_id, predicate_id))
 
-    with override_current_actor(actor_user_id, actor_org_id):
-        visible_concept_ids = filter_accessible_concept_ids(concept_ids)
+    visible_concept_ids: set[str] = set()
+    if concept_ids:
+        with override_current_actor(actor_user_id, actor_org_id):
+            visible_concept_ids = filter_accessible_concept_ids(concept_ids)
 
     allowed: set[tuple[str, str]] = set()
+    for assertion_id, revision in current_standalone_revisions.items():
+        metadata = scoped_metadata.get(assertion_id)
+        if metadata is None:
+            continue
+        if metadata.get("assertion_form") != STANDALONE_TEXT_ASSERTION_FORM:
+            continue
+        try:
+            metadata_revision = int(metadata.get("assertion_revision") or 0)
+        except (TypeError, ValueError):
+            continue
+        if metadata_revision == revision:
+            allowed.add(("scoped_knowledge_assertion", assertion_id))
     for key, (subject_id, predicate, predicate_id) in current_rows.items():
         kind, candidate_id = key
         metadata = (

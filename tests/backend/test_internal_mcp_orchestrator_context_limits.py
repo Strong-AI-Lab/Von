@@ -357,6 +357,59 @@ def test_format_tool_result_shapes_search_knowledge_base_payload_for_live_follow
     assert "source systems" in payload["retrieval_diagnostics"]["note"].lower()
 
 
+def test_format_tool_result_preserves_raw_text_assertion_identity_and_context():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+    )
+    encoded = orchestrator._format_tool_result(
+        "search_knowledge_base",
+        {
+            "query": "salon gatherings in Svalbard",
+            "count": 1,
+            "results": [
+                {
+                    "id": "scoped_assertion:ska_raw",
+                    "text": "Susan hosted salon-style gatherings in Svalbard.",
+                    "score": 0.91,
+                    "metadata": {
+                        "type": "scoped_knowledge_assertion",
+                        "row_kind": "text_assertion",
+                        "payload_kind": "text",
+                        "assertion_form": "standalone_text",
+                        "assertion_id": "ska_raw",
+                        "assertion_revision": 2,
+                        "language": "en-NZ",
+                        "context_id": "intake:user:#V#member",
+                        "context_selection": "implicit",
+                        "canonical_publication": False,
+                        "assertion_provenance": {
+                            "asserted_by_user_concept_id": "#V#member",
+                            "source_event_id": "source:7",
+                            "evidence": {"unbounded": "must not be copied"},
+                        },
+                    },
+                }
+            ],
+        },
+        1.0,
+        "ok",
+    )
+    row = json.loads(encoded)["payload"]["results"][0]
+    assert row["assertion_id"] == "ska_raw"
+    assert row["assertion_revision"] == 2
+    assert row["row_kind"] == "text_assertion"
+    assert row["assertion_form"] == "standalone_text"
+    assert row["context_id"] == "intake:user:#V#member"
+    assert row["canonical_publication"] is False
+    assert row["assertion_provenance"] == {
+        "asserted_by_user_concept_id": "#V#member",
+        "source_event_id": "source:7",
+    }
+
+
 def test_format_tool_result_preserves_bounded_rag_concept_frontier():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),
@@ -700,6 +753,73 @@ def test_format_tool_result_shapes_find_relations_payload_with_target_type_ids()
     assert payload["hits"][1]["target_type_ids"] == [
         "#V#diary_entry_about_michael_witbrocks_work"
     ]
+
+
+def test_format_tool_result_preserves_linked_text_assertion_envelope():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+    )
+    encoded = orchestrator._format_tool_result(
+        "find_relations_with_argument",
+        {
+            "concept_id": "#V#susan",
+            "context_view": "actor_effective",
+            "total_hits": 1,
+            "hits": [
+                {
+                    "source_concept_id": None,
+                    "predicate_concept_id": None,
+                    "relation_kind": "text",
+                    "argument_indexes": [2],
+                    "target_value": "Susan hosted gatherings in Svalbard.",
+                    "relation_state": "asserted_text_with_link",
+                    "canonical_publication": False,
+                    "relation_metadata": {
+                        "assertion_id": "ska_raw",
+                        "assertion_revision": 2,
+                        "row_kind": "text_assertion",
+                        "assertion_form": "standalone_text",
+                        "link_id": "skl_susan",
+                        "link_role": "about",
+                        "linked_concept_id": "#V#susan",
+                        "link_method": "explicit_user_link",
+                        "link_confidence": 0.9,
+                        "match_type": "explicit_concept_link",
+                        "canonical_publication": False,
+                        "assertion_context": {
+                            "context_id": "intake:user:#V#member",
+                            "selection": "implicit",
+                        },
+                        "provenance": {
+                            "asserted_by_user_concept_id": "#V#member",
+                            "turn_id": "turn-1",
+                            "evidence": {"large": "not copied"},
+                        },
+                    },
+                }
+            ],
+        },
+        1.0,
+        "ok",
+    )
+    hit = json.loads(encoded)["payload"]["hits"][0]
+    assert hit["assertion_id"] == "ska_raw"
+    assert hit["assertion_revision"] == 2
+    assert hit["row_kind"] == "text_assertion"
+    assert hit["link_id"] == "skl_susan"
+    assert hit["link_role"] == "about"
+    assert hit["canonical_publication"] is False
+    assert hit["assertion_context"] == {
+        "context_id": "intake:user:#V#member",
+        "selection": "implicit",
+    }
+    assert hit["provenance"] == {
+        "asserted_by_user_concept_id": "#V#member",
+        "turn_id": "turn-1",
+    }
 
 
 def test_format_tool_result_projects_unique_related_entities_in_both_directions():

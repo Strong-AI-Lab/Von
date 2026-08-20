@@ -387,6 +387,7 @@ def find_relations_with_argument(
     asserted_binary_hits: List[Dict[str, Any]] = []
     scoped_concept_query_truncated = False
     actor_effective_text_query_truncated = False
+    linked_text_assertion_query_truncated = False
 
     subject_doc = _load_accessible_relation_subject_document(
         resolved_concept_id,
@@ -773,6 +774,102 @@ def find_relations_with_argument(
                 hit["source_concept_preview"] = source_preview
             hits.append(hit)
 
+    if (
+        context_view == "actor_effective"
+        and include_asserted_rows
+        and include_text
+        and include_arg2_or_later
+    ):
+        from .scoped_assertion_service import (
+            STANDALONE_TEXT_ASSERTION_FORM,
+            list_visible_scoped_assertions_page,
+        )
+
+        linked_assertion_page = list_visible_scoped_assertions_page(
+            argument_concept_id=resolved_concept_id,
+            object_kind="text",
+            assertion_form=STANDALONE_TEXT_ASSERTION_FORM,
+            limit=_MAX_LIMIT + 1,
+        )
+        linked_assertions = list(linked_assertion_page.get("items") or ())
+        linked_text_assertion_query_truncated = bool(
+            linked_assertion_page.get("has_more")
+            or linked_assertion_page.get("counts_are_lower_bounds")
+            or len(linked_assertions) > _MAX_LIMIT
+        )
+        for assertion in linked_assertions[:_MAX_LIMIT]:
+            object_text = assertion.get("object_text")
+            if not isinstance(object_text, Mapping):
+                continue
+            text_value = object_text.get("text")
+            if not isinstance(text_value, str) or not text_value.strip():
+                continue
+            for link in assertion.get("concept_links") or ():
+                if not isinstance(link, Mapping):
+                    continue
+                if link.get("status") != "active":
+                    continue
+                if link.get("concept_id") != resolved_concept_id:
+                    continue
+                role = str(link.get("role") or "").strip()
+                if not _predicate_matches_terms(role, predicate_terms):
+                    continue
+                if not _argument_indexes_match(
+                    [_ARG_INDEX_FIRST_OBJECT], argument_filter
+                ):
+                    continue
+                assertion_context = assertion.get("assertion_context")
+                hit = {
+                    "source_concept_id": None,
+                    # A link role is qualified enrichment, not silently a
+                    # Vontology predicate concept or grounded binary relation.
+                    "predicate_concept_id": None,
+                    "relation_kind": "text",
+                    "argument_indexes": [_ARG_INDEX_FIRST_OBJECT],
+                    "target_value": text_value,
+                    "relation_metadata": {
+                        "relation_id": None,
+                        "assertion_id": assertion.get("assertion_id"),
+                        "assertion_revision": assertion.get(
+                            "assertion_revision"
+                        ),
+                        "assertion_form": STANDALONE_TEXT_ASSERTION_FORM,
+                        "row_kind": "text_assertion",
+                        "link_id": link.get("link_id"),
+                        "link_role": role or None,
+                        "linked_concept_id": resolved_concept_id,
+                        "link_spans": link.get("spans") or [],
+                        "link_method": link.get("method"),
+                        "link_confidence": link.get("confidence"),
+                        "link_provenance": link.get("provenance") or {},
+                        "lang": object_text.get("language"),
+                        "updated_at": assertion.get("updated_at"),
+                        "match_type": "explicit_concept_link",
+                        "assertion_context": (
+                            assertion_context
+                            if isinstance(assertion_context, Mapping)
+                            else {}
+                        ),
+                        "assertion_scope": assertion.get("scope"),
+                        "canonical_publication": False,
+                        "storage_surface": "scoped_knowledge_assertions",
+                        "provenance": assertion.get("provenance"),
+                    },
+                    "access_granted": True,
+                    "follow_up_actions": [],
+                    "score": 1.0,
+                    "is_asserted": True,
+                    "relation_state": "asserted_text_with_link",
+                    "canonical_publication": False,
+                }
+                snippet = _make_snippet(
+                    text_value,
+                    "snippets" if include_text_snippets else "",
+                )
+                if snippet:
+                    hit["text_snippet"] = snippet
+                hits.append(hit)
+
     if include_asserted_rows and include_text and include_arg1:
         source_preview = _resolve_concept_preview(
             resolved_concept_id,
@@ -1007,6 +1104,7 @@ def find_relations_with_argument(
     counts_are_lower_bounds = bool(
         scoped_concept_query_truncated
         or actor_effective_text_query_truncated
+        or linked_text_assertion_query_truncated
         or (
             incoming_asserted_binary_diagnostics.get("requested")
             and not incoming_asserted_binary_diagnostics.get("complete", True)
@@ -1053,6 +1151,9 @@ def find_relations_with_argument(
                     ),
                     "actor_effective_text_query_truncated": (
                         actor_effective_text_query_truncated
+                    ),
+                    "linked_text_assertion_query_truncated": (
+                        linked_text_assertion_query_truncated
                     ),
                 }
                 if counts_are_lower_bounds
@@ -4087,6 +4188,7 @@ def _dedupe_argument_hits(hits: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
             hit.get("target_value"),
             metadata.get("relation_id"),
             metadata.get("assertion_id"),
+            metadata.get("link_id"),
         )
         existing = deduped.get(key)
         if existing is None:

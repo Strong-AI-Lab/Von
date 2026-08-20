@@ -87,7 +87,7 @@ def test_scoped_assertion_indexes_are_ensured_once_per_database(monkeypatch):
 
     assert coll_first is coll_second
     assert coll_first is not None
-    assert len(coll_first.create_index_calls) == 8
+    assert len(coll_first.create_index_calls) == 10
     calls_by_name = {
         str(call["kwargs"].get("name")): call
         for call in coll_first.create_index_calls
@@ -101,6 +101,8 @@ def test_scoped_assertion_indexes_are_ensured_once_per_database(monkeypatch):
         "audience_status_id",
         "subject_audience_status_id",
         "predicate_audience_status_id",
+        "concept_link_audience_status_updated_at_desc_assertion_id",
+        "standalone_rag_queue_status_due_lease_updated_at",
     }
     assert calls_by_name["audience_status_updated_at_desc_assertion_id"]["keys"] == [
         ("scope.audience_keys", mc.ASCENDING),
@@ -151,6 +153,27 @@ def test_scoped_assertion_indexes_are_ensured_once_per_database(monkeypatch):
         ("scope.audience_keys", mc.ASCENDING),
         ("status", mc.ASCENDING),
         ("_id", mc.ASCENDING),
+    ]
+    assert calls_by_name[
+        "concept_link_audience_status_updated_at_desc_assertion_id"
+    ]["keys"] == [
+        ("concept_links.concept_id", mc.ASCENDING),
+        ("scope.audience_key", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("updated_at", mc.DESCENDING),
+        ("assertion_id", mc.ASCENDING),
+    ]
+    assert calls_by_name[
+        "standalone_rag_queue_status_due_lease_updated_at"
+    ]["keys"] == [
+        ("assertion_form", mc.ASCENDING),
+        ("object_kind", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("rag_index.desired_operation", mc.ASCENDING),
+        ("rag_index.status", mc.ASCENDING),
+        ("rag_index.next_attempt_at", mc.ASCENDING),
+        ("rag_index.lease_expires_at", mc.ASCENDING),
+        ("updated_at", mc.ASCENDING),
     ]
 
 

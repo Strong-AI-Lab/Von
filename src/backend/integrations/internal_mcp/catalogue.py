@@ -2872,6 +2872,195 @@ def _upsert_scoped_assertion(**kwargs):
         )
 
 
+def _store_text_assertion(**kwargs):
+    from ...services.scoped_assertion_service import (
+        add_text_assertion_concept_links,
+        store_text_assertion,
+    )
+
+    text = kwargs.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing non-empty 'text' parameter",
+            details={"missing": ["text"]},
+        )
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="text assertion mutation",
+        require_actor=True,
+    )
+    if denial is not None:
+        return denial
+    if actor_scope.user_concept_id is None:
+        return make_error_response(
+            "authenticated_actor_context_required",
+            "Text assertion mutation requires an authenticated user actor.",
+        )
+
+    mutation_dispatched = False
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            mutation_dispatched = True
+            result = store_text_assertion(
+                text=text,
+                language=kwargs.get("language") or "en-NZ",
+                scope_mode=kwargs.get("scope_mode") or "user",
+                context_id=kwargs.get("context_id"),
+                source_event_id=(
+                    kwargs.get("source_event_id")
+                    or kwargs.get("source_occurrence_key")
+                ),
+                evidence=kwargs.get("evidence"),
+                acting_user_concept_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+                turn_id=kwargs.get("turn_id"),
+                canonical_publication=False,
+            )
+    except PermissionError as exc:
+        return make_error_response("access_denied", str(exc))
+    except ValueError as exc:
+        return make_error_response("invalid_text_assertion", str(exc))
+    except Exception as exc:
+        if not mutation_dispatched:
+            return make_error_response(
+                "exception",
+                f"Failed to prepare text assertion: {exc}",
+                details={"exception_type": type(exc).__name__},
+            )
+        return _indeterminate_effect_error(
+            "The text-assertion operation raised unexpectedly; canonical state "
+            "may already have changed.",
+            details={
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+            },
+        )
+
+    concept_links = kwargs.get("concept_links")
+    if concept_links is None or concept_links == []:
+        return result
+    # Enrichment is deliberately after canonical admission. Bad, incomplete,
+    # or currently unresolvable links never discard the stored assertion.
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            link_result = add_text_assertion_concept_links(
+                assertion_id=result["assertion_id"],
+                links=concept_links,
+                acting_user_concept_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+                turn_id=kwargs.get("turn_id"),
+            )
+        result = {
+            **result,
+            "assertion": link_result.get("assertion") or result.get("assertion"),
+            "canonical_read_back": (
+                link_result.get("canonical_read_back")
+                or result.get("canonical_read_back")
+            ),
+            "derived_maintenance": (
+                link_result.get("derived_maintenance")
+                or result.get("derived_maintenance")
+            ),
+            "enrichment": {
+                "success": True,
+                "changed": bool(link_result.get("changed")),
+                "links_added": int(link_result.get("links_added") or 0),
+            },
+        }
+    except Exception as exc:
+        logger.warning(
+            "Text assertion persisted but optional concept linking failed: %s",
+            exc,
+        )
+        result = {
+            **result,
+            "enrichment": {
+                "success": False,
+                "changed": False,
+                "links_added": 0,
+                "retryable": True,
+                "error_code": (
+                    "access_denied"
+                    if isinstance(exc, PermissionError)
+                    else "invalid_concept_links"
+                    if isinstance(exc, ValueError)
+                    else "concept_linking_failed"
+                ),
+                "error": str(exc),
+            },
+        }
+    return result
+
+
+def _add_text_assertion_concept_links(**kwargs):
+    from ...services.scoped_assertion_service import (
+        add_text_assertion_concept_links,
+    )
+
+    assertion_id = kwargs.get("assertion_id")
+    links = kwargs.get("links")
+    if not isinstance(assertion_id, str) or not assertion_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing non-empty 'assertion_id' parameter",
+            details={"missing": ["assertion_id"]},
+        )
+    if not isinstance(links, list) or not links:
+        return make_error_response(
+            "missing_parameter",
+            "Missing non-empty 'links' array",
+            details={"missing": ["links"]},
+        )
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="text assertion concept-link enrichment",
+        require_actor=True,
+    )
+    if denial is not None:
+        return denial
+    if actor_scope.user_concept_id is None:
+        return make_error_response(
+            "authenticated_actor_context_required",
+            "Text assertion enrichment requires an authenticated user actor.",
+        )
+
+    mutation_dispatched = False
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            mutation_dispatched = True
+            return add_text_assertion_concept_links(
+                assertion_id=assertion_id,
+                links=links,
+                acting_user_concept_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+                turn_id=kwargs.get("turn_id"),
+            )
+    except PermissionError as exc:
+        return make_error_response("access_denied", str(exc))
+    except ValueError as exc:
+        return make_error_response("invalid_concept_links", str(exc))
+    except Exception as exc:
+        if not mutation_dispatched:
+            return make_error_response(
+                "exception",
+                f"Failed to prepare text assertion enrichment: {exc}",
+                details={"exception_type": type(exc).__name__},
+            )
+        return _indeterminate_effect_error(
+            "The text-assertion enrichment operation raised unexpectedly; "
+            "canonical link state may already have changed.",
+            details={
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "assertion_id": assertion_id,
+            },
+        )
+
+
 def _retract_scoped_assertion(**kwargs):
     from ...services.rag_text_relation_change_hook_service import (
         maybe_sync_concept_text_relations_to_rag,
@@ -2990,6 +3179,8 @@ def _list_scoped_assertions(**kwargs):
             predicates=predicates,
             object_kind=kwargs.get("object_kind"),
             languages=kwargs.get("languages"),
+            assertion_form=kwargs.get("assertion_form"),
+            context_id=kwargs.get("context_id"),
             limit=kwargs.get("limit") or 200,
             offset=kwargs.get("offset") or 0,
             user_concept_id=actor_scope.user_concept_id,
@@ -9915,6 +10106,89 @@ def _upsert_scoped_assertion_input_schema() -> Schema:
     )
 
 
+def _store_text_assertion_input_schema() -> Schema:
+    return Schema(
+        required={"text": str},
+        optional={
+            "language": (str, type(None)),
+            "scope_mode": (str, type(None)),
+            "context_id": (str, type(None)),
+            "source_event_id": (str, type(None)),
+            "source_occurrence_key": (str, type(None)),
+            "evidence": (dict, type(None)),
+            "concept_links": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "store_text_assertion input: exact text plus optional language, "
+            "user/organisation scope, opaque context_id, source occurrence key, "
+            "evidence, and optional qualified concept_links. No subject, predicate, "
+            "concept link, or semantic analysis is required. Actor, organisation, "
+            "namespace, turn, and non-publication are server-bound."
+        ),
+    )
+
+
+def _store_text_assertion_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
+            "assertion_id": (str, type(None)),
+            "assertion": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "canonical_publication": (bool, type(None)),
+            "storage_surface": (str, type(None)),
+            "derived_maintenance": (dict, type(None)),
+            "enrichment": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Standalone text-assertion write receipt. Canonical admission succeeds "
+            "before optional concept-link enrichment and RAG indexing; their status "
+            "is reported separately and never replaces the durable read-back."
+        ),
+    )
+
+
+def _add_text_assertion_concept_links_input_schema() -> Schema:
+    return Schema(
+        required={"assertion_id": str, "links": list},
+        optional={},
+        allow_unknown=True,
+        description=(
+            "Add optional qualified concept links to an existing standalone text "
+            "assertion. Actor, organisation, namespace, and turn are server-bound. "
+            "This enrichment never changes the exact assertion text."
+        ),
+    )
+
+
+def _add_text_assertion_concept_links_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
+            "assertion_id": (str, type(None)),
+            "links_added": (int, type(None)),
+            "assertion": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "canonical_publication": (bool, type(None)),
+            "storage_surface": (str, type(None)),
+            "derived_maintenance": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Canonical read-back for optional text-assertion concept-link "
+            "enrichment and its independently retryable RAG maintenance state."
+        ),
+    )
+
+
 def _upsert_scoped_assertion_output_schema() -> Schema:
     return Schema(
         required={
@@ -9984,6 +10258,8 @@ def _list_scoped_assertions_input_schema() -> Schema:
             "predicates": (list, type(None)),
             "object_kind": (str, type(None)),
             "languages": (list, type(None)),
+            "assertion_form": (str, type(None)),
+            "context_id": (str, type(None)),
             "limit": (int, type(None)),
             "offset": (int, type(None)),
         },
@@ -9991,7 +10267,7 @@ def _list_scoped_assertions_input_schema() -> Schema:
         description=(
             "List assertions visible in the trusted user/organisation scope, "
             "bounded by limit/offset and optionally filtered by subject, argument, "
-            "predicate, object kind, or text language."
+            "predicate, object kind, text language, assertion form, or context."
         ),
     )
 
@@ -25894,7 +26170,7 @@ def _rag_list_indexed(**kwargs):
                         "item_kind": "vontology_text_relation",
                         "source_system": (
                             "mongo.scoped_knowledge_assertions"
-                            if row_kind == "scoped_assertion"
+                            if row_kind in {"scoped_assertion", "text_assertion"}
                             else "mongo.text_relations"
                         ),
                         "namespace_source": ns_report.get("namespace_source"),
@@ -26527,17 +26803,21 @@ def _rag_get_item(**kwargs):
             "session_id": session_id,
             "index_item_id": doc.doc_id,
             "row_kind": (doc.metadata.get("row_kind") or "base_text_relation"),
+            "assertion_form": doc.metadata.get("assertion_form"),
             "relation_id": doc.metadata.get("relation_id"),
             "assertion_id": doc.metadata.get("assertion_id"),
+            "assertion_revision": doc.metadata.get("assertion_revision"),
             "subject_concept_id": doc.metadata.get("subject_concept_id"),
             "predicate": doc.metadata.get("predicate"),
             "lang": doc.metadata.get("lang"),
+            "context_id": doc.metadata.get("context_id"),
             "namespace": ns,
             "preview": (doc.text or "")[:4000],
             "item_kind": "vontology_text_relation",
             "source_system": (
                 "mongo.scoped_knowledge_assertions"
-                if doc.metadata.get("row_kind") == "scoped_assertion"
+                if doc.metadata.get("row_kind")
+                in {"scoped_assertion", "text_assertion"}
                 else "mongo.text_relations"
             ),
             "namespace_source": ns_report.get("namespace_source"),
@@ -37350,6 +37630,54 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "instance_of. Read-only and fail-closed: multiple matches or an "
                 "incomplete bounded scan return ambiguous rather than selecting a "
                 "candidate."
+            ),
+        ),
+        MethodDefinition(
+            name="add_text_assertion_concept_links",
+            handler=_add_text_assertion_concept_links,
+            input_schema=_add_text_assertion_concept_links_input_schema(),
+            output_schema=_add_text_assertion_concept_links_output_schema(),
+            category="write",
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+                "turn_id": "turn_id",
+            },
+            ordinary_turn_effect=True,
+            description=(
+                "Add optional, provenance-bearing links from an already stored "
+                "standalone text assertion to visible concepts. Use this after "
+                "later analysis discovers aboutness or involvement; unresolved "
+                "analysis never changes or removes the underlying assertion."
+            ),
+        ),
+        MethodDefinition(
+            name="store_text_assertion",
+            handler=_store_text_assertion,
+            input_schema=_store_text_assertion_input_schema(),
+            output_schema=_store_text_assertion_output_schema(),
+            category="write",
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+                "turn_id": "turn_id",
+            },
+            ordinary_turn_fixed_arguments={"canonical_publication": False},
+            ordinary_turn_effect=True,
+            description=(
+                "Store an exact provenance-bearing natural-language assertion in "
+                "the trusted user or organisation scope before semantic analysis. "
+                "No subject, predicate, or concept link is required. Equal text "
+                "from distinct occurrences remains distinct; retries within one "
+                "trusted occurrence are idempotent. Optional concept_links are "
+                "qualified enrichment and cannot block canonical admission. RAG "
+                "indexing is durable, asynchronous, observable, and retryable."
             ),
         ),
         MethodDefinition(

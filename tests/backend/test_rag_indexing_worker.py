@@ -53,3 +53,32 @@ def test_startup_diagnostics_logs_only_sanitized_mongo_location(
         raw_uri,
     ):
         assert fragment not in log_text
+
+
+def test_worker_iteration_runs_bounded_text_assertion_queue(monkeypatch) -> None:
+    from src.backend.services import knowledge_assertion_rag_service as service
+
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "reconcile_assertion_rag_state",
+        lambda *, limit: calls.append(("reconcile", limit)) or {"repaired": 0},
+    )
+    monkeypatch.setattr(
+        service,
+        "process_pending_assertion_rag_jobs",
+        lambda *, limit, worker_id: calls.append(
+            ("process", limit, worker_id)
+        )
+        or {
+            "claimed": 2,
+            "succeeded": 1,
+            "failed": 1,
+            "superseded": 0,
+        },
+    )
+
+    assert worker.process_pending_text_assertions() == 1
+    assert calls[0] == ("reconcile", worker.BATCH_SIZE)
+    assert calls[1][0:2] == ("process", worker.BATCH_SIZE)
+    assert calls[1][2].startswith("rag-index-worker:")

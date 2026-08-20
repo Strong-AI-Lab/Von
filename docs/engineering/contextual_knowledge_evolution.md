@@ -8,13 +8,13 @@
   hypotheses, knowledge publication or promotion, and actor-, organisation-,
   project-, source-, theory-, or time-relative knowledge
 - **Owner:** Von maintainers
-- **Last reviewed:** 29 July 2026
+- **Last reviewed:** 20 August 2026
 - **Review trigger:** Adoption of a first-class context/theory model, material
   multi-tenant scale evidence, material changes to the named implementation
   surfaces, or a change to assertion, namespace, inclusion, or publication
   semantics
 - **Live implementation evidence:** Revalidate the services named in section 4;
-  the map is a 29 July 2026 observation, not a permanent architecture contract
+  the map is a 20 August 2026 observation, not a permanent architecture contract
 
 ## 1. When to use this guide
 
@@ -124,6 +124,45 @@ may read the current situation and revise it in the same model call. Add
 sub-situation identity, promotion, inheritance, conflict resolution, or
 cross-session reuse only when actual work needs those semantics.
 
+### 2.2 Admit text assertions before semantic analysis
+
+Von may know an exact natural-language assertion before it knows which
+concepts, predicates, events, roles, or formal proposition express its meaning.
+That assertion must still be storable, retrievable through text and semantic
+search, and usable as provenance-bearing evidence. Concept resolution,
+aboutness analysis, complete entity linking, logical parsing, truth assessment,
+and alignment with an existing grounded relation are optional enrichment, not
+admission criteria.
+
+The minimum durable write is the exact language-tagged text plus an assertion
+identity, trusted provenance and visibility, lifecycle state, and either an
+explicit context or a documented implicit intake context. Choosing the default
+context is an authority and publication decision; it must not require analysis
+of what the sentence means. If indexing or enrichment is unavailable, preserve
+the assertion and expose retryable indexing or enrichment state rather than
+failing or discarding the write.
+
+Keep these identities distinct when they matter:
+
+- a text value or formulation, which may be shared or deduplicated;
+- an assertion occurrence, whose source, context, status, and lifecycle must
+  not be collapsed merely because another assertion has identical text; and
+- an optional claim-equivalence identity linking textual formulations and a
+  grounded binary or richer representation when that equivalence has actually
+  been established.
+
+Enrichment may add zero or more concept links such as `about`, `mentions`, or
+`involves`, with spans, method, provenance, and confidence where useful. It may
+also add a candidate grounded relation, event frame, translation, or
+paraphrase. Preserve the original text and qualify derived interpretations;
+neither a model extraction nor a concept match silently becomes the asserted
+meaning or a published ground predicate.
+
+RAG indexing must be able to start from the raw assertion body and authorised
+retrieval metadata alone. A semantic or exact-text query may therefore return
+an assertion with no concept links. Concept-relative queries use explicit links
+when they exist; an empty link set means only that no link is currently known.
+
 ## 3. Four questions for a coding agent
 
 For a triggered change, ask only:
@@ -150,7 +189,7 @@ claim.
 
 ## 4. Current starting points — verify live
 
-As observed on 29 July 2026, related capabilities are distributed across:
+As observed on 20 August 2026, related capabilities are distributed across:
 
 - inspectable conversation-situation text and bounded exact observations on
   chat-history sessions, used as provisional per-conversation context rather
@@ -162,8 +201,10 @@ As observed on 29 July 2026, related capabilities are distributed across:
   metadata plus the route to that carrier-bearing read;
 - base concept and text relations in `concept_service.py`,
   `concept_relation_service.py`, and `text_value_service.py`;
-- actor- and organisation-visible assertion deltas in
-  `scoped_assertion_service.py`;
+- actor- and organisation-visible relation assertions and standalone exact-text
+  assertion occurrences in `scoped_assertion_service.py`, with optional
+  qualified concept links, a distinct assertion-context envelope, lifecycle,
+  and durable revision-aware RAG maintenance;
 - local assertions, lifecycle, diff, promotion, rollback, and stored inclusion
   identifiers in `testing_theory_service.py`;
 - evidence, hypotheses, branches, and theory references in
@@ -176,7 +217,22 @@ one of them.
 
 Material current limitations include:
 
-- the scoped-assertion audience currently doubles as an implicit context;
+- base text relations require one subject concept and predicate, while their
+  shared text values are deduplicated separately from assertion occurrence;
+- base text relations do not carry queryable links to an open set of other
+  concepts mentioned or involved in their text;
+- standalone text assertions can carry explicit qualified concept links, but
+  automatic analysis and complete linking are deliberately not admission or
+  retrieval requirements;
+- secondary-argument retrieval for base text currently recognises a concept
+  only when its literal `#V#` identifier occurs in the text;
+- the first standalone-assertion slice selects a distinct implicit intake
+  context from the audience when no context is supplied; this is not yet a
+  general microtheory selection or inheritance mechanism;
+- semantic RAG maintenance currently targets the writer's physical namespace:
+  canonical organisation-visible reads work across members, but organisation-
+  wide cross-member vector fan-out and user-scope portability between physical
+  organisation namespaces are not yet provided;
 - Testing Theory inclusion identifiers do not yet constitute a general
   inherited query model;
 - storage-specific metadata is exposed by compatibility adapters; and

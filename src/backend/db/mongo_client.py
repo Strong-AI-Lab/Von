@@ -1905,6 +1905,32 @@ def _ensure_scoped_knowledge_assertions_indexes(coll: Collection) -> None:
         ],
         name="predicate_audience_status_id",
     )
+    # concept_links and scope.audience_keys are both arrays, so a compound
+    # index across them would be an invalid parallel-array index. New writes
+    # also materialise the one-valued scope.audience_key for this lookup.
+    coll.create_index(
+        [
+            ("concept_links.concept_id", ASCENDING),
+            ("scope.audience_key", ASCENDING),
+            ("status", ASCENDING),
+            ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
+        ],
+        name="concept_link_audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
+            ("assertion_form", ASCENDING),
+            ("object_kind", ASCENDING),
+            ("status", ASCENDING),
+            ("rag_index.desired_operation", ASCENDING),
+            ("rag_index.status", ASCENDING),
+            ("rag_index.next_attempt_at", ASCENDING),
+            ("rag_index.lease_expires_at", ASCENDING),
+            ("updated_at", ASCENDING),
+        ],
+        name="standalone_rag_queue_status_due_lease_updated_at",
+    )
 
 
 def _ensure_meta_relations_indexes(coll: Collection) -> None:

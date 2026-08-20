@@ -45,6 +45,257 @@ def _stored_text_assertion(
     }
 
 
+def test_standalone_text_admission_preserves_exact_body_without_analysis(
+    monkeypatch,
+):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+
+    def _analysis_must_not_run(*_args, **_kwargs):
+        raise AssertionError("standalone text admission must not analyse concepts")
+
+    monkeypatch.setattr(service, "can_access_concept", _analysis_must_not_run)
+    monkeypatch.setattr(
+        service,
+        "resolve_text_relation_predicate_for_write",
+        _analysis_must_not_run,
+    )
+    exact_text = "  Susan hosted salon-style gatherings in Svalbard.\n"
+    receipt = service.store_text_assertion(
+        text=exact_text,
+        language="en-NZ",
+        acting_user_concept_id="#V#member",
+        turn_id="turn-raw-1",
+    )
+
+    assertion = receipt["canonical_read_back"]
+    assert receipt["changed"] is True
+    assert assertion["schema_version"] == "scoped_knowledge_assertion.v2"
+    assert assertion["assertion_form"] == "standalone_text"
+    assert assertion["subject_concept_id"] is None
+    assert assertion["predicate"] is None
+    assert assertion["concept_links"] == []
+    assert assertion["object_text"]["text"] == exact_text
+    assert assertion["assertion_context"] == {
+        "context_id": "intake:user:#V#member",
+        "selection": "implicit",
+        "kind": "intake",
+    }
+    assert assertion["rag_index"]["status"] == "pending"
+    assert assertion["rag_index"]["desired_operation"] == "upsert"
+    assert receipt["derived_maintenance"]["durable"] is True
+
+
+def test_standalone_occurrence_replay_and_distinct_turns(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    kwargs = {
+        "text": "The same formulation.",
+        "acting_user_concept_id": "#V#member",
+    }
+    first = service.store_text_assertion(**kwargs, turn_id="turn-1")
+    replay = service.store_text_assertion(**kwargs, turn_id="turn-1")
+    other_turn = service.store_text_assertion(**kwargs, turn_id="turn-2")
+    source_first = service.store_text_assertion(
+        **kwargs,
+        turn_id="turn-3",
+        source_event_id="source:item:7",
+    )
+    source_replay = service.store_text_assertion(
+        **kwargs,
+        turn_id="turn-4",
+        source_event_id="source:item:7",
+    )
+
+    assert replay["changed"] is False
+    assert replay["assertion_id"] == first["assertion_id"]
+    assert other_turn["assertion_id"] != first["assertion_id"]
+    assert source_replay["changed"] is False
+    assert source_replay["assertion_id"] == source_first["assertion_id"]
+    assert collection.count_documents({}) == 3
+
+
+def test_standalone_source_replay_rejects_different_payload(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    service.store_text_assertion(
+        text="Original body.",
+        source_event_id="source:item:8",
+        acting_user_concept_id="#V#member",
+    )
+    with pytest.raises(ValueError, match="different text assertion"):
+        service.store_text_assertion(
+            text="Changed body.",
+            source_event_id="source:item:8",
+            acting_user_concept_id="#V#member",
+        )
+    assert collection.count_documents({}) == 1
+
+
+def test_standalone_text_is_visible_without_links_and_links_are_optional(
+    monkeypatch,
+):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    visible = {"#V#susan", "#V#svalbard"}
+    monkeypatch.setattr(
+        service,
+        "can_access_concept",
+        lambda concept_id: concept_id in visible,
+    )
+    def _filter_link_concepts(concept_ids):
+        requested = set(concept_ids)
+        if not requested:
+            raise AssertionError(
+                "linkless standalone retrieval must not require concept access"
+            )
+        return requested & visible
+
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        _filter_link_concepts,
+    )
+    text = "Susan hosted salon-style gatherings in Svalbard."
+    receipt = service.store_text_assertion(
+        text=text,
+        acting_user_concept_id="#V#member",
+        turn_id="turn-links",
+    )
+    broad = service.list_visible_scoped_assertions(
+        assertion_form="standalone_text",
+        user_concept_id="#V#member",
+    )
+    assert [row["assertion_id"] for row in broad] == [receipt["assertion_id"]]
+
+    linked = service.add_text_assertion_concept_links(
+        assertion_id=receipt["assertion_id"],
+        links=[
+            {
+                "concept_id": "#V#susan",
+                "role": "about",
+                "method": "explicit_user_link",
+                "spans": [{"start": 0, "end": 5}],
+            },
+            {
+                "concept_id": "#V#svalbard",
+                "role": "involves",
+                "confidence": 0.9,
+                "spans": [{"start": 39, "end": 47}],
+            },
+        ],
+        acting_user_concept_id="#V#member",
+        turn_id="turn-links",
+    )
+    assert linked["changed"] is True
+    assert linked["links_added"] == 2
+    assert linked["assertion"]["object_text"]["text"] == text
+    for concept_id in ("#V#susan", "#V#svalbard"):
+        by_concept = service.list_visible_scoped_assertions(
+            argument_concept_id=concept_id,
+            assertion_form="standalone_text",
+            user_concept_id="#V#member",
+        )
+        assert [row["assertion_id"] for row in by_concept] == [
+            receipt["assertion_id"]
+        ]
+
+    visible.remove("#V#svalbard")
+    redacted = service.list_visible_scoped_assertions(
+        assertion_form="standalone_text",
+        user_concept_id="#V#member",
+    )
+    assert [link["concept_id"] for link in redacted[0]["concept_links"]] == [
+        "#V#susan"
+    ]
+
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda _concept_ids: (_ for _ in ()).throw(
+            RuntimeError("concept visibility temporarily unavailable")
+        ),
+    )
+    degraded = service.list_visible_scoped_assertions(
+        assertion_form="standalone_text",
+        user_concept_id="#V#member",
+    )
+    assert [row["assertion_id"] for row in degraded] == [receipt["assertion_id"]]
+    assert degraded[0]["concept_links"] == []
+
+
+def test_standalone_retraction_is_canonical_and_marks_rag_delete(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    stored = service.store_text_assertion(
+        text="A raw assertion.",
+        acting_user_concept_id="#V#member",
+        turn_id="turn-retract",
+    )
+    retracted = service.retract_scoped_assertion(
+        assertion_id=stored["assertion_id"],
+        acting_user_concept_id="#V#member",
+    )
+    repeated = service.retract_scoped_assertion(
+        assertion_id=stored["assertion_id"],
+        acting_user_concept_id="#V#member",
+    )
+
+    assert retracted["changed"] is True
+    assert retracted["assertion"]["status"] == "retracted"
+    assert retracted["assertion"]["assertion_revision"] == 2
+    assert retracted["assertion"]["rag_index"]["status"] == "pending"
+    assert retracted["assertion"]["rag_index"]["desired_operation"] == "delete"
+    assert retracted["assertion"]["rag_index"]["desired_revision"] == 2
+    assert retracted["derived_maintenance"]["durable"] is True
+    assert repeated["changed"] is False
+    assert service.list_visible_scoped_assertions(
+        user_concept_id="#V#member"
+    ) == []
+
+    reasserted = service.store_text_assertion(
+        text="A raw assertion.",
+        acting_user_concept_id="#V#member",
+        turn_id="turn-retract",
+    )
+    assert reasserted["changed"] is True
+    assert reasserted["assertion_id"] == stored["assertion_id"]
+    assert reasserted["assertion"]["status"] == "asserted"
+    assert reasserted["assertion"]["assertion_revision"] == 3
+    assert reasserted["assertion"]["rag_index"]["status"] == "pending"
+    assert reasserted["assertion"]["rag_index"]["desired_operation"] == "upsert"
+
+
 def test_visible_global_subject_accepts_user_scoped_text_assertion(monkeypatch):
     from src.backend.services import scoped_assertion_service as service
 
