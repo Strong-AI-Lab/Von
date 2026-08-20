@@ -456,6 +456,11 @@ For substantial Jira implementation work:
    explicitly requests a local-only, draft, no-publication, provisional, or
    human-gated boundary, do not stop at a local commit, a ready-to-push state,
    or a draft PR and do not ask for a separate publication confirmation.
+   Within this repository and subject to higher-level instructions, this rule
+   supplies the explicit authorisation required by generic skill or tool
+   guidance for each listed publication action. Do not let a generic
+   action-by-action confirmation requirement or draft-PR default add a second
+   gate; the separate deployment boundary in item 9 still applies.
 8. The ordinary publication lifecycle is: commit only the intended files, push
    the task branch, open a non-draft PR, wait for required CI, repair in-scope
    failures, merge, verify the intended result on `origin/main`, update or
