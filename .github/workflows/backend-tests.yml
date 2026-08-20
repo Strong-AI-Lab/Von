@@ -26,9 +26,11 @@ jobs:
     name: Backend test drift
     runs-on: ubuntu-latest
     # A 2-core runner is far slower than a laptop: the same suite that takes
-    # 13m48s locally exceeded 35 minutes here. A nightly can afford the time,
-    # which is why this is one job rather than a shard matrix.
-    timeout-minutes: 90
+    # 13m48s locally exceeded 35 minutes here, and an unsharded run was
+    # cancelled at 90 minutes. A nightly can absorb the time, which is why this
+    # is one job rather than a shard matrix, but the ceiling has to be honest
+    # about what the suite actually costs.
+    timeout-minutes: 350
     permissions:
       contents: read
 
@@ -65,4 +67,28 @@ jobs:
             pytest pytest-mock pytest-cov pytest-asyncio mongomock blinker anyio
 
       - name: Report drift against the recorded backlog
-        run: python scripts/report_backend_test_drift.py
+        id: drift
+        run: |
+          set +e
+          python scripts/report_backend_test_drift.py | tee /tmp/drift.txt
+          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Notify on new failures
+        if: steps.drift.outputs.status == '1'
+        env:
+          NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
+          NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
+        run: python scripts/notify_backend_test_drift.py new_failures /tmp/drift.txt
+
+      - name: Notify when the run itself broke
+        if: steps.drift.outputs.status == '2'
+        env:
+          NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
+          NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
+        run: python scripts/notify_backend_test_drift.py broken /tmp/drift.txt
+
+      - name: Fail the run when there is drift
+        if: steps.drift.outputs.status != '0'
+        run: |
+          echo "drift report exited ${{ steps.drift.outputs.status }}"
+          exit 1
