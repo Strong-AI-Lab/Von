@@ -7,10 +7,10 @@
   authority, or current implementation evidence.
 - **Authority scope:** Reliability-ratchet analysis in Von engineering work
 - **Owner:** Von maintainers
-- **Last reviewed:** 19 August 2026
+- **Last reviewed:** 20 August 2026
 - **Review trigger:** A new tracked case, a material source correction, or new
   evidence that changes a recorded diagnosis or status
-- **State or evidence as of:** 19 August 2026
+- **State or evidence as of:** 20 August 2026
 - **Open questions:** Which recorded diagnoses remain supported, need narrowing,
   or should be reclassified after outcome-level validation?
 
@@ -580,3 +580,87 @@ a tidiness argument rather than evidence.
 - Reconciliation of the 19 divergent tool-metadata entries shows the database
   values were stale rather than curated, making the rows straightforwardly
   deletable after the values move into code.
+
+### RR-003 — A mechanism built without checking whether it could function
+
+- **Observed:** 20 August 2026
+- **Status:** Closed by redesign the same day; the gate was replaced with a
+  nightly report before merge
+- **Delivery tracking:**
+  [JVNAUTOSCI-2656](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2656)
+- **Distinguishing feature:** RR-002's guard worked and was merely surplus. This
+  mechanism could not work at all, and the fact that established it was
+  available before any code was written.
+
+#### What was observed
+
+Backend pytest has never run in CI. `test_mcp_manifest_parity` was failing for
+an unknown period and was found by accident while investigating something
+unrelated. Measurement then established that 110 of 3776 `cost_normal` tests
+fail on main with a working database.
+
+The diagnosis was correct and measured rather than conjectured, which is worth
+stating plainly: this is not a case of a weak causal theory.
+
+#### The response, and what was wrong with it
+
+A per-pull-request gate, a shard matrix, a runner script, a 209-entry
+deselection backlog, and a further test guarding that backlog against growth.
+
+`main` has no branch protection and no required status checks. Four of the last
+twenty commits went directly to it. A failing gate therefore blocks nothing. The
+mechanism was incapable of doing the job it was built for, and one API call
+would have established that before any of it was written.
+
+The simplest credible alternative, a nightly report, was never compared. The
+first article asks for exactly that comparison, and the second describes using
+the argument to change the burden of proof on new mechanisms. Neither happened.
+
+When the gate then failed on runner timeouts, the response was more machinery:
+four shards, then six, then an attempt to tune Mongo timeouts. Each step
+addressed the symptom. None asked whether the gate should exist. That is the
+article's "when a neighbouring case fails, another mechanism is added outside
+the first", observed across a single afternoon.
+
+#### What stopped it
+
+A direct question from the repository owner: why do we really need this. No
+internal check caught it, and no test could have.
+
+#### The finding about the case log itself
+
+RR-002 records this precise reflex, surplus machinery on a correct diagnosis
+defended with further machinery when challenged. It was written the previous day
+by the same agent that then repeated it.
+
+Recording a case did not prevent its recurrence within twenty-four hours. That
+is evidence about what this log is: a lens that works when deliberately picked
+up, not a passive safeguard that operates by having been written. The second
+article anticipates the distinction when it warns against converting the essay
+into a checklist; this is the same limit seen from the other side, where the
+material is available and simply is not consulted at the moment of decision.
+
+#### What survived
+
+The measurement. That 110 tests fail with a database and 208 without, that
+`lane_backend_core` holds 3488 of 3776 `cost_normal` tests so a lane matrix
+cannot parallelise the suite, that shortening Mongo timeouts makes the suite
+slower rather than faster, and that at least one test depends on state another
+test leaves behind. None of that is contingent on the mechanism that was
+abandoned.
+
+#### An ambiguity the response assumed away
+
+That 110 tests fail while nothing visibly breaks admits two readings:
+enforcement is missing, or those tests were not protecting anything. The second
+is the accidental-constitution failure described in the first article. Only the
+first was considered, and the backlog was framed as work owed rather than as a
+question.
+
+#### Evidence that would change this record
+
+- Branch protection is introduced, at which point a gate becomes capable of the
+  job and the redesign should be revisited.
+- The nightly report proves insufficient to surface drift within a useful time.
+- Review of the 209 recorded failures shows they protect outcomes that matter,
+  settling the ambiguity above in favour of enforcement.

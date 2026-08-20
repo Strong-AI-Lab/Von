@@ -1,0 +1,68 @@
+name: Nightly Backend Tests
+
+# JVNAUTOSCI-2656. Backend pytest has never run in CI, so red tests accumulate
+# on main unnoticed: test_mcp_manifest_parity was failing for an unknown period
+# and was found by accident.
+#
+# This reports rather than gates. main has no branch protection, so a failing
+# check blocks nothing, and a per-pull-request gate would have cost several
+# thirty-minute jobs on every PR while being unable to prevent anything.
+# Promoting this to a required check is a small change if that is introduced.
+#
+# It runs without a database. Of 3776 cost_normal tests, 3561 pass with no
+# database in 13m48s locally; the rest are recorded in
+# ci/known_test_failures.txt along with the genuinely broken ones. Provisioning
+# a database would shrink that list by roughly half and is tracked separately.
+
+on:
+  schedule:
+    # 15:00 UTC daily, which is early morning in Pacific/Auckland, so drift
+    # introduced during the working day is reported before the next one.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+jobs:
+  drift-report:
+    name: Backend test drift
+    runs-on: ubuntu-latest
+    # A 2-core runner is far slower than a laptop: the same suite that takes
+    # 13m48s locally exceeded 35 minutes here. A nightly can afford the time,
+    # which is why this is one job rather than a shard matrix.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    env:
+      # No database is provisioned. The default 5000ms Mongo timeouts are kept
+      # deliberately: measured at 200ms the same tests ran slower, apparently
+      # because faster driver failures trigger more application-level retries.
+      MONGO_URI: "mongodb://127.0.0.1:1/ci"
+      MONGO_DNS_FALLBACK_URI: "mongodb://127.0.0.1:1/ci"
+      MONGO_ALLOW_LOCAL_FALLBACK: "0"
+      # Import-time requirements of the Jira MCP surface. Deliberately invalid:
+      # nothing here may reach a real external service.
+      ATLASSIAN_BASE_URL: "https://example.invalid"
+      ATLASSIAN_EMAIL: "ci@example.invalid"
+      ATLASSIAN_API_TOKEN: "ci-placeholder-not-a-credential"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          # pytest and friends live in [dependency-groups] dev, which
+          # `pip install -e .` does not install.
+          pip install --group dev || pip install \
+            pytest pytest-mock pytest-cov pytest-asyncio mongomock blinker anyio
+
+      - name: Report drift against the recorded backlog
+        run: python scripts/report_backend_test_drift.py
