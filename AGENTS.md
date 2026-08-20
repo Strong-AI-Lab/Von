@@ -450,10 +450,23 @@ For substantial Jira implementation work:
 6. Before another patch, wider campaign, or delay prompted by a material new
    observation, state explicitly whether it changes the merge decision and act
    accordingly.
-7. At the current decision boundary, leave the branch, Jira issue, and any live
-   state consistent with reality. Commit, publish, merge, release, comment, or
-   transition only when current task authority permits it and the action helps
-   the work. A provisional branch, experiment, or human-gated Jira programme
+7. A request to implement, fully implement, finish, or finish up Jira-backed
+   repository work authorises the ordinary publication lifecycle once
+   proportionate acceptance evidence supports delivery. Unless the user
+   explicitly requests a local-only, draft, no-publication, provisional, or
+   human-gated boundary, do not stop at a local commit, a ready-to-push state,
+   or a draft PR and do not ask for a separate publication confirmation.
+8. The ordinary publication lifecycle is: commit only the intended files, push
+   the task branch, open a non-draft PR, wait for required CI, repair in-scope
+   failures, merge, verify the intended result on `origin/main`, update or
+   transition Jira and read it back, return the primary checkout to the current
+   default branch, and remove only merged, unused task branches or worktrees
+   while preserving unrelated or dirty work.
+9. Repository publication does not by itself authorise deployment or activation
+   of a running system unless that effect is part of the requested outcome or an
+   applicable standing deployment workflow. At every decision boundary, leave
+   the branch, Jira issue, and any live state consistent with reality. A
+   provisional branch, experiment, or explicitly human-gated Jira programme
    must stop at its stated boundary even when implementation and tests are
    complete.
 
