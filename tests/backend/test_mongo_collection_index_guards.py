@@ -271,6 +271,7 @@ def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
         "relationships_has_initial_step_1",
         "relationships_v_evidence_view_applies_to_tool_1",
         "episode_critique_remediation_external_instance_lookup",
+        "embedding_status_updated_at_desc",
         "legacy_name_exact_1",
         "updated_at_-1",
     }.issubset(concept_index_names)
@@ -284,6 +285,13 @@ def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
     assert concept_indexes_by_name["legacy_name_exact_1"]["kwargs"] == {
         "name": "legacy_name_exact_1",
         "sparse": True,
+    }
+    assert concept_indexes_by_name["embedding_status_updated_at_desc"]["keys"] == [
+        ("embedding_status", mc.ASCENDING),
+        ("updated_at", mc.DESCENDING),
+    ]
+    assert concept_indexes_by_name["embedding_status_updated_at_desc"]["kwargs"] == {
+        "name": "embedding_status_updated_at_desc"
     }
 
 

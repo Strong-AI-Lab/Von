@@ -4,7 +4,7 @@ Background worker that polls for concepts needing (re)indexing and updates
 the concept vector store in LlamaIndex.
 
 This worker:
-1. Polls for concepts where embedding_status != "indexed" or updated_at > embedding_updated_at
+1. Polls the indexed materialised embedding-status queue
 2. Builds aggregated searchable text for each concept (kind-specific)
 3. Generates embeddings via LlamaIndex RAG service
 4. Updates embedding_status and embedding_updated_at on success
@@ -128,18 +128,15 @@ def process_concept_batch(rag_service, iteration: int) -> int:
     concepts = get_concepts_needing_indexing(batch_size=BATCH_SIZE)
 
     if not concepts:
-        # Heartbeat log when idle
-        pending = count_concepts_needing_indexing()
-        logger.info(
-            f"[Iteration {iteration}] No pending concepts. " f"Queue depth: {pending}"
-        )
+        # The bounded queue read already proves the queue is empty. Repeating
+        # the same predicate as an exact count doubled idle Atlas work.
+        logger.info(f"[Iteration {iteration}] No pending concepts. Queue depth: 0")
         _flush()
         return 0
 
-    pending_total = count_concepts_needing_indexing()
     logger.info(
         f"[Iteration {iteration}] Processing {len(concepts)} concepts. "
-        f"Total queue depth: {pending_total}"
+        f"Queue depth: at least {len(concepts)}"
     )
 
     success_count = 0

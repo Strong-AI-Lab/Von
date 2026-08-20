@@ -6,6 +6,8 @@ Tests the background worker that indexes concepts for semantic search.
 import logging
 from unittest.mock import patch, MagicMock
 
+import mongomock
+
 from src.backend.services.concept_embedding_service import (
     EMBEDDING_STATUS_INDEXED,
     EMBEDDING_STATUS_FAILED,
@@ -22,12 +24,10 @@ class TestConceptIndexWorkerProcessBatch:
         "src.backend.utilities.concept_index_worker.build_concept_embedding_metadata"
     )
     @patch("src.backend.utilities.concept_index_worker.build_concept_searchable_text")
-    @patch("src.backend.utilities.concept_index_worker.count_concepts_needing_indexing")
     @patch("src.backend.utilities.concept_index_worker.get_concepts_needing_indexing")
     def test_process_batch_indexes_pending_concepts(
         self,
         mock_get_concepts,
-        mock_count,
         mock_build_text,
         mock_build_metadata,
         mock_update_status,
@@ -38,7 +38,6 @@ class TestConceptIndexWorkerProcessBatch:
             {"concept_id": "#V#concept1", "relationships": {}},
             {"concept_id": "#V#concept2", "relationships": {}},
         ]
-        mock_count.return_value = 2
         mock_build_text.return_value = "searchable text content"
         mock_build_metadata.return_value = {
             "concept_id": "#V#concept1",
@@ -64,12 +63,10 @@ class TestConceptIndexWorkerProcessBatch:
         "src.backend.utilities.concept_index_worker.build_concept_embedding_metadata"
     )
     @patch("src.backend.utilities.concept_index_worker.build_concept_searchable_text")
-    @patch("src.backend.utilities.concept_index_worker.count_concepts_needing_indexing")
     @patch("src.backend.utilities.concept_index_worker.get_concepts_needing_indexing")
     def test_process_batch_handles_rag_failure(
         self,
         mock_get_concepts,
-        mock_count,
         mock_build_text,
         mock_build_metadata,
         mock_update_status,
@@ -78,7 +75,6 @@ class TestConceptIndexWorkerProcessBatch:
         mock_get_concepts.return_value = [
             {"concept_id": "#V#concept1", "relationships": {}},
         ]
-        mock_count.return_value = 1
         mock_build_text.return_value = "text"
         mock_build_metadata.return_value = {"concept_id": "#V#concept1"}
 
@@ -98,12 +94,10 @@ class TestConceptIndexWorkerProcessBatch:
 
     @patch("src.backend.utilities.concept_index_worker.update_concept_embedding_status")
     @patch("src.backend.utilities.concept_index_worker.build_concept_searchable_text")
-    @patch("src.backend.utilities.concept_index_worker.count_concepts_needing_indexing")
     @patch("src.backend.utilities.concept_index_worker.get_concepts_needing_indexing")
     def test_process_batch_handles_empty_searchable_text(
         self,
         mock_get_concepts,
-        mock_count,
         mock_build_text,
         mock_update_status,
     ):
@@ -111,7 +105,6 @@ class TestConceptIndexWorkerProcessBatch:
         mock_get_concepts.return_value = [
             {"concept_id": "#V#empty_concept", "relationships": {}},
         ]
-        mock_count.return_value = 1
         mock_build_text.return_value = ""  # Empty text
 
         mock_rag = MagicMock()
@@ -126,24 +119,27 @@ class TestConceptIndexWorkerProcessBatch:
             "#V#empty_concept", EMBEDDING_STATUS_INDEXED
         )
 
-    @patch("src.backend.utilities.concept_index_worker.count_concepts_needing_indexing")
     @patch("src.backend.utilities.concept_index_worker.get_concepts_needing_indexing")
     def test_process_batch_returns_zero_when_queue_empty(
         self,
         mock_get_concepts,
-        mock_count,
     ):
         """Worker should return 0 when no concepts need indexing."""
         mock_get_concepts.return_value = []
-        mock_count.return_value = 0
 
         mock_rag = MagicMock()
 
-        from src.backend.utilities.concept_index_worker import process_concept_batch
+        from src.backend.utilities import concept_index_worker
 
-        success_count = process_concept_batch(mock_rag, iteration=1)
+        with patch.object(
+            concept_index_worker, "count_concepts_needing_indexing"
+        ) as mock_count:
+            success_count = concept_index_worker.process_concept_batch(
+                mock_rag, iteration=1
+            )
 
         assert success_count == 0
+        mock_count.assert_not_called()
         mock_rag.upsert_documents.assert_not_called()
 
 
@@ -271,7 +267,17 @@ class TestConceptsNeedingIndexing:
         # Verify find was called with correct filter
         call_args = mock_repo.find.call_args
         query = call_args[0][0]
-        assert "$or" in query
+        assert query == {
+            "embedding_status": {
+                "$in": [
+                    None,
+                    EMBEDDING_STATUS_PENDING,
+                    EMBEDDING_STATUS_STALE,
+                    EMBEDDING_STATUS_FAILED,
+                ]
+            }
+        }
+        assert "$expr" not in str(query)
 
     @patch("src.backend.services.concept_embedding_service.ConceptsRepository")
     def test_get_concepts_respects_batch_size(self, mock_repo):
@@ -288,6 +294,58 @@ class TestConceptsNeedingIndexing:
 
         call_args = mock_repo.find.call_args
         assert call_args[1].get("limit") == 25
+
+    @patch("src.backend.services.concept_embedding_service.ConceptsRepository")
+    def test_count_uses_same_materialised_queue_predicate(self, mock_repo):
+        mock_repo.count_documents.return_value = 3
+
+        from src.backend.services.concept_embedding_service import (
+            count_concepts_needing_indexing,
+        )
+
+        assert count_concepts_needing_indexing() == 3
+        mock_repo.count_documents.assert_called_once_with(
+            {
+                "embedding_status": {
+                    "$in": [
+                        None,
+                        EMBEDDING_STATUS_PENDING,
+                        EMBEDDING_STATUS_STALE,
+                        EMBEDDING_STATUS_FAILED,
+                    ]
+                }
+            }
+        )
+
+    def test_materialised_queue_includes_legacy_missing_and_null_statuses(self):
+        from src.backend.services.concept_embedding_service import (
+            _embedding_queue_query,
+        )
+
+        collection = mongomock.MongoClient().db.concepts
+        collection.insert_many(
+            [
+                {"concept_id": "#V#missing"},
+                {"concept_id": "#V#null", "embedding_status": None},
+                {"concept_id": "#V#pending", "embedding_status": "pending"},
+                {"concept_id": "#V#stale", "embedding_status": "stale"},
+                {"concept_id": "#V#failed", "embedding_status": "failed"},
+                {"concept_id": "#V#indexed", "embedding_status": "indexed"},
+            ]
+        )
+
+        matched = {
+            document["concept_id"]
+            for document in collection.find(_embedding_queue_query())
+        }
+
+        assert matched == {
+            "#V#missing",
+            "#V#null",
+            "#V#pending",
+            "#V#stale",
+            "#V#failed",
+        }
 
 
 class TestBuildConceptDocumentId:
