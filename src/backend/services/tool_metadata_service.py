@@ -292,7 +292,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "remove_relationships_bulk": {
         "salience": "high",
         "category": "vontology",
-        "display_template": "Bulk removed relationships: {removed_count}",
+        "display_template": "Bulk relationships removed",
     },
     "undo_relationship_removal": {
         "salience": "high",
@@ -312,12 +312,12 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "delete_concept": {
         "salience": "high",
         "category": "vontology",
-        "display_template": "Deleted: {concept_id}",
+        "display_template": "Concept deleted",
     },
     "rename_concept": {
         "salience": "high",
         "category": "vontology",
-        "display_template": "Renamed: {old_name} → {new_name}",
+        "display_template": "Renamed: {old_id} → {new_id}",
     },
     # Task tools (HIGH salience)
     "create_task": {
@@ -344,7 +344,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "task_assign": {
         "salience": "high",
         "category": "task",
-        "display_template": "Assigned to: {assignee}",
+        "display_template": "Task assigned",
         "dispatch_surface_family": "task",
         "evidence_surface_family": "task",
         "external_surface": False,
@@ -352,7 +352,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "task_delete": {
         "salience": "high",
         "category": "task",
-        "display_template": "Deleted task: {task_id}",
+        "display_template": "Task deleted",
         "dispatch_surface_family": "task",
         "evidence_surface_family": "task",
         "external_surface": False,
@@ -558,7 +558,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "jira_get_comments": {
         "salience": "medium",
         "category": "jira",
-        "display_template": "Comments: {issue_key}",
+        "display_template": "{count} comments",
         "dispatch_surface_family": "jira",
         "evidence_surface_family": "jira",
         "external_surface": True,
