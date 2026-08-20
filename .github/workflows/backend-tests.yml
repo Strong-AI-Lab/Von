@@ -1,44 +1,46 @@
-name: Backend Tests
+name: Nightly Backend Tests
 
-# Backend pytest has never run in CI. Red tests accumulated on main unnoticed:
-# test_mcp_manifest_parity was failing for an unknown period and was found only
-# by accident. This gate exists so that stops being possible.
+# JVNAUTOSCI-2656. Backend pytest has never run in CI, so red tests accumulate
+# on main unnoticed: test_mcp_manifest_parity was failing for an unknown period
+# and was found by accident.
 #
-# It runs without a database. Of the 3769 cost_normal tests, 3561 pass with no
-# database at all in under 14 minutes, so the gate is deliberately hermetic
-# rather than provisioning Mongo: a gate that needs credentials is a gate that
-# gets disabled. Tests needing a database are deselected via
-# ci/known_test_failures.txt along with the recorded backlog.
+# This reports rather than gates. main has no branch protection, so a failing
+# check blocks nothing, and a per-pull-request gate would have cost several
+# thirty-minute jobs on every PR while being unable to prevent anything.
+# Promoting this to a required check is a small change if that is introduced.
+#
+# It runs without a database. Of 3776 cost_normal tests, 3561 pass with no
+# database in 13m48s locally; the rest are recorded in
+# ci/known_test_failures.txt along with the genuinely broken ones. Provisioning
+# a database would shrink that list by roughly half and is tracked separately.
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+  schedule:
+    # 15:00 UTC daily, which is early morning in Pacific/Auckland, so drift
+    # introduced during the working day is reported before the next one.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
 
 jobs:
-  backend-cost-normal:
-    name: Backend cost_normal ${{ matrix.shard }}
+  drift-report:
+    name: Backend test drift
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Sharded because the whole lane takes over 35 minutes on a 2-core runner,
-    # against 13m48s locally. The lanes cannot be used to split it:
-    # lane_backend_core holds 3488 of 3776 cost_normal tests.
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
+    # A 2-core runner is far slower than a laptop: the same suite that takes
+    # 13m48s locally exceeded 35 minutes here. A nightly can afford the time,
+    # which is why this is one job rather than a shard matrix.
+    timeout-minutes: 90
     permissions:
       contents: read
 
     env:
-      # No database is provisioned. An unroutable address with a short timeout
-      # keeps a test that reaches for Mongo failing fast rather than hanging.
-      MONGO_URI: "mongodb://127.0.0.1:1/ci?serverSelectionTimeoutMS=200"
-      MONGO_DNS_FALLBACK_URI: "mongodb://127.0.0.1:1/ci?serverSelectionTimeoutMS=200"
+      # No database is provisioned. The default 5000ms Mongo timeouts are kept
+      # deliberately: measured at 200ms the same tests ran slower, apparently
+      # because faster driver failures trigger more application-level retries.
+      MONGO_URI: "mongodb://127.0.0.1:1/ci"
+      MONGO_DNS_FALLBACK_URI: "mongodb://127.0.0.1:1/ci"
       MONGO_ALLOW_LOCAL_FALLBACK: "0"
-      # Import-time requirements in the Jira MCP surface. Deliberately invalid:
-      # nothing in this gate may reach a real external service.
+      # Import-time requirements of the Jira MCP surface. Deliberately invalid:
+      # nothing here may reach a real external service.
       ATLASSIAN_BASE_URL: "https://example.invalid"
       ATLASSIAN_EMAIL: "ci@example.invalid"
       ATLASSIAN_API_TOKEN: "ci-placeholder-not-a-credential"
@@ -58,14 +60,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           # pytest and friends live in [dependency-groups] dev, which
-          # `pip install -e .` does not install. The first run of this gate
-          # failed for exactly that reason.
+          # `pip install -e .` does not install.
           pip install --group dev || pip install \
             pytest pytest-mock pytest-cov pytest-asyncio mongomock blinker anyio
 
-      - name: Verify the known-failure list is current
-        if: matrix.shard == '1/6'
-        run: python scripts/run_ci_backend_suite.py --check-list
-
-      - name: Run backend cost_normal suite
-        run: python scripts/run_ci_backend_suite.py --shard "${{ matrix.shard }}"
+      - name: Report drift against the recorded backlog
+        run: python scripts/report_backend_test_drift.py
