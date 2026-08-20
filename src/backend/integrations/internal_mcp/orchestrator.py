@@ -22839,6 +22839,22 @@ class InternalMCPChatOrchestrator:
             ans = str(payload["answer"])
             context["answer"] = ans[:50] + "..." if len(ans) > 50 else ans
 
+        # Generic fallback. The named mappings above cover common shapes but are
+        # an arbitrary list, and twenty-one templates referenced ordinary
+        # identifier fields it happened to omit, so they were silently discarded
+        # (JVNAUTOSCI-2652). A placeholder naming a scalar field the payload
+        # actually carries should resolve to it. Named mappings still win.
+        for payload_key, payload_value in payload.items():
+            if payload_key in context:
+                continue
+            if isinstance(payload_value, bool):
+                context[payload_key] = "Yes" if payload_value else "No"
+            elif isinstance(payload_value, (str, int, float)):
+                text_value = str(payload_value)
+                context[payload_key] = (
+                    text_value[:60] + "..." if len(text_value) > 60 else text_value
+                )
+
         # Try to apply the template
         try:
             # Find all placeholders
