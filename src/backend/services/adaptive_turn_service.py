@@ -6182,11 +6182,13 @@ def execute_adaptive_turn(
         capability_name: str,
         arguments: Mapping[str, Any],
         *,
-        include_language: bool = True,
+        recovery_contract: str,
     ) -> str | None:
-        """Identify one exact scoped assertion independently of trusted bindings."""
+        """Identify one scoped recovery under its advertised contract."""
 
         if capability_name != "upsert_scoped_assertion":
+            return None
+        if recovery_contract not in {"actor_scope_alternative", "exact_retry"}:
             return None
         subject_id = str(arguments.get("subject_concept_id") or "").strip()
         predicate = str(arguments.get("predicate") or "").strip()
@@ -6207,15 +6209,33 @@ def execute_adaptive_turn(
         if has_text == has_concept:
             return None
         semantic_identity = {
+            "recovery_contract": recovery_contract,
             "subject_concept_id": subject_id,
             "predicate": predicate,
             "target_kind": "text" if has_text else "concept",
             "target": (str(target_text).strip() if has_text else target_concept_id),
         }
-        if has_text and include_language:
-            language = arguments.get("language")
-            if isinstance(language, str) and language.strip():
-                semantic_identity["language"] = language.strip()
+        if has_text:
+            semantic_identity["language"] = (
+                str(arguments.get("language") or "en-NZ").strip() or "en-NZ"
+            )
+        if recovery_contract == "exact_retry":
+            scope_mode = str(arguments.get("scope_mode") or "user").strip().lower()
+            if scope_mode not in {"user", "organisation"}:
+                return None
+            evidence = arguments.get("evidence")
+            if evidence is None:
+                evidence = {}
+            elif isinstance(evidence, Mapping):
+                evidence = dict(evidence)
+            else:
+                return None
+            semantic_identity.update(
+                {
+                    "scope_mode": scope_mode,
+                    "evidence": evidence,
+                }
+            )
         return hashlib.sha256(_json_bytes(semantic_identity)).hexdigest()
 
     def remember_recovery_affordance(
@@ -6234,6 +6254,15 @@ def execute_adaptive_turn(
         for affordance in affordances:
             if not isinstance(affordance, Mapping):
                 continue
+            action_type = str(affordance.get("action_type") or "").strip()
+            recovery_contract = {
+                "assert_in_actor_scope": "actor_scope_alternative",
+                "retry_exact_scoped_assertion_with_canonical_predicate_id": (
+                    "exact_retry"
+                ),
+            }.get(action_type)
+            if recovery_contract is None:
+                continue
             tool_name = str(affordance.get("tool") or "").strip()
             alternative_arguments = affordance.get("arguments")
             if not isinstance(alternative_arguments, Mapping):
@@ -6241,6 +6270,7 @@ def execute_adaptive_turn(
             recovery_key = scoped_assertion_recovery_key(
                 tool_name,
                 alternative_arguments,
+                recovery_contract=recovery_contract,
             )
             if recovery_key is None:
                 continue
@@ -6256,30 +6286,21 @@ def execute_adaptive_turn(
         nonlocal effect_state_generation
         if effect_status != "succeeded":
             return
-        recovery_keys = [
-            scoped_assertion_recovery_key(
+        failed_effect_id = None
+        for recovery_contract in ("exact_retry", "actor_scope_alternative"):
+            recovery_key = scoped_assertion_recovery_key(
                 capability_name,
                 arguments,
+                recovery_contract=recovery_contract,
             )
-        ]
-        language_agnostic_key = scoped_assertion_recovery_key(
-            capability_name,
-            arguments,
-            include_language=False,
-        )
-        if language_agnostic_key not in recovery_keys:
-            recovery_keys.append(language_agnostic_key)
-        failed_effect_id = None
-        for recovery_key in recovery_keys:
             if recovery_key is None:
                 continue
             pending_effect_ids = recoverable_effect_ids.get(recovery_key)
-            if not pending_effect_ids:
-                continue
-            failed_effect_id = pending_effect_ids.pop(0)
-            if not pending_effect_ids:
-                recoverable_effect_ids.pop(recovery_key, None)
-            break
+            if pending_effect_ids:
+                failed_effect_id = pending_effect_ids.pop(0)
+                if not pending_effect_ids:
+                    recoverable_effect_ids.pop(recovery_key, None)
+                break
         if failed_effect_id is None:
             if capability_name == "upsert_scoped_assertion":
                 attempted_effect_ids = {
@@ -7264,6 +7285,10 @@ def execute_adaptive_turn(
             state.get("reconciliation_status") == "current_state_observed"
             for state in incomplete_effects
         )
+        mismatched_recovery_present = any(
+            state.get("recovery_status") == "mismatched"
+            for state in incomplete_effects
+        )
         if status == "completed" and incomplete_effects:
             all_incomplete_statuses = {
                 str(state.get("effect_status") or "")
@@ -7278,6 +7303,8 @@ def execute_adaptive_turn(
             elif "partial" in incomplete_statuses:
                 status = "effect_partially_completed"
             elif current_state_observation_present:
+                status = "effect_partially_completed"
+            elif mismatched_recovery_present and succeeded_effects:
                 status = "effect_partially_completed"
             elif (
                 succeeded_effects
@@ -9447,6 +9474,8 @@ def execute_adaptive_turn(
                             "final_status",
                             "created_new",
                             "semantic_outcome",
+                            "change_kind",
+                            "operational_changed",
                         ):
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):

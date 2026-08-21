@@ -80,7 +80,6 @@ def test_bootstrap_materialises_concept_search_instance_retrieval_workflow(
         "zero-result exact search" in note
         for note in (discovery_exemplars.get("routing_notes") or [])
     )
-
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         CONCEPT_SEARCH_INSTANCE_RETRIEVAL_WORKFLOW_ID
     )
@@ -135,6 +134,18 @@ def test_bootstrap_materialises_concept_search_instance_retrieval_workflow(
         "find_relations_with_argument",
     ]
     assert llm_policy.get("max_tool_invocations") == 6
+    tool_argument_defaults = llm_policy.get("tool_argument_defaults") or {}
+    assert "fetch_concept" not in tool_argument_defaults
+    assert tool_argument_defaults.get("get_text_relations_summary") == {
+        "max_relation_ids_per_group": 20
+    }
+    assert tool_argument_defaults.get("find_relations_with_argument") == {
+        "argument_index": "any",
+        "relation_kind": "any",
+        "include_text_snippets": True,
+        "include_concept_preview": False,
+        "limit": 30,
+    }
     assert llm_policy.get("context_messages_context_key") == "augmented_context"
     assert "conversation_situation" in {
         field.get("context_key")

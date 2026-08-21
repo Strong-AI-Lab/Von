@@ -5328,6 +5328,8 @@ def _summarise_tool_invocations(
             "timeout_phase",
             "effect_id",
             "effect_status",
+            "recovery_status",
+            "recovered_by_effect_id",
             "capability_kind",
             "capability_display_name",
             "execution_method",
@@ -9532,6 +9534,10 @@ def _extract_mutation_metadata_from_invocation(
             include_arguments=False,
         )
 
+    changed_value = invocation.get("changed")
+    if not isinstance(changed_value, bool) and isinstance(payload, Mapping):
+        changed_value = payload.get("changed")
+
     return {
         "tool_name": tool_name,
         "status": status,
@@ -9544,6 +9550,9 @@ def _extract_mutation_metadata_from_invocation(
         "mutation_outcome": mutation_outcome,
         "outcome_finality": _receipt_text("outcome_finality"),
         "error_code": _receipt_text("error_code"),
+        "changed": changed_value if isinstance(changed_value, bool) else None,
+        "recovery_status": _receipt_text("recovery_status"),
+        "recovered_by_effect_id": _receipt_text("recovered_by_effect_id"),
     }
 
 
@@ -9556,22 +9565,44 @@ def _build_tool_authored_mutation_effects(
 
     Durable adaptive effects are projected independently by their stable
     ``effect_id`` so one successful invocation cannot mask another attempted
-    effect that was not started, partial, or indeterminate. Legacy invocations
-    without an effect identifier retain the existing per-tool grouping.
+    effect that was not started, partial, or indeterminate. An unchanged failed
+    or unstarted effect is superseded only when its existing recovery metadata
+    names an effect that is independently observed as successful in this same
+    execution evidence. Legacy invocations without an effect identifier retain
+    the existing per-tool grouping.
     """
     if not tool_invocations:
         return []
 
-    groups: dict[str, dict[str, Any]] = {}
-    group_order: list[str] = []
-
+    metadata_rows: list[dict[str, Any]] = []
     for invocation in tool_invocations:
         if not isinstance(invocation, Mapping):
             continue
         metadata = _extract_mutation_metadata_from_invocation(invocation)
         if metadata is None:
             continue
+        metadata_rows.append(metadata)
 
+    effect_evidence_rows: dict[str, list[dict[str, Any]]] = {}
+    for metadata in metadata_rows:
+        effect_id = _safe_str(metadata.get("effect_id"))
+        if effect_id:
+            effect_evidence_rows.setdefault(effect_id, []).append(metadata)
+    successful_effect_ids = {
+        effect_id
+        for effect_id, rows in effect_evidence_rows.items()
+        if rows
+        and all(
+            (_safe_str(row.get("status")) or "error") == "ok"
+            and (_safe_str(row.get("effect_status")) or "").lower()
+            == "succeeded"
+            for row in rows
+        )
+    }
+
+    groups: dict[str, dict[str, Any]] = {}
+    group_order: list[str] = []
+    for metadata in metadata_rows:
         canonical_tool_key = _tool_requirement_key(metadata["tool_name"])
         stable_effect_id = _safe_str(metadata.get("effect_id"))
         if not stable_effect_id and not include_legacy_without_effect_id:
@@ -9599,6 +9630,10 @@ def _build_tool_authored_mutation_effects(
                 "mutation_outcomes": [],
                 "outcome_finalities": [],
                 "error_codes": [],
+                "recovery_statuses": [],
+                "recovered_by_effect_ids": [],
+                "superseded_by_effect_id": None,
+                "unrecovered_failure": False,
             }
             group_order.append(group_key)
 
@@ -9628,10 +9663,28 @@ def _build_tool_authored_mutation_effects(
             ("mutation_outcome", "mutation_outcomes"),
             ("outcome_finality", "outcome_finalities"),
             ("error_code", "error_codes"),
+            ("recovery_status", "recovery_statuses"),
+            ("recovered_by_effect_id", "recovered_by_effect_ids"),
         ):
             field_value = _safe_str(metadata.get(field_name))
             if field_value and field_value not in group[group_field]:
                 group[group_field].append(field_value)
+
+        recovery_status = (_safe_str(metadata.get("recovery_status")) or "").lower()
+        recovered_by_effect_id = _safe_str(metadata.get("recovered_by_effect_id"))
+        if metadata["status"] != "ok":
+            recovery_supersedes_failure = bool(
+                stable_effect_id
+                and metadata.get("changed") is False
+                and metadata["status"] in {"error", "not_started"}
+                and recovery_status == "succeeded"
+                and recovered_by_effect_id in successful_effect_ids
+            )
+            if recovery_supersedes_failure:
+                if group["superseded_by_effect_id"] is None:
+                    group["superseded_by_effect_id"] = recovered_by_effect_id
+            else:
+                group["unrecovered_failure"] = True
 
         normalised_effect_status = (
             _safe_str(metadata.get("effect_status")) or ""
@@ -9671,8 +9724,19 @@ def _build_tool_authored_mutation_effects(
         predicates = group["predicates"][:5]
         relation_tuples = group["relation_tuples"][:5]
         independently_observed = bool(group["effect_id"])
+        recovery_superseded = bool(
+            group["superseded_by_effect_id"]
+            and not group["unrecovered_failure"]
+            and (group["any_failure"] or group["any_not_started"])
+        )
 
-        if independently_observed and group["any_not_started"]:
+        if recovery_superseded:
+            effect_status = "satisfied"
+            status_reason = (
+                f"Unchanged {tool_name} failure was superseded by successful "
+                f"recovery effect {group['superseded_by_effect_id']}."
+            )
+        elif independently_observed and group["any_not_started"]:
             effect_status = "not_executed"
             status_reason = f"{tool_name} invocation was not started."
         elif independently_observed and group["any_indeterminate"]:
@@ -9700,7 +9764,9 @@ def _build_tool_authored_mutation_effects(
             effect_status = "not_executed"
             status_reason = f"No {tool_name} invocation completed."
 
-        failure_codes: list[str] = _dedupe_string_sequence(group["error_codes"])
+        failure_codes: list[str] = (
+            [] if recovery_superseded else _dedupe_string_sequence(group["error_codes"])
+        )
         if effect_status in {"not_satisfied", "not_executed"} and not failure_codes:
             failure_codes = [
                 (
@@ -9729,6 +9795,8 @@ def _build_tool_authored_mutation_effects(
             "status_reason": status_reason,
             "failure_codes": failure_codes,
         }
+        if recovery_superseded:
+            effect["postcondition_strategy"] = "execution_observed"
         if relation_tuples:
             effect["required_relation_tuples"] = relation_tuples
         if independently_observed and (
@@ -9745,6 +9813,15 @@ def _build_tool_authored_mutation_effects(
                 effect[effect_field] = observed_values[0]
             elif observed_values:
                 effect[f"{effect_field}s"] = list(observed_values)
+        for source_field, effect_field in (
+            ("recovery_statuses", "recovery_status"),
+            ("recovered_by_effect_ids", "recovered_by_effect_id"),
+        ):
+            recovery_values = group[source_field]
+            if len(recovery_values) == 1:
+                effect[effect_field] = recovery_values[0]
+            elif recovery_values:
+                effect[f"{effect_field}s"] = list(recovery_values)
         if failure_codes:
             effect["failure_code"] = failure_codes[0]
 
@@ -12806,6 +12883,14 @@ def reconcile_durable_workflow_terminal_effect(
                 "instance_id": clean_instance_id,
                 "terminal_status": clean_terminal_status,
                 "effect_status": effect_status,
+                # A terminal workflow-instance state is operational evidence. It
+                # does not, by itself, prove the requested domain postconditions.
+                # Keep that distinction on the existing conversation observation
+                # so a late UI update cannot turn an operational completion into
+                # a semantic-success claim.
+                "domain_postcondition_status": (
+                    "not_established_by_workflow_terminal"
+                ),
                 "changed": changed,
                 "outcome_finality": "canonical_durable_terminal",
                 "final_state": canonical_receipt.get("final_state"),

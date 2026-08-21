@@ -5079,7 +5079,7 @@ def test_canonical_literal_relationship_recovery_requires_same_object(
     assert denial["recovery_status"] == "mismatched"
     assert denial["attempted_recovery_effect_id"] == unrelated_recovery["effect_id"]
     assert "recovered_by_effect_id" not in denial
-    assert result.terminal_status == "effect_not_started"
+    assert result.terminal_status == "effect_partially_completed"
     assert result.response_text != "The scoped assertion was recorded."
 
 
@@ -12518,3 +12518,693 @@ def test_model_call_progress_reports_cumulative_usage_cost_and_exact_identity() 
             "call_count": 2,
         }
     ]
+
+
+def _run_explicit_scoped_recovery_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mismatched_index: int | None,
+    mismatch_kind: str = "target",
+    emit_exact_affordances: bool = True,
+) -> tuple[Any, list[dict[str, Any]]]:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    facts = [
+        ("is_an_instance_of", "#V#academic_staff"),
+        ("affiliated_with", "#V#school_of_computer_science"),
+        ("has_job_title", "#V#associate_professor"),
+        ("employed_by", "#V#university_of_auckland"),
+        ("member_of", "#V#computer_science_staff"),
+        ("works_at", "#V#university_of_auckland_city_campus"),
+    ]
+    seen_arguments: list[dict[str, Any]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "upsert_scoped_assertion"
+        seen_arguments.append(dict(arguments))
+        predicate = str(arguments["predicate"])
+        if not predicate.startswith("#V#"):
+            failure = {
+                "success": False,
+                "effect_status": "failed",
+                "changed": False,
+                "error_code": "invalid_scoped_assertion",
+                "error": "predicate must be a represented concept ID",
+            }
+            if emit_exact_affordances:
+                failure["recovery_affordances"] = [
+                    {
+                        "action_type": (
+                            "retry_exact_scoped_assertion_with_canonical_predicate_id"
+                        ),
+                        "tool": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": arguments[
+                                "subject_concept_id"
+                            ],
+                            "predicate": f"#V#{predicate}",
+                            "target_concept_id": arguments[
+                                "target_concept_id"
+                            ],
+                            "scope_mode": arguments["scope_mode"],
+                            "evidence": arguments["evidence"],
+                        },
+                    }
+                ]
+            return failure
+
+        assertion_id = f"ska_recovery_{len(seen_arguments)}"
+        scope_mode = str(arguments["scope_mode"])
+        organisation_id = arguments["organisation_concept_id"]
+        readback = {
+            "schema_version": "scoped_knowledge_assertion.v1",
+            "assertion_id": assertion_id,
+            "subject_concept_id": arguments["subject_concept_id"],
+            "predicate": predicate,
+            "object_kind": "concept",
+            "object_concept_id": arguments["target_concept_id"],
+            "object_text": None,
+            "scope": {
+                "mode": scope_mode,
+                "user_concept_id": arguments["acting_user_concept_id"],
+                "organisation_concept_id": organisation_id,
+                "namespace": arguments["namespace"],
+                "audience_keys": [f"org:{organisation_id}"],
+            },
+            "provenance": {
+                "asserted_by_user_concept_id": arguments[
+                    "acting_user_concept_id"
+                ],
+                "organisation_concept_id": organisation_id,
+                "namespace": arguments["namespace"],
+            },
+            "canonical_publication": False,
+            "status": "asserted",
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": assertion_id,
+            "canonical_read_back": readback,
+        }
+
+    malformed_calls = [
+        ToolCall(
+            tool_name="turn_invoke_capability",
+            call_id=f"malformed-scoped-fact-{index + 1}",
+            payload={
+                "name": "upsert_scoped_assertion",
+                "arguments": {
+                    "subject_concept_id": "#V#marc_example",
+                    "predicate": predicate,
+                    "target_concept_id": target,
+                    "scope_mode": "organisation",
+                    "evidence": {"source": "official staff page"},
+                },
+            },
+        )
+        for index, (predicate, target) in enumerate(facts)
+    ]
+    corrected_calls = []
+    for index, (predicate, target) in enumerate(facts):
+        corrected_arguments = {
+            "subject_concept_id": "#V#marc_example",
+            "predicate": f"#V#{predicate}",
+            "target_concept_id": target,
+            "scope_mode": "organisation",
+            "evidence": {"source": "official staff page"},
+        }
+        if index == mismatched_index:
+            if mismatch_kind == "target":
+                corrected_arguments["target_concept_id"] = (
+                    "#V#valid_but_wrong_target"
+                )
+            elif mismatch_kind == "scope":
+                corrected_arguments["scope_mode"] = "user"
+            elif mismatch_kind == "evidence":
+                corrected_arguments["evidence"] = {"source": "different page"}
+            else:
+                raise AssertionError(f"Unsupported mismatch kind: {mismatch_kind}")
+        corrected_calls.append(
+            ToolCall(
+                tool_name="turn_invoke_capability",
+                call_id=f"corrected-scoped-fact-{index + 1}",
+                payload={
+                    "name": "upsert_scoped_assertion",
+                    "arguments": corrected_arguments,
+                },
+            )
+        )
+
+    client = _SequenceClient(
+        LLMResponse(text_response="", tool_calls=malformed_calls),
+        LLMResponse(text_response="", tool_calls=corrected_calls),
+        LLMResponse(text_response="The six requested scoped facts are now present."),
+    )
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt="Represent Marc Example with these six organisation-scoped facts.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"turn-explicit-scoped-recovery-{mismatched_index}",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    invoke_tool = next(
+        tool
+        for tool in client.calls[0]["available_tools"]
+        if tool.name == "turn_invoke_capability"
+    )
+    assert "satisfies_obligation_id" not in invoke_tool.input_schema["properties"]
+    assert all(
+        set(call.payload) == {"name", "arguments"}
+        for call in malformed_calls + corrected_calls
+    )
+    assert all(
+        "satisfies_obligation_id" not in arguments
+        for arguments in seen_arguments
+    )
+    return result, seen_arguments
+
+
+def test_all_explicit_exact_scoped_recoveries_complete_without_linkage_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, seen_arguments = _run_explicit_scoped_recovery_replay(
+        monkeypatch,
+        mismatched_index=None,
+    )
+
+    assert len(seen_arguments) == 12
+    failures = [
+        invocation
+        for invocation in result.tool_invocations
+        if str(invocation.get("call_id") or "").startswith("malformed-scoped-fact-")
+    ]
+    recoveries = [
+        invocation
+        for invocation in result.tool_invocations
+        if str(invocation.get("call_id") or "").startswith("corrected-scoped-fact-")
+    ]
+    assert len(failures) == len(recoveries) == 6
+    assert all(
+        invocation["effect_status"] == "failed"
+        and invocation["changed"] is False
+        and invocation["recovery_status"] == "succeeded"
+        and invocation.get("recovered_by_effect_id")
+        for invocation in failures
+    )
+    assert all(
+        invocation["effect_status"] == "succeeded"
+        and invocation["changed"] is True
+        and invocation.get("canonical_readback", {}).get("status") == "asserted"
+        for invocation in recoveries
+    )
+    assert result.terminal_status == "completed"
+    assert result.response_authority == "model"
+    assert result.response_text == "The six requested scoped facts are now present."
+
+
+@pytest.mark.parametrize("mismatch_kind", ["target", "scope", "evidence"])
+def test_one_valid_but_mismatched_scoped_recovery_keeps_turn_partial(
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch_kind: str,
+) -> None:
+    result, seen_arguments = _run_explicit_scoped_recovery_replay(
+        monkeypatch,
+        mismatched_index=5,
+        mismatch_kind=mismatch_kind,
+    )
+
+    failures = [
+        invocation
+        for invocation in result.tool_invocations
+        if str(invocation.get("call_id") or "").startswith("malformed-scoped-fact-")
+    ]
+    assert sum(
+        invocation.get("recovery_status") == "succeeded"
+        for invocation in failures
+    ) == 5
+    mismatched = next(
+        invocation
+        for invocation in failures
+        if invocation.get("recovery_status") == "mismatched"
+    )
+    wrong_recovery = next(
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("call_id") == "corrected-scoped-fact-6"
+    )
+    assert mismatched["attempted_recovery_effect_id"] == wrong_recovery["effect_id"]
+    assert "recovered_by_effect_id" not in mismatched
+    recovery_arguments = seen_arguments[-1]
+    if mismatch_kind == "target":
+        assert wrong_recovery["canonical_readback"]["object_concept_id"] == (
+            "#V#valid_but_wrong_target"
+        )
+    elif mismatch_kind == "scope":
+        assert recovery_arguments["scope_mode"] == "user"
+    else:
+        assert recovery_arguments["evidence"] == {"source": "different page"}
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.response_authority == "canonical_outcome"
+    assert result.response_text != "The six requested scoped facts are now present."
+
+
+def test_malformed_scoped_failures_without_exact_affordances_are_not_fuzzily_reconciled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, _seen_arguments = _run_explicit_scoped_recovery_replay(
+        monkeypatch,
+        mismatched_index=None,
+        emit_exact_affordances=False,
+    )
+
+    failures = [
+        invocation
+        for invocation in result.tool_invocations
+        if str(invocation.get("call_id") or "").startswith("malformed-scoped-fact-")
+    ]
+    assert len(failures) == 6
+    assert all("recovery_status" not in invocation for invocation in failures)
+    assert all("recovered_by_effect_id" not in invocation for invocation in failures)
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.response_authority == "canonical_outcome"
+
+
+def test_catalogue_exact_predicate_affordances_reconcile_concept_and_text_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.integrations.internal_mcp.catalogue import (
+        build_default_catalogue,
+    )
+    from src.backend.services.text_relation_predicate_validation_service import (
+        TextRelationPredicateResolutionError,
+    )
+
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.security.access_control.can_access_concept",
+        lambda _concept_id: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service."
+        "resolve_existing_predicate_value_kind",
+        lambda predicate_id: (
+            "text" if predicate_id == "#V#has_email" else "concept"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service."
+        "maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: {"success": True, "skipped": True},
+    )
+
+    service_calls: list[dict[str, Any]] = []
+
+    def upsert(**arguments: Any) -> dict[str, Any]:
+        service_calls.append(dict(arguments))
+        predicate = str(arguments["predicate"])
+        if predicate == "affiliated_with":
+            raise ValueError("predicate must be an exact #V# concept ID")
+        if predicate == "has_email":
+            raise TextRelationPredicateResolutionError(
+                "unsupported_text_relation_predicate",
+                "Unsupported text-relation predicate 'has_email'.",
+                details={"predicate": "has_email"},
+            )
+        object_kind = "text" if arguments.get("target_text") else "concept"
+        assertion_id = f"ska_catalogue_recovery_{len(service_calls)}"
+        readback = {
+            "schema_version": "scoped_knowledge_assertion.v1",
+            "assertion_id": assertion_id,
+            "subject_concept_id": arguments["subject_concept_id"],
+            "predicate": predicate,
+            "object_kind": object_kind,
+            "object_concept_id": arguments.get("target_concept_id"),
+            "object_text": (
+                {
+                    "text": arguments["target_text"],
+                    "language": arguments.get("language") or "en-NZ",
+                }
+                if object_kind == "text"
+                else None
+            ),
+            "scope": {
+                "mode": arguments["scope_mode"],
+                "user_concept_id": arguments["acting_user_concept_id"],
+                "organisation_concept_id": arguments[
+                    "organisation_concept_id"
+                ],
+                "namespace": arguments["namespace"],
+            },
+            "provenance": {
+                "asserted_by_user_concept_id": arguments[
+                    "acting_user_concept_id"
+                ],
+                "evidence": arguments["evidence"],
+            },
+            "canonical_publication": False,
+            "status": "asserted",
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": assertion_id,
+            "assertion": readback,
+            "canonical_read_back": readback,
+            "canonical_publication": False,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.upsert_scoped_assertion",
+        upsert,
+    )
+    common = {
+        "subject_concept_id": "#V#marc_example",
+        "scope_mode": "organisation",
+        "evidence": {"source": "official staff page"},
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="catalogue-bare-concept-predicate",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            **common,
+                            "predicate": "affiliated_with",
+                            "target_concept_id": "#V#school_of_computer_science",
+                        },
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="catalogue-bare-text-predicate",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            **common,
+                            "predicate": "has_email",
+                            "target_text": "marc@example.test",
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="catalogue-exact-concept-predicate",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            **common,
+                            "predicate": "#V#affiliated_with",
+                            "target_concept_id": "#V#school_of_computer_science",
+                        },
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="catalogue-exact-text-predicate",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            **common,
+                            "predicate": "#V#has_email",
+                            "target_text": "marc@example.test",
+                            "language": "en-NZ",
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response="Both exact assertions are represented."),
+    )
+    result = execute_adaptive_turn(
+        gateway=InternalMCPGateway(
+            catalogue=build_default_catalogue(),
+            transport=InternalMCPTransport(
+                read_timeout_sec=1.0,
+                write_timeout_sec=1.0,
+            ),
+            enabled=True,
+        ),
+        prompt="Represent the exact School affiliation and email assertions.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-catalogue-exact-predicate-recovery",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    failures = result.tool_invocations[:2]
+    recoveries = result.tool_invocations[2:]
+    assert all(item["effect_status"] == "not_started" for item in failures)
+    assert all(item["recovery_status"] == "succeeded" for item in failures)
+    assert all(item.get("recovered_by_effect_id") for item in failures)
+    assert all(item["effect_status"] == "succeeded" for item in recoveries)
+    assert result.terminal_status == "completed"
+    assert result.response_authority == "model"
+    assert result.response_text == "Both exact assertions are represented."
+
+
+def test_existing_scoped_fact_canonical_read_completes_without_a_write() -> None:
+    seen_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        seen_calls.append((name, dict(arguments)))
+        assert name == "general_read"
+        return {
+            "success": True,
+            "found": True,
+            "canonical_read_back": {
+                "schema_version": "scoped_knowledge_assertion.v1",
+                "assertion_id": "ska_existing_affiliation",
+                "subject_concept_id": "#V#marc_example",
+                "predicate": "#V#affiliated_with",
+                "object_kind": "concept",
+                "object_concept_id": "#V#school_of_computer_science",
+                "scope_mode": "organisation",
+                "status": "asserted",
+            },
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-existing-scoped-fact",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {
+                            "subject_concept_id": "#V#marc_example",
+                            "predicate": "#V#affiliated_with",
+                            "target_concept_id": (
+                                "#V#school_of_computer_science"
+                            ),
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The existing scoped fact was verified."),
+    )
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt=(
+            "Ensure Marc Example's School affiliation is represented; read first "
+            "and do not write if it already exists."
+        ),
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-existing-scoped-fact-read",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert seen_calls == [
+        (
+            "general_read",
+            {
+                "subject_concept_id": "#V#marc_example",
+                "predicate": "#V#affiliated_with",
+                "target_concept_id": "#V#school_of_computer_science",
+                "scope_mode": "organisation",
+            },
+        )
+    ]
+    assert all(
+        invocation.get("effect_id") is None
+        for invocation in result.tool_invocations
+    )
+    assert result.terminal_status == "completed"
+    assert result.response_authority == "model"
+    assert result.response_text == "The existing scoped fact was verified."
+
+
+@pytest.mark.parametrize(
+    ("recovery_language", "expected_recovery_status", "expected_terminal_status"),
+    (
+        ("en-NZ", "succeeded", "completed"),
+        ("fr-FR", "mismatched", "effect_partially_completed"),
+    ),
+)
+def test_scoped_text_recovery_uses_exact_defaulted_language(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_language: str,
+    expected_recovery_status: str,
+    expected_terminal_status: str,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    handler_calls: list[dict[str, Any]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "upsert_scoped_assertion"
+        handler_calls.append(dict(arguments))
+        if len(handler_calls) == 1:
+            return {
+                "success": False,
+                "effect_status": "failed",
+                "changed": False,
+                "error_code": "scoped_assertion_write_failed",
+                "recovery_affordances": [
+                    {
+                        "action_type": (
+                            "retry_exact_scoped_assertion_with_canonical_predicate_id"
+                        ),
+                        "tool": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#marc_example",
+                            "predicate": "#V#has_note",
+                            "target_text": "Research note",
+                            "scope_mode": "organisation",
+                        },
+                    }
+                ],
+            }
+
+        assertion_id = "ska_text_language_recovery"
+        organisation_id = arguments["organisation_concept_id"]
+        readback = {
+            "schema_version": "scoped_knowledge_assertion.v1",
+            "assertion_id": assertion_id,
+            "subject_concept_id": arguments["subject_concept_id"],
+            "predicate": arguments["predicate"],
+            "object_kind": "text",
+            "object_concept_id": None,
+            "object_text": {
+                "text": arguments["target_text"],
+                "language": arguments["language"],
+            },
+            "scope": {
+                "mode": arguments["scope_mode"],
+                "user_concept_id": arguments["acting_user_concept_id"],
+                "organisation_concept_id": organisation_id,
+                "namespace": arguments["namespace"],
+                "audience_keys": [f"org:{organisation_id}"],
+            },
+            "provenance": {
+                "asserted_by_user_concept_id": arguments[
+                    "acting_user_concept_id"
+                ],
+                "organisation_concept_id": organisation_id,
+                "namespace": arguments["namespace"],
+            },
+            "canonical_publication": False,
+            "status": "asserted",
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": assertion_id,
+            "canonical_read_back": readback,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="failed-default-language-assertion",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#marc_example",
+                            "predicate": "#V#has_note",
+                            "target_text": "Research note",
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="text-language-recovery",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#marc_example",
+                            "predicate": "#V#has_note",
+                            "target_text": "Research note",
+                            "language": recovery_language,
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The text assertion was recovered."),
+    )
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt="Record this organisation-scoped research note.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"turn-text-language-recovery-{recovery_language}",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    failure, recovery = result.tool_invocations
+    assert failure["recovery_status"] == expected_recovery_status
+    if expected_recovery_status == "succeeded":
+        assert failure["recovered_by_effect_id"] == recovery["effect_id"]
+    else:
+        assert "recovered_by_effect_id" not in failure
+        assert failure["attempted_recovery_effect_id"] == recovery["effect_id"]
+    assert recovery["canonical_readback"]["object_text_identity_sha256"]
+    assert result.terminal_status == expected_terminal_status

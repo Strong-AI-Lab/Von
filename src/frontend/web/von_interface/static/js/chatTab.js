@@ -251,6 +251,7 @@ const workflowStatusStreamState = {
     retryAttempt: 0,
     liveRefreshTimeoutId: null
 };
+const workflowTerminalObservationRefreshKeys = new Set();
 const workflowDefinitionsState = {
     visible: false,
     loading: false,
@@ -4921,6 +4922,7 @@ function _acceptConversationSituationPayload(payload, sessionId, options = {}) {
     conversationSituationStateBySession.set(sid, accepted);
     if (sid === activeChatSessionId) {
         _renderConversationSituationForActiveSession();
+        _renderLateWorkflowOutcomesForActiveSession();
     }
     return accepted;
 }
@@ -5057,6 +5059,7 @@ function _renderConversationObservation(observation) {
         'observed_at_utc',
         'terminal_status',
         'effect_status',
+        'domain_postcondition_status',
         'outcome_finality',
         'final_state',
         'capability_name',
@@ -5088,6 +5091,128 @@ function _renderConversationObservation(observation) {
     });
     card.appendChild(fields);
     return card;
+}
+
+function _lateWorkflowOutcomeLead(observation) {
+    const status = String(observation?.terminal_status || '').trim().toLowerCase();
+    const workflowLabel = String(
+        observation?.capability_name || observation?.workflow_id || 'Background workflow'
+    ).trim();
+    if (status === 'completed' || status === 'succeeded' || status === 'success') {
+        return `${workflowLabel} completed after the original response.`;
+    }
+    if (status === 'cancelled' || status === 'canceled') {
+        return `${workflowLabel} was cancelled after the original response.`;
+    }
+    if (status === 'failed') {
+        return `${workflowLabel} failed after the original response.`;
+    }
+    return `${workflowLabel} reached terminal status ${status || 'unknown'} after the original response.`;
+}
+
+function _renderLateWorkflowOutcome(observation, sessionId) {
+    const card = document.createElement('aside');
+    card.className = 'message-container assistant-turn chat-late-workflow-outcome';
+    card.setAttribute('role', 'status');
+    card.setAttribute('aria-live', 'polite');
+    card.dataset.conversationObservationId = observation.observation_id;
+    card.dataset.sessionId = sessionId;
+
+    const header = document.createElement('div');
+    header.className = 'message-header chat-late-workflow-outcome-header';
+    header.textContent = 'Workflow update';
+    const observedAt = String(
+        observation.completed_at || observation.observed_at_utc || ''
+    ).trim();
+    if (observedAt) {
+        header.textContent += ` • ${formatChatTimestamp(observedAt)}`;
+        setUnambiguousTimestampTooltip(header, observedAt, 'Observed: ');
+    }
+
+    const lead = document.createElement('p');
+    lead.className = 'chat-late-workflow-outcome-lead';
+    lead.textContent = _lateWorkflowOutcomeLead(observation);
+
+    const qualification = document.createElement('p');
+    qualification.className = 'chat-late-workflow-outcome-qualification';
+    qualification.textContent = (
+        observation.domain_postcondition_status === 'verified'
+            ? 'The linked requested postconditions were canonically verified.'
+            : 'This confirms the workflow execution status only; it does not by itself prove every requested knowledge change.'
+    );
+
+    const details = document.createElement('details');
+    details.className = 'chat-late-workflow-outcome-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Exact outcome details';
+    details.appendChild(summary);
+    const fields = document.createElement('dl');
+    fields.className = 'chat-situation-observation-fields';
+    [
+        'terminal_status',
+        'effect_status',
+        'domain_postcondition_status',
+        'workflow_id',
+        'instance_id',
+        'request_id',
+        'effect_id',
+        'completed_at',
+        'execution_trace_id'
+    ].forEach((key) => {
+        _appendConversationSituationDefinitionRow(
+            fields,
+            _humaniseConversationSituationField(key),
+            observation[key],
+            key
+        );
+    });
+    details.appendChild(fields);
+
+    const message = document.createElement('div');
+    message.className = 'chat-message-text';
+    message.appendChild(lead);
+    message.appendChild(qualification);
+    message.appendChild(details);
+
+    card.appendChild(header);
+    card.appendChild(message);
+    return card;
+}
+
+function _renderLateWorkflowOutcomesForActiveSession() {
+    const sid = normaliseHistorySessionId(activeChatSessionId);
+    const scrollableField = document.getElementById('scrollableField');
+    if (!sid || !scrollableField) {
+        return 0;
+    }
+    if (displayedHistorySessionId && displayedHistorySessionId !== sid) {
+        return 0;
+    }
+    const state = conversationSituationStateBySession.get(sid);
+    const observations = Array.isArray(state?.observations) ? state.observations : [];
+    const existingIds = new Set(
+        Array.from(
+            scrollableField.querySelectorAll('[data-conversation-observation-id]')
+        ).map(element => String(element.dataset.conversationObservationId || '').trim())
+            .filter(Boolean)
+    );
+    let appended = 0;
+    observations.forEach((observation) => {
+        if (
+            observation?.kind !== 'durable_workflow_terminal'
+            || !observation.observation_id
+            || existingIds.has(observation.observation_id)
+        ) {
+            return;
+        }
+        scrollableField.appendChild(_renderLateWorkflowOutcome(observation, sid));
+        existingIds.add(observation.observation_id);
+        appended += 1;
+    });
+    if (appended > 0) {
+        updateScrollToEndButtonVisibility(scrollableField);
+    }
+    return appended;
 }
 
 function _renderConversationSituationForActiveSession() {
@@ -27238,6 +27363,7 @@ async function loadChatHistory(options = {}) {
             });
 
             displayedHistorySessionId = targetSessionId;
+            _renderLateWorkflowOutcomesForActiveSession();
             clearHistoryLoadState({ sessionId: targetSessionId });
             updateHistoryBanner();
             const sessionMeta = sessionTabsCache.find(
@@ -27287,6 +27413,7 @@ async function loadChatHistory(options = {}) {
         historySegmentsShown = segmentsReturned;
         totalHistorySegments = totalSegments;
         displayedHistorySessionId = targetSessionId;
+        _renderLateWorkflowOutcomesForActiveSession();
         clearHistoryLoadState({ sessionId: targetSessionId });
         updateHistoryBanner();
         console.log('No Conversation history to load or empty history');
@@ -27449,6 +27576,11 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             }
         }
     });
+
+    // Conversation observations are a separate append-only carrier. Rebuild
+    // their user-visible late-result cards after transcript rehydration, which
+    // clears the scrollable field after accepting the carrier snapshot.
+    _renderLateWorkflowOutcomesForActiveSession();
 
     // JVNAUTOSCI-2128: rehydrate the per-conversation ArrowUp recall buffer
     // from history so the most recent user prompt is recallable after a
@@ -30267,12 +30399,71 @@ function scheduleWorkflowStatusLiveRefresh() {
     }, WORKFLOW_STATUS_LIVE_REFRESH_DEBOUNCE_MS);
 }
 
+function _activeConversationContainsRequestId(requestId) {
+    const cleanRequestId = String(requestId || '').trim();
+    if (!cleanRequestId || !activeChatSessionId) {
+        return false;
+    }
+    const requestCandidates = [
+        activeChatRequest?.clientRequestId,
+        activeChatRequest?.latestProgress?.request_id,
+        lastFinishedThinkingCard?.clientRequestId,
+        lastFinishedThinkingCard?.latestProgress?.request_id
+    ];
+    if (requestCandidates.some(value => String(value || '').trim() === cleanRequestId)) {
+        return true;
+    }
+    for (const debugData of llmDebugData.values()) {
+        if (
+            debugData
+            && typeof debugData === 'object'
+            && String(debugData.request_id || '').trim() === cleanRequestId
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function _refreshLateWorkflowObservationAfterTerminalEvent(payload) {
+    const status = String(payload?.status || '').trim().toLowerCase();
+    const requestId = String(payload?.source_event_id || '').trim();
+    const instanceId = String(payload?.instance_id || '').trim();
+    if (
+        payload?.source_event_type !== 'conversation_turn'
+        || !['completed', 'failed', 'cancelled', 'canceled'].includes(status)
+        || !requestId
+        || !instanceId
+        || !_activeConversationContainsRequestId(requestId)
+    ) {
+        return false;
+    }
+    const refreshKey = `${requestId}:${instanceId}:${status}`;
+    if (workflowTerminalObservationRefreshKeys.has(refreshKey)) {
+        return false;
+    }
+    workflowTerminalObservationRefreshKeys.add(refreshKey);
+    if (workflowTerminalObservationRefreshKeys.size > 200) {
+        const oldest = workflowTerminalObservationRefreshKeys.values().next().value;
+        workflowTerminalObservationRefreshKeys.delete(oldest);
+    }
+    void refreshConversationSituationForSession(activeChatSessionId).then((refreshed) => {
+        if (!refreshed) {
+            workflowTerminalObservationRefreshKeys.delete(refreshKey);
+        }
+    }).catch(() => {
+        workflowTerminalObservationRefreshKeys.delete(refreshKey);
+    });
+    return true;
+}
+
 function applyWorkflowStatusUpdate(payload) {
     if (!payload || !payload.instance_id) return;
     const existingItem = workflowStatusStreamState.items.get(payload.instance_id) || null;
     const mergedPayload = mergeWorkflowStatusPayload(existingItem, payload);
     const status = mergedPayload.status || '';
     if (!WORKFLOW_STATUS_ACTIVE.has(status)) {
+        _refreshLateWorkflowObservationAfterTerminalEvent(mergedPayload);
         workflowStatusStreamState.items.delete(payload.instance_id);
         syncWorkflowStatusSnapshotNotice();
         renderWorkflowStatusBody();
@@ -37340,6 +37531,7 @@ export function __testOnly_resetWorkflowStatusState() {
     workflowStatusStreamState.snapshotError = '';
     workflowStatusStreamState.snapshotNotice = '';
     workflowStatusStreamState.lastSnapshotPayload = null;
+    workflowTerminalObservationRefreshKeys.clear();
     workflowStatusGroupUiState.collapsedByWorkflowId.clear();
     workflowStatusGroupUiState.globallyFurled = false;
     workflowStatusPanelInitialised = false;

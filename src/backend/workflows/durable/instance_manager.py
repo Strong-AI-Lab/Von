@@ -2211,8 +2211,12 @@ class WorkflowInstanceManager:
                     else instance_before.llm_usage_cost_summary
                 ),
             )
-            self._broadcast_instance(completed_instance)
             self._reconcile_conversation_turn_terminal_effect(completed_instance)
+            # Reconcile the durable effect and append its conversation
+            # observation before the actor-scoped terminal SSE event. The
+            # browser can then perform one bounded read and see the persisted
+            # observation without another prompt or a page reload.
+            self._broadcast_instance(completed_instance)
             self._emit_episode_evaluation_terminal_event(
                 instance=completed_instance,
                 terminal_status=WorkflowInstanceStatus.COMPLETED.value,
@@ -2354,8 +2358,8 @@ class WorkflowInstanceManager:
                     else instance_before.llm_usage_cost_summary
                 ),
             )
-            self._broadcast_instance(failed_instance)
             self._reconcile_conversation_turn_terminal_effect(failed_instance)
+            self._broadcast_instance(failed_instance)
             self._emit_episode_evaluation_terminal_event(
                 instance=failed_instance,
                 terminal_status=WorkflowInstanceStatus.FAILED.value,
@@ -2420,8 +2424,8 @@ class WorkflowInstanceManager:
                 progress_message="cancelled",
                 progress_updated_at=now,
             )
-            self._broadcast_instance(cancelled_instance)
             self._reconcile_conversation_turn_terminal_effect(cancelled_instance)
+            self._broadcast_instance(cancelled_instance)
             self._emit_episode_evaluation_terminal_event(
                 instance=cancelled_instance,
                 terminal_status=WorkflowInstanceStatus.CANCELLED.value,

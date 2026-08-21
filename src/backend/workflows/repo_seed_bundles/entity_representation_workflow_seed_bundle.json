@@ -2,7 +2,7 @@
   "family_id": "entity_representation_workflow_seed_bundle",
   "managed_by": "entity_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
+  "seed_version": "6",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#entity_representation_workflow": {
       "2": [
@@ -10,6 +10,9 @@
       ],
       "4": [
         "4d6f1b2d87d0b861ac19241bd021ca78e3037cacdd161c6c956e764d9847e529"
+      ],
+      "5": [
+        "bca9845b99f4558392719cd06a63be2f03473dd739221d00a5ea8066ea5ef6be"
       ]
     }
   },
@@ -24,8 +27,8 @@
     {
       "workflow_id": "#V#entity_representation_workflow",
       "display_name": "Entity Representation Workflow",
-      "description": "Route conversational entity-representation requests across reusable person, company, event, and place workflows, creating missing specialised workflows when necessary.",
-      "content": "Conversational wrapper workflow for entity representation. It discovers reusable specialised workflows, decides whether to reuse or create one for people, companies, events, or places, and only asks the user for clarification when vital information is missing.",
+      "description": "Route conversational entity-representation requests that may require creating or additively representing missing people, companies, events, or places; exclude pure read-only verification when an exact entity is already resolved.",
+      "content": "Conversational wrapper workflow for mutation-capable entity representation. It discovers reusable specialised workflows, decides whether to reuse or create one for people, companies, events, or places, and only asks the user for clarification when vital information is missing. Pure read-only verification of an exact already-resolved entity should use the smallest adequate read-only capability plan.",
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
@@ -67,7 +70,7 @@
         },
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"represent person in vontology\",\"represent company in vontology\",\"represent event in vontology\",\"represent place in vontology\",\"entity representation workflow\"],\"examples\":[\"Represent these people in the Vontology if they are not already represented.\",\"Please represent this company in the Vontology.\",\"Represent this event in the Vontology.\",\"Represent this place in the Vontology.\"]}",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"represent person in vontology\",\"represent company in vontology\",\"represent event in vontology\",\"represent place in vontology\",\"entity representation workflow\"],\"examples\":[\"Represent these people in the Vontology if they are not already represented.\",\"Please represent this company in the Vontology.\",\"Represent this event in the Vontology.\",\"Represent this place in the Vontology.\"],\"routing_notes\":[\"Choose this workflow when the entity may be missing or the requested outcome may require additive representation. For pure read-only verification of an exact already-resolved entity, choose the smallest adequate read-only capability plan.\"]}",
           "lang": "en-NZ"
         },
         {

@@ -372,6 +372,8 @@ def test_succeeded_person_core_only_workflow_receipt_requires_non_semantic_follo
     assert follow_up["semantic_effect"] is False
     assert follow_up["semantic_outcome"] == "follow_up_required"
     assert follow_up["semantic_outcome"] != "completed"
+    assert follow_up["change_kind"] == "workflow_instance_operational_state"
+    assert follow_up["operational_changed"] is True
 
 
 @pytest.mark.parametrize("semantic_outcome", ["blocked", "failed", "not_completed"])

@@ -53,7 +53,7 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     report = bootstrap_canonical_entity_representation_workflows()
 
     template_publication = report.get("template_publication") or {}
-    assert template_publication.get("repo_seed_version") == "5"
+    assert template_publication.get("repo_seed_version") == "6"
     assert (template_publication.get("counts") or {}).get("persisted_templates") == 4
 
     publication = report.get("publication") or {}
@@ -114,6 +114,10 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     assert discovery_source.startswith("text_relation:")
     assert "entity representation workflow" in (
         discovery_exemplars.get("keywords") or []
+    )
+    assert any(
+        "smallest adequate read-only capability plan" in str(note)
+        for note in discovery_exemplars.get("routing_notes") or []
     )
 
     dispatch_mapping_concept_ids: set[str] = set()
