@@ -15,6 +15,7 @@ MODEL_PARAMETERS_KEY = "model_parameters"
 MODEL_PARAMETER_REASONING_EFFORT = "reasoning_effort"
 MODEL_PARAMETER_CAPABILITY_SCHEMA = "model_parameter_capabilities.v1"
 OPENAI_REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
+GEMINI_REASONING_EFFORT_VALUES = ("low", "medium", "high")
 
 _OPENAI_REASONING_EFFORT_API_MAPPINGS = {
     "responses": {
@@ -24,6 +25,17 @@ _OPENAI_REASONING_EFFORT_API_MAPPINGS = {
     "chat_completions": {
         "type": "top_level",
         "key": "reasoning_effort",
+    },
+}
+
+_GEMINI_REASONING_EFFORT_API_MAPPINGS = {
+    "interactions": {
+        "type": "nested_object",
+        "path": ["generation_config", "thinking_level"],
+    },
+    "gemini_generate_content": {
+        "type": "nested_object",
+        "path": ["thinking_config", "thinking_level"],
     },
 }
 
@@ -101,6 +113,20 @@ def _openai_reasoning_effort_supported(model: str | None) -> bool:
     return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
+def _gemini_reasoning_effort_supported(model: str | None) -> bool:
+    """Return whether the model has Google's discrete thinking-level control."""
+
+    model_id = _clean_text(model)
+    if not model_id:
+        return False
+    lowered = model_id.lower()
+    if lowered.startswith("gemini:"):
+        lowered = lowered.split(":", 1)[1].strip()
+    if lowered.startswith("models/"):
+        lowered = lowered.split("/", 1)[1].strip()
+    return lowered == "gemini-3.7-flash" or lowered.startswith("gemini-3.7-flash-")
+
+
 def _parameter_capability(
     *,
     parameter_id: str,
@@ -143,18 +169,31 @@ def _provider_default_reasoning_effort_capability(
     provider: str | None,
     model: str | None,
 ) -> dict[str, Any]:
-    supported = provider == "openai" and _openai_reasoning_effort_supported(model)
+    openai_supported = provider == "openai" and _openai_reasoning_effort_supported(
+        model
+    )
+    gemini_supported = provider == "gemini" and _gemini_reasoning_effort_supported(
+        model
+    )
+    supported = openai_supported or gemini_supported
+    if openai_supported:
+        allowed_values = list(OPENAI_REASONING_EFFORT_VALUES)
+        provider_api_mapping: Mapping[str, Any] = _OPENAI_REASONING_EFFORT_API_MAPPINGS
+    elif gemini_supported:
+        allowed_values = list(GEMINI_REASONING_EFFORT_VALUES)
+        provider_api_mapping = _GEMINI_REASONING_EFFORT_API_MAPPINGS
+    else:
+        allowed_values = []
+        provider_api_mapping = {}
     return _parameter_capability(
         parameter_id=MODEL_PARAMETER_REASONING_EFFORT,
         supported=supported,
-        allowed_values=list(OPENAI_REASONING_EFFORT_VALUES) if supported else [],
+        allowed_values=allowed_values,
         fixed_value=None,
         read_only=False,
         source="provider_default_metadata" if supported else "unsupported",
         sources=["provider_default_metadata"] if supported else ["unsupported"],
-        provider_api_mapping=(
-            _OPENAI_REASONING_EFFORT_API_MAPPINGS if provider == "openai" else {}
-        ),
+        provider_api_mapping=provider_api_mapping,
     )
 
 
@@ -463,6 +502,27 @@ def openai_chat_completions_kwargs_from_model_parameters(
         provider="openai",
         model=model,
         api_surface="chat_completions",
+        include_registry=True,
+        profile_concept_id=profile_concept_id,
+    )
+
+
+def gemini_kwargs_from_model_parameters(
+    raw: Any,
+    *,
+    model: str | None,
+    api_surface: str,
+    profile_concept_id: str | None = None,
+) -> dict[str, Any]:
+    """Project Von's neutral reasoning effort onto a Gemini API surface."""
+
+    if api_surface not in {"interactions", "gemini_generate_content"}:
+        return {}
+    return provider_kwargs_from_model_parameters(
+        raw,
+        provider="gemini",
+        model=model,
+        api_surface=api_surface,
         include_registry=True,
         profile_concept_id=profile_concept_id,
     )

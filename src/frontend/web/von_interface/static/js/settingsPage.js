@@ -16,7 +16,9 @@ import {
   loadAndRenderOllamaHosts,
   loadOllamaHosts,
   populateModelDropdown,
+  populateGeminiModelDropdown,
   populateOpenAIModelDropdown,
+  renderGeminiModelOptions,
   renderOpenAIModelOptions,
   populateOrganisationsDropdown,
   populatePeopleDropdown,
@@ -55,15 +57,21 @@ import {
 } from './utils/runtimeIdentityBootstrap.js';
 import {
   clearStoredOllamaSelection,
+  getStoredGeminiModelParameters,
+  getStoredGeminiSelectedModel,
+  getStoredPremiumModelProvider,
   getEffectiveLocalModelPreference,
   getStoredOpenAiModelParameters,
   getStoredOpenAiSelectedModel,
   normaliseModelParameters,
   normaliseLocalModelName,
   setLocalPremiumModelUseEnabled,
+  setStoredGeminiModelParameters,
+  setStoredGeminiSelectedModel,
   setStoredOllamaSelection,
   setStoredOpenAiModelParameters,
   setStoredOpenAiSelectedModel,
+  setStoredPremiumModelProvider,
 } from './utils/localModelPreferences.js';
 import {
   __testOnly_resetWorkflowCapabilityIndexStatusCoordinator,
@@ -137,6 +145,8 @@ let currentEffectiveLlm = null;
 let currentEffectiveEnabledLlms = [];
 let latestOpenAiModelProbe = null;
 let latestOpenAiModelParameterCapability = null;
+let latestGeminiModelProbe = null;
+let latestGeminiModelParameterCapability = null;
 let openAiModelCostSummaryGeneration = 0;
 let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
@@ -245,7 +255,7 @@ const SETTINGS_ANCHOR_LABELS = Object.freeze({
   'current-organisation-settings': 'Organisation',
   'conversation-history-settings': 'History',
   'speech-settings': 'Speech',
-  'premium-model-settings': 'OpenAI',
+  'premium-model-settings': 'Premium',
   'ollima-settings': 'Ollama',
   'rag-model-settings': 'RAG & index',
   'vontology-performance': 'Vontology UI',
@@ -323,24 +333,79 @@ function getSettingsConcernIdentitySnapshot() {
   };
 }
 
+const PREMIUM_PROVIDER_CONFIG = Object.freeze({
+  openai: Object.freeze({
+    label: 'OpenAI',
+    envInputId: 'openaiApiKeyEnvVar',
+    verifyButtonId: 'verifyOpenAiApiKeyButton',
+    providerContainerId: 'openaiProviderSettings',
+    modelsContainerId: 'openaiModelsContainer',
+    modelSelectId: 'openaiModelSelect',
+    testButtonId: 'testOpenAiModelButton',
+    addButtonId: 'addOpenAiToWorkflowPoolButton',
+    eligibilityStatusId: 'openaiModelEligibilityStatus',
+    modelStatusId: 'openaiModelStatusMessage',
+    providerStatusId: 'openaiStatusMessage',
+    verifyEndpoint: '/api/settings/openai/verify',
+    testEndpoint: '/api/settings/openai/test_model',
+    apiSurface: 'responses',
+  }),
+  gemini: Object.freeze({
+    label: 'Gemini',
+    envInputId: 'geminiApiKeyEnvVar',
+    verifyButtonId: 'verifyGeminiApiKeyButton',
+    providerContainerId: 'geminiProviderSettings',
+    modelsContainerId: 'geminiModelsContainer',
+    modelSelectId: 'geminiModelSelect',
+    testButtonId: 'testGeminiModelButton',
+    addButtonId: 'addGeminiToWorkflowPoolButton',
+    eligibilityStatusId: 'geminiModelEligibilityStatus',
+    modelStatusId: 'geminiModelStatusMessage',
+    providerStatusId: 'geminiStatusMessage',
+    verifyEndpoint: '/api/settings/gemini/verify',
+    testEndpoint: '/api/settings/gemini/test_model',
+    apiSurface: 'interactions',
+  }),
+});
+
+function normalisePremiumProvider(value) {
+  if (typeof value !== 'string') return null;
+  const provider = value.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(PREMIUM_PROVIDER_CONFIG, provider)
+    ? provider
+    : null;
+}
+
+function selectedPremiumProvider() {
+  return normalisePremiumProvider(document.getElementById('premiumProviderSelect')?.value)
+    || normalisePremiumProvider(getStoredPremiumModelProvider())
+    || 'openai';
+}
+
+function selectedPremiumModelName(provider = selectedPremiumProvider()) {
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  if (!config) return '';
+  const storedModel = provider === 'gemini'
+    ? getStoredGeminiSelectedModel()
+    : getStoredOpenAiSelectedModel();
+  return String(document.getElementById(config.modelSelectId)?.value || storedModel || '').trim();
+}
+
 function getSettingsConcernModelSnapshot() {
   const localModelPreference = getEffectiveLocalModelPreference();
   const premiumToggle = document.getElementById('enableOpenAiPremiumToggle');
   const premiumEnabled = premiumToggle
     ? !!premiumToggle.checked
-    : localModelPreference.activeSource === 'openai';
-  const openAiModel = String(
-    document.getElementById('openaiModelSelect')?.value
-    || getStoredOpenAiSelectedModel()
-    || localModelPreference.openaiModel
-    || '',
-  ).trim();
+    : ['openai', 'gemini'].includes(localModelPreference.activeSource);
+  const premiumProvider = selectedPremiumProvider();
+  const premiumModel = selectedPremiumModelName(premiumProvider);
   const ollamaSelection = resolveOllamaSelection(false) || localModelPreference.ollamaSelection || null;
   const ollamaModel = String(ollamaSelection?.model || ollamaSelection?.value || '').trim();
 
   return {
     premiumEnabled,
-    openAiModel,
+    premiumProvider,
+    premiumModel,
     ollamaModel,
   };
 }
@@ -395,7 +460,7 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         description: 'Review language and concept-display preferences here, then move on to the model surface this browser should prefer.',
         actionLabel: 'Review model setup',
         actionTarget: 'premium-model-settings',
-        focusSelector: '#globalModelSelect, #openaiModelSelect, #openaiApiKeyEnvVar',
+        focusSelector: '#globalModelSelect, #premiumProviderSelect, #openaiModelSelect, #geminiModelSelect',
         source: 'temporary-placeholder',
       };
     }
@@ -410,16 +475,22 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         source: 'temporary-placeholder',
       };
     case 'models': {
-      const { premiumEnabled, openAiModel, ollamaModel } = getSettingsConcernModelSnapshot();
+      const {
+        premiumEnabled,
+        premiumProvider,
+        premiumModel,
+        ollamaModel,
+      } = getSettingsConcernModelSnapshot();
+      const providerLabel = PREMIUM_PROVIDER_CONFIG[premiumProvider]?.label || 'premium';
 
-      if (premiumEnabled && !openAiModel) {
+      if (premiumEnabled && !premiumModel) {
         return {
           kicker: 'Suggested next step',
           title: 'Choose the premium model before relying on it',
-          description: 'Premium use is enabled for this browser, but there is no selected OpenAI model yet. Pick one before you leave this page.',
+          description: `Premium use is enabled for this browser, but there is no selected ${providerLabel} model yet. Pick one before you leave this page.`,
           actionLabel: 'Choose premium model',
           actionTarget: 'premium-model-settings',
-          focusSelector: '#openaiApiKeyEnvVar, #openaiModelSelect',
+          focusSelector: `#${PREMIUM_PROVIDER_CONFIG[premiumProvider]?.envInputId}, #${PREMIUM_PROVIDER_CONFIG[premiumProvider]?.modelSelectId}`,
           source: 'temporary-placeholder',
         };
       }
@@ -436,14 +507,14 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         };
       }
 
-      if (premiumEnabled && openAiModel) {
+      if (premiumEnabled && premiumModel) {
         return {
           kicker: 'Suggested next step',
           title: 'Test the selected premium model before relying on it',
-          description: `${openAiModel} is selected for premium use on this browser. Run a quick check here before you return to chat.`,
+          description: `${providerLabel} ${premiumModel} is selected for premium use on this browser. Run a quick check here before you return to chat.`,
           actionLabel: 'Review premium model',
           actionTarget: 'premium-model-settings',
-          focusSelector: '#testOpenAiModelButton, #openaiModelSelect',
+          focusSelector: `#${PREMIUM_PROVIDER_CONFIG[premiumProvider]?.testButtonId}, #${PREMIUM_PROVIDER_CONFIG[premiumProvider]?.modelSelectId}`,
           source: 'temporary-placeholder',
         };
       }
@@ -854,6 +925,7 @@ function resolveDisplayedProviderModels(settings) {
   const enabledLlms = Array.isArray(settings?.enabled_llms) ? settings.enabled_llms : [];
   let currentOllamaModel = null;
   let currentOpenAIModel = null;
+  let currentGeminiModel = null;
 
   for (const entry of enabledLlms) {
     if (!entry || typeof entry !== 'object') continue;
@@ -861,6 +933,8 @@ function resolveDisplayedProviderModels(settings) {
       currentOllamaModel = entry.model;
     } else if (entry.provider === 'openai' && entry.model && !currentOpenAIModel) {
       currentOpenAIModel = entry.model;
+    } else if (entry.provider === 'gemini' && entry.model && !currentGeminiModel) {
+      currentGeminiModel = entry.model;
     }
   }
 
@@ -868,12 +942,15 @@ function resolveDisplayedProviderModels(settings) {
     currentOllamaModel = effectiveLlm.model;
   } else if (effectiveLlm?.provider === 'openai' && effectiveLlm.model) {
     currentOpenAIModel = effectiveLlm.model;
+  } else if (effectiveLlm?.provider === 'gemini' && effectiveLlm.model) {
+    currentGeminiModel = effectiveLlm.model;
   }
 
   return {
     effectiveLlm,
     currentOllamaModel,
     currentOpenAIModel,
+    currentGeminiModel,
   };
 }
 
@@ -1063,15 +1140,43 @@ function setInlineStatusMessage(element, text, tone = null) {
   element.style.display = element.textContent ? 'block' : 'none';
 }
 
-function readOpenAiModelParametersFromUi() {
+function getStoredPremiumModelParameters(provider) {
+  return provider === 'gemini'
+    ? getStoredGeminiModelParameters()
+    : getStoredOpenAiModelParameters();
+}
+
+function setStoredPremiumModelParameters(provider, parameters) {
+  if (provider === 'gemini') {
+    setStoredGeminiModelParameters(parameters);
+  } else {
+    setStoredOpenAiModelParameters(parameters);
+  }
+}
+
+function getLatestPremiumModelParameterCapability(provider) {
+  return provider === 'gemini'
+    ? latestGeminiModelParameterCapability
+    : latestOpenAiModelParameterCapability;
+}
+
+function setLatestPremiumModelParameterCapability(provider, capability) {
+  if (provider === 'gemini') {
+    latestGeminiModelParameterCapability = capability;
+  } else {
+    latestOpenAiModelParameterCapability = capability;
+  }
+}
+
+function readPremiumModelParametersFromUi(provider = selectedPremiumProvider()) {
   const effort = String(document.getElementById('openaiReasoningEffortSelect')?.value || '').trim();
   return normaliseModelParameters(
     effort ? { reasoning_effort: effort } : null,
-    latestOpenAiModelParameterCapability,
+    getLatestPremiumModelParameterCapability(provider),
   );
 }
 
-function applyOpenAiReasoningEffortControls(capability) {
+function applyPremiumReasoningEffortControls(provider, capability) {
   const container = document.getElementById('openaiReasoningEffortContainer');
   const selectEl = document.getElementById('openaiReasoningEffortSelect');
   if (!container || !selectEl) return;
@@ -1082,7 +1187,7 @@ function applyOpenAiReasoningEffortControls(capability) {
   selectEl.disabled = !supported;
   if (!supported) {
     selectEl.value = '';
-    setStoredOpenAiModelParameters(null);
+    setStoredPremiumModelParameters(provider, null);
     return;
   }
 
@@ -1091,7 +1196,7 @@ function applyOpenAiReasoningEffortControls(capability) {
       .map((value) => String(value || '').trim().toLowerCase())
       .filter(Boolean)
     : [];
-  const current = getStoredOpenAiModelParameters()?.reasoning_effort || '';
+  const current = getStoredPremiumModelParameters(provider)?.reasoning_effort || '';
   selectEl.replaceChildren();
   const defaultOption = document.createElement('option');
   defaultOption.value = '';
@@ -1106,54 +1211,78 @@ function applyOpenAiReasoningEffortControls(capability) {
     selectEl.append(option);
   }
   selectEl.value = current && allowedValues.includes(current) ? current : '';
-  setStoredOpenAiModelParameters(readOpenAiModelParametersFromUi());
+  setStoredPremiumModelParameters(provider, readPremiumModelParametersFromUi(provider));
 }
 
-async function refreshOpenAiReasoningEffortControls() {
-  const selectedModel = String(document.getElementById('openaiModelSelect')?.value || '').trim();
+async function refreshPremiumReasoningEffortControls(provider = selectedPremiumProvider()) {
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  const selectedModel = selectedPremiumModelName(provider);
   if (!selectedModel) {
-    latestOpenAiModelParameterCapability = null;
-    applyOpenAiReasoningEffortControls({ parameters: { reasoning_effort: { supported: false } } });
+    setLatestPremiumModelParameterCapability(provider, null);
+    applyPremiumReasoningEffortControls(
+      provider,
+      { parameters: { reasoning_effort: { supported: false } } },
+    );
     return null;
   }
   try {
     const response = await fetch(
-      `/api/settings/model_parameters/capabilities?provider=openai&model=${encodeURIComponent(selectedModel)}&api_surface=responses&include_registry=true`,
+      `/api/settings/model_parameters/capabilities?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(selectedModel)}&api_surface=${encodeURIComponent(config.apiSurface)}&include_registry=true`,
       { cache: 'no-store' },
     );
     const capability = await response.json();
     if (response.ok && capability?.success !== false) {
-      latestOpenAiModelParameterCapability = capability;
-      applyOpenAiReasoningEffortControls(capability);
+      setLatestPremiumModelParameterCapability(provider, capability);
+      applyPremiumReasoningEffortControls(provider, capability);
       return capability;
     }
   } catch (error) {
-    console.warn('Failed to refresh OpenAI model parameter controls', error);
+    console.warn(`Failed to refresh ${config.label} model parameter controls`, error);
   }
-  latestOpenAiModelParameterCapability = null;
-  applyOpenAiReasoningEffortControls({ parameters: { reasoning_effort: { supported: false } } });
+  setLatestPremiumModelParameterCapability(provider, null);
+  applyPremiumReasoningEffortControls(
+    provider,
+    { parameters: { reasoning_effort: { supported: false } } },
+  );
   return null;
 }
 
-function updateOpenAiModelStatusMessage() {
-  const statusEl = document.getElementById('openaiModelStatusMessage');
-  const toggleEl = document.getElementById('enableOpenAiPremiumToggle');
-  const selectEl = document.getElementById('openaiModelSelect');
+async function refreshOpenAiReasoningEffortControls() {
+  return refreshPremiumReasoningEffortControls('openai');
+}
+
+function latestPremiumModelProbe(provider) {
+  return provider === 'gemini' ? latestGeminiModelProbe : latestOpenAiModelProbe;
+}
+
+function setLatestPremiumModelProbe(provider, probe) {
+  if (provider === 'gemini') {
+    latestGeminiModelProbe = probe;
+  } else {
+    latestOpenAiModelProbe = probe;
+  }
+}
+
+function updatePremiumModelStatusMessageForProvider(provider) {
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  const statusEl = document.getElementById(config?.modelStatusId);
   if (!statusEl) return;
 
-  const allowed = updateSelectedOpenAiEligibilityControls();
-  const premiumEnabled = !!toggleEl?.checked;
-  const selectedModel = String(selectEl?.value || getStoredOpenAiSelectedModel() || '').trim();
-  const selectedModelParameters = readOpenAiModelParametersFromUi()
-    || getStoredOpenAiModelParameters()
-    || null;
+  const premiumEnabled = !!document.getElementById('enableOpenAiPremiumToggle')?.checked
+    && selectedPremiumProvider() === provider;
+  const selectedModel = selectedPremiumModelName(provider);
+  const selectedModelParameters = provider === selectedPremiumProvider()
+    ? (readPremiumModelParametersFromUi(provider) || getStoredPremiumModelParameters(provider))
+    : getStoredPremiumModelParameters(provider);
+  const allowed = isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider));
+  const probe = latestPremiumModelProbe(provider);
 
   if (!selectedModel) {
     setInlineStatusMessage(
       statusEl,
       premiumEnabled
-        ? 'Select a premium model, then test it before relying on it.'
-        : 'Premium use is disabled on this machine. Ollama remains the active provider here.',
+        ? `Select a ${config.label} model, then test it before relying on it.`
+        : `Select a ${config.label} model to configure this provider.`,
       null,
     );
     return;
@@ -1162,37 +1291,35 @@ function updateOpenAiModelStatusMessage() {
   if (!allowed) {
     setInlineStatusMessage(
       statusEl,
-      `Testing and browser use remain unavailable until ${selectedModel} is allowed for this scope and saved.`,
+      `Testing and browser use remain unavailable until ${config.label} ${selectedModel} is allowed for this scope and saved.`,
       'error',
     );
     return;
   }
 
   if (
-    latestOpenAiModelProbe
-    && latestOpenAiModelProbe.model === selectedModel
-    && stableModelParametersKey(latestOpenAiModelProbe.model_parameters)
+    probe
+    && probe.model === selectedModel
+    && stableModelParametersKey(probe.model_parameters)
       === stableModelParametersKey(selectedModelParameters)
   ) {
-    if (latestOpenAiModelProbe.usable) {
+    if (probe.usable) {
       const prefix = premiumEnabled
-        ? `${selectedModel} is usable.`
-        : `${selectedModel} tested successfully, but premium use is disabled.`;
+        ? `${config.label} ${selectedModel} is usable.`
+        : `${config.label} ${selectedModel} tested successfully but is not this browser's active provider.`;
       setInlineStatusMessage(
         statusEl,
-        latestOpenAiModelProbe.reason ? `${prefix} ${latestOpenAiModelProbe.reason}` : prefix,
+        probe.reason ? `${prefix} ${probe.reason}` : prefix,
         premiumEnabled ? 'success' : null,
       );
       return;
     }
     const failurePrefix = premiumEnabled
-      ? `${selectedModel} is not usable.`
-      : `Premium use is disabled on this machine. ${selectedModel} also failed its last test.`;
+      ? `${config.label} ${selectedModel} is not usable.`
+      : `${config.label} ${selectedModel} failed its last test.`;
     setInlineStatusMessage(
       statusEl,
-      latestOpenAiModelProbe.reason
-        ? `${failurePrefix} ${latestOpenAiModelProbe.reason}`
-        : failurePrefix,
+      probe.reason ? `${failurePrefix} ${probe.reason}` : failurePrefix,
       'error',
     );
     return;
@@ -1201,10 +1328,20 @@ function updateOpenAiModelStatusMessage() {
   setInlineStatusMessage(
     statusEl,
     premiumEnabled
-      ? `Selected premium model has not been tested yet.`
-      : `Premium use is disabled on this machine. You can still test ${selectedModel} before enabling it.`,
+      ? `Selected ${config.label} model has not been tested yet.`
+      : `${config.label} ${selectedModel} is configured but is not this browser's active premium model.`,
     null,
   );
+}
+
+function updatePremiumModelStatusMessages() {
+  updateSelectedPremiumEligibilityControls();
+  updatePremiumModelStatusMessageForProvider('openai');
+  updatePremiumModelStatusMessageForProvider('gemini');
+}
+
+function updateOpenAiModelStatusMessage() {
+  updatePremiumModelStatusMessages();
 }
 
 function updateOllamaModelStatusMessage() {
@@ -1266,46 +1403,119 @@ function notifyLocalModelPreferenceChanged() {
   }
 }
 
-async function testSelectedOpenAiModel() {
-  const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar')?.value;
-  const selectedModel = String(document.getElementById('openaiModelSelect')?.value || '').trim();
-  const modelParameters = readOpenAiModelParametersFromUi();
-  const statusEl = document.getElementById('openaiModelStatusMessage');
+function syncPremiumProviderPanels() {
+  const provider = selectedPremiumProvider();
+  for (const [candidateProvider, config] of Object.entries(PREMIUM_PROVIDER_CONFIG)) {
+    const container = document.getElementById(config.providerContainerId);
+    if (!container) continue;
+    const visible = candidateProvider === provider;
+    container.classList.toggle('hidden', !visible);
+    container.setAttribute('aria-hidden', String(!visible));
+  }
+  const label = document.getElementById('enablePremiumModelLabel');
+  if (label) {
+    label.textContent = `Use selected allowed ${PREMIUM_PROVIDER_CONFIG[provider].label} model for chat in this browser`;
+  }
+  return provider;
+}
+
+async function handlePremiumModelSelectionChange(provider) {
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  const model = normaliseLocalModelName(
+    document.getElementById(config?.modelSelectId)?.value,
+  ) || '';
+  if (provider === 'gemini') {
+    setStoredGeminiSelectedModel(model);
+  } else {
+    setStoredOpenAiSelectedModel(model);
+  }
+  invalidateSelectedOpenAiCostSummary();
+  if (selectedPremiumProvider() === provider) {
+    await refreshPremiumReasoningEffortControls(provider);
+  }
+  setLatestPremiumModelProbe(provider, null);
+  updatePremiumModelStatusMessages();
+  refreshActiveSettingsConcernGuidance();
+  notifyLocalModelPreferenceChanged();
+  renderModelScopeOverview();
+  void refreshSelectedOpenAiCostSummary();
+}
+
+async function handlePremiumProviderSelectionChange(value) {
+  const provider = normalisePremiumProvider(value) || selectedPremiumProvider();
+  const select = document.getElementById('premiumProviderSelect');
+  if (select) select.value = provider;
+  setStoredPremiumModelProvider(provider);
+  syncPremiumProviderPanels();
+  await refreshPremiumReasoningEffortControls(provider);
+
+  const toggle = document.getElementById('enableOpenAiPremiumToggle');
+  if (toggle?.checked) {
+    const allowed = isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider));
+    toggle.checked = allowed;
+    setLocalPremiumModelUseEnabled(allowed, provider);
+  }
+  updatePremiumModelStatusMessages();
+  updateOllamaModelStatusMessage();
+  invalidateSelectedOpenAiCostSummary();
+  void refreshSelectedOpenAiCostSummary();
+  refreshActiveSettingsConcernGuidance();
+  notifyLocalModelPreferenceChanged();
+  renderModelScopeOverview();
+
+  if (await checkPremiumProviderEnvVar(provider)) {
+    await verifyPremiumApiKey(provider);
+  }
+}
+
+async function testSelectedPremiumModel(provider) {
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  const apiKeyEnvVar = document.getElementById(config.envInputId)?.value;
+  const selectedModel = selectedPremiumModelName(provider);
+  const modelParameters = provider === selectedPremiumProvider()
+    ? readPremiumModelParametersFromUi(provider)
+    : getStoredPremiumModelParameters(provider);
+  const statusEl = document.getElementById(config.modelStatusId);
 
   if (!selectedModel) {
-    latestOpenAiModelProbe = null;
-    updateOpenAiModelStatusMessage();
+    setLatestPremiumModelProbe(provider, null);
+    updatePremiumModelStatusMessages();
     return { usable: false, model: null, reason: 'No premium model selected.' };
   }
 
-  if (!isPersistedEffectiveModelAllowed(selectedOpenAiPoolEntry())) {
-    latestOpenAiModelProbe = null;
-    updateOpenAiModelStatusMessage();
+  if (!isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider))) {
+    setLatestPremiumModelProbe(provider, null);
+    updatePremiumModelStatusMessages();
     return {
       usable: false,
       model: selectedModel,
-      reason: 'The exact premium model is not allowed for the selected scope.',
+      reason: 'The exact provider and premium model are not allowed for the selected scope.',
       failure_kind: 'premium_model_not_allowed',
     };
   }
 
-  setStoredOpenAiSelectedModel(selectedModel);
-  setStoredOpenAiModelParameters(modelParameters);
-  setInlineStatusMessage(statusEl, `Testing ${selectedModel}...`, null);
+  if (provider === 'gemini') {
+    setStoredGeminiSelectedModel(selectedModel);
+  } else {
+    setStoredOpenAiSelectedModel(selectedModel);
+  }
+  setStoredPremiumModelParameters(provider, modelParameters);
+  setInlineStatusMessage(statusEl, `Testing ${config.label} ${selectedModel}...`, null);
 
   try {
-    const response = await postJson('/api/settings/openai/test_model', {
+    const response = await postJson(config.testEndpoint, {
       api_key_env_var: apiKeyEnvVar,
       model: selectedModel,
       ...(modelParameters ? { model_parameters: modelParameters } : {}),
     });
-    latestOpenAiModelProbe = {
+    setLatestPremiumModelProbe(provider, {
       usable: !!response?.usable,
       model: String(response?.model || selectedModel),
       model_parameters: normaliseModelParameters(response?.model_parameters) || modelParameters,
       reason: String(response?.reason || '').trim(),
       failure_kind: String(response?.failure_kind || '').trim() || null,
-    };
+      api_surface: String(response?.api_surface || '').trim() || null,
+    });
   } catch (error) {
     const message = String(error?.message || '').trim();
     const restartHint = (
@@ -1313,19 +1523,27 @@ async function testSelectedOpenAiModel() {
       || /unexpected token </i.test(message)
       || /failed to fetch/i.test(message)
     )
-      ? 'The server needs a restart before the premium model test endpoint is available.'
+      ? `The server needs a restart before the ${config.label} model test endpoint is available.`
       : null;
-    latestOpenAiModelProbe = {
+    setLatestPremiumModelProbe(provider, {
       usable: false,
       model: selectedModel,
       model_parameters: modelParameters,
       reason: restartHint || message || 'Premium model test failed.',
       failure_kind: restartHint ? 'server_restart_required' : 'request_failed',
-    };
+    });
   }
 
-  updateOpenAiModelStatusMessage();
-  return latestOpenAiModelProbe;
+  updatePremiumModelStatusMessages();
+  return latestPremiumModelProbe(provider);
+}
+
+async function testSelectedOpenAiModel() {
+  return testSelectedPremiumModel('openai');
+}
+
+async function testSelectedGeminiModel() {
+  return testSelectedPremiumModel('gemini');
 }
 
 async function testSelectedOllamaModel() {
@@ -1707,15 +1925,25 @@ async function reloadScopedModelSettings({
   }
 }
 
-function selectedOpenAiPoolEntry() {
-  const model = String(document.getElementById('openaiModelSelect')?.value || '').trim();
+function selectedPremiumPoolEntry(provider = selectedPremiumProvider()) {
+  const model = selectedPremiumModelName(provider);
   if (!model) return null;
-  const modelParameters = readOpenAiModelParametersFromUi();
+  const modelParameters = provider === selectedPremiumProvider()
+    ? readPremiumModelParametersFromUi(provider)
+    : getStoredPremiumModelParameters(provider);
   return buildCanonicalLlmEntry({
-    provider: 'openai',
+    provider,
     model,
     ...(modelParameters ? { model_parameters: modelParameters } : {}),
   });
+}
+
+function selectedOpenAiPoolEntry() {
+  return selectedPremiumPoolEntry('openai');
+}
+
+function selectedGeminiPoolEntry() {
+  return selectedPremiumPoolEntry('gemini');
 }
 
 function isPersistedEffectiveModelAllowed(entry) {
@@ -1741,15 +1969,15 @@ function formatHistoricalCostAmount(amount, currency) {
 function renderSelectedOpenAiCostSummary(summary = null) {
   const element = document.getElementById('openaiModelCostSummary');
   if (!element) return;
-  const selected = selectedOpenAiPoolEntry();
+  const selected = selectedPremiumPoolEntry();
   const identityMatches = Boolean(
     selected
     && String(summary?.schema_version || '') === OPENAI_MODEL_COST_SUMMARY_SCHEMA_VERSION
-    && String(summary?.model_identity?.provider || '').toLowerCase() === 'openai'
+    && String(summary?.model_identity?.provider || '').toLowerCase() === selected.provider
     && String(summary?.model_identity?.model || '') === selected.model
   );
   if (!selected) {
-    element.textContent = 'Select an OpenAI model to view historical cost.';
+    element.textContent = 'Select a premium model to view historical cost.';
     return;
   }
   if (summary?.status === 'loading') {
@@ -1794,7 +2022,7 @@ function invalidateSelectedOpenAiCostSummary() {
 }
 
 async function refreshSelectedOpenAiCostSummary() {
-  const selected = selectedOpenAiPoolEntry();
+  const selected = selectedPremiumPoolEntry();
   if (!scopedModelStateReady || !selected) {
     invalidateSelectedOpenAiCostSummary();
     return false;
@@ -1806,11 +2034,11 @@ async function refreshSelectedOpenAiCostSummary() {
   renderSelectedOpenAiCostSummary({
     schema_version: OPENAI_MODEL_COST_SUMMARY_SCHEMA_VERSION,
     status: 'loading',
-    model_identity: { provider: 'openai', model },
+    model_identity: { provider: selected.provider, model },
   });
 
   const params = new URLSearchParams({
-    provider: 'openai', model,
+    provider: selected.provider, model,
   });
   const url = `${OPENAI_MODEL_COST_SUMMARY_ENDPOINT}?${params.toString()}`;
 
@@ -1825,43 +2053,52 @@ async function refreshSelectedOpenAiCostSummary() {
   if (
     generation !== openAiModelCostSummaryGeneration
     || selectedModelPoolTargetScope !== modelScope
-    || selectedOpenAiPoolEntry()?.model !== model
+    || !sameLlmSlot(selectedPremiumPoolEntry(), selected)
   ) return false;
   renderSelectedOpenAiCostSummary(summary);
   return true;
 }
 
-function updateSelectedOpenAiEligibilityControls() {
-  const statusEl = document.getElementById('openaiModelEligibilityStatus');
+function updateSelectedPremiumEligibilityControls() {
+  const provider = selectedPremiumProvider();
   const toggleEl = document.getElementById('enableOpenAiPremiumToggle');
-  const testButton = document.getElementById('testOpenAiModelButton');
-  const selected = selectedOpenAiPoolEntry();
-  const allowed = isPersistedEffectiveModelAllowed(selected);
-  for (const control of [toggleEl, testButton]) {
-    if (!control) continue;
-    control.disabled = !allowed;
-    control.setAttribute('aria-disabled', String(!allowed));
+  const selected = selectedPremiumPoolEntry(provider);
+  const selectedAllowed = isPersistedEffectiveModelAllowed(selected);
+  for (const candidateProvider of Object.keys(PREMIUM_PROVIDER_CONFIG)) {
+    const config = PREMIUM_PROVIDER_CONFIG[candidateProvider];
+    const candidate = selectedPremiumPoolEntry(candidateProvider);
+    const allowed = isPersistedEffectiveModelAllowed(candidate);
+    const testButton = document.getElementById(config.testButtonId);
+    if (testButton) {
+      testButton.disabled = !allowed;
+      testButton.setAttribute('aria-disabled', String(!allowed));
+    }
+    const statusEl = document.getElementById(config.eligibilityStatusId);
+    if (statusEl) {
+      const message = !scopedModelStateReady
+        ? 'Loading persisted allowed models for this scope.'
+        : !candidate
+          ? `Select a ${config.label} model to check whether it is allowed for this scope.`
+          : allowed
+            ? `Allowed: ${formatLlmEntry(candidate)} is persisted for the current effective actor scope.`
+            : `Not allowed: allow ${formatLlmEntry(candidate)} for this scope and save before testing it or using it for browser chat.`;
+      setInlineStatusMessage(
+        statusEl,
+        message,
+        scopedModelStateReady && candidate ? (allowed ? 'success' : 'error') : null,
+      );
+    }
   }
-  if (!allowed && toggleEl?.checked) {
+  if (toggleEl) {
+    toggleEl.disabled = !selectedAllowed;
+    toggleEl.setAttribute('aria-disabled', String(!selectedAllowed));
+  }
+  if (!selectedAllowed && toggleEl?.checked) {
     toggleEl.checked = false;
     setLocalPremiumModelUseEnabled(false);
     notifyLocalModelPreferenceChanged();
   }
-  if (statusEl) {
-    const message = !scopedModelStateReady
-      ? 'Loading persisted allowed models for this scope.'
-      : !selected
-        ? 'Select an OpenAI model to check whether it is allowed for this scope.'
-        : allowed
-          ? `Allowed: ${formatLlmEntry(selected)} is persisted for the current effective actor scope.`
-          : `Not allowed: allow ${formatLlmEntry(selected)} for this scope and save before testing it or using it for browser chat.`;
-    setInlineStatusMessage(
-      statusEl,
-      message,
-      scopedModelStateReady && selected ? (allowed ? 'success' : 'error') : null,
-    );
-  }
-  return allowed;
+  return selectedAllowed;
 }
 
 function selectedOllamaPoolEntry() {
@@ -2022,9 +2259,10 @@ function renderWorkflowModelPool() {
       loading.textContent = 'Scoped model settings are loading. Saving is unavailable until they are ready.';
       listEl.appendChild(loading);
       updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
+      updatePoolActionButton('addGeminiToWorkflowPoolButton', selectedGeminiPoolEntry());
       updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
       updateScopedPrimaryActionButtons();
-      updateSelectedOpenAiEligibilityControls();
+      updateSelectedPremiumEligibilityControls();
       updateScopedModelSaveAvailability();
       return;
     }
@@ -2086,9 +2324,10 @@ function renderWorkflowModelPool() {
   }
 
   updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
+  updatePoolActionButton('addGeminiToWorkflowPoolButton', selectedGeminiPoolEntry());
   updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
   updateScopedPrimaryActionButtons();
-  updateSelectedOpenAiEligibilityControls();
+  updateSelectedPremiumEligibilityControls();
 }
 
 function renderModelScopeOverview() {
@@ -3996,6 +4235,22 @@ export function __testOnly_refreshSelectedOpenAiCostSummary() {
   return refreshSelectedOpenAiCostSummary();
 }
 
+export function __testOnly_selectedPremiumPoolEntry(provider = selectedPremiumProvider()) {
+  return selectedPremiumPoolEntry(provider);
+}
+
+export function __testOnly_refreshPremiumReasoningEffortControls(provider) {
+  return refreshPremiumReasoningEffortControls(provider);
+}
+
+export function __testOnly_handlePremiumProviderSelectionChange(provider) {
+  return handlePremiumProviderSelectionChange(provider);
+}
+
+export function __testOnly_testSelectedPremiumModel(provider) {
+  return testSelectedPremiumModel(provider);
+}
+
 export function __testOnly_saveAllSettings(options = {}) {
   return saveAllSettings(options);
 }
@@ -4635,22 +4890,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       showStatusMessage('settingsStatusMessage', 'Error saving timeout.', true);
     }
   });
-  document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
-    const selectedModel = document.getElementById('openaiModelSelect')?.value || '';
-    setStoredOpenAiSelectedModel(selectedModel);
-    invalidateSelectedOpenAiCostSummary();
-    await refreshOpenAiReasoningEffortControls();
-    latestOpenAiModelProbe = null;
-    updateOpenAiModelStatusMessage();
-    refreshActiveSettingsConcernGuidance();
-    notifyLocalModelPreferenceChanged();
-    renderModelScopeOverview();
-    void refreshSelectedOpenAiCostSummary();
+  document.getElementById('premiumProviderSelect')?.addEventListener('change', (event) => {
+    void handlePremiumProviderSelectionChange(event?.target?.value);
+  });
+  document.getElementById('openaiModelSelect')?.addEventListener('change', () => {
+    void handlePremiumModelSelectionChange('openai');
+  });
+  document.getElementById('geminiModelSelect')?.addEventListener('change', () => {
+    void handlePremiumModelSelectionChange('gemini');
   });
   document.getElementById('openaiReasoningEffortSelect')?.addEventListener('change', async () => {
-    setStoredOpenAiModelParameters(readOpenAiModelParametersFromUi());
-    latestOpenAiModelProbe = null;
-    updateOpenAiModelStatusMessage();
+    const provider = selectedPremiumProvider();
+    setStoredPremiumModelParameters(provider, readPremiumModelParametersFromUi(provider));
+    setLatestPremiumModelProbe(provider, null);
+    updatePremiumModelStatusMessages();
     refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
     renderModelScopeOverview();
@@ -4673,18 +4926,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    if (!isPersistedEffectiveModelAllowed(selectedOpenAiPoolEntry())) {
+    const provider = selectedPremiumProvider();
+    if (!isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider))) {
       premiumToggle.checked = false;
       setLocalPremiumModelUseEnabled(false);
-      updateOpenAiModelStatusMessage();
+      updatePremiumModelStatusMessages();
       refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
       renderModelScopeOverview();
       return;
     }
 
-    setLocalPremiumModelUseEnabled(true);
-    updateOpenAiModelStatusMessage();
+    setLocalPremiumModelUseEnabled(true, provider);
+    updatePremiumModelStatusMessages();
     refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
     renderModelScopeOverview();
@@ -4785,10 +5039,17 @@ document.getElementById('refreshOllamaModelsButton')?.addEventListener('click', 
 document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', () => {
   verifyOpenAiApiKey();
 });
+document.getElementById('verifyGeminiApiKeyButton')?.addEventListener('click', () => {
+  verifyGeminiApiKey();
+});
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
+document.getElementById('testGeminiModelButton')?.addEventListener('click', testSelectedGeminiModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 document.getElementById('addOpenAiToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOpenAiPoolEntry());
+});
+document.getElementById('addGeminiToWorkflowPoolButton')?.addEventListener('click', () => {
+  addOrUpdateWorkflowPoolEntry(selectedGeminiPoolEntry());
 });
 document.getElementById('addOllamaToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOllamaPoolEntry());
@@ -5106,7 +5367,11 @@ async function loadAndDisplaySettings() {
 
     // The selector should reflect the resolved active model for the provider in scope,
     // not a stale enabled_llms entry from an older or broader context.
-    const { currentOpenAIModel } = resolveDisplayedProviderModels(settings);
+    const {
+      effectiveLlm: displayedEffectiveLlm,
+      currentOpenAIModel,
+      currentGeminiModel,
+    } = resolveDisplayedProviderModels(settings);
     currentEffectiveLlm = settings.effective_llm || settings.resolved_llm || null;
     currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(
       settings.effective_enabled_llms || settings.enabled_llms,
@@ -5116,7 +5381,16 @@ async function loadAndDisplaySettings() {
     const localModelPreference = getEffectiveLocalModelPreference();
     const currentOllamaModel = resolveOllamaDropdownSelectionValue(localModelPreference);
     const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
-    const openAiPremiumEnabled = localModelPreference.activeSource === 'openai';
+    const preferredGeminiModel = currentGeminiModel || localModelPreference.geminiModel || null;
+    const premiumEnabled = ['openai', 'gemini'].includes(localModelPreference.activeSource);
+    const preferredPremiumProvider = normalisePremiumProvider(
+      localModelPreference.premiumProvider || localModelPreference.activeSource,
+    )
+      || normalisePremiumProvider(displayedEffectiveLlm?.provider)
+      || (currentGeminiModel && !currentOpenAIModel ? 'gemini' : 'openai');
+    const premiumProviderSelect = document.getElementById('premiumProviderSelect');
+    if (premiumProviderSelect) premiumProviderSelect.value = preferredPremiumProvider;
+    syncPremiumProviderPanels();
 
     // Load and display Ollama hosts first
     await loadAndRenderOllamaHosts();
@@ -5133,8 +5407,8 @@ async function loadAndDisplaySettings() {
       }
     } catch (_e) { /* non-critical */ }
 
-    // Try to populate OpenAI models directly (without verification, if API key is already configured)
-    if (preferredOpenAiModel) {
+    // Populate the selected premium provider directly when a model is already known.
+    if (preferredPremiumProvider === 'openai' && preferredOpenAiModel) {
       try {
         await populateOpenAIModelDropdown('openaiModelSelect', preferredOpenAiModel);
         const oac = document.getElementById('openaiModelsContainer');
@@ -5142,6 +5416,15 @@ async function loadAndDisplaySettings() {
         await refreshOpenAiReasoningEffortControls();
       } catch (error) {
         console.log('Could not directly load OpenAI models, will need verification:', error.message);
+      }
+    } else if (preferredPremiumProvider === 'gemini' && preferredGeminiModel) {
+      try {
+        await populateGeminiModelDropdown('geminiModelSelect', preferredGeminiModel);
+        const container = document.getElementById('geminiModelsContainer');
+        if (container) { container.style.display = 'block'; container.classList.remove('hidden'); }
+        await refreshPremiumReasoningEffortControls('gemini');
+      } catch (error) {
+        console.log('Could not directly load Gemini models, will need verification:', error.message);
       }
     }
 
@@ -5283,19 +5566,28 @@ async function loadAndDisplaySettings() {
       suppressActorOrgSwitchReload = false;
     }
 
-    // Populate OpenAI settings
+    // Populate premium-provider settings
     const envVarInput = document.getElementById('openaiApiKeyEnvVar');
     if (envVarInput && settings.openai_api_key_env_var) {
       envVarInput.value = settings.openai_api_key_env_var;
     }
+    const geminiEnvVarInput = document.getElementById('geminiApiKeyEnvVar');
+    if (geminiEnvVarInput && settings.gemini_api_key_env_var) {
+      geminiEnvVarInput.value = settings.gemini_api_key_env_var;
+    }
     const openAiPremiumToggle = document.getElementById('enableOpenAiPremiumToggle');
     if (openAiPremiumToggle) {
-      openAiPremiumToggle.checked = openAiPremiumEnabled;
+      openAiPremiumToggle.checked = premiumEnabled;
     }
     if (preferredOpenAiModel) {
       setStoredOpenAiSelectedModel(preferredOpenAiModel);
     }
+    if (preferredGeminiModel) {
+      setStoredGeminiSelectedModel(preferredGeminiModel);
+    }
+    setStoredPremiumModelProvider(preferredPremiumProvider);
     latestOpenAiModelProbe = null;
+    latestGeminiModelProbe = null;
     latestOllamaModelProbe = null;
     updateOpenAiModelStatusMessage();
     updateOllamaModelStatusMessage();
@@ -5474,9 +5766,12 @@ async function loadAndDisplaySettings() {
     // Update Gmail profile status line
     updateGmailProfileStatus();
 
-    // Check if the API key exists and verify it to load models
-    if (await checkOpenAiEnvVar()) {
-      await verifyOpenAiApiKey(currentOpenAIModel); // Pass the current OpenAI model
+    // Check the selected premium provider key and load its available models.
+    if (await checkPremiumProviderEnvVar(preferredPremiumProvider)) {
+      await verifyPremiumApiKey(
+        preferredPremiumProvider,
+        preferredPremiumProvider === 'gemini' ? preferredGeminiModel : preferredOpenAiModel,
+      );
     }
 
     // Trigger height update after all settings content is loaded
@@ -5856,10 +6151,13 @@ async function persistCurrentUserPreferences() {
   }
 }
 
-export async function checkOpenAiEnvVar() {
-  const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar').value;
-  const verifyButton = document.getElementById('verifyOpenAiApiKeyButton');
-  const statusMessage = document.getElementById('openaiStatusMessage');
+export async function checkPremiumProviderEnvVar(providerName) {
+  const provider = normalisePremiumProvider(providerName) || 'openai';
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  const apiKeyEnvVar = document.getElementById(config.envInputId)?.value;
+  const verifyButton = document.getElementById(config.verifyButtonId);
+  const statusMessage = document.getElementById(config.providerStatusId);
+  if (!apiKeyEnvVar || !verifyButton || !statusMessage) return false;
 
   try {
     const response = await postJson('/api/settings/env_var/check', { env_var_name: apiKeyEnvVar });
@@ -5869,9 +6167,11 @@ export async function checkOpenAiEnvVar() {
       verifyButton.style.display = 'inline-block';
       verifyButton.disabled = false;
       if (response.source === 'dotenv') {
-        statusMessage.textContent = `Key found (from .env because not in process environment): ${response.masked_value}. Verify and test the selected model before enabling premium use.`;
+        statusMessage.textContent = `${config.label} key found in .env. Verify and test the selected model before enabling premium use.`;
+      } else if (response.source === 'secret_file' || response.source === 'dotenv_secret_file') {
+        statusMessage.textContent = `${config.label} key found in the configured secret file. Verify and test the selected model before enabling premium use.`;
       } else {
-        statusMessage.textContent = `Key found: ${response.masked_value}. Verify and test the selected model before enabling premium use.`;
+        statusMessage.textContent = `${config.label} key found. Verify and test the selected model before enabling premium use.`;
       }
       statusMessage.className = 'status-message';
       statusMessage.style.display = 'block';
@@ -5886,7 +6186,7 @@ export async function checkOpenAiEnvVar() {
       return false;
     }
   } catch (error) {
-    console.error('Error checking environment variable:', error);
+    console.error(`Error checking ${config.label} environment variable:`, error);
     verifyButton.classList.add('hidden');
     verifyButton.style.display = 'none';
     verifyButton.disabled = true;
@@ -5897,68 +6197,106 @@ export async function checkOpenAiEnvVar() {
   }
 }
 
-async function verifyOpenAiApiKey(savedModel = null) {
-  const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar').value;
-  const statusMessage = document.getElementById('openaiStatusMessage');
-  const modelsContainer = document.getElementById('openaiModelsContainer');
+export async function checkOpenAiEnvVar() {
+  return checkPremiumProviderEnvVar('openai');
+}
+
+export async function checkGeminiEnvVar() {
+  return checkPremiumProviderEnvVar('gemini');
+}
+
+async function verifyPremiumApiKey(providerName, savedModel = null) {
+  const provider = normalisePremiumProvider(providerName) || 'openai';
+  const config = PREMIUM_PROVIDER_CONFIG[provider];
+  const apiKeyEnvVar = document.getElementById(config.envInputId)?.value;
+  const statusMessage = document.getElementById(config.providerStatusId);
+  const modelsContainer = document.getElementById(config.modelsContainerId);
   const preferredModel = normaliseLocalModelName(savedModel)
-    || getStoredOpenAiSelectedModel()
+    || (provider === 'gemini' ? getStoredGeminiSelectedModel() : getStoredOpenAiSelectedModel())
     || null;
 
   setInlineStatusMessage(
     statusMessage,
-    'Verifying API key and loading premium models...',
+    `Verifying ${config.label} API key and loading models...`,
     null,
   );
 
   try {
-    const response = await postJson('/api/settings/openai/verify', { api_key_env_var: apiKeyEnvVar });
+    const response = await postJson(config.verifyEndpoint, { api_key_env_var: apiKeyEnvVar });
 
     if (response.success) {
       setInlineStatusMessage(
         statusMessage,
-        'API key verified. Premium models loaded. Test the selected model before relying on it.',
+        `${config.label} API key verified. Models loaded. Test the selected model before relying on it.`,
         null,
       );
-      modelsContainer.style.display = 'block';
-      modelsContainer.classList.remove('hidden');
-
-      renderOpenAIModelOptions('openaiModelSelect', response.models || [], preferredModel);
-      const selectedOpenAiModel = normaliseLocalModelName(
-        document.getElementById('openaiModelSelect')?.value,
-      );
-      if (selectedOpenAiModel) {
-        setStoredOpenAiSelectedModel(selectedOpenAiModel);
+      if (modelsContainer) {
+        modelsContainer.style.display = 'block';
+        modelsContainer.classList.remove('hidden');
       }
-      await refreshOpenAiReasoningEffortControls();
-      latestOpenAiModelProbe = null;
-      updateOpenAiModelStatusMessage();
+
+      if (provider === 'gemini') {
+        renderGeminiModelOptions(config.modelSelectId, response.models || [], preferredModel);
+      } else {
+        renderOpenAIModelOptions(config.modelSelectId, response.models || [], preferredModel);
+      }
+      const selectedModel = normaliseLocalModelName(
+        document.getElementById(config.modelSelectId)?.value,
+      );
+      if (selectedModel) {
+        if (provider === 'gemini') {
+          setStoredGeminiSelectedModel(selectedModel);
+        } else {
+          setStoredOpenAiSelectedModel(selectedModel);
+        }
+      }
+      if (selectedPremiumProvider() === provider) {
+        await refreshPremiumReasoningEffortControls(provider);
+      }
+      setLatestPremiumModelProbe(provider, null);
+      updatePremiumModelStatusMessages();
       void refreshSelectedOpenAiCostSummary();
     } else {
       throw new Error(response.error || 'Failed to verify API key.');
     }
   } catch (error) {
-    // As a fallback, try the direct OpenAI models endpoint
+    // Fall back to the provider's direct model-list endpoint.
     try {
-      await populateOpenAIModelDropdown('openaiModelSelect', preferredModel);
+      if (provider === 'gemini') {
+        await populateGeminiModelDropdown(config.modelSelectId, preferredModel);
+      } else {
+        await populateOpenAIModelDropdown(config.modelSelectId, preferredModel);
+      }
       setInlineStatusMessage(
         statusMessage,
-        'Loaded a cached premium model list, but live verification failed. Test the selected model before enabling premium use.',
+        `Loaded the ${config.label} model list, but live verification failed. Test the selected model before enabling premium use.`,
         'error',
       );
-      modelsContainer.style.display = 'block';
-      modelsContainer.classList.remove('hidden');
-      latestOpenAiModelProbe = null;
-      updateOpenAiModelStatusMessage();
+      if (modelsContainer) {
+        modelsContainer.style.display = 'block';
+        modelsContainer.classList.remove('hidden');
+      }
+      setLatestPremiumModelProbe(provider, null);
+      updatePremiumModelStatusMessages();
       void refreshSelectedOpenAiCostSummary();
     } catch (_) {
       setInlineStatusMessage(statusMessage, `Error: ${error.message}`, 'error');
-      modelsContainer.style.display = 'none';
-      modelsContainer.classList.add('hidden');
-      latestOpenAiModelProbe = null;
-      updateOpenAiModelStatusMessage();
+      if (modelsContainer) {
+        modelsContainer.style.display = 'none';
+        modelsContainer.classList.add('hidden');
+      }
+      setLatestPremiumModelProbe(provider, null);
+      updatePremiumModelStatusMessages();
     }
   }
+}
+
+async function verifyOpenAiApiKey(savedModel = null) {
+  return verifyPremiumApiKey('openai', savedModel);
+}
+
+async function verifyGeminiApiKey(savedModel = null) {
+  return verifyPremiumApiKey('gemini', savedModel);
 }
 
 // Remove the old, separate save functions (saveGlobalModel, saveCurrentUser, saveOpenAISettings)

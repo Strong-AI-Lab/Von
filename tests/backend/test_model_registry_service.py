@@ -60,6 +60,17 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
             '"input_tokens":1.0,"output_tokens":4.0}}'
         ],
         (
+            "#V#openai_gpt5_mini_registry_entry",
+            mod.PRED_HAS_MODEL_CAPABILITIES_JSON,
+        ): [
+            (
+                '{"schema_version":"llm_model_capabilities.v1",'
+                '"model_id":"gpt-5-mini","input_token_limit":400000,'
+                '"output_token_limit":128000,'
+                '"features":{"function_calling":"supported"}}'
+            )
+        ],
+        (
             "#V#openai_gpt5_mini_chat_completions_profile",
             mod.PRED_HAS_API_SURFACE,
         ): ["chat_completions"],
@@ -115,6 +126,13 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
     assert "gpt-5-mini" in model_entry["model_aliases"]
     assert model_entry["pricing"]["schema_version"] == "llm_model_pricing.v1"
     assert model_entry["pricing"]["rates"]["output_tokens"] == 4.0
+    assert model_entry["capabilities"]["schema_version"] == (
+        "llm_model_capabilities.v1"
+    )
+    assert model_entry["capabilities"]["input_token_limit"] == 400000
+    assert model_entry["capabilities"]["features"]["function_calling"] == (
+        "supported"
+    )
 
     profile = model_entry["api_profiles"][0]
     assert profile["api_surface"] == "chat_completions"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any
 
@@ -58,6 +59,24 @@ def _amount(value: Decimal | None) -> float | None:
     except (OverflowError, ValueError):
         return None
     return amount if math.isfinite(amount) else None
+
+
+def _utc_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        raw = value.strip()
+        try:
+            parsed = datetime.fromisoformat(
+                f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+            )
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def normalise_llm_usage(
@@ -178,7 +197,7 @@ def _exact_pricing(
 def _pricing_metadata(
     pricing: Mapping[str, Any], *, effective_model: str
 ) -> dict[str, Any]:
-    return {
+    metadata = {
         "schema_version": _text(pricing.get("schema_version")),
         "version": _text(pricing.get("version")),
         "source": _text(pricing.get("source")),
@@ -186,6 +205,10 @@ def _pricing_metadata(
         "model_id": _text(pricing.get("model_id")) or effective_model,
         "unit_tokens": _count(pricing.get("unit_tokens")),
     }
+    effective_until_utc = _text(pricing.get("effective_until_utc"))
+    if effective_until_utc:
+        metadata["effective_until_utc"] = effective_until_utc
+    return metadata
 
 
 def _estimate_call_cost(
@@ -198,6 +221,7 @@ def _estimate_call_cost(
     effective_service_tier: str | None,
     connection_id: str | None,
     pricing_context_input_tokens: int | None,
+    pricing_as_of: datetime,
 ) -> dict[str, Any]:
     if provider_request_sent is False:
         return {
@@ -238,6 +262,43 @@ def _estimate_call_cost(
     currency = _text(pricing.get("currency"))
     currency = currency.upper() if currency else None
     unit_tokens = _count(pricing.get("unit_tokens"))
+    effective_at_raw = _text(pricing.get("effective_at_utc"))
+    effective_until_raw = _text(pricing.get("effective_until_utc"))
+    effective_at = _utc_datetime(effective_at_raw)
+    effective_until = _utc_datetime(effective_until_raw)
+    if (effective_at_raw and effective_at is None) or (
+        effective_until_raw and effective_until is None
+    ) or (
+        effective_at is not None
+        and effective_until is not None
+        and effective_at >= effective_until
+    ):
+        return {
+            "status": "unavailable",
+            "amount": None,
+            "known_amount": None,
+            "currency": currency,
+            "reason": "pricing_effective_window_invalid",
+            "pricing": metadata,
+        }
+    if effective_at is not None and pricing_as_of < effective_at:
+        return {
+            "status": "unavailable",
+            "amount": None,
+            "known_amount": None,
+            "currency": currency,
+            "reason": "pricing_not_yet_effective",
+            "pricing": metadata,
+        }
+    if effective_until is not None and pricing_as_of >= effective_until:
+        return {
+            "status": "unavailable",
+            "amount": None,
+            "known_amount": None,
+            "currency": currency,
+            "reason": "pricing_expired",
+            "pricing": metadata,
+        }
     applicability = pricing.get("applicability")
     if isinstance(applicability, Mapping):
         allowed_tiers = applicability.get("effective_service_tiers")
@@ -479,7 +540,11 @@ def _deduplicate(value: Any) -> tuple[list[Mapping[str, Any]], int, int]:
 
 
 def _normalise_call(
-    call: Mapping[str, Any], *, source_index: int, model_registry: Any
+    call: Mapping[str, Any],
+    *,
+    source_index: int,
+    model_registry: Any,
+    pricing_as_of: datetime,
 ) -> dict[str, Any]:
     provider_request_sent = (
         call.get("provider_request_sent")
@@ -527,6 +592,7 @@ def _normalise_call(
         effective_service_tier=effective_service_tier,
         connection_id=connection_id,
         pricing_context_input_tokens=pricing_context_input_tokens,
+        pricing_as_of=pricing_as_of,
     )
     return {
         "call_id": _text(call.get("call_id")),
@@ -770,12 +836,21 @@ def build_llm_usage_cost_summary(
     llm_calls: Any,
     *,
     model_registry: Any = None,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Build one content-free summary from one canonical call sequence."""
 
     unique, raw_count, duplicate_count = _deduplicate(llm_calls)
+    pricing_as_of = _utc_datetime(as_of) if as_of is not None else datetime.now(UTC)
+    if pricing_as_of is None:
+        raise ValueError("as_of must be a valid datetime")
     calls = [
-        _normalise_call(call, source_index=index, model_registry=model_registry)
+        _normalise_call(
+            call,
+            source_index=index,
+            model_registry=model_registry,
+            pricing_as_of=pricing_as_of,
+        )
         for index, call in enumerate(unique)
     ]
     model_identities, omitted_identity_count = _model_identity_summary(calls)

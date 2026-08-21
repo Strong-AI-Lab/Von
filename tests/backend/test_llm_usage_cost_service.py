@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from src.backend.services.llm_usage_cost_service import (
     build_llm_usage_cost_summary,
     normalise_llm_usage,
@@ -28,6 +30,51 @@ def _registry(*, model_id: str = "gpt-5-test") -> dict:
                 },
             }
         ],
+    }
+
+
+def _expiring_gemini_registry() -> dict:
+    return {
+        "models": [
+            {
+                "provider": "gemini",
+                "model_id": "gemini-3.7-flash",
+                "pricing": {
+                    "schema_version": "llm_model_pricing.v1",
+                    "version": "gemini-standard-introductory-2026-08-13",
+                    "source": "https://ai.google.dev/gemini-api/docs/pricing",
+                    "effective_at_utc": "2026-08-13T00:00:00Z",
+                    "effective_until_utc": "2027-01-01T00:00:00Z",
+                    "model_id": "gemini-3.7-flash",
+                    "currency": "USD",
+                    "unit_tokens": 1_000_000,
+                    "applicability": {
+                        "effective_service_tiers": ["standard"],
+                        "connection_ids": ["gemini_developer_api"],
+                    },
+                    "rates": {
+                        "input_tokens": 0.75,
+                        "output_tokens": 3.75,
+                    },
+                },
+            }
+        ]
+    }
+
+
+def _priced_gemini_call(
+    *, tier: str = "standard", connection_id: str = "gemini_developer_api"
+) -> dict:
+    return {
+        "call_id": "gemini-call",
+        "provider": "gemini",
+        "effective_model": "gemini-3.7-flash",
+        "model_identity_source": "provider_response",
+        "usage": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        "transport": {
+            "effective_service_tier": tier,
+            "effective_connection_id": connection_id,
+        },
     }
 
 
@@ -171,6 +218,48 @@ def test_detailed_price_requires_effective_tier_and_direct_connection() -> None:
         )
         assert summary["estimated_cost"]["status"] == "unavailable"
         assert summary["estimated_cost"]["amount"] is None
+
+
+def test_expiring_gemini_price_requires_exact_standard_tier_and_connection() -> None:
+    as_of = datetime(2026, 8, 21, tzinfo=UTC)
+    standard = build_llm_usage_cost_summary(
+        [_priced_gemini_call()],
+        model_registry=_expiring_gemini_registry(),
+        as_of=as_of,
+    )
+    priority = build_llm_usage_cost_summary(
+        [_priced_gemini_call(tier="priority")],
+        model_registry=_expiring_gemini_registry(),
+        as_of=as_of,
+    )
+    wrong_connection = build_llm_usage_cost_summary(
+        [_priced_gemini_call(connection_id="gemini_vertex_ai")],
+        model_registry=_expiring_gemini_registry(),
+        as_of=as_of,
+    )
+
+    assert standard["estimated_cost"]["status"] == "estimated"
+    assert standard["estimated_cost"]["amount"] == 4.5
+    assert priority["estimated_cost"]["status"] == "unavailable"
+    assert priority["estimated_cost"]["unavailable_reasons"] == [
+        "effective_service_tier_unpriced"
+    ]
+    assert wrong_connection["estimated_cost"]["status"] == "unavailable"
+    assert wrong_connection["estimated_cost"]["unavailable_reasons"] == [
+        "provider_connection_unpriced"
+    ]
+
+
+def test_expiring_price_fails_closed_at_effective_until_boundary() -> None:
+    summary = build_llm_usage_cost_summary(
+        [_priced_gemini_call()],
+        model_registry=_expiring_gemini_registry(),
+        as_of=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+
+    assert summary["estimated_cost"]["status"] == "unavailable"
+    assert summary["estimated_cost"]["amount"] is None
+    assert summary["estimated_cost"]["unavailable_reasons"] == ["pricing_expired"]
 
 
 def test_cost_uses_effective_model_and_exact_registry_match() -> None:

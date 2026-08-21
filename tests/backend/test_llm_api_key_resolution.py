@@ -11,6 +11,28 @@ def test_get_gemini_api_key_prefers_primary_env_var(monkeypatch):
     assert get_gemini_api_key() == "preferred-key"
 
 
+def test_get_gemini_api_key_accepts_primary_secret_file(monkeypatch, tmp_path):
+    secret_file = tmp_path / "gemini_api_key"
+    secret_file.write_text("file-key\n", encoding="utf-8")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY_FILE", str(secret_file))
+
+    assert get_gemini_api_key() == "file-key"
+
+
+def test_get_gemini_api_key_prefers_primary_file_over_legacy_direct(
+    monkeypatch, tmp_path
+):
+    secret_file = tmp_path / "gemini_api_key"
+    secret_file.write_text("primary-file-key", encoding="utf-8")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY_FILE", str(secret_file))
+    monkeypatch.setenv("GOOGLE_API_KEY", "legacy-key")
+
+    assert get_gemini_api_key() == "primary-file-key"
+
+
 def test_gemini_client_accepts_legacy_google_api_key(monkeypatch):
     from src.backend.languagemodels import llm_interface
 
@@ -18,15 +40,11 @@ def test_gemini_client_accepts_legacy_google_api_key(monkeypatch):
 
     fake_genai = types.SimpleNamespace()
 
-    def _configure(*, api_key):
+    def _client(*, api_key):
         configured["api_key"] = api_key
+        return types.SimpleNamespace(interactions=types.SimpleNamespace())
 
-    class _Model:
-        def __init__(self, model_name):
-            configured["model_name"] = model_name
-
-    fake_genai.configure = _configure
-    fake_genai.GenerativeModel = _Model
+    fake_genai.Client = _client
 
     monkeypatch.setattr(llm_interface, "genai", fake_genai)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -36,7 +54,7 @@ def test_gemini_client_accepts_legacy_google_api_key(monkeypatch):
 
     assert client.api_key == "legacy-key"
     assert configured["api_key"] == "legacy-key"
-    assert configured["model_name"] == "gemini-2.0-flash"
+    assert client.default_model == "gemini-3.7-flash"
 
 
 def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
@@ -46,25 +64,34 @@ def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
     google_mod = types.ModuleType("google")
     configured = {}
 
-    def _configure(*, api_key):
-        configured["api_key"] = api_key
-
     class _Response:
         text = "A labelled diagram of a research workflow."
 
-    class _Model:
-        def __init__(self, model_name):
-            configured["model_name"] = model_name
-
-        def generate_content(self, _parts):
+    class _Models:
+        def generate_content(self, *, model, contents):
+            configured["model_name"] = model
+            configured["contents"] = contents
             return _Response()
+
+    class _Client:
+        def __init__(self, *, api_key):
+            configured["api_key"] = api_key
+            self.models = _Models()
+
+        def close(self):
+            configured["closed"] = True
+
+    class _Part:
+        @staticmethod
+        def from_bytes(*, data, mime_type):
+            return {"data": data, "mime_type": mime_type}
 
     setattr(
         google_mod,
         "genai",
         types.SimpleNamespace(
-            configure=_configure,
-            GenerativeModel=_Model,
+            Client=_Client,
+            types=types.SimpleNamespace(Part=_Part),
         ),
     )
 
@@ -85,7 +112,8 @@ def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
     )
 
     assert configured["api_key"] == "legacy-key"
-    assert configured["model_name"] == "gemini-2.0-flash"
+    assert configured["model_name"] == "gemini-3.7-flash"
+    assert configured["closed"] is True
     assert result["method"] == "gemini_vision"
     assert result["description"] == "A labelled diagram of a research workflow."
 

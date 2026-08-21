@@ -26,7 +26,7 @@ bootstrap assets from `templates/` to configure a runnable Von host:
 
 ## Prerequisites
 
-- Terraform `>= 1.5.0`.
+- Terraform `>= 1.9.0`.
 - OpenStack credentials available at runtime via:
   - `OS_CLOUD` + `clouds.yaml`, or
   - direct `OS_*` environment variables.
@@ -189,6 +189,9 @@ needed for real chat/workflow execution:
 - `bootstrap_openai_api_key_file` defaults to `/etc/von/secrets/openai_api_key`.
 - OpenAI keys can be injected with `TF_VAR_bootstrap_openai_api_key` or by
   pre-provisioning `bootstrap_openai_api_key_file` on host.
+- `bootstrap_gemini_api_key_file` defaults to
+  `/etc/von/secrets/gemini_api_key`. Gemini keys can be injected with
+  `TF_VAR_bootstrap_gemini_api_key` or pre-provisioned at that path.
 - `bootstrap_default_llm_provider`, `bootstrap_default_llm_model`, and either
   `bootstrap_default_llm_organisation_concept_id` or
   `bootstrap_default_llm_user_concept_id` can seed the scoped LLM setting after
@@ -196,7 +199,7 @@ needed for real chat/workflow execution:
 
 Do not assign `bootstrap_openai_api_key = null` in local tfvars when using
 `TF_VAR_bootstrap_openai_api_key`; tfvars values override runtime environment
-variables.
+variables. The same rule applies to `bootstrap_gemini_api_key`.
 
 Operational note:
 

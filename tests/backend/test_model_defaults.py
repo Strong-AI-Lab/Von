@@ -52,9 +52,9 @@ class TestModelDefaults:
         import src.backend.languagemodels.model_defaults as mod
 
         importlib.reload(mod)
-        assert mod.DEFAULT_OLLAMA_MODEL == "gemma4:26b"
+        assert mod.DEFAULT_OLLAMA_MODEL == "gemma4:31b"
         assert mod.DEFAULT_OPENAI_MODEL == "gpt-5.5"
-        assert mod.DEFAULT_GEMINI_MODEL == "gemini-2.0-flash"
+        assert mod.DEFAULT_GEMINI_MODEL == "gemini-3.7-flash"
 
 
 # ---------------------------------------------------------------------------

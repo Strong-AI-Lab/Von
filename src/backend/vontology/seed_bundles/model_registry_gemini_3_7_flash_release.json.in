@@ -1,0 +1,254 @@
+{
+  "schema_version": "model_registry_release_bundle.v1",
+  "release_version": "1",
+  "source_tag": "gemini-3.7-flash-ga-2026-08-13",
+  "managed_by": "model_registry_release_vontology_service",
+  "authority_role": "repo_release_input_only",
+  "model": {
+    "provider": "gemini",
+    "model_id": "gemini-3.7-flash",
+    "concept_id": "#V#google_gemini_3_7_flash",
+    "registry_entry_id": "#V#gemini_3_7_flash_registry_entry"
+  },
+  "required_existing_concept_ids": [
+    "#V#default_model_registry",
+    "#V#gemini_provider",
+    "#V#large_language_model",
+    "#V#model_registry_entry",
+    "#V#model_api_profile",
+    "#V#predicate",
+    "#V#has_model_entry",
+    "#V#refers_to_model",
+    "#V#has_provider",
+    "#V#has_model_api_profile",
+    "#V#has_model_id",
+    "#V#has_model_pricing_json",
+    "#V#has_api_surface",
+    "#V#has_structured_tool_calling_support",
+    "#V#has_tool_continuation_mode",
+    "#V#has_response_storage_policy",
+    "#V#hasName"
+  ],
+  "concepts": [
+    {
+      "concept_id": "#V#has_model_capabilities_json",
+      "name": "has model capabilities JSON",
+      "kind": "predicate",
+      "description": "Stores versioned provider-observed model limits and capability metadata as JSON."
+    },
+    {
+      "concept_id": "#V#has_provider_connection_id",
+      "name": "has provider connection ID",
+      "kind": "predicate",
+      "description": "Identifies the exact provider connection or runtime lane used by a model API profile."
+    },
+    {
+      "concept_id": "#V#google_gemini_3_7_flash",
+      "name": "Google Gemini 3.7 Flash",
+      "kind": "individual",
+      "instance_of_type": "#V#large_language_model",
+      "description": "Google Gemini 3.7 Flash generally available model, stable API identifier gemini-3.7-flash."
+    },
+    {
+      "concept_id": "#V#gemini_3_7_flash_registry_entry",
+      "name": "Gemini 3.7 Flash Registry Entry",
+      "kind": "individual",
+      "instance_of_type": "#V#model_registry_entry",
+      "description": "Default Von model-registry entry for the direct Gemini Developer API Gemini 3.7 Flash model."
+    },
+    {
+      "concept_id": "#V#gemini_3_7_flash_interactions_profile",
+      "name": "Gemini 3.7 Flash Interactions Profile",
+      "kind": "individual",
+      "instance_of_type": "#V#model_api_profile",
+      "description": "Direct Gemini Interactions API structured transport profile for Gemini 3.7 Flash."
+    }
+  ],
+  "relationships": [
+    {
+      "source_id": "#V#gemini_3_7_flash_registry_entry",
+      "predicate": "#V#refers_to_model",
+      "target_id": "#V#google_gemini_3_7_flash"
+    },
+    {
+      "source_id": "#V#google_gemini_3_7_flash",
+      "predicate": "#V#has_provider",
+      "target_id": "#V#gemini_provider"
+    },
+    {
+      "source_id": "#V#gemini_3_7_flash_registry_entry",
+      "predicate": "#V#has_model_api_profile",
+      "target_id": "#V#gemini_3_7_flash_interactions_profile"
+    },
+    {
+      "source_id": "#V#default_model_registry",
+      "predicate": "#V#has_model_entry",
+      "target_id": "#V#gemini_3_7_flash_registry_entry"
+    }
+  ],
+  "text_relations": [
+    {
+      "subject_concept_id": "#V#google_gemini_3_7_flash",
+      "predicate": "hasName",
+      "text": "gemini-3.7-flash",
+      "lang": "en-NZ",
+      "mode": "additive"
+    },
+    {
+      "subject_concept_id": "#V#google_gemini_3_7_flash",
+      "predicate": "hasName",
+      "text": "gemini:gemini-3.7-flash",
+      "lang": "en-NZ",
+      "mode": "additive"
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_registry_entry",
+      "predicate": "#V#has_model_id",
+      "text": "gemini-3.7-flash",
+      "lang": "en-NZ",
+      "mode": "singleton"
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_registry_entry",
+      "predicate": "#V#has_model_pricing_json",
+      "lang": "en-NZ",
+      "mode": "singleton",
+      "json": {
+        "schema_version": "llm_model_pricing.v1",
+        "version": "gemini-standard-introductory-2026-08-13",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "effective_at_utc": "2026-08-13T00:00:00Z",
+        "effective_until_utc": "2027-01-01T00:00:00Z",
+        "effective_at_basis": "provider_schedule_observed_current",
+        "provider": "gemini",
+        "model_id": "gemini-3.7-flash",
+        "currency": "USD",
+        "unit_tokens": 1000000,
+        "applicability": {
+          "effective_service_tiers": [
+            "standard"
+          ],
+          "connection_ids": [
+            "gemini_developer_api"
+          ]
+        },
+        "rates": {
+          "input_tokens": 0.75,
+          "output_tokens": 3.75
+        },
+        "caveats": [
+          "Estimate only; provider billing is authoritative.",
+          "These introductory Standard API rates expire after 31 December 2026 and must be replaced before 1 January 2027.",
+          "Output pricing includes thinking tokens.",
+          "Context-cache storage, grounding, Batch, Flex and Priority charges are not estimated by this entry."
+        ]
+      }
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_registry_entry",
+      "predicate": "#V#has_model_capabilities_json",
+      "lang": "en-NZ",
+      "mode": "singleton",
+      "json": {
+        "schema_version": "llm_model_capabilities.v1",
+        "version": "gemini-3.7-flash-ga-2026-08-13",
+        "source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash",
+        "observed_at_utc": "2026-08-13T00:00:00Z",
+        "provider": "gemini",
+        "model_id": "gemini-3.7-flash",
+        "lifecycle": "generally_available",
+        "input_token_limit": 1048576,
+        "output_token_limit": 65536,
+        "input_modalities": [
+          "text",
+          "image",
+          "video",
+          "audio",
+          "pdf"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "features": {
+          "caching": "supported",
+          "function_calling": "supported",
+          "structured_outputs": "supported",
+          "thinking": {
+            "supported": true,
+            "default_level": "medium",
+            "allowed_levels": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "unsupported_levels": [
+              "minimal"
+            ]
+          },
+          "live_api": "unsupported"
+        },
+        "generation_parameter_policy": {
+          "omit": [
+            "temperature",
+            "top_p",
+            "top_k",
+            "candidate_count",
+            "thinking_budget"
+          ],
+          "use_instead": {
+            "thinking_budget": "thinking_level"
+          }
+        }
+      }
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_interactions_profile",
+      "predicate": "#V#has_api_surface",
+      "text": "interactions",
+      "lang": "en-NZ",
+      "mode": "singleton"
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_interactions_profile",
+      "predicate": "#V#has_structured_tool_calling_support",
+      "text": "supported",
+      "lang": "en-NZ",
+      "mode": "singleton"
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_interactions_profile",
+      "predicate": "#V#has_tool_continuation_mode",
+      "text": "stateless",
+      "lang": "en-NZ",
+      "mode": "singleton"
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_interactions_profile",
+      "predicate": "#V#has_response_storage_policy",
+      "text": "disabled",
+      "lang": "en-NZ",
+      "mode": "singleton"
+    },
+    {
+      "subject_concept_id": "#V#gemini_3_7_flash_interactions_profile",
+      "predicate": "#V#has_provider_connection_id",
+      "text": "gemini_developer_api",
+      "lang": "en-NZ",
+      "mode": "singleton"
+    }
+  ],
+  "expected_read_back": {
+    "provider": "gemini",
+    "model_id": "gemini-3.7-flash",
+    "registry_entry_id": "#V#gemini_3_7_flash_registry_entry",
+    "model_concept_id": "#V#google_gemini_3_7_flash",
+    "api_profile_id": "#V#gemini_3_7_flash_interactions_profile",
+    "api_surface": "interactions",
+    "structured_tool_calling": "supported",
+    "tool_continuation_mode": "stateless",
+    "response_storage_policy": "disabled",
+    "connection_id": "gemini_developer_api",
+    "pricing_version": "gemini-standard-introductory-2026-08-13",
+    "capabilities_version": "gemini-3.7-flash-ga-2026-08-13"
+  }
+}

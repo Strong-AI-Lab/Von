@@ -20,4 +20,4 @@ DEFAULT_OPENAI_MODEL: str = os.getenv("VON_DEFAULT_OPENAI_MODEL", "gpt-5.5")
 # ---------------------------------------------------------------------------
 # Gemini
 # ---------------------------------------------------------------------------
-DEFAULT_GEMINI_MODEL: str = os.getenv("VON_DEFAULT_GEMINI_MODEL", "gemini-2.0-flash")
+DEFAULT_GEMINI_MODEL: str = os.getenv("VON_DEFAULT_GEMINI_MODEL", "gemini-3.7-flash")

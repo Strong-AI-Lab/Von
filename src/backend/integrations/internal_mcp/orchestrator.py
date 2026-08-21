@@ -1658,6 +1658,49 @@ class _ModelCandidate:
     model_parameters: Mapping[str, Any] | None = None
 
 
+class _ModelCandidateClientResolutionError(RuntimeError):
+    """A selected provider client could not be resolved without substitution."""
+
+    failure_kind = "candidate_client_resolution"
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        model: str | None,
+        telemetry: Mapping[str, Any],
+        cause_class: str,
+    ) -> None:
+        self.provider = provider
+        self.model = model
+        self.telemetry = dict(telemetry)
+        self.cause_class = cause_class
+        super().__init__(
+            f"{provider} candidate client resolution failed for "
+            f"{model or 'the provider default model'}."
+        )
+
+    def error_record(self) -> dict[str, Any]:
+        return {
+            "candidate": dict(self.telemetry),
+            "model_resolved": self.model,
+            "error": str(self),
+            "error_class": type(self).__name__,
+            "provider_error_class": self.cause_class,
+            "failure_kind": self.failure_kind,
+        }
+
+    def fallback_attempt(self, *, attempt_no: int) -> dict[str, Any]:
+        return {
+            "attempt_no": attempt_no,
+            "provider": self.provider,
+            "model": self.model,
+            "status": "failed",
+            "duration_ms": 0,
+            **self.error_record(),
+        }
+
+
 @dataclass(frozen=True)
 class _StructuredToolCandidateResolution:
     """Resolved structured-tool candidate set for one LLM planning call."""
@@ -13657,6 +13700,10 @@ class InternalMCPChatOrchestrator:
             elif candidate.lower().startswith("ft:"):
                 provider = "openai"
                 model = candidate.strip()
+            elif model_suffix.strip() == "default":
+                # An unsupported provider's default must not be reinterpreted
+                # as an Ollama name-and-tag model identifier.
+                return None
             elif _model_identifier_looks_local_ollama(candidate):
                 provider = "ollama"
                 model = candidate.strip()
@@ -14919,6 +14966,7 @@ class InternalMCPChatOrchestrator:
             client = default_client
             resolved_model = default_model
             resolved_provider = None
+            requested_provider_client: str | None = None
             try:
                 from src.backend.languagemodels.llm_interface import (
                     get_llm_client,
@@ -14938,6 +14986,7 @@ class InternalMCPChatOrchestrator:
                     and model_implied_provider != default_provider
                     and model_implied_provider in {"openai", "ollama", "gemini"}
                 ):
+                    requested_provider_client = model_implied_provider
                     client = get_llm_client(
                         client_type=model_implied_provider,
                         user_concept_id=user_concept_id,
@@ -14968,7 +15017,25 @@ class InternalMCPChatOrchestrator:
                 elif resolved_provider == "ollama":
                     resolved_model = resolve_ollama_model_name(resolved_model)
                 resolved_model = self._normalise_llm_model_name(resolved_model)
-            except Exception:
+            except Exception as exc:
+                if requested_provider_client == "gemini":
+                    telemetry.update(
+                        {
+                            "provider": "gemini",
+                            "model": default_model,
+                            "error": "candidate_client_resolution_failed",
+                            "error_class": type(exc).__name__,
+                            "failure_kind": (
+                                _ModelCandidateClientResolutionError.failure_kind
+                            ),
+                        }
+                    )
+                    raise _ModelCandidateClientResolutionError(
+                        provider="gemini",
+                        model=default_model,
+                        telemetry=telemetry,
+                        cause_class=type(exc).__name__,
+                    ) from exc
                 resolved_provider = None
 
             if resolved_provider:
@@ -15058,6 +15125,24 @@ class InternalMCPChatOrchestrator:
                     telemetry["model_resolution_source"] = "client_default"
             return client, model or default_model, telemetry
         except Exception as exc:
+            if provider == "gemini":
+                telemetry.update(
+                    {
+                        "provider": "gemini",
+                        "model": model,
+                        "error": "candidate_client_resolution_failed",
+                        "error_class": type(exc).__name__,
+                        "failure_kind": (
+                            _ModelCandidateClientResolutionError.failure_kind
+                        ),
+                    }
+                )
+                raise _ModelCandidateClientResolutionError(
+                    provider="gemini",
+                    model=model,
+                    telemetry=telemetry,
+                    cause_class=type(exc).__name__,
+                ) from exc
             telemetry["error"] = str(exc)
             return default_client, default_model, telemetry
 
@@ -15571,16 +15656,73 @@ class InternalMCPChatOrchestrator:
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
-            )
+        )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
-            client, model_name, telemetry = self._create_client_for_candidate(
-                candidate,
-                default_client=default_client,
-                default_model=default_model,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-            )
+            try:
+                client, model_name, telemetry = self._create_client_for_candidate(
+                    candidate,
+                    default_client=default_client,
+                    default_model=default_model,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                )
+            except _ModelCandidateClientResolutionError as exc:
+                error_record = exc.error_record()
+                errors.append(error_record)
+                fallback_attempts.append(exc.fallback_attempt(attempt_no=attempt_no))
+                last_exception = exc
+                last_failure_class = type(exc).__name__
+                failure_attempt_meta = {
+                    "fallback_attempt_no": attempt_no,
+                    "fallback_candidate_count": total_candidates,
+                    "model_source": candidate.source,
+                    "requested_model": default_model,
+                    "selected_model": exc.model,
+                    "provider": exc.provider,
+                    "llm_exchange_id": live_llm_exchange_id,
+                    "call_id": self._build_live_llm_call_id(
+                        live_llm_exchange_id, attempt_no
+                    ),
+                }
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": exc.model,
+                            "duration_ms": 0,
+                            "success": False,
+                            "error": str(exc),
+                            "error_class": type(exc).__name__,
+                            "failure_kind": exc.failure_kind,
+                            **_stage_extra,
+                            **failure_attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="failed",
+                                prepared_at_utc=request_prepared_at_utc,
+                            ),
+                        }
+                    )
+                record_llm_call(
+                    call_type="llm.generate",
+                    model_name=exc.model,
+                    requested_model_name=default_model,
+                    duration_ms=0,
+                    usage=None,
+                    note="candidate client resolution failed; trying fallback",
+                    stage=stage,
+                    provider=exc.provider,
+                    candidate=exc.telemetry,
+                    workflow_stage_id=workflow_stage_id,
+                    status="failed",
+                    success=False,
+                    error=str(exc),
+                    error_class=type(exc).__name__,
+                    failure_kind=exc.failure_kind,
+                )
+                continue
             provider = (
                 str(telemetry.get("provider")).strip().lower()
                 if isinstance(telemetry, Mapping) and telemetry.get("provider")
@@ -15794,6 +15936,50 @@ class InternalMCPChatOrchestrator:
                     timeout_override_sec=timeout_override_sec,
                     check_cancellation=check_cancellation,
                 )
+                provider_response_metadata = getattr(
+                    client, "last_response_metadata", None
+                )
+                if not isinstance(provider_response_metadata, Mapping):
+                    provider_response_metadata = {}
+                provider_usage = provider_response_metadata.get("usage")
+                if not isinstance(provider_usage, Mapping):
+                    provider_usage = None
+                provider_response_model = provider_response_metadata.get(
+                    "effective_model"
+                )
+                if not isinstance(provider_response_model, str) or not (
+                    provider_response_model := provider_response_model.strip()
+                ):
+                    provider_response_model = None
+                if provider_response_model:
+                    attempt_meta["effective_model"] = provider_response_model
+                    attempt_meta["model_identity_source"] = "provider_response"
+                provider_api_surface = provider_response_metadata.get("api_surface")
+                if (
+                    isinstance(provider_api_surface, str)
+                    and provider_api_surface.strip()
+                ):
+                    attempt_meta["api_surface"] = provider_api_surface.strip()
+                provider_transport = provider_response_metadata.get(
+                    "transport_metadata"
+                )
+                if isinstance(provider_transport, Mapping) and provider_transport:
+                    attempt_meta["llm_transport"] = dict(provider_transport)
+                response_telemetry = (
+                    dict(telemetry) if isinstance(telemetry, Mapping) else {}
+                )
+                if provider_response_model:
+                    response_telemetry["effective_model"] = provider_response_model
+                    response_telemetry["model_identity_source"] = "provider_response"
+                if (
+                    isinstance(provider_api_surface, str)
+                    and provider_api_surface.strip()
+                ):
+                    response_telemetry["api_surface"] = provider_api_surface.strip()
+                if isinstance(provider_transport, Mapping) and provider_transport:
+                    response_telemetry["transport_metadata"] = dict(provider_transport)
+                if provider_usage is not None:
+                    response_telemetry["usage"] = dict(provider_usage)
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 first_output_at_utc = self._utc_now_iso()
                 response_text = str(response)
@@ -15804,6 +15990,21 @@ class InternalMCPChatOrchestrator:
                             "stage": stage,
                             "model": model_name,
                             "chunks": 1,
+                            "tokens_streamed": (
+                                provider_usage.get("visible_output_tokens")
+                                if isinstance(provider_usage, Mapping)
+                                and isinstance(
+                                    provider_usage.get("visible_output_tokens"), int
+                                )
+                                else (
+                                    provider_usage.get("output_tokens")
+                                    if isinstance(provider_usage, Mapping)
+                                    and isinstance(
+                                        provider_usage.get("output_tokens"), int
+                                    )
+                                    else None
+                                )
+                            ),
                             "duration_ms": int(duration_ms),
                             **_stage_extra,
                             **attempt_meta,
@@ -15822,7 +16023,7 @@ class InternalMCPChatOrchestrator:
                     validation_result = response_validator(
                         response_text,
                         model_name,
-                        telemetry if isinstance(telemetry, Mapping) else {},
+                        response_telemetry,
                     )
                     if isinstance(validation_result, Mapping) and validation_result:
                         validation_failure = dict(validation_result)
@@ -15875,8 +16076,12 @@ class InternalMCPChatOrchestrator:
                         call_type="llm.generate",
                         model_name=model_name,
                         requested_model_name=default_model,
+                        effective_model_name=provider_response_model,
+                        model_identity_source=(
+                            "provider_response" if provider_response_model else None
+                        ),
                         duration_ms=duration_ms,
-                        usage=None,
+                        usage=provider_usage,
                         note="llm.generate response failed validation; trying fallback",
                         stage=stage,
                         provider=(
@@ -15884,7 +16089,7 @@ class InternalMCPChatOrchestrator:
                             if isinstance(telemetry, Mapping)
                             else None
                         ),
-                        candidate=telemetry,
+                        candidate=response_telemetry,
                         workflow_stage_id=workflow_stage_id,
                         status="failed",
                         success=False,
@@ -15907,7 +16112,7 @@ class InternalMCPChatOrchestrator:
                             prepared_at_utc=request_prepared_at_utc,
                             sent_at_utc=request_sent_at_utc,
                             first_output_at_utc=first_output_at_utc,
-                            usage=None,
+                            usage=provider_usage,
                             extra=failure_extra,
                         ),
                     )
@@ -15970,8 +16175,12 @@ class InternalMCPChatOrchestrator:
                     call_type="llm.generate",
                     model_name=model_name,
                     requested_model_name=default_model,
+                    effective_model_name=provider_response_model,
+                    model_identity_source=(
+                        "provider_response" if provider_response_model else None
+                    ),
                     duration_ms=duration_ms,
-                    usage=None,
+                    usage=provider_usage,
                     note=("Fallback chain generate()" if errors else "llm.generate"),
                     stage=stage,
                     provider=(
@@ -15979,7 +16188,7 @@ class InternalMCPChatOrchestrator:
                         if isinstance(telemetry, Mapping)
                         else None
                     ),
-                    candidate=telemetry,
+                    candidate=response_telemetry,
                     workflow_stage_id=workflow_stage_id,
                     exchange_blob_ref=self._capture_llm_exchange_blob(
                         stage=stage,
@@ -15997,7 +16206,7 @@ class InternalMCPChatOrchestrator:
                         prepared_at_utc=request_prepared_at_utc,
                         sent_at_utc=request_sent_at_utc,
                         first_output_at_utc=first_output_at_utc,
-                        usage=None,
+                        usage=provider_usage,
                     ),
                 )
                 fallback_attempts.append(
@@ -16011,9 +16220,7 @@ class InternalMCPChatOrchestrator:
                             "text": str(response),
                             "char_count": len(str(response)),
                         },
-                        "candidate": (
-                            dict(telemetry) if isinstance(telemetry, Mapping) else None
-                        ),
+                        "candidate": (dict(response_telemetry)),
                     }
                 )
                 selection_metadata = self._build_stage_model_selection_metadata(
@@ -16034,7 +16241,7 @@ class InternalMCPChatOrchestrator:
                         "policy_stage": candidate_stage,
                         "request": request_telemetry,
                         "selected": {
-                            **telemetry,
+                            **response_telemetry,
                             "model_resolved": model_name,
                         },
                         "fallback_used": bool(errors),
@@ -16046,14 +16253,16 @@ class InternalMCPChatOrchestrator:
                         "skipped_candidate_count": len(skipped_candidates),
                         "requested_model": default_model,
                         "selected_model": model_name,
-                        "effective_model": None,
-                        "model_identity_source": None,
+                        "effective_model": provider_response_model,
+                        "model_identity_source": (
+                            "provider_response" if provider_response_model else None
+                        ),
                         "model_source": candidate.source,
                         **_stage_extra,
                         **selection_metadata,
                     }
                 )
-                return response, model_name, telemetry
+                return response, model_name, response_telemetry
             except CancellationRequested as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 exc_text = str(exc)
@@ -16875,16 +17084,73 @@ class InternalMCPChatOrchestrator:
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
-            )
+        )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
-            client, model_name, telemetry = self._create_client_for_candidate(
-                candidate,
-                default_client=default_client,
-                default_model=default_model,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-            )
+            try:
+                client, model_name, telemetry = self._create_client_for_candidate(
+                    candidate,
+                    default_client=default_client,
+                    default_model=default_model,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                )
+            except _ModelCandidateClientResolutionError as exc:
+                error_record = exc.error_record()
+                errors.append(error_record)
+                fallback_attempts.append(exc.fallback_attempt(attempt_no=attempt_no))
+                last_exception = exc
+                last_failure_class = type(exc).__name__
+                failure_attempt_meta = {
+                    "fallback_attempt_no": attempt_no,
+                    "fallback_candidate_count": total_candidates,
+                    "model_source": candidate.source,
+                    "requested_model": default_model,
+                    "selected_model": exc.model,
+                    "provider": exc.provider,
+                    "llm_exchange_id": live_llm_exchange_id,
+                    "call_id": self._build_live_llm_call_id(
+                        live_llm_exchange_id, attempt_no
+                    ),
+                }
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": exc.model,
+                            "duration_ms": 0,
+                            "success": False,
+                            "error": str(exc),
+                            "error_class": type(exc).__name__,
+                            "failure_kind": exc.failure_kind,
+                            **_stage_extra,
+                            **failure_attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="failed",
+                                prepared_at_utc=request_prepared_at_utc,
+                            ),
+                        }
+                    )
+                record_llm_call(
+                    call_type="llm.generate_with_tools",
+                    model_name=exc.model,
+                    requested_model_name=default_model,
+                    duration_ms=0,
+                    usage=None,
+                    note="candidate client resolution failed; trying fallback",
+                    stage=stage,
+                    provider=exc.provider,
+                    candidate=exc.telemetry,
+                    workflow_stage_id=workflow_stage_id,
+                    status="failed",
+                    success=False,
+                    error=str(exc),
+                    error_class=type(exc).__name__,
+                    failure_kind=exc.failure_kind,
+                )
+                continue
             provider = (
                 str(telemetry.get("provider")).strip()
                 if isinstance(telemetry, Mapping) and telemetry.get("provider")
@@ -17034,11 +17300,11 @@ class InternalMCPChatOrchestrator:
                 if matched_name and matched_name not in required_available_tool_names:
                     required_available_tool_names.append(matched_name)
             structured_call_kwargs: dict[str, Any] = {}
+            provider_llm_params = dict(model_parameters or {})
+            if provider_llm_params:
+                structured_call_kwargs["llm_params"] = provider_llm_params
             if provider == "openai":
                 structured_call_kwargs["parallel_tool_calls"] = False
-                provider_llm_params = dict(model_parameters or {})
-                if provider_llm_params:
-                    structured_call_kwargs["llm_params"] = provider_llm_params
                 if tool_choice_override is not None:
                     structured_call_kwargs["tool_choice"] = tool_choice_override
                 elif len(required_available_tool_names) == 1:
@@ -17306,11 +17572,15 @@ class InternalMCPChatOrchestrator:
                 if callable(emit_progress):
                     completion_tokens = None
                     if isinstance(getattr(llm_response, "usage", None), Mapping):
-                        raw_completion_tokens = llm_response.usage.get(
-                            "completion_tokens"
-                        )
-                        if isinstance(raw_completion_tokens, int):
-                            completion_tokens = raw_completion_tokens
+                        for usage_key in (
+                            "completion_tokens",
+                            "visible_output_tokens",
+                            "output_tokens",
+                        ):
+                            raw_completion_tokens = llm_response.usage.get(usage_key)
+                            if isinstance(raw_completion_tokens, int):
+                                completion_tokens = raw_completion_tokens
+                                break
                     emit_progress(
                         {
                             "status": "llm_call_chunk",

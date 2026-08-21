@@ -68,6 +68,71 @@ describe('chat task queue', () => {
         delete global.fetch;
     });
 
+    test('sends the stored Gemini choice as a bare model with its exact provider', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const { sendMessage } = require(chatTabModulePath);
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+        localStorage.setItem('von:localModelPreference', JSON.stringify({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'gemini',
+            premiumProvider: 'gemini',
+            openaiModel: null,
+            geminiModel: 'gemini-3.7-flash',
+            geminiModelParameters: { reasoning_effort: 'high' },
+            ollamaSelection: null
+        }));
+        const originalScrollTo = window.scrollTo;
+        window.scrollTo = jest.fn();
+
+        let generateBody = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateBody = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Gemini response',
+                        llm_debug: { provider: 'gemini', model: 'gemini-3.7-flash' }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        try {
+            document.getElementById('promptInput').value = 'Use Gemini';
+            await sendMessage();
+            expect(generateBody).toMatchObject({
+                prompt: 'Use Gemini',
+                model: 'gemini-3.7-flash',
+                model_provider: 'gemini',
+                model_parameters: { reasoning_effort: 'high' }
+            });
+            expect(generateBody.model).not.toContain('gemini:');
+        } finally {
+            localStorage.removeItem('von:localModelPreference');
+            window.scrollTo = originalScrollTo;
+        }
+    });
+
     test('queues while thinking and executes edited queued prompt after current turn', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { sendMessage } = require(chatTabModulePath);

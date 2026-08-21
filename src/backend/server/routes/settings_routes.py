@@ -101,11 +101,17 @@ from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
 from ...languagemodels.llm_interface import (
+    GeminiClient,
     ModelExecutionEligibilityError,
     OpenAIClient,
     assert_model_execution_allowed,
     get_ollama_auto_pull_state_snapshot,
     resolve_openai_responses_max_output_tokens,
+)
+from ...utils.runtime_env import (
+    load_secret_from_env_or_file,
+    read_repo_dotenv_values,
+    read_secret_file,
 )
 from ...db.repositories.concepts_repository import ConceptsRepository
 from bson import ObjectId
@@ -796,10 +802,15 @@ def get_llm_info():
 
         # Allow the client to pass the effective provider when a local model preference
         # overrides the DB-stored setting (e.g. premium disabled, Ollama selected locally).
-        # Only 'openai' and 'ollama' are accepted; any other value is ignored.
+        # Only known providers are accepted; any other value is ignored.
         effective_provider_override = request.args.get("effective_provider")
-        if effective_provider_override in ("openai", "ollama"):
+        if effective_provider_override in ("openai", "gemini", "ollama"):
             provider = effective_provider_override
+            effective_model_override = str(
+                request.args.get("effective_model") or ""
+            ).strip()
+            if effective_model_override:
+                model = effective_model_override
 
         status = "unknown"
         error_message = None
@@ -834,6 +845,31 @@ def get_llm_info():
                 except Exception as e:
                     status = "error"
                     error_message = str(e)
+
+        elif provider == "gemini":
+            api_key = _resolve_settings_api_key(
+                "GEMINI_API_KEY",
+                fallback_env_vars=("GOOGLE_API_KEY",),
+            )
+            if not api_key:
+                status = "missing_key"
+                error_message = "Gemini API key not set"
+            else:
+                try:
+                    client = GeminiClient(
+                        api_key=api_key,
+                        **({"default_model": model} if model else {}),
+                    )
+                    client.list_models()
+                    status = "ready"
+                    ping_ok = True
+                except Exception as e:
+                    status = "error"
+                    error_message = "Gemini status check failed."
+                    current_app.logger.warning(
+                        "Gemini LLM status check failed (error_type=%s)",
+                        type(e).__name__,
+                    )
 
         elif provider == "ollama":
             host = get_active_ollama_host()
@@ -1002,6 +1038,7 @@ def get_all_settings_data():
         # Merge DB settings with computed/env-var settings
         return {
             **db_settings,  # active_llm, openai_api_key_env_var, fetch_counts_on_load, etc.
+            "gemini_api_key_env_var": "GEMINI_API_KEY",
             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
             "buttonify_prompt_active": (
                 BUTTONIFY_PROMPT_IDS[0] if BUTTONIFY_PROMPT_IDS else None
@@ -1823,53 +1860,107 @@ def set_llm_override():
 
 @settings_bp.route("/env_var/check", methods=["POST"])
 def check_environment_variable():
-    """API endpoint to check if an environment variable is set."""
-    data = request.get_json()
-    if not data:
-        current_app.logger.warning(
-            "No JSON data received in environment variable check request"
+    """Report existence/source for a server-recognised model API key.
+
+    Browser input cannot turn this endpoint into an arbitrary environment or
+    ``.env`` reader, and no credential fragment is returned or logged.
+    """
+
+    data = request.get_json(silent=True) or {}
+    env_var_name = _normalise_settings_key_check_env_var(data.get("env_var_name"))
+    if env_var_name is None:
+        return _jsonify_no_store(
+            {"error": "Unsupported model API key source."},
+            400,
         )
-        return jsonify({"error": "Invalid JSON payload"}), 400
 
-    env_var_name = data.get("env_var_name")
-    if not env_var_name:
-        current_app.logger.warning("Missing 'env_var_name' in request body")
-        return jsonify({"error": "Missing 'env_var_name' in request body."}), 400
-
-    current_app.logger.info(f"Checking environment variable: {env_var_name}")
-    value = os.getenv(env_var_name)
-    source = "process" if value else None
-
-    if not value:
-        try:
-            from dotenv import dotenv_values  # type: ignore
-            from pathlib import Path
-
-            repo_root = Path(__file__).resolve().parents[4]
-            env_path = repo_root / ".env"
-            if env_path.exists():
-                values = dotenv_values(env_path)
-                raw = values.get(env_var_name)
-                if raw is not None:
-                    value = str(raw)
-                    source = "dotenv"
-        except Exception:
-            value = value or None
-
-    response_data: Dict[str, Any] = {"exists": bool(value)}
+    exists, source = _settings_key_presence(env_var_name)
+    current_app.logger.info(
+        "Model API key presence checked env_var=%s exists=%s source=%s",
+        env_var_name,
+        exists,
+        source or "none",
+    )
+    response_data: Dict[str, Any] = {"exists": exists}
     if source:
         response_data["source"] = source
-    if value:
-        # Return a masked version of the key for verification
-        masked_value = f"{value[:5]}...{value[-4:]}" if len(value) > 9 else value
-        response_data["masked_value"] = masked_value
-        current_app.logger.info(
-            f"Environment variable {env_var_name} exists (masked: {masked_value})"
-        )
-    else:
-        current_app.logger.info(f"Environment variable {env_var_name} not found")
+    return _jsonify_no_store(response_data, 200)
 
-    return jsonify(response_data), 200
+
+def _resolve_settings_api_key(
+    env_var_name: str | None,
+    *,
+    fallback_env_vars: tuple[str, ...] = (),
+) -> str | None:
+    """Resolve a provider key for Settings probes without exposing it."""
+
+    names: list[str] = []
+    for raw_name in (env_var_name, *fallback_env_vars):
+        name = str(raw_name or "").strip()
+        if name and name not in names:
+            names.append(name)
+    for name in names:
+        value = load_secret_from_env_or_file(name, f"{name}_FILE")
+        if value:
+            return value
+    dotenv_values = read_repo_dotenv_values(names)
+    for name in names:
+        value = dotenv_values.get(name)
+        if value:
+            return value
+    return None
+
+
+_GEMINI_SETTINGS_KEY_ENV_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+
+def _normalise_settings_key_check_env_var(value: object) -> str | None:
+    """Accept only key names selected by server-side model configuration."""
+
+    name = str(value or "").strip()
+    if name in _GEMINI_SETTINGS_KEY_ENV_VARS:
+        return name
+    try:
+        configured_openai_env_var = str(get_openai_env_var() or "").strip()
+    except Exception:
+        configured_openai_env_var = "OPENAI_API_KEY"
+    return name if name and name == configured_openai_env_var else None
+
+
+def _settings_key_presence(env_var_name: str) -> tuple[bool, str | None]:
+    """Return credential presence without returning or logging credential data."""
+
+    candidates = (
+        _GEMINI_SETTINGS_KEY_ENV_VARS
+        if env_var_name == "GEMINI_API_KEY"
+        else (env_var_name,)
+    )
+    for name in candidates:
+        direct = str(os.getenv(name) or "").strip()
+        if direct:
+            return True, "process"
+        if read_secret_file(os.getenv(f"{name}_FILE")):
+            return True, "secret_file"
+
+    dotenv_keys = tuple(
+        key
+        for name in candidates
+        for key in (name, f"{name}_FILE")
+    )
+    dotenv_values = read_repo_dotenv_values(dotenv_keys)
+    for name in candidates:
+        if dotenv_values.get(name):
+            return True, "dotenv"
+        if read_secret_file(dotenv_values.get(f"{name}_FILE")):
+            return True, "dotenv_secret_file"
+    return False, None
+
+
+def _normalise_gemini_settings_key_env_var(value: object) -> str | None:
+    """Accept only the server-supported Gemini key sources from browser input."""
+
+    name = str(value or "").strip()
+    return name if name in _GEMINI_SETTINGS_KEY_ENV_VARS else None
 
 
 @settings_bp.route("/models/ollama", methods=["GET"])
@@ -1946,6 +2037,48 @@ def get_openai_models():
                 ),
                 500,
             )
+
+
+@settings_bp.route("/models/gemini", methods=["GET"])
+def get_gemini_models():
+    """Return Gemini generate-content models available to the configured key."""
+
+    api_key = _resolve_settings_api_key(
+        "GEMINI_API_KEY",
+        fallback_env_vars=("GOOGLE_API_KEY",),
+    )
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "error": (
+                    "Gemini API key not found in GEMINI_API_KEY or legacy "
+                    "GOOGLE_API_KEY."
+                )
+            },
+            400,
+        )
+    try:
+        models = GeminiClient(api_key=api_key).list_models()
+        if not models:
+            return _jsonify_no_store(
+                {
+                    "error": (
+                        "Gemini returned no generate-content models for this API key."
+                    )
+                },
+                400,
+            )
+        current_app.logger.info("Retrieved %s Gemini models", len(models))
+        return _jsonify_no_store(models, 200)
+    except Exception as exc:
+        current_app.logger.warning(
+            "Could not list Gemini models (error_type=%s)",
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {"error": "Could not retrieve Gemini models with the configured key."},
+            400,
+        )
 
 
 @settings_bp.route("/model_parameters/capabilities", methods=["GET"])
@@ -2341,6 +2474,71 @@ def verify_openai_api_key():
                 jsonify({"success": False, "error": "An unexpected error occurred."}),
                 500,
             )
+
+
+@settings_bp.route("/gemini/verify", methods=["POST"])
+def verify_gemini_api_key():
+    """Verify a configured Gemini key by listing its generate-content models."""
+
+    payload = request.get_json(silent=True) or {}
+    api_key_env_var = _normalise_gemini_settings_key_env_var(
+        payload.get("api_key_env_var") or "GEMINI_API_KEY"
+    )
+    if not api_key_env_var:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": (
+                    "Gemini key source must be GEMINI_API_KEY or GOOGLE_API_KEY."
+                ),
+            },
+            400,
+        )
+    api_key = _resolve_settings_api_key(
+        api_key_env_var,
+        fallback_env_vars=("GOOGLE_API_KEY",)
+        if api_key_env_var == "GEMINI_API_KEY"
+        else (),
+    )
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": f"Gemini API key was not found in {api_key_env_var}.",
+            },
+            400,
+        )
+
+    current_app.logger.info(
+        "Attempting to verify Gemini API key from environment variable %s",
+        api_key_env_var,
+    )
+    try:
+        models = GeminiClient(api_key=api_key).list_models()
+        if not models:
+            return _jsonify_no_store(
+                {
+                    "success": False,
+                    "error": (
+                        "Gemini returned no generate-content models for this API key."
+                    ),
+                },
+                400,
+            )
+        current_app.logger.info("Successfully retrieved %s Gemini models", len(models))
+        return _jsonify_no_store({"success": True, "models": models}, 200)
+    except Exception as exc:
+        current_app.logger.warning(
+            "Gemini API key verification failed (error_type=%s)",
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "Gemini API verification failed with the configured key.",
+            },
+            400,
+        )
 
 
 @settings_bp.route("/ollama/hosts", methods=["GET"])
@@ -3767,6 +3965,192 @@ def test_openai_model():
                 "success": True,
                 "usable": False,
                 "model": requested_model,
+                "failure_kind": failure_kind,
+                "reason": reason,
+            }
+        )
+
+
+def _classify_gemini_probe_exception(exc: Exception) -> tuple[str, str]:
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    lowered = str(exc).strip().lower()
+    if status_code == 401 or "unauth" in lowered or "api key not valid" in lowered:
+        return "authentication_error", "Gemini authentication failed."
+    if status_code == 403 or "permission" in lowered or "forbidden" in lowered:
+        return "permission_denied", "Gemini access was denied for this model."
+    if status_code == 404 or "not found" in lowered:
+        return "model_not_found", "The selected Gemini model was not found."
+    if status_code == 429 or "rate limit" in lowered or "resource_exhausted" in lowered:
+        if "quota" in lowered or "resource_exhausted" in lowered:
+            return "quota_exhausted", "Gemini quota is exhausted."
+        return "rate_limited", "Gemini rate limit exceeded."
+    if status_code == 400 or "invalid argument" in lowered:
+        return "bad_request", "Gemini rejected the selected model probe."
+    if "connect" in lowered or "network" in lowered or "dns" in lowered:
+        return "connection_error", "Could not reach the Gemini API."
+    return "unexpected_error", "Unexpected Gemini model probe failure."
+
+
+def _gemini_probe_api_surface(client: object, model: str) -> str:
+    metadata = getattr(client, "last_response_metadata", None)
+    observed = (
+        str(metadata.get("api_surface") or "").strip()
+        if isinstance(metadata, dict)
+        else ""
+    )
+    if observed in {"interactions", "gemini_generate_content"}:
+        return observed
+    canonical_model = str(model or "").strip().lower()
+    if canonical_model.startswith("models/"):
+        canonical_model = canonical_model.split("/", 1)[1]
+    return (
+        "interactions"
+        if canonical_model == "gemini-3.7-flash"
+        or canonical_model.startswith("gemini-3.7-flash-")
+        else "gemini_generate_content"
+    )
+
+
+@settings_bp.route("/gemini/test_model", methods=["POST"])
+def test_gemini_model():
+    """Probe whether an allowed Gemini model is usable with the configured key."""
+
+    payload = request.get_json(silent=True) or {}
+    api_key_env_var = _normalise_gemini_settings_key_env_var(
+        payload.get("api_key_env_var") or "GEMINI_API_KEY"
+    )
+    requested_model = str(payload.get("model") or "").strip()
+    if not api_key_env_var:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "invalid_key_env_var",
+                "reason": (
+                    "Gemini key source must be GEMINI_API_KEY or GOOGLE_API_KEY."
+                ),
+            },
+            400,
+        )
+    if not requested_model:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "missing_model",
+                "reason": "No Gemini model is selected.",
+            },
+            400,
+        )
+
+    try:
+        assert_model_execution_allowed(provider="gemini", model=requested_model)
+    except ModelExecutionEligibilityError as exc:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": exc.model or requested_model,
+                "failure_kind": exc.failure_kind,
+                "reason": str(exc),
+            },
+            403,
+        )
+
+    api_key = _resolve_settings_api_key(
+        api_key_env_var,
+        fallback_env_vars=("GOOGLE_API_KEY",)
+        if api_key_env_var == "GEMINI_API_KEY"
+        else (),
+    )
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": requested_model,
+                "failure_kind": "missing_api_key",
+                "reason": f"Gemini API key was not found in {api_key_env_var}.",
+            },
+            400,
+        )
+
+    model_parameters = normalise_model_parameters_for_storage(
+        payload.get(MODEL_PARAMETERS_KEY) or payload.get("modelParameters"),
+        provider="gemini",
+        model=requested_model,
+        api_surface="interactions",
+        include_registry=True,
+    )
+    parameter_capabilities = build_model_parameter_capabilities(
+        provider="gemini",
+        model=requested_model,
+        api_surface="interactions",
+        include_registry=True,
+    )
+    try:
+        client = GeminiClient(api_key=api_key, default_model=requested_model)
+        try:
+            available_models = client.list_models()
+        except Exception as exc:
+            available_models = []
+            current_app.logger.warning(
+                "[gemini_test_model] Failed to list Gemini models before probe: %s",
+                exc,
+            )
+        if available_models and requested_model not in available_models:
+            return _jsonify_no_store(
+                {
+                    "success": True,
+                    "usable": False,
+                    "model": requested_model,
+                    MODEL_PARAMETERS_KEY: model_parameters,
+                    "model_parameter_capabilities": parameter_capabilities,
+                    "failure_kind": "model_unavailable",
+                    "reason": (
+                        f"{requested_model} is not present in the models available "
+                        "to this Gemini API key."
+                    ),
+                }
+            )
+        client.generate(
+            "Reply exactly with OK.",
+            model=requested_model,
+            llm_params=model_parameters or None,
+        )
+        api_surface = _gemini_probe_api_surface(client, requested_model)
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": True,
+                "model": requested_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
+                "failure_kind": None,
+                "reason": (
+                    "The selected Gemini model completed a live probe successfully."
+                ),
+                "api_surface": api_surface,
+            }
+        )
+    except Exception as exc:
+        failure_kind, reason = _classify_gemini_probe_exception(exc)
+        current_app.logger.warning(
+            "[gemini_test_model] Probe failed for %s (error_type=%s)",
+            requested_model,
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": False,
+                "model": requested_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
                 "failure_kind": failure_kind,
                 "reason": reason,
             }

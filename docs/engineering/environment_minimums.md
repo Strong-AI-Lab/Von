@@ -34,7 +34,13 @@ $env:OLLAMA_HOST = 'http://<host>:11434'
 
 `GEMINI_API_KEY` is the primary Gemini variable. Von also accepts the legacy
 `GOOGLE_API_KEY` name for compatibility, but new setups should use
-`GEMINI_API_KEY`.
+`GEMINI_API_KEY`. Managed deployments can instead set
+`GEMINI_API_KEY_FILE=/etc/von/secrets/gemini_api_key`; the file should be
+readable only by the Von service account. The default Gemini model is
+`gemini-3.7-flash` (overridable with `VON_DEFAULT_GEMINI_MODEL`). The tracked
+Gemini 3.7 premium-profile release input selects the stateless Interactions API
+with response storage disabled; it takes effect only after governed registry
+publication and canonical read-back.
 
 ## 2. How Von decides whether MongoDB is local or remote
 

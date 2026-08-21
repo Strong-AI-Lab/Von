@@ -56,7 +56,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.6.6"
+          terraform_version: "1.9.8"
 
       - name: Lint Gate (Terraform fmt + shell syntax)
         shell: bash

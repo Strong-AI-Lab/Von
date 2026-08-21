@@ -112,7 +112,7 @@ environment variables (see `src/backend/languagemodels/model_defaults.py`):
 |---|---|
 | `VON_DEFAULT_OLLAMA_MODEL` | `gemma4:26b` |
 | `VON_DEFAULT_OPENAI_MODEL` | `gpt-5.5` |
-| `VON_DEFAULT_GEMINI_MODEL` | `gemini-2.0-flash` |
+| `VON_DEFAULT_GEMINI_MODEL` | `gemini-3.7-flash` |
 
 When writing policy JSON, prefer `active_llm` for stages that should follow
 the user's primary model selection, and use explicit `provider:model` strings

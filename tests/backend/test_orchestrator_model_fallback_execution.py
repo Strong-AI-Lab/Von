@@ -12,6 +12,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     CancellationRequested,
     InternalMCPChatOrchestrator,
     _ModelCandidate,
+    _ModelCandidateClientResolutionError,
     _PromptRequirementEvaluation,
     _WorkflowModelPolicyState,
 )
@@ -50,6 +51,23 @@ class _FailingClient:
 class _SuccessfulClient:
     def generate(self, *_args: Any, **_kwargs: Any) -> str:
         return '["Proceed", "Hold"]'
+
+
+class _NeverUsedClient:
+    def __init__(self) -> None:
+        self.generate_calls = 0
+        self.structured_calls = 0
+
+    def generate(self, *_args: Any, **_kwargs: Any) -> str:
+        self.generate_calls += 1
+        raise AssertionError("default client must not replace a Gemini candidate")
+
+    def _should_use_structured_calling(self) -> bool:
+        return True
+
+    def generate_with_tools(self, **_kwargs: Any) -> LLMResponse:
+        self.structured_calls += 1
+        raise AssertionError("default client must not replace a Gemini candidate")
 
 
 class _SuccessfulOllamaClient(_SuccessfulClient):
@@ -157,6 +175,36 @@ def _bare_orchestrator() -> InternalMCPChatOrchestrator:
     orchestrator._structured_tool_cap_headroom = 0
     orchestrator._structured_tool_candidate_cap_override = 0
     return orchestrator
+
+
+def _install_gemini_failure_then_ollama_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ollama_client: Any,
+) -> list[str | None]:
+    from src.backend.languagemodels import llm_interface
+
+    requested_providers: list[str | None] = []
+
+    def _get_llm_client(*, client_type: str | None = None, **_kwargs: Any) -> Any:
+        requested_providers.append(client_type)
+        if client_type == "gemini":
+            raise RuntimeError("api_key=must-not-appear")
+        assert client_type == "ollama"
+        return ollama_client
+
+    monkeypatch.setattr(llm_interface, "get_llm_client", _get_llm_client)
+    monkeypatch.setattr(
+        llm_interface,
+        "infer_llm_client_provider",
+        lambda _client: "ollama",
+    )
+    monkeypatch.setattr(
+        llm_interface,
+        "resolve_effective_llm_model_for_client",
+        lambda _client, requested_model: requested_model,
+    )
+    return requested_providers
 
 
 def _install_synthesiser_context_template(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,6 +456,164 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     )
 
 
+def test_plain_fallback_does_not_substitute_default_client_for_failed_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    default_client = _NeverUsedClient()
+    fallback_client = _SuccessfulClient()
+    requested_providers = _install_gemini_failure_then_ollama_client(
+        monkeypatch,
+        ollama_client=fallback_client,
+    )
+    candidates = [
+        _ModelCandidate(
+            provider="gemini",
+            model="gemini-3.7-flash",
+            raw="gemini:gemini-3.7-flash",
+            source="enabled_settings",
+        ),
+        _ModelCandidate(
+            provider="ollama",
+            model="qwen3:8b",
+            raw="ollama:qwen3:8b",
+            source="settings_fallback",
+        ),
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+    recorded_calls: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="summary",
+        prompt="Summarise.",
+        context=[],
+        default_client=default_client,
+        default_model="gemini-3.7-flash",
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+    )
+
+    assert response == '["Proceed", "Hold"]'
+    assert model_name == "qwen3:8b"
+    assert telemetry["provider"] == "ollama"
+    assert requested_providers == ["gemini", "ollama"]
+    assert default_client.generate_calls == 0
+    assert recorded_calls[0]["provider"] == "gemini"
+    assert recorded_calls[0]["error_class"] == (
+        _ModelCandidateClientResolutionError.__name__
+    )
+    assert recorded_calls[0]["failure_kind"] == "candidate_client_resolution"
+    assert "must-not-appear" not in str(recorded_calls)
+    summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert summary["fallback_attempts"][0]["provider"] == "gemini"
+    assert summary["selected"]["provider"] == "ollama"
+
+
+def test_structured_fallback_does_not_substitute_default_client_for_failed_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    default_client = _NeverUsedClient()
+    fallback_client = _StructuredToolClient(LLMResponse(text_response="done"))
+    requested_providers = _install_gemini_failure_then_ollama_client(
+        monkeypatch,
+        ollama_client=fallback_client,
+    )
+    candidates = [
+        _ModelCandidate(
+            provider="gemini",
+            model="gemini-3.7-flash",
+            raw="gemini:gemini-3.7-flash",
+            source="enabled_settings",
+        ),
+        _ModelCandidate(
+            provider="ollama",
+            model="qwen3:8b",
+            raw="ollama:qwen3:8b",
+            source="settings_fallback",
+        ),
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+    recorded_calls: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="Find evidence.",
+        context=[],
+        tool_definitions=[
+            ToolDefinition(
+                name="fetch_concept",
+                description="Fetch a represented concept.",
+                input_schema={"type": "object", "properties": {}},
+            )
+        ],
+        default_client=default_client,
+        default_model="gemini-3.7-flash",
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+        method_catalogue={"fetch_concept": {"category": "read"}},
+    )
+
+    assert response.text_response == "done"
+    assert model_name == "qwen3:8b"
+    assert telemetry["provider"] == "ollama"
+    assert requested_providers == ["gemini", "ollama"]
+    assert default_client.structured_calls == 0
+    assert recorded_calls[0]["provider"] == "gemini"
+    assert recorded_calls[0]["error_class"] == (
+        _ModelCandidateClientResolutionError.__name__
+    )
+    assert recorded_calls[0]["failure_kind"] == "candidate_client_resolution"
+    assert "must-not-appear" not in str(recorded_calls)
+    summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert summary["fallback_attempts"][0]["provider"] == "gemini"
+    assert summary["selected"]["provider"] == "ollama"
+
+
 def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
     monkeypatch,
 ) -> None:
@@ -619,6 +825,198 @@ def test_run_llm_with_tools_fallbacks_passes_default_model_parameters(
     assert stage_summary["model_identity_source"] == "provider_response"
     assert stage_summary["requested_model_parameters"] == requested_parameters
     assert stage_summary["effective_model_parameters"] == requested_parameters
+
+
+def test_plain_generate_records_provider_observed_gemini_identity_and_usage(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    candidate = _ModelCandidate(
+        provider="gemini",
+        model="gemini-3.7-flash",
+        raw="gemini:gemini-3.7-flash",
+        source="active_llm",
+    )
+
+    class _GeminiClient:
+        last_response_metadata: dict[str, Any] = {}
+
+        def generate(self, _prompt: str, **_kwargs: Any) -> str:
+            self.last_response_metadata = {
+                "api_surface": "interactions",
+                "effective_model": "gemini-3.7-flash-20260815",
+                "usage": {
+                    "input_tokens": 20,
+                    "visible_output_tokens": 6,
+                    "output_tokens": 15,
+                    "thought_tokens": 9,
+                    "total_tokens": 35,
+                },
+                "transport_metadata": {
+                    "provider": "gemini",
+                    "effective_api_surface": "interactions",
+                    "store": False,
+                },
+            }
+            return "grounded"
+
+    client = _GeminiClient()
+    monkeypatch.setattr(
+        orchestrator, "_stage_model_candidates", lambda **_kwargs: [candidate]
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            "gemini-3.7-flash",
+            {
+                "provider": "gemini",
+                "model": "gemini-3.7-flash",
+                "raw": candidate.raw,
+                "source": candidate.source,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call()
+    )
+    recorded_calls: list[dict[str, Any]] = []
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, _, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="summary",
+        prompt="Summarise.",
+        context=[],
+        default_client=object(),
+        default_model="gemini-3.7-flash",
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+    )
+
+    assert response == "grounded"
+    assert telemetry["effective_model"] == "gemini-3.7-flash-20260815"
+    assert telemetry["api_surface"] == "interactions"
+    assert telemetry["usage"]["thought_tokens"] == 9
+    assert recorded_calls[0]["effective_model_name"] == ("gemini-3.7-flash-20260815")
+    assert recorded_calls[0]["model_identity_source"] == "provider_response"
+    assert recorded_calls[0]["usage"]["output_tokens"] == 15
+    chunk = next(
+        event for event in progress_events if event.get("status") == "llm_call_chunk"
+    )
+    assert chunk["tokens_streamed"] == 6
+    summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert summary["effective_model"] == "gemini-3.7-flash-20260815"
+
+
+def test_gemini_structured_stage_receives_model_parameters_without_openai_options(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    requested_parameters = {"reasoning_effort": "high"}
+    candidate = _ModelCandidate(
+        provider="gemini",
+        model="gemini-3.7-flash",
+        raw="gemini:gemini-3.7-flash",
+        source="active_llm",
+        model_parameters=requested_parameters,
+    )
+    client = _StructuredToolClient(
+        LLMResponse(
+            text_response="done",
+            model="gemini-3.7-flash-20260815",
+            usage={
+                "input_tokens": 8,
+                "visible_output_tokens": 5,
+                "output_tokens": 12,
+                "thought_tokens": 7,
+            },
+        )
+    )
+    monkeypatch.setattr(
+        orchestrator, "_stage_model_candidates", lambda **_kwargs: [candidate]
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            "gemini-3.7-flash",
+            {
+                "provider": "gemini",
+                "model": "gemini-3.7-flash",
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "model_parameters": requested_parameters,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call()
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    response, _, _ = orchestrator._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="Find evidence.",
+        context=[],
+        tool_definitions=[
+            ToolDefinition(
+                name="fetch_concept",
+                description="Fetch a represented concept.",
+                input_schema={"type": "object", "properties": {}},
+            )
+        ],
+        default_client=object(),
+        default_model="gemini-3.7-flash",
+        default_model_parameters=requested_parameters,
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=[],
+        record_llm_call=lambda **_payload: None,
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        method_catalogue={"fetch_concept": {"category": "read"}},
+    )
+
+    assert response.text_response == "done"
+    structured_kwargs = client.calls[0]["kwargs"]
+    assert structured_kwargs["llm_params"] == requested_parameters
+    assert "parallel_tool_calls" not in structured_kwargs
+    assert "tool_choice" not in structured_kwargs
+    chunk = next(
+        event for event in progress_events if event.get("status") == "llm_call_chunk"
+    )
+    assert chunk["tokens_streamed"] == 5
 
 
 def test_failed_structured_stage_retains_requested_model_parameters(
