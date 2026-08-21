@@ -50,6 +50,7 @@ from src.backend.services.adaptive_turn_service import (
     _compact_evidence_envelope,
     _compact_evidence_index,
     _effect_id,
+    _effect_requires_turn_finality,
     _effect_result_target_ids,
     _effect_subject_authorised,
     _effect_subject_authority_denial,
@@ -2513,6 +2514,226 @@ def test_invalid_effect_arguments_are_returned_for_correction_without_poisoning_
     assert result.tool_invocations[0]["effect_status"] == "not_started"
     assert result.tool_invocations[0]["turn_finality_required"] is False
     assert result.tool_invocations[1]["effect_status"] == "succeeded"
+
+
+def test_non_object_effect_arguments_are_returned_for_correction_without_poisoning_turn() -> (
+    None
+):
+    invoked: list[dict[str, Any]] = []
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="record_source_processing_marker",
+            handler=lambda **arguments: (
+                invoked.append(dict(arguments))
+                or {
+                    "success": True,
+                    "effect_status": "succeeded",
+                    "changed": True,
+                }
+            ),
+            input_schema=Schema(
+                required={
+                    "source_system": str,
+                    "source_profile": str,
+                    "source_item_id": str,
+                },
+                allow_unknown=False,
+                description="Record one source-processing marker.",
+            ),
+            category="write",
+            ordinary_turn_effect=True,
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(write_timeout_sec=1.0),
+        enabled=True,
+    )
+    corrected_arguments = {
+        "source_system": "gmail",
+        "source_profile": "personal-gmail",
+        "source_item_id": "message-1",
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="marker-non-object-arguments",
+                    payload={
+                        "name": "record_source_processing_marker",
+                        "arguments": ["gmail", "personal-gmail", "message-1"],
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="marker-corrected-object-arguments",
+                    payload={
+                        "name": "record_source_processing_marker",
+                        "arguments": corrected_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The corrected marker write succeeded."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Record the exact source marker.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="correct-non-object-effect-arguments",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == [corrected_arguments]
+    validation_message = next(
+        item
+        for item in client.calls[1]["context"]
+        if item.get("tool_call_id") == "marker-non-object-arguments"
+    )
+    validation_result = json.loads(validation_message["content"])
+    validation_receipt = json.loads(validation_result["preview"])
+    assert validation_receipt["error_code"] == "capability_arguments_invalid"
+    assert validation_receipt["status"] == "not_started"
+    assert validation_receipt["effect_status"] == "not_started"
+    assert validation_receipt["mutation_outcome"] == "not_started"
+    assert validation_receipt["changed"] is False
+    invalid_invocation, corrected_invocation = result.tool_invocations
+    assert invalid_invocation["effect_status"] == "not_started"
+    assert invalid_invocation["turn_finality_required"] is False
+    assert corrected_invocation["effect_status"] == "succeeded"
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The corrected marker write succeeded."
+
+
+def test_non_object_read_arguments_use_the_same_not_started_contract() -> None:
+    invoked: list[dict[str, Any]] = []
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="read_source_marker",
+            handler=lambda **arguments: (
+                invoked.append(dict(arguments))
+                or {"success": True, "source_item_id": arguments["source_item_id"]}
+            ),
+            input_schema=Schema(
+                required={"source_item_id": str},
+                allow_unknown=False,
+                description="Read one source-processing marker.",
+            ),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(write_timeout_sec=1.0),
+        enabled=True,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-marker-non-object-arguments",
+                    payload={
+                        "name": "read_source_marker",
+                        "arguments": ["message-1"],
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-marker-corrected-arguments",
+                    payload={
+                        "name": "read_source_marker",
+                        "arguments": {"source_item_id": "message-1"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The marker read succeeded."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Read the exact source marker.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="correct-non-object-read-arguments",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == [{"source_item_id": "message-1"}]
+    validation_message = next(
+        item
+        for item in client.calls[1]["context"]
+        if item.get("tool_call_id") == "read-marker-non-object-arguments"
+    )
+    validation_result = json.loads(validation_message["content"])
+    validation_receipt = json.loads(validation_result["preview"])
+    assert validation_receipt["error_code"] == "capability_arguments_invalid"
+    assert validation_receipt["status"] == "not_started"
+    assert validation_receipt["effect_status"] == "not_started"
+    assert validation_receipt["mutation_outcome"] == "not_started"
+    assert validation_receipt["changed"] is False
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The marker read succeeded."
+
+
+@pytest.mark.parametrize(
+    ("error_code", "effect_status", "expected"),
+    (
+        ("capability_arguments_invalid", "not_started", False),
+        ("invalid_capability_arguments", "failed", False),
+        ("ontology_mutation_target_not_accessible", "not_started", True),
+    ),
+)
+def test_only_pre_dispatch_argument_rejections_are_exempt_from_turn_finality(
+    error_code: str,
+    effect_status: str,
+    expected: bool,
+) -> None:
+    assert (
+        _effect_requires_turn_finality(
+            capability_kind="registered_tool",
+            effect_status=effect_status,
+            changed=False,
+            raw_payload={
+                "success": False,
+                "status": "not_started",
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "error_code": error_code,
+            },
+        )
+        is expected
+    )
 
 
 def test_effect_subject_authority_matches_actor_or_organisation_scope(
@@ -11935,6 +12156,476 @@ def test_predelegation_create_failure_is_suppressed_but_corrected_call_runs(
     assert "recovery_affordances" not in repeated_receipt
     assert corrected["effect_status"] == "succeeded"
     assert corrected["changed"] is True
+
+
+@pytest.mark.parametrize(
+    (
+        "recovery_concept_id",
+        "receipt_concept_id",
+        "origin_error_code",
+        "recovery_succeeds",
+        "extra_readback_concept",
+        "original_omits_concept_id",
+        "expected_recovered",
+        "expected_terminal_status",
+    ),
+    (
+        (
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "ontology_create_concept_id_conflict",
+            True,
+            False,
+            False,
+            True,
+            "completed",
+        ),
+        (
+            "#V#scoped_referent_ava_example_fedcba9876543210fedcba98",
+            "#V#scoped_referent_ava_example_fedcba9876543210fedcba98",
+            "ontology_create_concept_id_conflict",
+            True,
+            False,
+            False,
+            False,
+            "effect_partially_completed",
+        ),
+        (
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "#V#scoped_referent_ava_example_badbadbadbadbadbadbadbad",
+            "ontology_create_concept_id_conflict",
+            True,
+            False,
+            False,
+            False,
+            "effect_partially_completed",
+        ),
+        (
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "ontology_create_concept_id_conflict",
+            False,
+            False,
+            False,
+            False,
+            "effect_failed",
+        ),
+        (
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "unrelated_create_failure",
+            True,
+            False,
+            False,
+            False,
+            "effect_partially_completed",
+        ),
+        (
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "ontology_create_concept_id_conflict",
+            True,
+            True,
+            False,
+            False,
+            "effect_partially_completed",
+        ),
+        (
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "#V#scoped_referent_ava_example_0123456789abcdef01234567",
+            "ontology_create_concept_id_conflict",
+            True,
+            False,
+            True,
+            True,
+            "completed",
+        ),
+    ),
+    ids=[
+        "exact-advertised-recovery",
+        "different-unadvertised-referent",
+        "wrong-success-readback",
+        "exact-recovery-failed",
+        "unrelated-origin-cannot-advertise-recovery",
+        "extra-readback-concept",
+        "name-only-original-create",
+    ],
+)
+def test_actor_scoped_referent_retires_only_exact_advertised_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_concept_id: str,
+    receipt_concept_id: str,
+    origin_error_code: str,
+    recovery_succeeds: bool,
+    extra_readback_concept: bool,
+    original_omits_concept_id: bool,
+    expected_recovered: bool,
+    expected_terminal_status: str,
+) -> None:
+    from src.backend.services.actor_scoped_referent_identity_service import (
+        ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+        ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+        ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+        ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+    )
+
+    requested_concept_id = "#V#ava_example"
+    advertised_referent_id = (
+        "#V#scoped_referent_ava_example_0123456789abcdef01234567"
+    )
+    core_concept = {
+        "concept_id": advertised_referent_id,
+        "name": "Ava Example",
+        "kind": "instance",
+        "description": "A represented person used by this test.",
+    }
+    advertised_arguments = {
+        "parent_id": "#V#person",
+        "concepts": [core_concept],
+        "duplicate_resolution_mode": "canonical_id_only",
+        "collision_resolution_mode": ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+        "requested_concept_id": requested_concept_id,
+        "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+    }
+    attempted_arguments = {
+        **advertised_arguments,
+        "concepts": [
+            {
+                **core_concept,
+                "concept_id": recovery_concept_id,
+            }
+        ],
+    }
+    delegation_calls: list[dict[str, Any]] = []
+
+    def issue_delegation(**kwargs: Any) -> dict[str, Any]:
+        delegation_calls.append(dict(kwargs))
+        if not kwargs["arguments"].get("collision_resolution_mode"):
+            return {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "retryable": False,
+                "error_code": origin_error_code,
+                "error": "The requested concept ID cannot be created.",
+                "recovery_affordances": [
+                    {
+                        "action_type": ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+                        "tool": "create_concepts",
+                        "recovery_contract": (
+                            ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT
+                        ),
+                        "arguments": advertised_arguments,
+                    }
+                ],
+            }
+        return {"delegation_id": f"delegation-{kwargs['effect_id']}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue_delegation,
+    )
+    handler_calls: list[dict[str, Any]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "create_concepts"
+        handler_calls.append(arguments)
+        if not recovery_succeeds:
+                return {
+                    "success": False,
+                    "effect_status": "failed",
+                    "mutation_outcome": "failed",
+                "changed": False,
+                "error_code": "actor_scoped_referent_create_failed",
+            }
+        readback_concepts = [
+            {
+                "concept_id": receipt_concept_id,
+                "exists": True,
+                "publication_context": {
+                    "kind": "user",
+                    "concept_id": "#V#person",
+                },
+            }
+        ]
+        if extra_readback_concept:
+            readback_concepts.append(
+                {
+                    "concept_id": "#V#unexpected_extra_concept",
+                    "exists": True,
+                    "publication_context": {
+                        "kind": "user",
+                        "concept_id": "#V#person",
+                    },
+                }
+            )
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "mutation_outcome": "succeeded",
+            "changed": True,
+            "created_concept_ids": [receipt_concept_id],
+            "actor_scoped_referent": {
+                "schema_version": ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+                "effective_concept_id": receipt_concept_id,
+                "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+                "identity_status": "unreconciled_actor_scoped_referent",
+                "equivalence_asserted": False,
+                "alias_created": False,
+            },
+            "canonical_read_back": {"concepts": readback_concepts},
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="colliding-person-create",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "parent_id": "#V#person",
+                            "concepts": [
+                                {
+                                    **(
+                                        {}
+                                        if original_omits_concept_id
+                                        else {"concept_id": requested_concept_id}
+                                    ),
+                                    "name": "Ava Example",
+                                    "kind": "instance",
+                                    "description": (
+                                        "A represented person used by this test."
+                                    ),
+                                }
+                            ],
+                            "duplicate_resolution_mode": "canonical_id_only",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="actor-scoped-person-recovery",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": attempted_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The person referent was represented."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Represent this person despite an inaccessible ID collision.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=(
+            "actor-scoped-referent-"
+            f"{origin_error_code}-{recovery_succeeds}-"
+            f"{receipt_concept_id[-8:]}-{extra_readback_concept}-"
+            f"{original_omits_concept_id}"
+        ),
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(delegation_calls) == 2
+    assert len(handler_calls) == 1
+    assert handler_calls[0]["concepts"][0]["concept_id"] == recovery_concept_id
+    collision, recovery = result.tool_invocations
+    assert collision["error_code"] == origin_error_code
+    assert recovery["effect_status"] == (
+        "succeeded" if recovery_succeeds else "failed"
+    )
+    assert result.terminal_status == expected_terminal_status
+    if expected_recovered:
+        assert collision["recovery_status"] == "succeeded"
+        assert collision["recovered_by_effect_id"] == recovery["effect_id"]
+        assert result.response_text == "The person referent was represented."
+    else:
+        assert "recovery_status" not in collision
+        assert "recovered_by_effect_id" not in collision
+        assert result.response_text != "The person referent was represented."
+
+
+def test_one_actor_scoped_referent_recovery_does_not_retire_another_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services.actor_scoped_referent_identity_service import (
+        ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+        ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+        ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+        ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+    )
+
+    people = {
+        "#V#ava_example": {
+            "name": "Ava Example",
+            "referent_id": (
+                "#V#scoped_referent_ava_example_0123456789abcdef01234567"
+            ),
+        },
+        "#V#ben_example": {
+            "name": "Ben Example",
+            "referent_id": (
+                "#V#scoped_referent_ben_example_0123456789abcdef01234567"
+            ),
+        },
+    }
+
+    def recovery_arguments(requested_id: str) -> dict[str, Any]:
+        person = people[requested_id]
+        return {
+            "parent_id": "#V#person",
+            "concepts": [
+                {
+                    "concept_id": person["referent_id"],
+                    "name": person["name"],
+                    "kind": "instance",
+                }
+            ],
+            "duplicate_resolution_mode": "canonical_id_only",
+            "collision_resolution_mode": ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+            "requested_concept_id": requested_id,
+            "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+        }
+
+    def issue_delegation(**kwargs: Any) -> dict[str, Any]:
+        arguments = kwargs["arguments"]
+        if not arguments.get("collision_resolution_mode"):
+            requested_id = arguments["concepts"][0]["concept_id"]
+            return {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "retryable": False,
+                "error_code": "ontology_create_concept_id_conflict",
+                "error": "The requested concept ID cannot be created.",
+                "recovery_affordances": [
+                    {
+                        "action_type": ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+                        "tool": "create_concepts",
+                        "recovery_contract": (
+                            ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT
+                        ),
+                        "arguments": recovery_arguments(requested_id),
+                    }
+                ],
+            }
+        return {"delegation_id": f"delegation-{kwargs['effect_id']}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue_delegation,
+    )
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "create_concepts"
+        referent_id = arguments["concepts"][0]["concept_id"]
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "mutation_outcome": "succeeded",
+            "changed": True,
+            "created_concept_ids": [referent_id],
+            "actor_scoped_referent": {
+                "schema_version": ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+                "effective_concept_id": referent_id,
+                "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+                "identity_status": "unreconciled_actor_scoped_referent",
+                "equivalence_asserted": False,
+                "alias_created": False,
+            },
+            "canonical_read_back": {
+                "concepts": [
+                    {
+                        "concept_id": referent_id,
+                        "exists": True,
+                        "publication_context": {
+                            "kind": "user",
+                            "concept_id": "#V#person",
+                        },
+                    }
+                ]
+            },
+        }
+
+    initial_calls = [
+        ToolCall(
+            tool_name="turn_invoke_capability",
+            call_id=f"collide-{requested_id.removeprefix('#V#')}",
+            payload={
+                "name": "create_concepts",
+                "arguments": {
+                    "parent_id": "#V#person",
+                    "concepts": [
+                        {
+                            "concept_id": requested_id,
+                            "name": person["name"],
+                            "kind": "instance",
+                        }
+                    ],
+                },
+            },
+        )
+        for requested_id, person in people.items()
+    ]
+    client = _SequenceClient(
+        LLMResponse(text_response="", tool_calls=initial_calls),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="recover-only-ava",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": recovery_arguments("#V#ava_example"),
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Ava was represented."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Represent Ava and Ben despite inaccessible ID collisions.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="two-actor-scoped-referent-collisions",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    ava_collision, ben_collision, ava_recovery = result.tool_invocations
+    assert ava_collision["recovery_status"] == "succeeded"
+    assert ava_collision["recovered_by_effect_id"] == ava_recovery["effect_id"]
+    assert "recovery_status" not in ben_collision
+    assert "recovered_by_effect_id" not in ben_collision
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.response_text != "Ava was represented."
 
 
 def test_successful_core_create_continues_with_scoped_semantic_postconditions(

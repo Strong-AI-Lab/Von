@@ -68,6 +68,68 @@ def test_governed_create_preserves_default_type_and_one_exact_parent(
         )
 
 
+def test_governed_create_rejects_conflicting_instance_types_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    mutation_calls = 0
+
+    def mutate() -> dict[str, Any]:
+        nonlocal mutation_calls
+        mutation_calls += 1
+        return {"success": True, "changed": True}
+
+    with authority.override_current_actor("#V#member", None):
+        result = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": "#V#research_object",
+                "instance_of_type": "#V#top_level_type",
+                "concepts": [
+                    {
+                        "concept_id": "#V#typed_record",
+                        "name": "Typed record",
+                        "kind": "type",
+                        "instance_of_type": "#V#per_concept_type",
+                    }
+                ],
+                "scope_mode": "user_only_default",
+            },
+            mutate=mutate,
+        )
+
+    assert mutation_calls == 0
+    assert result["success"] is False
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+    assert result["error_code"] == "conflicting_create_instance_of_type"
+
+    resolved = command.resolve_governed_ontology_arguments(
+        "create_concepts",
+        {
+            "parent_id": "#V#research_object",
+            "instance_of_type": "#V#same_type",
+            "concepts": [
+                {
+                    "concept_id": "#V#typed_record",
+                    "name": "Typed record",
+                    "kind": "type",
+                    "instance_of_type": "#V#same_type",
+                }
+            ],
+        },
+    )
+    assert "instance_of_type" not in resolved
+    assert resolved["concepts"][0]["instance_of_type"] == "#V#same_type"
+
+
 def test_create_intent_fingerprints_exact_scope_and_complete_effect(
     monkeypatch,
 ) -> None:
@@ -826,4 +888,670 @@ def test_inaccessible_create_collision_is_non_disclosing(monkeypatch) -> None:
     assert result["error"] == "The requested concept ID cannot be created."
     assert "LEAK" not in repr(result)
     assert "private_parent" not in repr(result)
+    assert "recovery_affordances" not in result
     assert mutate_calls["count"] == 0
+
+
+def test_hidden_instance_id_conflict_advertises_only_executable_referent_recovery(
+    monkeypatch,
+) -> None:
+    from src.backend.services import actor_scoped_referent_identity_service as identity
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    requested_id = "#V#hidden_person"
+    actor_id = "#V#member"
+    parent_id = "#V#person"
+    effective_id = identity.actor_scoped_referent_concept_id(
+        requested_concept_id=requested_id,
+        actor_concept_id=actor_id,
+    )
+    hidden_document = {
+        "concept_id": requested_id,
+        "relationships": {
+            "#V#specific_to_user": ["#V#other_actor"],
+            "is_an_instance_of": ["#V#hidden_parent_sentinel"],
+        },
+        "attributes": {"hidden_metadata": "HIDDEN_METADATA_SENTINEL"},
+    }
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(
+        command.ConceptsRepository,
+        "find_one",
+        lambda query: (
+            hidden_document if query.get("concept_id") == requested_id else None
+        ),
+    )
+    monkeypatch.setattr(
+        command,
+        "can_access_concept",
+        lambda concept_id: concept_id == parent_id,
+    )
+
+    with authority.override_current_actor(actor_id, "#V#organisation_a"):
+        result = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": parent_id,
+                "concepts": [
+                    {
+                        "concept_id": requested_id,
+                        "name": "Hidden Person",
+                        "kind": "instance",
+                        "description": "A requested core description.",
+                    }
+                ],
+                "scope_mode": "user_only_default",
+            },
+            mutate=lambda: (_ for _ in ()).throw(
+                AssertionError("a colliding create must not mutate")
+            ),
+        )
+
+    assert result == {
+        "success": False,
+        "effect_status": "not_started",
+        "mutation_outcome": "not_started",
+        "changed": False,
+        "error_code": "ontology_create_concept_id_conflict",
+        "error": "The requested concept ID cannot be created.",
+        "recovery_affordances": [
+            {
+                "action_type": ("create_actor_scoped_referent_after_id_conflict"),
+                "tool": "create_concepts",
+                "recovery_contract": ("ontology_actor_scoped_instance_referent.v1"),
+                "arguments": {
+                    "parent_id": parent_id,
+                    "concepts": [
+                        {
+                            "concept_id": effective_id,
+                            "name": "Hidden Person",
+                            "kind": "instance",
+                            "description": "A requested core description.",
+                        }
+                    ],
+                    "duplicate_resolution_mode": "canonical_id_only",
+                    "collision_resolution_mode": "actor_scoped_referent",
+                    "requested_concept_id": requested_id,
+                    "scope_mode": "user_only_default",
+                },
+                "semantic_effect": (
+                    "Create or idempotently reuse an actor-private instance "
+                    "referent. This does not create an alias, assert identity "
+                    "or equivalence, publish knowledge, or access the concept "
+                    "occupying the requested ID."
+                ),
+            }
+        ],
+    }
+    assert "create_scoped_assertion" not in repr(result)
+    assert "request_ontology_administrator_delegation" not in repr(result)
+    assert actor_id not in repr(result["recovery_affordances"])
+    assert "HIDDEN_METADATA_SENTINEL" not in repr(result)
+    assert "hidden_parent_sentinel" not in repr(result)
+
+    raw_recovery_arguments = {
+        **result["recovery_affordances"][0]["arguments"],
+        "created_by_concept_id": "#V#untrusted_actor",
+        "organisation_concept_id": "#V#untrusted_organisation",
+    }
+    with authority.override_current_actor(actor_id, "#V#organisation_a"):
+        resolved = command.resolve_governed_ontology_arguments(
+            "create_concepts",
+            command.normalise_governed_ontology_arguments(
+                "create_concepts",
+                raw_recovery_arguments,
+            ),
+        )
+
+    assert resolved["concepts"][0]["concept_id"] == effective_id
+    assert resolved["created_by_concept_id"] == actor_id
+    assert resolved["organisation_concept_id"] == "#V#organisation_a"
+
+
+def test_direct_actor_scoped_referent_mode_never_probes_requested_id(
+    monkeypatch,
+) -> None:
+    from src.backend.services import actor_scoped_referent_identity_service as identity
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    requested_id = "#V#opaque_requested_id"
+    actor_id = "#V#member"
+    effective_id = identity.actor_scoped_referent_concept_id(
+        requested_concept_id=requested_id,
+        actor_concept_id=actor_id,
+    )
+    probed_ids: list[str] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+
+    def record_unfiltered_probe(concept_id: str) -> bool:
+        probed_ids.append(concept_id)
+        if concept_id == requested_id:
+            raise AssertionError("recovery mode must not inspect the requested ID")
+        return False
+
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", record_unfiltered_probe)
+
+    def visible(concept_id: str) -> bool:
+        if concept_id == requested_id:
+            raise AssertionError("recovery mode must not inspect requested visibility")
+        return concept_id == "#V#person"
+
+    monkeypatch.setattr(command, "can_access_concept", visible)
+    arguments = {
+        "parent_id": "#V#person",
+        "concepts": [
+            {
+                "concept_id": effective_id,
+                "name": "Opaque requested person",
+                "kind": "instance",
+            }
+        ],
+        "collision_resolution_mode": "actor_scoped_referent",
+        "requested_concept_id": requested_id,
+        "duplicate_resolution_mode": "canonical_id_only",
+        "scope_mode": "user_only_default",
+    }
+
+    with authority.override_current_actor(actor_id, None):
+        resolved = command.resolve_governed_ontology_arguments(
+            "create_concepts",
+            arguments,
+        )
+
+    assert resolved["concepts"][0]["concept_id"] == effective_id
+    assert probed_ids == []
+
+    with (
+        authority.override_current_actor(actor_id, None),
+        pytest.raises(command.OntologyMutationCommandError) as exc_info,
+    ):
+        command.resolve_governed_ontology_arguments(
+            "create_concepts",
+            {
+                **arguments,
+                "concepts": [
+                    {
+                        "concept_id": requested_id,
+                        "name": "Opaque requested person",
+                        "kind": "instance",
+                    }
+                ],
+            },
+        )
+
+    assert exc_info.value.reason_code == "actor_scoped_referent_identity_mismatch"
+    assert probed_ids == []
+
+
+def test_visible_incompatible_and_hidden_conflicts_share_generic_public_failure(
+    monkeypatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    requested_id = "#V#colliding_person"
+    parent_id = "#V#person"
+    requested_is_visible = {"value": False}
+    arguments = {
+        "parent_id": parent_id,
+        "concepts": [
+            {
+                "concept_id": requested_id,
+                "name": "Colliding Person",
+                "kind": "instance",
+            }
+        ],
+        "scope_mode": "user_only_default",
+    }
+    monkeypatch.setattr(
+        command,
+        "_concept_exists_unfiltered",
+        lambda concept_id: concept_id == requested_id,
+    )
+    monkeypatch.setattr(
+        command,
+        "can_access_concept",
+        lambda concept_id: concept_id == parent_id
+        or (concept_id == requested_id and requested_is_visible["value"]),
+    )
+    monkeypatch.setattr(
+        command,
+        "_visible_concept_satisfies_requested_core",
+        lambda **_kwargs: False,
+    )
+
+    with authority.override_current_actor("#V#member", None):
+        hidden = command._safe_command_error(
+            command._create_id_conflict_error(
+                arguments=arguments,
+                expected_concept_id=requested_id,
+            )
+        )
+        requested_is_visible["value"] = True
+        visible_incompatible = command._safe_command_error(
+            command._create_id_conflict_error(
+                arguments=arguments,
+                expected_concept_id=requested_id,
+            )
+        )
+
+    hidden_base = {
+        key: value for key, value in hidden.items() if key != "recovery_affordances"
+    }
+    assert hidden_base == visible_incompatible
+    assert hidden_base == {
+        "success": False,
+        "effect_status": "not_started",
+        "mutation_outcome": "not_started",
+        "changed": False,
+        "error_code": "ontology_create_concept_id_conflict",
+        "error": "The requested concept ID cannot be created.",
+    }
+    assert hidden["recovery_affordances"][0]["arguments"][
+        "requested_concept_id"
+    ] == requested_id
+    assert "recovery_affordances" not in visible_incompatible
+
+
+def test_actor_scoped_referent_first_create_and_repeat_are_explicitly_idempotent(
+    monkeypatch,
+) -> None:
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.backend.services import actor_scoped_referent_identity_service as identity
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    requested_id = "#V#hidden_person"
+    actor_id = "#V#member"
+    parent_id = "#V#person"
+    effective_id = identity.actor_scoped_referent_concept_id(
+        requested_concept_id=requested_id,
+        actor_concept_id=actor_id,
+    )
+    state = {"created": False}
+    mutation_calls = {"count": 0}
+    canonical_concept = {
+        "concept_id": effective_id,
+        "exists": True,
+        "publication_context": authority.PublicationContext.user(actor_id).to_mapping(),
+        "forward_relationships": {
+            "is_a_type_of": [],
+            "is_an_instance_of": [parent_id],
+            "linked_to": [],
+        },
+        "attributes": {},
+        "system_tags": [],
+        "user_tags": [],
+        "vontology_path": None,
+        "text_relations": [
+            {
+                "predicate": "hasName",
+                "text": "Hidden Person",
+                "context": {"name_type": "NL"},
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(
+        command,
+        "_concept_exists_unfiltered",
+        lambda concept_id: (
+            concept_id == requested_id
+            or (concept_id == effective_id and state["created"])
+        ),
+    )
+    monkeypatch.setattr(
+        command,
+        "can_access_concept",
+        lambda concept_id: (
+            concept_id == parent_id or (concept_id == effective_id and state["created"])
+        ),
+    )
+    monkeypatch.setattr(
+        command,
+        "_concept_read_back",
+        lambda concept_id: (
+            dict(canonical_concept)
+            if concept_id == effective_id and state["created"]
+            else {"concept_id": concept_id, "exists": False}
+        ),
+    )
+
+    def scope_read_back(concept_id: str) -> dict[str, Any]:
+        if concept_id == effective_id and not state["created"]:
+            raise LookupError(concept_id)
+        return {"scope_fingerprint": f"scope:{concept_id}"}
+
+    monkeypatch.setattr(command, "scope_read_back", scope_read_back)
+    monkeypatch.setattr(
+        command,
+        "ontology_mutation_resource_lock",
+        lambda _resource_key: nullcontext(),
+    )
+    monkeypatch.setattr(command, "ontology_authority_resource_keys", lambda _intent: ())
+    monkeypatch.setattr(
+        command,
+        "authorise_ontology_mutation",
+        lambda _intent: SimpleNamespace(allowed=True),
+    )
+
+    def execute_authorised(**kwargs: Any) -> dict[str, Any]:
+        kwargs["read_before"]()
+        result = dict(kwargs["mutate"]())
+        canonical_state = kwargs["read_back"]()
+        assert kwargs["verify_read_back"](result, canonical_state) is True
+        return {**result, "canonical_read_back": canonical_state}
+
+    monkeypatch.setattr(
+        command,
+        "execute_authorised_ontology_mutation",
+        execute_authorised,
+    )
+    recovery_arguments = {
+        "parent_id": parent_id,
+        "concepts": [
+            {
+                "concept_id": effective_id,
+                "name": "Hidden Person",
+                "kind": "instance",
+            }
+        ],
+        "duplicate_resolution_mode": "canonical_id_only",
+        "collision_resolution_mode": "actor_scoped_referent",
+        "requested_concept_id": requested_id,
+        "scope_mode": "user_only_default",
+    }
+
+    def create_once() -> dict[str, Any]:
+        mutation_calls["count"] += 1
+        state["created"] = True
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_concept_ids": [effective_id],
+            "results": [
+                {
+                    "success": True,
+                    "changed": True,
+                    "concept_id": effective_id,
+                }
+            ],
+            "total": 1,
+            "successful": 1,
+        }
+
+    with authority.override_current_actor(actor_id, "#V#organisation_a"):
+        first = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments=recovery_arguments,
+            mutate=create_once,
+        )
+        repeated = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments=recovery_arguments,
+            mutate=lambda: (_ for _ in ()).throw(
+                AssertionError("compatible repeat must not mutate")
+            ),
+        )
+
+    expected_metadata = {
+        "schema_version": "ontology_actor_scoped_instance_referent.v1",
+        "effective_concept_id": effective_id,
+        "scope_mode": "user_only_default",
+        "identity_status": "unreconciled_actor_scoped_referent",
+        "equivalence_asserted": False,
+        "alias_created": False,
+    }
+    assert mutation_calls["count"] == 1
+    assert first["changed"] is True
+    assert first["created_concept_ids"] == [effective_id]
+    assert first["actor_scoped_referent"] == expected_metadata
+    assert repeated["success"] is True
+    assert repeated["changed"] is False
+    assert repeated["idempotent_reuse"] is True
+    assert repeated["created_concept_ids"] == []
+    assert repeated["resolved_concept_ids"] == [effective_id]
+    assert repeated["actor_scoped_referent"] == expected_metadata
+
+
+def test_visible_compatible_exact_create_is_reused_without_mutation(
+    monkeypatch,
+) -> None:
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    concept_id = "#V#visible_person"
+    actor_id = "#V#member"
+    parent_id = "#V#person"
+    canonical_concept = {
+        "concept_id": concept_id,
+        "exists": True,
+        "publication_context": authority.PublicationContext.global_context().to_mapping(),
+        "forward_relationships": {
+            "is_a_type_of": [],
+            "is_an_instance_of": [parent_id],
+            "linked_to": ["#V#additional_visible_context"],
+        },
+        "attributes": {},
+        "system_tags": [],
+        "user_tags": [],
+        "vontology_path": None,
+        "text_relations": [
+            {
+                "predicate": "hasName",
+                "text": "Visible Person",
+                "context": {"name_type": "NL"},
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", lambda _concept_id: True)
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        command, "_concept_read_back", lambda _concept_id: canonical_concept
+    )
+    monkeypatch.setattr(
+        command,
+        "scope_read_back",
+        lambda value: {"scope_fingerprint": f"scope:{value}"},
+    )
+    monkeypatch.setattr(
+        command,
+        "ontology_mutation_resource_lock",
+        lambda _resource_key: nullcontext(),
+    )
+    monkeypatch.setattr(command, "ontology_authority_resource_keys", lambda _intent: ())
+    monkeypatch.setattr(
+        command,
+        "authorise_ontology_mutation",
+        lambda _intent: SimpleNamespace(allowed=True),
+    )
+
+    def execute_authorised(**kwargs: Any) -> dict[str, Any]:
+        result = dict(kwargs["mutate"]())
+        canonical_state = kwargs["read_back"]()
+        assert kwargs["verify_read_back"](result, canonical_state) is True
+        return {**result, "canonical_read_back": canonical_state}
+
+    monkeypatch.setattr(
+        command,
+        "execute_authorised_ontology_mutation",
+        execute_authorised,
+    )
+    with authority.override_current_actor(actor_id, None):
+        result = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": parent_id,
+                "concepts": [
+                    {
+                        "concept_id": concept_id,
+                        "name": "Visible Person",
+                        "kind": "instance",
+                    }
+                ],
+                "scope_mode": "user_only_default",
+            },
+            mutate=lambda: (_ for _ in ()).throw(
+                AssertionError("visible compatible reuse must not mutate")
+            ),
+        )
+
+    assert result["success"] is True
+    assert result["changed"] is False
+    assert result["idempotent_reuse"] is True
+    assert result["created_concept_ids"] == []
+    assert result["resolved_concept_ids"] == [concept_id]
+    assert "actor_scoped_referent" not in result
+
+
+def test_actor_scoped_referent_created_concurrently_is_reused_under_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.backend.services import actor_scoped_referent_identity_service as identity
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    actor_id = "#V#member"
+    requested_id = "#V#concurrent_person"
+    parent_id = "#V#person"
+    effective_id = identity.actor_scoped_referent_concept_id(
+        requested_concept_id=requested_id,
+        actor_concept_id=actor_id,
+    )
+    existence_checks = 0
+    canonical_concept = {
+        "concept_id": effective_id,
+        "exists": True,
+        "publication_context": authority.PublicationContext.user(actor_id).to_mapping(),
+        "forward_relationships": {
+            "is_a_type_of": [],
+            "is_an_instance_of": [parent_id],
+            "linked_to": [],
+        },
+        "attributes": {},
+        "system_tags": [],
+        "user_tags": [],
+        "vontology_path": None,
+        "text_relations": [
+            {
+                "predicate": "hasName",
+                "text": "Concurrent Person",
+                "context": {"name_type": "NL"},
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+
+    def concept_exists(concept_id: str) -> bool:
+        nonlocal existence_checks
+        assert concept_id == effective_id
+        existence_checks += 1
+        return existence_checks > 1
+
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", concept_exists)
+    monkeypatch.setattr(
+        command,
+        "can_access_concept",
+        lambda concept_id: concept_id in {parent_id, effective_id},
+    )
+    monkeypatch.setattr(
+        command,
+        "_concept_read_back",
+        lambda concept_id: (
+            dict(canonical_concept)
+            if concept_id == effective_id
+            else {"concept_id": concept_id, "exists": False}
+        ),
+    )
+    monkeypatch.setattr(
+        command,
+        "scope_read_back",
+        lambda value: {"scope_fingerprint": f"scope:{value}"},
+    )
+    monkeypatch.setattr(
+        command,
+        "ontology_mutation_resource_lock",
+        lambda _resource_key: nullcontext(),
+    )
+    monkeypatch.setattr(command, "ontology_authority_resource_keys", lambda _intent: ())
+    monkeypatch.setattr(
+        command,
+        "authorise_ontology_mutation",
+        lambda _intent: SimpleNamespace(allowed=True),
+    )
+
+    def execute_authorised(**kwargs: Any) -> dict[str, Any]:
+        result = dict(kwargs["mutate"]())
+        canonical_state = kwargs["read_back"]()
+        assert kwargs["verify_read_back"](result, canonical_state) is True
+        return {**result, "canonical_read_back": canonical_state}
+
+    monkeypatch.setattr(
+        command,
+        "execute_authorised_ontology_mutation",
+        execute_authorised,
+    )
+    with authority.override_current_actor(actor_id, None):
+        result = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": parent_id,
+                "concepts": [
+                    {
+                        "concept_id": effective_id,
+                        "name": "Concurrent Person",
+                        "kind": "instance",
+                    }
+                ],
+                "duplicate_resolution_mode": "canonical_id_only",
+                "collision_resolution_mode": "actor_scoped_referent",
+                "requested_concept_id": requested_id,
+                "scope_mode": "user_only_default",
+            },
+            mutate=lambda: (_ for _ in ()).throw(
+                AssertionError("a compatible concurrent create must not mutate")
+            ),
+        )
+
+    assert existence_checks == 2
+    assert result["success"] is True
+    assert result["changed"] is False
+    assert result["idempotent_reuse"] is True
+    assert result["resolved_concept_ids"] == [effective_id]
+    assert result["actor_scoped_referent"]["effective_concept_id"] == effective_id

@@ -983,7 +983,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create exactly one governed core concept per effect. Supply one concept specification with name and optional concept_id, kind, description, notes, vontology_path, or instance_of_type. kind is 'instance' for an individual, 'type' for a subtype/default, or 'predicate' for a relationship type. This governed effect does not bundle batches, external identities, identity review, attributes, tags, links, duplicate suffixing, or multiple parents. Use separate add_relationship effects with exact existing predicate IDs for further classifications or relationships, and use add_names afterward for alternative names or translations. Ordinary-turn creation is actor-private; direct governed callers may select a broader scope only with matching authority.",
+            "description": "Create exactly one governed core concept per effect. Supply one concept specification with name and optional concept_id, kind, description, notes, vontology_path, or instance_of_type. kind is 'instance' for an individual, 'type' for a subtype/default, or 'predicate' for a relationship type. This governed effect idempotently reuses an exact actor-visible concept when canonical read-back verifies the requested core. An actor-hidden instance-ID collision can expose one explicit executable actor-private referent recovery action; executing its complete arguments creates or reuses a server-derived ID without aliasing or asserting identity. Recovery mode uses the requested ID only as a seed and does not inspect or confirm whether it is occupied. It does not bundle batches, external identities, identity review, attributes, tags, links, duplicate suffixing, or multiple parents. Use separate add_relationship effects with exact existing predicate IDs for further classifications or relationships, and use add_names afterward for alternative names or translations. Ordinary-turn creation is actor-private; direct governed callers may select a broader scope only with matching authority.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -994,6 +994,16 @@
                         "type": "array",
                         "items": {}
                     },
+                    "collision_resolution_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "actor_scoped_referent",
+                            null
+                        ]
+                    },
                     "duplicate_resolution_mode": {
                         "type": [
                             "string",
@@ -1002,6 +1012,12 @@
                         "enum": [
                             "canonical_id_only",
                             null
+                        ]
+                    },
+                    "requested_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
                         ]
                     },
                     "scope_mode": {
@@ -1030,7 +1046,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "Governed create_concepts input: parent_id is one exact semantic type concept ID, and concepts must contain exactly one core concept specification: {name, concept_id?, kind?, description?, notes?, vontology_path?, instance_of_type?}. kind is 'instance' for an individual, 'type' for a subtype (the default), or 'predicate' for a relationship type. duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-ID miss; omitting it preserves the default semantic fallback. This governed effect does not accept batched concepts, external identity or identity review fields, attributes, tags, linked concepts, duplicate suffixing, or multiple parents. Add further classifications or relationships after creation through separate add_relationship effects using exact existing predicate IDs. Governed creation defaults to actor-private visibility. Direct governed callers with matching authority may use scope_mode='organisation_general' or scope_mode='global_general'. Optional namespace is propagated for tenancy attribution. Unknown top-level fields remain tolerated for orchestrator-added context but do not enlarge the governed effect."
+                "description": "Governed create_concepts input: parent_id is one exact semantic type concept ID, and concepts must contain exactly one core concept specification: {name, concept_id?, kind?, description?, notes?, vontology_path?, instance_of_type?}. kind is 'instance' for an individual, 'type' for a subtype (the default), or 'predicate' for a relationship type. duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-ID miss; omitting it preserves the default semantic fallback. This governed effect idempotently reuses an exact actor-visible concept only when canonical read-back verifies the requested core. When an actor-hidden ID collision prevents an instance create, the failure may advertise one executable create_actor_scoped_referent_after_id_conflict action. Use that action's complete arguments to opt into collision_resolution_mode='actor_scoped_referent'; the server derives the actor-private ID from trusted actor context and does not create an alias or identity/equivalence assertion. Recovery mode treats requested_concept_id only as an identity seed; it does not inspect or confirm whether that ID is occupied. This governed effect does not accept batched concepts, external identity or identity review fields, attributes, tags, linked concepts, duplicate suffixing, or multiple parents. Add further classifications or relationships after creation through separate add_relationship effects using exact existing predicate IDs. Governed creation defaults to actor-private visibility. Direct governed callers with matching authority may use scope_mode='organisation_general' or scope_mode='global_general'. Optional namespace is propagated for tenancy attribution. Unknown top-level fields remain tolerated for orchestrator-added context but do not enlarge the governed effect."
             }
         },
         {

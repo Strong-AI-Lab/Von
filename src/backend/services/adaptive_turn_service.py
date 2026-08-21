@@ -42,6 +42,12 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     ToolResult,
 )
 from src.backend.security.access_control import override_current_actor
+from src.backend.services.actor_scoped_referent_identity_service import (
+    ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+    ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+    ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+    ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+)
 from src.backend.services.llm_usage_cost_service import (
     build_llm_usage_cost_summary,
 )
@@ -56,6 +62,7 @@ from src.backend.services.turn_evidence_store import (
     TrustedTurnScope,
     TurnEvidenceStore,
 )
+from src.backend.utils.concept_id_utils import canonicalise_vontology_concept_id
 from src.backend.workflows.conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_advisory_sec,
     default_conversation_turn_llm_advisory_sec,
@@ -5373,15 +5380,19 @@ def _effect_requires_turn_finality(
         if isinstance(raw_payload, Mapping)
         else ""
     )
-    if (
-        effect_status == "not_started"
-        and changed is False
-        and isinstance(raw_payload, Mapping)
-        and raw_payload.get("error_code")
-        in {
-            "capability_arguments_invalid",
-            "effect_request_unchanged_after_terminal_failure",
-        }
+    error_code = (
+        raw_payload.get("error_code") if isinstance(raw_payload, Mapping) else None
+    )
+    if changed is False and (
+        (
+            effect_status == "not_started"
+            and error_code
+            in {
+                "capability_arguments_invalid",
+                "effect_request_unchanged_after_terminal_failure",
+            }
+        )
+        or error_code == "invalid_capability_arguments"
     ):
         # Input validation and exact-request suppression both run before the
         # handler. The feedback remains visible to the model, but neither guard
@@ -6238,9 +6249,73 @@ def execute_adaptive_turn(
             )
         return hashlib.sha256(_json_bytes(semantic_identity)).hexdigest()
 
+    def actor_scoped_referent_recovery_key(
+        capability_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        recovery_contract: str,
+    ) -> str | None:
+        """Identify one server-authored actor-private referent recovery."""
+
+        if (
+            capability_name != "create_concepts"
+            or recovery_contract != ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT
+            or str(arguments.get("collision_resolution_mode") or "").strip()
+            != ACTOR_SCOPED_REFERENT_COLLISION_MODE
+            or str(arguments.get("scope_mode") or "").strip().lower()
+            != ACTOR_SCOPED_REFERENT_SCOPE_MODE
+        ):
+            return None
+        requested_id = str(arguments.get("requested_concept_id") or "").strip()
+        parent_id = str(arguments.get("parent_id") or "").strip()
+        concepts = arguments.get("concepts")
+        if (
+            not requested_id.startswith("#V#")
+            or not parent_id.startswith("#V#")
+            or not isinstance(concepts, Sequence)
+            or isinstance(concepts, (str, bytes, bytearray))
+            or len(concepts) != 1
+            or not isinstance(concepts[0], Mapping)
+        ):
+            return None
+        concept = concepts[0]
+        effective_id = str(concept.get("concept_id") or "").strip()
+        kind = str(concept.get("kind") or "").strip().lower()
+        if not effective_id.startswith("#V#") or kind not in {"instance", "individual"}:
+            return None
+        core_fields = {
+            key: concept.get(key)
+            for key in (
+                "concept_id",
+                "description",
+                "instance_of_type",
+                "kind",
+                "name",
+                "notes",
+                "vontology_path",
+            )
+            if key in concept
+        }
+        semantic_identity = {
+            "recovery_contract": recovery_contract,
+            "tool": capability_name,
+            "parent_id": parent_id,
+            "requested_concept_id": requested_id,
+            "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+            "duplicate_resolution_mode": str(
+                arguments.get("duplicate_resolution_mode") or ""
+            ).strip(),
+            "concept": core_fields,
+        }
+        return hashlib.sha256(_json_bytes(semantic_identity)).hexdigest()
+
     def remember_recovery_affordance(
         *,
         effect_id: str,
+        capability_name: str,
+        arguments: Mapping[str, Any],
+        effect_status: str,
+        changed: bool | None,
         payload: Any,
     ) -> None:
         if not isinstance(payload, Mapping):
@@ -6255,6 +6330,79 @@ def execute_adaptive_turn(
             if not isinstance(affordance, Mapping):
                 continue
             action_type = str(affordance.get("action_type") or "").strip()
+            if action_type == ACTOR_SCOPED_REFERENT_RECOVERY_ACTION:
+                if not (
+                    capability_name == "create_concepts"
+                    and effect_status == "not_started"
+                    and changed is False
+                    and payload.get("success") is False
+                    and payload.get("mutation_outcome") == "not_started"
+                    and payload.get("error_code")
+                    == "ontology_create_concept_id_conflict"
+                ):
+                    continue
+                recovery_contract = str(
+                    affordance.get("recovery_contract") or ""
+                ).strip()
+                if recovery_contract != ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT:
+                    continue
+                tool_name = str(affordance.get("tool") or "").strip()
+                alternative_arguments = affordance.get("arguments")
+                if not isinstance(alternative_arguments, Mapping):
+                    continue
+                recovery_key = actor_scoped_referent_recovery_key(
+                    tool_name,
+                    alternative_arguments,
+                    recovery_contract=recovery_contract,
+                )
+                original_concepts = arguments.get("concepts")
+                recovery_concepts = alternative_arguments.get("concepts")
+                original_concept = (
+                    original_concepts[0]
+                    if isinstance(original_concepts, Sequence)
+                    and not isinstance(original_concepts, (str, bytes, bytearray))
+                    and len(original_concepts) == 1
+                    and isinstance(original_concepts[0], Mapping)
+                    else None
+                )
+                recovery_concept = (
+                    recovery_concepts[0]
+                    if isinstance(recovery_concepts, Sequence)
+                    and not isinstance(recovery_concepts, (str, bytes, bytearray))
+                    and len(recovery_concepts) == 1
+                    and isinstance(recovery_concepts[0], Mapping)
+                    else None
+                )
+                original_requested_id = canonicalise_vontology_concept_id(
+                    (
+                        original_concept.get("concept_id")
+                        or original_concept.get("name")
+                    )
+                    if original_concept is not None
+                    else None
+                )
+                recovery_requested_id = canonicalise_vontology_concept_id(
+                    alternative_arguments.get("requested_concept_id")
+                )
+                original_parent_id = canonicalise_vontology_concept_id(
+                    arguments.get("parent_id")
+                )
+                recovery_parent_id = canonicalise_vontology_concept_id(
+                    alternative_arguments.get("parent_id")
+                )
+                affordance_matches_failure = bool(
+                    original_concept is not None
+                    and recovery_concept is not None
+                    and original_requested_id
+                    and original_requested_id == recovery_requested_id
+                    and original_parent_id
+                    and original_parent_id == recovery_parent_id
+                )
+                if recovery_key is not None and affordance_matches_failure:
+                    recoverable_effect_ids.setdefault(recovery_key, []).append(
+                        effect_id
+                    )
+                continue
             recovery_contract = {
                 "assert_in_actor_scope": "actor_scope_alternative",
                 "retry_exact_scoped_assertion_with_canonical_predicate_id": (
@@ -6282,12 +6430,80 @@ def execute_adaptive_turn(
         capability_name: str,
         arguments: Mapping[str, Any],
         effect_status: str,
+        payload: Any,
     ) -> None:
         nonlocal effect_state_generation
         if effect_status != "succeeded":
             return
         failed_effect_id = None
+        recovery_key = None
+        concepts = arguments.get("concepts")
+        referent_id = (
+            str(concepts[0].get("concept_id") or "").strip()
+            if isinstance(concepts, Sequence)
+            and not isinstance(concepts, (str, bytes, bytearray))
+            and len(concepts) == 1
+            and isinstance(concepts[0], Mapping)
+            else ""
+        )
+        referent_metadata = (
+            payload.get("actor_scoped_referent")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        canonical_readback = (
+            payload.get("canonical_read_back")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        readback_concepts = (
+            canonical_readback.get("concepts")
+            if isinstance(canonical_readback, Mapping)
+            else None
+        )
+        exact_actor_private_readback = bool(
+            referent_id
+            and isinstance(payload, Mapping)
+            and payload.get("success") is True
+            and isinstance(referent_metadata, Mapping)
+            and referent_metadata.get("schema_version")
+            == ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT
+            and referent_metadata.get("effective_concept_id") == referent_id
+            and referent_metadata.get("scope_mode")
+            == ACTOR_SCOPED_REFERENT_SCOPE_MODE
+            and referent_metadata.get("identity_status")
+            == "unreconciled_actor_scoped_referent"
+            and referent_metadata.get("equivalence_asserted") is False
+            and referent_metadata.get("alias_created") is False
+            and isinstance(readback_concepts, Sequence)
+            and not isinstance(readback_concepts, (str, bytes, bytearray))
+            and len(readback_concepts) == 1
+            and any(
+                isinstance(concept, Mapping)
+                and concept.get("concept_id") == referent_id
+                and concept.get("exists") is True
+                and isinstance(concept.get("publication_context"), Mapping)
+                and concept["publication_context"].get("kind") == "user"
+                and concept["publication_context"].get("concept_id")
+                == scope.user_concept_id
+                for concept in readback_concepts
+            )
+        )
+        if exact_actor_private_readback:
+            recovery_key = actor_scoped_referent_recovery_key(
+                capability_name,
+                arguments,
+                recovery_contract=ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+            )
+        if recovery_key is not None:
+            pending_effect_ids = recoverable_effect_ids.get(recovery_key)
+            if pending_effect_ids:
+                failed_effect_id = pending_effect_ids.pop(0)
+                if not pending_effect_ids:
+                    recoverable_effect_ids.pop(recovery_key, None)
         for recovery_contract in ("exact_retry", "actor_scope_alternative"):
+            if failed_effect_id is not None:
+                break
             recovery_key = scoped_assertion_recovery_key(
                 capability_name,
                 arguments,
@@ -8375,10 +8591,16 @@ def execute_adaptive_turn(
             )
             if not isinstance(arguments, Mapping):
                 raw_capability_results[index] = _ContainedCapabilityResult(
-                    raw_payload=_error_payload(
-                        "invalid_capability_arguments",
-                        "arguments must be an object.",
-                    ),
+                    raw_payload={
+                        **_error_payload(
+                            "capability_arguments_invalid",
+                            "arguments must be an object.",
+                        ),
+                        "status": "not_started",
+                        "effect_status": "not_started",
+                        "mutation_outcome": "not_started",
+                        "changed": False,
+                    },
                     transport_result=None,
                     arguments={},
                     capability_name=capability_name,
@@ -9436,6 +9658,10 @@ def execute_adaptive_turn(
                     )
                     remember_recovery_affordance(
                         effect_id=effect_identifier,
+                        capability_name=canonical_name,
+                        arguments=arguments,
+                        effect_status=effect_status,
+                        changed=changed,
                         payload=raw_payload,
                     )
                     reconcile_successful_recovery(
@@ -9443,6 +9669,7 @@ def execute_adaptive_turn(
                         capability_name=canonical_name,
                         arguments=arguments,
                         effect_status=effect_status,
+                        payload=raw_payload,
                     )
                     reconcile_successful_exact_absence_retry(
                         recovery_effect_id=effect_identifier,

@@ -26,6 +26,13 @@ from ..security.visibility_predicates import (
     SPECIFIC_TO_ORG_PREDICATES_READ,
     SPECIFIC_TO_USER_PREDICATES,
 )
+from .actor_scoped_referent_identity_service import (
+    ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+    ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+    ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+    ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+    actor_scoped_referent_concept_id,
+)
 from .concept_predicate_metadata_service import get_structural_inverse_map
 from .ontology_publication_authority_service import (
     RESERVED_GENERIC_MUTATION_PREDICATES,
@@ -62,6 +69,7 @@ class OntologyMutationCommandError(Exception):
     reason_code: str
     public_message: str
     error_details: Mapping[str, Any] | None = None
+    recovery_affordances: Sequence[Mapping[str, Any]] | None = None
 
     def __str__(self) -> str:
         return self.public_message
@@ -126,6 +134,18 @@ _INTENT_TRANSPORT_FIELDS = frozenset(
         "ontology_effect_id",
         "operator",
         "request_id",
+    }
+)
+
+_CREATE_CORE_CONCEPT_FIELDS = frozenset(
+    {
+        "concept_id",
+        "description",
+        "instance_of_type",
+        "kind",
+        "name",
+        "notes",
+        "vontology_path",
     }
 )
 
@@ -673,6 +693,12 @@ def _create_reference_concept_ids(arguments: Mapping[str, Any]) -> tuple[str, ..
             concept_id = None
         if concept_id:
             references.append(concept_id)
+    for item in arguments.get("concepts") or []:
+        if not isinstance(item, Mapping):
+            continue
+        instance_type = _normalise_concept_id(item.get("instance_of_type"))
+        if instance_type:
+            references.append(instance_type)
     # Predicate creation deterministically types the child under this canonical
     # parent even though the caller supplies a general semantic parent.
     if any(
@@ -916,7 +942,60 @@ def resolve_governed_ontology_arguments(
                     requested_instance = resolved.get("create_as_instance")
                 item["kind"] = "instance" if requested_instance is True else "type"
             canonical_concepts.append(item)
+
+        raw_top_level_instance_type = resolved.get("instance_of_type")
+        top_level_instance_type = (
+            canonicalise_vontology_concept_id(raw_top_level_instance_type)
+            if _clean_text(raw_top_level_instance_type)
+            else None
+        )
+        if _clean_text(raw_top_level_instance_type) and not top_level_instance_type:
+            raise OntologyMutationCommandError(
+                "invalid_create_instance_of_type",
+                "A governed create requires one exact instance_of_type concept ID.",
+                recovery_affordances=(),
+            )
+        consolidated_concepts: list[Any] = []
+        for item in canonical_concepts:
+            if not isinstance(item, Mapping):
+                consolidated_concepts.append(item)
+                continue
+            concept_item = dict(item)
+            raw_item_instance_type = concept_item.get("instance_of_type")
+            item_instance_type = (
+                canonicalise_vontology_concept_id(raw_item_instance_type)
+                if _clean_text(raw_item_instance_type)
+                else None
+            )
+            if _clean_text(raw_item_instance_type) and not item_instance_type:
+                raise OntologyMutationCommandError(
+                    "invalid_create_instance_of_type",
+                    (
+                        "A governed create requires one exact instance_of_type "
+                        "concept ID."
+                    ),
+                    recovery_affordances=(),
+                )
+            if (
+                top_level_instance_type
+                and item_instance_type
+                and top_level_instance_type != item_instance_type
+            ):
+                raise OntologyMutationCommandError(
+                    "conflicting_create_instance_of_type",
+                    (
+                        "Top-level and per-concept instance_of_type must identify "
+                        "the same exact concept."
+                    ),
+                    recovery_affordances=(),
+                )
+            canonical_instance_type = item_instance_type or top_level_instance_type
+            if canonical_instance_type:
+                concept_item["instance_of_type"] = canonical_instance_type
+            consolidated_concepts.append(concept_item)
+        canonical_concepts = consolidated_concepts
         resolved["concepts"] = canonical_concepts
+        resolved.pop("instance_of_type", None)
 
         parent_id = resolve_parent(resolved.get("parent_id"))
         if parent_id:
@@ -945,6 +1024,94 @@ def resolve_governed_ontology_arguments(
             if not parent_id and resolved_parent_ids:
                 resolved["parent_id"] = resolved_parent_ids[0]
                 resolved["authority_resolved_parent_id"] = resolved_parent_ids[0]
+
+        collision_mode = _clean_text(resolved.get("collision_resolution_mode"))
+        if collision_mode and collision_mode != ACTOR_SCOPED_REFERENT_COLLISION_MODE:
+            raise OntologyMutationCommandError(
+                "invalid_create_collision_resolution_mode",
+                "The requested concept-ID collision resolution mode is unsupported.",
+                error_details={
+                    "supported_modes": [ACTOR_SCOPED_REFERENT_COLLISION_MODE]
+                },
+                recovery_affordances=(),
+            )
+        if collision_mode == ACTOR_SCOPED_REFERENT_COLLISION_MODE:
+            if canonical_scope_mode != ACTOR_SCOPED_REFERENT_SCOPE_MODE:
+                raise OntologyMutationCommandError(
+                    "actor_scoped_referent_requires_user_only_scope",
+                    (
+                        "Actor-scoped referent recovery is available only for "
+                        "user_only_default creation."
+                    ),
+                    recovery_affordances=(),
+                )
+            if len(canonical_concepts) != 1 or not isinstance(
+                canonical_concepts[0], Mapping
+            ):
+                raise OntologyMutationCommandError(
+                    "actor_scoped_referent_requires_single_instance",
+                    (
+                        "Actor-scoped referent recovery requires exactly one "
+                        "instance concept."
+                    ),
+                    recovery_affordances=(),
+                )
+            referent_spec = dict(canonical_concepts[0])
+            referent_kind = _clean_text(referent_spec.get("kind")).lower()
+            if referent_kind == "individual":
+                referent_kind = "instance"
+            if referent_kind != "instance":
+                raise OntologyMutationCommandError(
+                    "actor_scoped_referent_requires_instance",
+                    (
+                        "Actor-scoped referent recovery is available only for "
+                        "instance concepts."
+                    ),
+                    recovery_affordances=(),
+                )
+            requested_concept_id = canonicalise_vontology_concept_id(
+                resolved.get("requested_concept_id")
+            )
+            if not requested_concept_id:
+                raise OntologyMutationCommandError(
+                    "actor_scoped_referent_requested_id_required",
+                    (
+                        "Actor-scoped referent recovery requires the requested "
+                        "concept ID used as its deterministic identity seed."
+                    ),
+                    recovery_affordances=(),
+                )
+            # This is a caller-supplied deterministic identity seed, not an
+            # authority-bearing conflict receipt. Direct recovery mode must not
+            # inspect, confirm, or disclose whether the requested ID is occupied.
+            actor_concept_id = get_effective_user_concept_id()
+            if not actor_concept_id:
+                raise OntologyMutationCommandError(
+                    "authenticated_actor_context_required",
+                    "Trusted actor context is required for referent recovery.",
+                    recovery_affordances=(),
+                )
+            effective_concept_id = actor_scoped_referent_concept_id(
+                requested_concept_id=requested_concept_id,
+                actor_concept_id=actor_concept_id,
+            )
+            supplied_referent_id = _normalise_concept_id(
+                referent_spec.get("concept_id")
+            )
+            if supplied_referent_id != effective_concept_id:
+                raise OntologyMutationCommandError(
+                    "actor_scoped_referent_identity_mismatch",
+                    (
+                        "The supplied recovery concept ID does not match the "
+                        "server-derived actor-scoped referent identity."
+                    ),
+                    recovery_affordances=(),
+                )
+            referent_spec["concept_id"] = effective_concept_id
+            referent_spec["kind"] = "instance"
+            resolved["concepts"] = [referent_spec]
+            resolved["requested_concept_id"] = requested_concept_id
+            resolved["collision_resolution_mode"] = collision_mode
     if _clean_text(method_name) == "add_relationship":
         predicate_ref = resolved.get("predicate_ref")
         if predicate_ref is not None:
@@ -1207,36 +1374,57 @@ def build_ontology_mutation_intent(
                 "invalid_create_concept_id",
                 "A governed create requires one exact canonical concept ID.",
             )
-        if _concept_exists_unfiltered(expected_concept_id):
-            # Existing visible and inaccessible IDs deliberately share one
-            # non-disclosing conflict. A create effect never reads or reuses
-            # the colliding concept.
-            raise OntologyMutationCommandError(
-                "ontology_create_concept_id_conflict",
-                "The requested concept ID cannot be created.",
-            )
-        reference_ids = _create_reference_concept_ids(arguments)
-        _visible_or_fail(reference_ids)
-        targets = tuple(
-            dict.fromkeys((*_concepts_from_create_arguments(arguments), *reference_ids))
-        )
         parent_id = _normalise_concept_id(arguments.get("parent_id"))
         if _clean_text(concept_spec.get("kind")).lower() == "predicate":
             from ..vontology.code_concepts_registry import PREDICATE_TYPE_ID
 
             parent_id = PREDICATE_TYPE_ID
+        instance_of_type = _normalise_concept_id(
+            arguments.get("instance_of_type") or concept_spec.get("instance_of_type")
+        )
+        actor_scoped_referent = (
+            _clean_text(arguments.get("collision_resolution_mode"))
+            == ACTOR_SCOPED_REFERENT_COLLISION_MODE
+        )
+        visible_exact_reuse = False
+        if _concept_exists_unfiltered(expected_concept_id):
+            required_context = (
+                publication_context.to_mapping() if actor_scoped_referent else None
+            )
+            visible_exact_reuse = can_access_concept(
+                expected_concept_id
+            ) and _visible_concept_satisfies_requested_core(
+                concept_id=expected_concept_id,
+                concept_spec=concept_spec,
+                parent_id=parent_id,
+                instance_of_type=instance_of_type,
+                required_publication_context=required_context,
+            )
+            if not visible_exact_reuse:
+                # Visible incompatible and inaccessible IDs retain the same
+                # non-disclosing error. Only an actor-invisible instance
+                # collision can advertise the bounded scoped-referent action.
+                raise _create_id_conflict_error(
+                    arguments=arguments,
+                    expected_concept_id=expected_concept_id,
+                )
+        reference_ids = _create_reference_concept_ids(arguments)
+        _visible_or_fail(reference_ids)
+        targets = tuple(
+            dict.fromkeys((*_concepts_from_create_arguments(arguments), *reference_ids))
+        )
         delta = {
             "concept_count": len(arguments.get("concepts") or []),
             "concepts": _create_intent_concepts(arguments),
             "expected_concept_id": expected_concept_id,
             "parent_id": parent_id,
             "parent_concept_ids": list(arguments.get("parent_concept_ids") or []),
-            "instance_of_type": _normalise_concept_id(
-                arguments.get("instance_of_type")
-            ),
+            "instance_of_type": instance_of_type,
             "referenced_concept_ids": list(reference_ids),
             "scope_mode": scope_projection["effective_scope_mode"],
             "stored_scope": scope_projection,
+            "visible_exact_reuse": visible_exact_reuse,
+            "actor_scoped_referent": actor_scoped_referent,
             # Parent inverses are deliberately not canonical side effects of
             # governed creation. The child's exact forward typing assertion is
             # authoritative; reverse traversal belongs to the derived extent.
@@ -1689,6 +1877,197 @@ def _concept_read_back(concept_id: str) -> dict[str, Any]:
     }
 
 
+def _visible_concept_satisfies_requested_core(
+    *,
+    concept_id: str,
+    concept_spec: Mapping[str, Any],
+    parent_id: str | None,
+    instance_of_type: str | None,
+    required_publication_context: Mapping[str, Any] | None = None,
+) -> bool:
+    """Verify actor-visible core compatibility without editing the concept."""
+
+    actual = _concept_read_back(concept_id)
+    if actual.get("exists") is not True or actual.get("concept_id") != concept_id:
+        return False
+    if required_publication_context is not None:
+        actual_context = actual.get("publication_context")
+        if not isinstance(actual_context, Mapping) or (
+            actual_context.get("kind") != required_publication_context.get("kind")
+            or actual_context.get("concept_id")
+            != required_publication_context.get("concept_id")
+        ):
+            return False
+
+    relationships = actual.get("forward_relationships")
+    if not isinstance(relationships, Mapping):
+        return False
+    type_parents = set(relationships.get("is_a_type_of") or [])
+    instance_types = set(relationships.get("is_an_instance_of") or [])
+    kind = _clean_text(concept_spec.get("kind")).lower()
+    if kind == "individual":
+        kind = "instance"
+    if instance_of_type:
+        if instance_of_type not in instance_types:
+            return False
+        if parent_id and parent_id not in type_parents:
+            return False
+    elif kind in {"instance", "predicate"}:
+        if parent_id and parent_id not in instance_types:
+            return False
+    elif parent_id and parent_id not in type_parents:
+        return False
+
+    requested_path = concept_spec.get("vontology_path")
+    if requested_path is not None and actual.get("vontology_path") != requested_path:
+        return False
+    texts = actual.get("text_relations")
+    if not isinstance(texts, list):
+        return False
+
+    def has_requested_text(
+        predicate: str,
+        value: Any,
+        *,
+        name_type: str | None = None,
+    ) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return True
+        return any(
+            isinstance(row, Mapping)
+            and row.get("predicate") == predicate
+            and row.get("text") == value.strip()
+            and (
+                name_type is None
+                or (
+                    isinstance(row.get("context"), Mapping)
+                    and row["context"].get("name_type") == name_type
+                )
+            )
+            for row in texts
+        )
+
+    return (
+        has_requested_text("hasName", concept_spec.get("name"), name_type="NL")
+        and has_requested_text("hasDescription", concept_spec.get("description"))
+        and has_requested_text("hasNote", concept_spec.get("notes"))
+    )
+
+
+def _actor_scoped_referent_result_metadata(concept_id: str) -> dict[str, Any]:
+    return {
+        "schema_version": ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT,
+        "effective_concept_id": concept_id,
+        "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+        "identity_status": "unreconciled_actor_scoped_referent",
+        "equivalence_asserted": False,
+        "alias_created": False,
+    }
+
+
+def _create_id_conflict_error(
+    *,
+    arguments: Mapping[str, Any],
+    expected_concept_id: str,
+) -> OntologyMutationCommandError:
+    """Return a non-disclosing conflict with at most one executable recovery."""
+
+    affordances: list[dict[str, Any]] = []
+    collision_mode = _clean_text(arguments.get("collision_resolution_mode"))
+    concept_specs = arguments.get("concepts") or []
+    concept_spec = (
+        concept_specs[0]
+        if len(concept_specs) == 1 and isinstance(concept_specs[0], Mapping)
+        else None
+    )
+    actor_id = get_effective_user_concept_id()
+    scope_mode = _clean_text(arguments.get("scope_mode"))
+    kind = _clean_text((concept_spec or {}).get("kind")).lower()
+    if kind == "individual":
+        kind = "instance"
+    references = _create_reference_concept_ids(arguments)
+    parent_id = _normalise_concept_id(arguments.get("parent_id"))
+    recovery_is_eligible = (
+        not collision_mode
+        and concept_spec is not None
+        and kind == "instance"
+        and scope_mode == ACTOR_SCOPED_REFERENT_SCOPE_MODE
+        and bool(actor_id)
+        and bool(parent_id)
+        and bool(_clean_text(concept_spec.get("name")))
+        and not can_access_concept(expected_concept_id)
+        and all(can_access_concept(reference_id) for reference_id in references)
+    )
+    if recovery_is_eligible and actor_id:
+        effective_concept_id = actor_scoped_referent_concept_id(
+            requested_concept_id=expected_concept_id,
+            actor_concept_id=actor_id,
+        )
+        required_context = publication_context_for_creation(
+            scope_mode=ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+            actor_concept_id=actor_id,
+            organisation_concept_id=None,
+        ).to_mapping()
+        derived_id_available = not _concept_exists_unfiltered(effective_concept_id)
+        derived_id_compatible = can_access_concept(
+            effective_concept_id
+        ) and _visible_concept_satisfies_requested_core(
+            concept_id=effective_concept_id,
+            concept_spec=concept_spec,
+            parent_id=parent_id,
+            instance_of_type=_normalise_concept_id(
+                arguments.get("instance_of_type")
+                or concept_spec.get("instance_of_type")
+            ),
+            required_publication_context=required_context,
+        )
+        if derived_id_available or derived_id_compatible:
+            recovered_spec = {
+                key: _json_safe(value)
+                for key, value in concept_spec.items()
+                if key in _CREATE_CORE_CONCEPT_FIELDS
+            }
+            recovered_spec.update(
+                {
+                    "concept_id": effective_concept_id,
+                    "kind": "instance",
+                }
+            )
+            requested_instance_type = _normalise_concept_id(
+                arguments.get("instance_of_type")
+                or concept_spec.get("instance_of_type")
+            )
+            if requested_instance_type:
+                recovered_spec["instance_of_type"] = requested_instance_type
+            recovery_arguments = {
+                "parent_id": parent_id,
+                "concepts": [recovered_spec],
+                "duplicate_resolution_mode": "canonical_id_only",
+                "collision_resolution_mode": (ACTOR_SCOPED_REFERENT_COLLISION_MODE),
+                "requested_concept_id": expected_concept_id,
+                "scope_mode": ACTOR_SCOPED_REFERENT_SCOPE_MODE,
+            }
+            affordances.append(
+                {
+                    "action_type": ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+                    "tool": "create_concepts",
+                    "recovery_contract": (ACTOR_SCOPED_REFERENT_RECOVERY_CONTRACT),
+                    "arguments": recovery_arguments,
+                    "semantic_effect": (
+                        "Create or idempotently reuse an actor-private instance "
+                        "referent. This does not create an alias, assert identity "
+                        "or equivalence, publish knowledge, or access the concept "
+                        "occupying the requested ID."
+                    ),
+                }
+            )
+    return OntologyMutationCommandError(
+        "ontology_create_concept_id_conflict",
+        "The requested concept ID cannot be created.",
+        recovery_affordances=affordances,
+    )
+
+
 def _create_read_back_concept_ids(
     *,
     arguments: Mapping[str, Any],
@@ -1696,14 +2075,20 @@ def _create_read_back_concept_ids(
 ) -> list[str]:
     """Resolve created or reused subjects without mistaking parents for output."""
 
-    if result.get("success") is False or result.get("changed") is False:
+    if result.get("success") is False:
         return []
-    candidates: list[Any] = list(result.get("created_concept_ids") or [])
+    idempotent_reuse = bool(result.get("idempotent_reuse"))
+    if result.get("changed") is False and not idempotent_reuse:
+        return []
+    candidates: list[Any] = [
+        *(result.get("created_concept_ids") or []),
+        *(result.get("resolved_concept_ids") or []),
+    ]
     for row in result.get("results") or []:
         if (
             not isinstance(row, Mapping)
             or not bool(row.get("success"))
-            or row.get("changed") is False
+            or (row.get("changed") is False and not bool(row.get("idempotent_reuse")))
         ):
             continue
         candidates.extend(
@@ -2078,7 +2463,12 @@ def _safe_command_error(exc: OntologyMutationCommandError) -> dict[str, Any]:
     }
     if exc.error_details is not None:
         payload["error_details"] = dict(exc.error_details)
-    if exc.reason_code not in {
+    if exc.recovery_affordances is not None:
+        if exc.recovery_affordances:
+            payload["recovery_affordances"] = [
+                dict(affordance) for affordance in exc.recovery_affordances
+            ]
+    elif exc.reason_code not in {
         "complex_create_requires_typed_effects",
         "multi_create_requires_individual_effects",
     }:
@@ -2185,6 +2575,21 @@ def _verify_method_postcondition(
         actual = concepts[0]
         spec = specs[0]
         expected_id = _normalise_concept_id(spec.get("concept_id"))
+        if intent.delta.get("visible_exact_reuse"):
+            if result.get("idempotent_reuse") is not True or not expected_id:
+                return False
+            required_context = (
+                expected_context if intent.delta.get("actor_scoped_referent") else None
+            )
+            return _visible_concept_satisfies_requested_core(
+                concept_id=expected_id,
+                concept_spec=spec,
+                parent_id=_normalise_concept_id(intent.delta.get("parent_id")),
+                instance_of_type=_normalise_concept_id(
+                    intent.delta.get("instance_of_type") or spec.get("instance_of_type")
+                ),
+                required_publication_context=required_context,
+            )
         if (
             actual.get("exists") is not True
             or actual.get("concept_id") != expected_id
@@ -2304,6 +2709,41 @@ def _postcondition_reconciliation_contract(
         "intent_fingerprint": intent.fingerprint,
         "intent": intent.canonical_payload(),
     }
+
+
+def _visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[str, Any]:
+    specs = intent.delta.get("concepts") or []
+    spec = specs[0] if len(specs) == 1 and isinstance(specs[0], Mapping) else {}
+    concept_id = _normalise_concept_id(spec.get("concept_id"))
+    result: dict[str, Any] = {
+        "success": True,
+        "effect_status": "succeeded",
+        "mutation_outcome": "succeeded",
+        "changed": False,
+        "idempotent_reuse": True,
+        "created_concept_ids": [],
+        "resolved_concept_ids": [concept_id] if concept_id else [],
+        "results": [
+            {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": False,
+                "idempotent_reuse": True,
+                "concept_id": concept_id,
+                "requested_name": spec.get("name"),
+                "requested_kind": spec.get("kind"),
+            }
+        ],
+        "total": 1,
+        "successful": 1,
+        "already_existed": 1,
+        "failed": 0,
+    }
+    if concept_id and intent.delta.get("actor_scoped_referent"):
+        result["actor_scoped_referent"] = _actor_scoped_referent_result_metadata(
+            concept_id
+        )
+    return result
 
 
 def _publication_context_from_payload(value: Any) -> PublicationContext | None:
@@ -2531,7 +2971,13 @@ def execute_governed_ontology_method(
         }
     result_holder: dict[str, Mapping[str, Any]] = {}
 
-    def perform_locked() -> Mapping[str, Any]:
+    def perform_locked(*, exact_create_reuse: bool = False) -> Mapping[str, Any]:
+        if method_name == "create_concepts" and (
+            exact_create_reuse or intent.delta.get("visible_exact_reuse")
+        ):
+            result = _visible_create_reuse_result(intent)
+            result_holder["result"] = result
+            return result
         if method_name == "delete_legacy_name":
             concept_id = _normalise_concept_id(arguments.get("concept_id")) or ""
             try:
@@ -2695,10 +3141,26 @@ def execute_governed_ontology_method(
                 ),
                 "concept": dict(result),
             }
+        if (
+            method_name == "create_concepts"
+            and intent.delta.get("actor_scoped_referent")
+            and result.get("success") is True
+        ):
+            effective_concept_id = _normalise_concept_id(
+                intent.delta.get("expected_concept_id")
+            )
+            if effective_concept_id:
+                result = {
+                    **dict(result),
+                    "actor_scoped_referent": (
+                        _actor_scoped_referent_result_metadata(effective_concept_id)
+                    ),
+                }
         result_holder["result"] = result
         return result
 
     def perform() -> Mapping[str, Any]:
+        exact_create_reuse = bool(intent.delta.get("visible_exact_reuse"))
         scope_fingerprints = intent.delta.get("affected_scope_fingerprints")
         expected = (
             dict(scope_fingerprints) if isinstance(scope_fingerprints, Mapping) else {}
@@ -2781,19 +3243,62 @@ def execute_governed_ontology_method(
                     expected_concept_id = _normalise_concept_id(
                         intent.delta.get("expected_concept_id")
                     )
-                    if expected_concept_id and _concept_exists_unfiltered(
+                    expected_exists = bool(
                         expected_concept_id
-                    ):
+                        and _concept_exists_unfiltered(expected_concept_id)
+                    )
+                    if exact_create_reuse and not expected_exists:
                         return _safe_command_error(
                             OntologyMutationCommandError(
-                                "ontology_create_concept_id_conflict",
-                                "The requested concept ID cannot be created.",
+                                "ontology_create_reuse_precondition_failed",
+                                (
+                                    "The compatible concept selected for reuse is "
+                                    "no longer available."
+                                ),
+                                recovery_affordances=(),
                             )
                         )
+                    if expected_exists:
+                        specs = intent.delta.get("concepts") or []
+                        spec = (
+                            specs[0]
+                            if len(specs) == 1 and isinstance(specs[0], Mapping)
+                            else None
+                        )
+                        required_context = (
+                            intent.publication_context.to_mapping()
+                            if intent.delta.get("actor_scoped_referent")
+                            else None
+                        )
+                        compatible_reuse = bool(
+                            expected_concept_id
+                            and spec is not None
+                            and can_access_concept(expected_concept_id)
+                            and _visible_concept_satisfies_requested_core(
+                                concept_id=expected_concept_id,
+                                concept_spec=spec,
+                                parent_id=_normalise_concept_id(
+                                    intent.delta.get("parent_id")
+                                ),
+                                instance_of_type=_normalise_concept_id(
+                                    intent.delta.get("instance_of_type")
+                                    or spec.get("instance_of_type")
+                                ),
+                                required_publication_context=required_context,
+                            )
+                        )
+                        if not compatible_reuse:
+                            return _safe_command_error(
+                                _create_id_conflict_error(
+                                    arguments=arguments,
+                                    expected_concept_id=(expected_concept_id or ""),
+                                )
+                            )
+                        exact_create_reuse = True
                 live_decision = authorise_ontology_mutation(intent)
                 if not live_decision.allowed:
                     return ontology_authority_denial_payload(live_decision, intent)
-                return perform_locked()
+                return perform_locked(exact_create_reuse=exact_create_reuse)
         except OntologyMutationResourceBusy:
             return {
                 "success": False,
