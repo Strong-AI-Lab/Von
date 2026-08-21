@@ -10,6 +10,8 @@ CLOUD_INIT_TEMPLATE = (
     REPO_ROOT / "infra/openstack/templates/cloud-init/von_bootstrap.yaml.tftpl"
 )
 WORKFLOW_FILE = REPO_ROOT / ".github/workflows/openstack-deploy.yml"
+TERRAFORM_VERSIONS_FILE = REPO_ROOT / "infra/openstack/versions.tf"
+OPENSTACK_README = REPO_ROOT / "infra/openstack/README.md"
 MONITOR_TEMPLATE = (
     REPO_ROOT / "infra/openstack/templates/scripts/von_monitor_health.sh.tftpl"
 )
@@ -126,6 +128,28 @@ def test_workflow_contains_ci_gates_and_manual_deploy_trigger() -> None:
     assert "workflow_dispatch" in content
     assert "CI Gates and Artefact" in content
     assert "Deploy to OpenStack host" in content
+
+
+def test_terraform_versions_support_cross_variable_validation() -> None:
+    workflow = WORKFLOW_FILE.read_text(encoding="utf-8")
+    versions = TERRAFORM_VERSIONS_FILE.read_text(encoding="utf-8")
+    readme = OPENSTACK_README.read_text(encoding="utf-8")
+
+    workflow_match = re.search(r'terraform_version: "(\d+\.\d+\.\d+)"', workflow)
+    required_match = re.search(r'required_version = ">= (\d+\.\d+\.\d+)"', versions)
+    readme_match = re.search(r'Terraform `>= (\d+\.\d+\.\d+)`', readme)
+
+    assert workflow_match is not None
+    assert required_match is not None
+    assert readme_match is not None
+
+    workflow_version = tuple(map(int, workflow_match.group(1).split(".")))
+    required_version = tuple(map(int, required_match.group(1).split(".")))
+    documented_version = tuple(map(int, readme_match.group(1).split(".")))
+
+    assert required_version >= (1, 9, 0)
+    assert workflow_version >= required_version
+    assert documented_version == required_version
 
 
 def test_monitoring_template_covers_required_failure_modes() -> None:

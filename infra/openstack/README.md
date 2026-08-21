@@ -26,7 +26,7 @@ bootstrap assets from `templates/` to configure a runnable Von host:
 
 ## Prerequisites
 
-- Terraform `>= 1.5.0`.
+- Terraform `>= 1.9.0`.
 - OpenStack credentials available at runtime via:
   - `OS_CLOUD` + `clouds.yaml`, or
   - direct `OS_*` environment variables.
