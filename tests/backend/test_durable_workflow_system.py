@@ -606,12 +606,20 @@ class TestWorkflowInstanceManager:
     ) -> None:
         manager = WorkflowInstanceManager()
         reconciliations: list[dict[str, Any]] = []
+        terminal_events: list[str] = []
         monkeypatch.setattr(
             "src.backend.services.turn_execution_record_service.reconcile_durable_workflow_terminal_effect",
             lambda **kwargs: (
+                terminal_events.append("reconciled")
+                or
                 reconciliations.append(dict(kwargs))
                 or {"updated": True}
             ),
+        )
+        monkeypatch.setattr(
+            manager,
+            "_broadcast_instance",
+            lambda _instance: terminal_events.append("broadcast"),
         )
         instance_id = manager.create_instance(
             "#V#test_workflow",
@@ -621,6 +629,7 @@ class TestWorkflowInstanceManager:
             source_event_type="conversation_turn",
             source_event_id="request-durable-terminal",
         )
+        terminal_events.clear()
 
         success = manager.mark_completed(
             instance_id,
@@ -630,6 +639,7 @@ class TestWorkflowInstanceManager:
         )
 
         assert success is True
+        assert terminal_events == ["reconciled", "broadcast"]
         assert len(reconciliations) == 1
         reconciliation = reconciliations[0]
         assert reconciliation["request_id"] == "request-durable-terminal"

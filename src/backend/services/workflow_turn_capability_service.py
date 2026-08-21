@@ -931,6 +931,8 @@ def normalise_workflow_effect_receipt(
             "workflow_id": capability.workflow_id,
             "effect_status": effect_status,
             "changed": changed,
+            "change_kind": "workflow_instance_operational_state",
+            "operational_changed": changed,
             "semantic_effect": semantic_effect,
             "semantic_outcome": semantic_outcome,
             "operational_state_effect": True,

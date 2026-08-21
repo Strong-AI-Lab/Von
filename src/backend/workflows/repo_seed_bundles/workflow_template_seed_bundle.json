@@ -1,7 +1,7 @@
 {
   "family_id": "workflow_template_seed_bundle",
   "schema_version": "repo_seed_workflow_template_bundle.v1",
-  "seed_version": "5",
+  "seed_version": "6",
   "source_tag": "JVNAUTOSCI-2577",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "workflow_creation.person_representation": {
@@ -10,6 +10,9 @@
       ],
       "4": [
         "bebaf90d6603fa63acdd1dcb363f8cb932c61d5ed45270064a7401c1f1cef23b"
+      ],
+      "5": [
+        "33321addf574eeed20ea11bb0aa879d31cbfdf821ff1b12bbc2e46284b3d41a7"
       ]
     },
     "workflow_creation.company_representation": {
@@ -18,6 +21,9 @@
       ],
       "4": [
         "1b567d6c833201a3e48953e6c8df416913c118dcc31b4b446f1a2f316658aeef"
+      ],
+      "5": [
+        "39336dd71db1c92a53506d7a9ae8b863109cc39d2aaced06a9fdbaa80d50c7a9"
       ]
     },
     "workflow_creation.event_representation": {
@@ -26,6 +32,9 @@
       ],
       "4": [
         "5c13822c0a2bc0f782dfda7b50966a2173029cf18797af64816479bc43360623"
+      ],
+      "5": [
+        "ee854744c22e256a8757061f5d549c0bff1b6ce1fc96e18111d9cffcd4f91a73"
       ]
     },
     "workflow_creation.place_representation": {
@@ -34,6 +43,9 @@
       ],
       "4": [
         "7eee095c5dd2d63ed60f5500350fdba48dc3c5fd87c16a1300a7e94ae411140d"
+      ],
+      "5": [
+        "eb5380690cddfbfea3b405c673d36665bbe0017cdcea61542fcdd9dc6828c181"
       ]
     }
   },
@@ -465,7 +477,7 @@
           },
           {
             "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"person representation\",\"represent person\",\"represent researcher\",\"represent contact\",\"represent people in vontology\"],\"examples\":[\"Represent this person in the Vontology.\",\"Please represent these researchers if they are not already represented.\",\"Create or update a person representation from this conversational description.\"]}}",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"person representation\",\"represent person\",\"represent researcher\",\"represent contact\",\"represent people in vontology\"],\"examples\":[\"Represent this person in the Vontology.\",\"Please represent these researchers if they are not already represented.\",\"Create or update a person representation from this conversational description.\"],\"routing_notes\":[\"Choose this workflow when a person may need to be created or additively represented. For pure read-only verification of an exact already-resolved person, choose the smallest adequate read-only capability plan.\"]}}",
             "lang": "en-NZ"
           }
         ],
@@ -876,9 +888,7 @@
               "tool_name": "fetch_concept",
               "concept_id": {
                 "$context_key": "entity_representation_concept_id"
-              },
-              "include_relations_any_arg": true,
-              "limit": 40
+              }
             },
             "tool_output_context_mappings": [
               {
@@ -1196,7 +1206,7 @@
           },
           {
             "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"company representation\",\"organisation representation\",\"organization representation\",\"represent company\",\"represent organisation\"],\"examples\":[\"Represent this company in the Vontology.\",\"Please represent these organisations if they are not already represented.\",\"Create or update a company representation from this conversational description.\"]}}",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"company representation\",\"organisation representation\",\"organization representation\",\"represent company\",\"represent organisation\"],\"examples\":[\"Represent this company in the Vontology.\",\"Please represent these organisations if they are not already represented.\",\"Create or update a company representation from this conversational description.\"],\"routing_notes\":[\"Choose this workflow when an organisation may need to be created or additively represented. For pure read-only verification of an exact already-resolved organisation, choose the smallest adequate read-only capability plan.\"]}}",
             "lang": "en-NZ"
           }
         ],
@@ -1607,9 +1617,7 @@
               "tool_name": "fetch_concept",
               "concept_id": {
                 "$context_key": "entity_representation_concept_id"
-              },
-              "include_relations_any_arg": true,
-              "limit": 40
+              }
             },
             "tool_output_context_mappings": [
               {
@@ -1928,7 +1936,7 @@
           },
           {
             "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"event representation\",\"meeting representation\",\"represent event\",\"represent meeting\",\"calendar event representation\"],\"examples\":[\"Represent this event in the Vontology.\",\"Please represent these meetings if they are not already represented.\",\"Create or update an event representation from this conversational description.\"]}}",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"event representation\",\"meeting representation\",\"represent event\",\"represent meeting\",\"calendar event representation\"],\"examples\":[\"Represent this event in the Vontology.\",\"Please represent these meetings if they are not already represented.\",\"Create or update an event representation from this conversational description.\"],\"routing_notes\":[\"Choose this workflow when an event may need to be created or additively represented. For pure read-only verification of an exact already-resolved event, choose the smallest adequate read-only capability plan.\"]}}",
             "lang": "en-NZ"
           }
         ],
@@ -2339,9 +2347,7 @@
               "tool_name": "fetch_concept",
               "concept_id": {
                 "$context_key": "entity_representation_concept_id"
-              },
-              "include_relations_any_arg": true,
-              "limit": 40
+              }
             },
             "tool_output_context_mappings": [
               {
@@ -2660,7 +2666,7 @@
           },
           {
             "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"place representation\",\"location representation\",\"represent place\",\"represent location\",\"venue representation\"],\"examples\":[\"Represent this place in the Vontology.\",\"Please represent these locations if they are not already represented.\",\"Create or update a place representation from this conversational description.\"]}}",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"place representation\",\"location representation\",\"represent place\",\"represent location\",\"venue representation\"],\"examples\":[\"Represent this place in the Vontology.\",\"Please represent these locations if they are not already represented.\",\"Create or update a place representation from this conversational description.\"],\"routing_notes\":[\"Choose this workflow when a place may need to be created or additively represented. For pure read-only verification of an exact already-resolved place, choose the smallest adequate read-only capability plan.\"]}}",
             "lang": "en-NZ"
           }
         ],
@@ -3071,9 +3077,7 @@
               "tool_name": "fetch_concept",
               "concept_id": {
                 "$context_key": "entity_representation_concept_id"
-              },
-              "include_relations_any_arg": true,
-              "limit": 40
+              }
             },
             "tool_output_context_mappings": [
               {

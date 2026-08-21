@@ -457,6 +457,45 @@
           "reasoning": "The request is ambiguous, but the Entity Representation Workflow is the right place to ask one minimal clarification question."
         },
         "notes": "Low-imposition ambiguity case: routing should still go to the entity wrapper, not to a plain assistant reply."
+      },
+      {
+        "case_id": "entity_known_person_idempotence_verification",
+        "replay_family_id": "known_entity_idempotence_verification",
+        "case_tags": [
+          "known_exact_entity",
+          "idempotence_verification",
+          "read_only",
+          "bounded_canonical_read"
+        ],
+        "turn_text": "Replay Marc Vinyals's representation idempotently. The conversation already resolves him as #V#marc_vinyals. Verify his exact Person typing and actor-effective assertions without mutation.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Mutation-capable representation route for an entity that may be missing or require additive representation."
+          },
+          {
+            "concept_id": "#V#concept_search_instance_retrieval_workflow",
+            "name": "Concept Search and Instance Retrieval Workflow",
+            "description": "Read-only grounded profile retrieval for an exact or already-resolved Vontology concept."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "description": "General-purpose tool-calling workflow supporting bounded exact canonical reads."
+          }
+        ],
+        "allowed_workflow_ids": [
+          "#V#concept_search_instance_retrieval_workflow",
+          "#V#tool_calling_workflow"
+        ],
+        "baseline_workflow_id": "#V#entity_representation_workflow",
+        "selector_response": {
+          "workflow_id": "#V#tool_calling_workflow",
+          "confidence": 0.98,
+          "reasoning": "The exact person concept is already resolved and the user requests bounded read-only verification, so direct canonical reads are sufficient and mutation-capable entity representation is unnecessary."
+        },
+        "notes": "Known-entity replay regression: exact actor-effective verification should use a bounded read-only route, while neighbouring missing/new entity requests remain eligible for representation. The selected direct-tool fixture is not the only valid read-only implementation path."
       }
     ],
     "corrective_evidence_failure_family": [

@@ -1887,6 +1887,7 @@ describe('conversation situation affordance', () => {
             <div id="chat-history-length"></div>
         `;
         __testOnly_resetHistoryUiState();
+        __testOnly_resetWorkflowStatusState();
         __testOnly_resetConversationSituationState();
         __testOnly_setActiveChatSession('session-1', 'Session 1');
         __testOnly_initializeConversationSituationPanel();
@@ -1895,6 +1896,7 @@ describe('conversation situation affordance', () => {
     afterEach(() => {
         delete global.fetch;
         __testOnly_resetHistoryUiState();
+        __testOnly_resetWorkflowStatusState();
         __testOnly_resetConversationSituationState();
         __testOnly_setActiveChatSession(null, null);
     });
@@ -2025,6 +2027,257 @@ describe('conversation situation affordance', () => {
         expect(exported.conversation_situation.revision).toBe(4);
         expect(exported.conversation_observation_state.total_count).toBe(5);
         expect(exported.conversation_observations).toHaveLength(1);
+    });
+
+    test('shows one append-only late workflow outcome and preserves it on history reload', async () => {
+        const lateObservation = {
+            schema_version: 'conversation_observation.v1',
+            observation_id: 'late-workflow-observation-1',
+            kind: 'durable_workflow_terminal',
+            observed_at_utc: '2026-07-29T09:11:00Z',
+            request_id: 'request-late-workflow-1',
+            effect_id: 'effect-late-workflow-1',
+            capability_name: 'Represent a person',
+            workflow_id: '#V#person_representation_workflow',
+            instance_id: 'instance-late-workflow-1',
+            terminal_status: 'completed',
+            effect_status: 'succeeded',
+            domain_postcondition_status: 'not_established_by_workflow_terminal'
+        };
+        const payload = situationPayload({
+            history: [
+                {
+                    role: 'assistant',
+                    content: 'The workflow is still running.',
+                    timestamp: '2026-07-29T09:10:00Z',
+                    llm_debug_data: { request_id: 'request-late-workflow-1' }
+                }
+            ],
+            conversation_observations: [lateObservation],
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 1,
+                omitted_count: 0,
+                retention_limit: 12
+            }
+        });
+        __testOnly_setDisplayedHistorySession('session-1');
+        __testOnly_applyConversationSituationPayload(payload, 'session-1');
+        __testOnly_applyConversationSituationPayload(payload, 'session-1');
+
+        let cards = document.querySelectorAll('.chat-late-workflow-outcome');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].textContent).toContain(
+            'Represent a person completed after the original response.'
+        );
+        expect(cards[0].textContent).toContain(
+            'does not by itself prove every requested knowledge change'
+        );
+        __testOnly_setTranscriptTurns([]);
+        const visibleTranscript = __testOnly_getConversationTranscriptTurnsSnapshot();
+        const lateTranscriptTurn = visibleTranscript.find(turn => turn.message.includes(
+            'Represent a person completed after the original response.'
+        ));
+        expect(lateTranscriptTurn).toBeDefined();
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => payload
+            });
+        });
+        expect(await __testOnly_loadChatHistory({ segments: 1 })).toBe(true);
+
+        cards = document.querySelectorAll('.chat-late-workflow-outcome');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].dataset.conversationObservationId).toBe(
+            'late-workflow-observation-1'
+        );
+    });
+
+    test('terminal workflow SSE refreshes the matching conversation once without a prompt', async () => {
+        const latePayload = situationPayload({
+            conversation_observations: [
+                {
+                    observation_id: 'late-workflow-observation-sse',
+                    kind: 'durable_workflow_terminal',
+                    observed_at_utc: '2026-07-29T09:12:00Z',
+                    request_id: 'request-late-workflow-sse',
+                    workflow_id: '#V#person_representation_workflow',
+                    instance_id: 'instance-late-workflow-sse',
+                    terminal_status: 'completed',
+                    effect_status: 'succeeded',
+                    domain_postcondition_status: 'not_established_by_workflow_terminal'
+                }
+            ],
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 1,
+                omitted_count: 0,
+                retention_limit: 12
+            }
+        });
+        __testOnly_setDisplayedHistorySession('session-1');
+        setLlmDebugDataForTurn('history-assistant-late-sse', {
+            request_id: 'request-late-workflow-sse'
+        });
+        let historyReads = 0;
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                historyReads += 1;
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => latePayload
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+        const terminalEvent = {
+            instance_id: 'instance-late-workflow-sse',
+            workflow_id: '#V#person_representation_workflow',
+            status: 'completed',
+            source_event_type: 'conversation_turn',
+            source_event_id: 'request-late-workflow-sse'
+        };
+
+        __testOnly_applyWorkflowStatusUpdate(terminalEvent);
+        __testOnly_applyWorkflowStatusUpdate(terminalEvent);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(historyReads).toBe(1);
+        expect(document.querySelectorAll('.chat-late-workflow-outcome')).toHaveLength(1);
+        expect(document.querySelector('.chat-late-workflow-outcome').textContent).toContain(
+            'completed after the original response'
+        );
+    });
+
+    test.each([
+        ['failed', 'failed after the original response'],
+        ['cancelled', 'was cancelled after the original response']
+    ])('renders a durable %s workflow outcome honestly', (terminalStatus, expectedLead) => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        __testOnly_applyConversationSituationPayload(situationPayload({
+            conversation_observations: [
+                {
+                    observation_id: `late-workflow-observation-${terminalStatus}`,
+                    kind: 'durable_workflow_terminal',
+                    observed_at_utc: '2026-07-29T09:13:00Z',
+                    request_id: `request-late-workflow-${terminalStatus}`,
+                    capability_name: 'Represent a person',
+                    workflow_id: '#V#person_representation_workflow',
+                    instance_id: `instance-late-workflow-${terminalStatus}`,
+                    terminal_status: terminalStatus,
+                    effect_status: terminalStatus,
+                    domain_postcondition_status: 'not_established_by_workflow_terminal'
+                }
+            ],
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 1,
+                omitted_count: 0,
+                retention_limit: 12
+            }
+        }), 'session-1');
+
+        const card = document.querySelector('.chat-late-workflow-outcome');
+        expect(card).not.toBeNull();
+        expect(card.textContent).toContain(expectedLead);
+        expect(card.textContent).toContain(
+            'does not by itself prove every requested knowledge change'
+        );
+    });
+
+    test('a transient terminal observation refresh failure remains retryable', async () => {
+        const latePayload = situationPayload({
+            conversation_observations: [
+                {
+                    observation_id: 'late-workflow-observation-retry',
+                    kind: 'durable_workflow_terminal',
+                    observed_at_utc: '2026-07-29T09:14:00Z',
+                    request_id: 'request-late-workflow-retry',
+                    workflow_id: '#V#person_representation_workflow',
+                    instance_id: 'instance-late-workflow-retry',
+                    terminal_status: 'completed',
+                    effect_status: 'succeeded',
+                    domain_postcondition_status: 'not_established_by_workflow_terminal'
+                }
+            ],
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 1,
+                omitted_count: 0,
+                retention_limit: 12
+            }
+        });
+        __testOnly_setDisplayedHistorySession('session-1');
+        setLlmDebugDataForTurn('history-assistant-late-retry', {
+            request_id: 'request-late-workflow-retry'
+        });
+        let historyReads = 0;
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                historyReads += 1;
+                if (historyReads === 1) {
+                    return Promise.reject(new Error('transient history failure'));
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => latePayload
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+        const terminalEvent = {
+            instance_id: 'instance-late-workflow-retry',
+            workflow_id: '#V#person_representation_workflow',
+            status: 'completed',
+            source_event_type: 'conversation_turn',
+            source_event_id: 'request-late-workflow-retry'
+        };
+
+        __testOnly_applyWorkflowStatusUpdate(terminalEvent);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        __testOnly_applyWorkflowStatusUpdate(terminalEvent);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(historyReads).toBe(2);
+        expect(document.querySelectorAll('.chat-late-workflow-outcome')).toHaveLength(1);
     });
 
     test('a canonical history read replaces the carrier after a reset lowers its revision and total', async () => {

@@ -2,7 +2,7 @@
   "family_id": "concept_search_instance_retrieval_workflow_seed_bundle",
   "managed_by": "concept_search_instance_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "5",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#concept_search_instance_retrieval_workflow": {
       "2": [
@@ -10,6 +10,9 @@
       ],
       "3": [
         "3d008215ae98e89b3743a84795cc144292919e90df3acca5471e1e195cbe595c"
+      ],
+      "4": [
+        "26b0bae36b7cb1ddf8b0b0a53e87c6b93bcb35e8d2ce6677a1b0784cdafbbffb"
       ]
     }
   },
@@ -104,12 +107,6 @@
               ],
               "max_tool_invocations": 6,
               "tool_argument_defaults": {
-                "fetch_concept": {
-                  "include_relations_arg1": true,
-                  "include_text_relations_arg1": true,
-                  "include_relations_any_arg": true,
-                  "limit": 80
-                },
                 "get_text_relations_summary": {
                   "max_relation_ids_per_group": 20
                 },
@@ -117,7 +114,7 @@
                   "argument_index": "any",
                   "relation_kind": "any",
                   "include_text_snippets": true,
-                  "include_concept_preview": true,
+                  "include_concept_preview": false,
                   "limit": 30
                 }
               },

@@ -1838,6 +1838,7 @@ _CONVERSATION_OBSERVATION_STRING_FIELDS = frozenset(
         "instance_id",
         "terminal_status",
         "effect_status",
+        "domain_postcondition_status",
         "outcome_finality",
         "final_state",
         "completed_at",

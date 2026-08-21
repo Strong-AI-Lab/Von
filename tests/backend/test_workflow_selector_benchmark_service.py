@@ -181,7 +181,7 @@ def test_load_selector_routing_benchmark_cases_supports_entity_representation_ca
     assert result["case_set"] == "entity_representation_generalisation"
 
     cases = result["cases"]
-    assert len(cases) == 10
+    assert len(cases) == 11
     assert any(
         case.case_id == "entity_people_follow_up_reasoning_override"
         for case in cases
@@ -194,6 +194,15 @@ def test_load_selector_routing_benchmark_cases_supports_entity_representation_ca
         case.case_id == "entity_event_write_with_capture_verb"
         for case in cases
     )
+    known_entity_case = next(
+        case
+        for case in cases
+        if case.case_id == "entity_known_person_idempotence_verification"
+    )
+    assert known_entity_case.allowed_workflow_ids == (
+        "#V#concept_search_instance_retrieval_workflow",
+        "#V#tool_calling_workflow",
+    )
 
 
 def test_build_selector_routing_benchmark_report_for_entity_representation_case_set() -> None:
@@ -203,20 +212,20 @@ def test_build_selector_routing_benchmark_report_for_entity_representation_case_
 
     assert result["success"] is True
     metrics = result["metrics"]
-    assert metrics["scanned_count"] == 10
-    assert metrics["matched_case_count"] == 10
+    assert metrics["scanned_count"] == 11
+    assert metrics["matched_case_count"] == 11
     assert metrics["selector_accuracy_pct"] == 100.0
     assert metrics["baseline_accuracy_pct"] == 0.0
     assert metrics["accuracy_improvement_pct"] == 100.0
     assert metrics["abstain_case_count"] == 0
     assert metrics["abstain_matched_count"] == 0
     assert metrics["misrouting_count"] == 0
-    assert metrics["outcome_label_counts"]["successful_completion"] == 10
+    assert metrics["outcome_label_counts"]["successful_completion"] == 11
     assert metrics["outcome_label_counts"]["abstain_escalate_no_safe_route"] == 0
     assert metrics["outcome_label_counts"]["tool_or_workflow_misrouting"] == 0
 
     replay_cases = result["replay_cases"]
-    assert len(replay_cases) == 10
+    assert len(replay_cases) == 11
     follow_up_case = next(
         case
         for case in replay_cases
@@ -224,6 +233,19 @@ def test_build_selector_routing_benchmark_report_for_entity_representation_case_
     )
     assert follow_up_case["selected_workflow_id"] == "#V#entity_representation_workflow"
     assert follow_up_case["overall_outcome"] == "successful_completion"
+    known_entity_case = next(
+        case
+        for case in replay_cases
+        if case["case_id"] == "entity_known_person_idempotence_verification"
+    )
+    assert known_entity_case["selected_workflow_id"] in (
+        known_entity_case["expected_workflow_ids"]
+    )
+    assert (
+        "#V#entity_representation_workflow"
+        not in known_entity_case["expected_workflow_ids"]
+    )
+    assert known_entity_case["overall_outcome"] == "successful_completion"
 
     signal_by_id = {
         signal["signal_id"]: signal for signal in result["benchmark_signals"]

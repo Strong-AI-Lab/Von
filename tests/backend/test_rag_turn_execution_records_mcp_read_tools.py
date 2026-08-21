@@ -3397,11 +3397,11 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 10
+    assert metrics.get("scanned_count") == 11
     assert metrics.get("matched_case_count") == metrics.get("scanned_count")
     assert metrics.get("selector_accuracy_pct") == 100.0
     assert metrics.get("baseline_accuracy_pct") == 0.0
-    assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 10
+    assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 11
     assert (
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
         in {None, 0}
@@ -3432,6 +3432,7 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
         "entity_event_write_with_capture_verb",
         "entity_place_representation_success",
         "entity_ambiguity_low_imposition_route",
+        "entity_known_person_idempotence_verification",
     }
     follow_up_case = next(
         case
@@ -3440,6 +3441,19 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
         and case.get("case_id") == "entity_people_follow_up_reasoning_override"
     )
     assert follow_up_case["selected_workflow_id"] == "#V#entity_representation_workflow"
+    known_entity_case = next(
+        case
+        for case in replay_cases
+        if isinstance(case, dict)
+        and case.get("case_id") == "entity_known_person_idempotence_verification"
+    )
+    assert known_entity_case["selected_workflow_id"] in (
+        known_entity_case["expected_workflow_ids"]
+    )
+    assert (
+        "#V#entity_representation_workflow"
+        not in known_entity_case["expected_workflow_ids"]
+    )
 
     signal_by_id = {
         signal.get("signal_id"): signal

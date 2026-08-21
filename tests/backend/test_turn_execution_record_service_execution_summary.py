@@ -235,6 +235,191 @@ def test_distinct_same_tool_effect_failure_is_not_masked_by_success() -> None:
     assert record["completion_gate"]["safe_to_claim_completion"] is False
 
 
+def test_exact_recovery_metadata_supersedes_unchanged_failed_effect() -> None:
+    record = _build_effect_projection_record(
+        "req-exact-recovery",
+        [
+            {
+                "tool": "add_relationship",
+                "status": "error",
+                "effective_arguments": {
+                    "source_id": "#V#person",
+                    "predicate": "#V#has_affiliation",
+                    "target_id": "#V#university",
+                },
+                "effect_id": "effect_attempt_failed",
+                "effect_status": "failed",
+                "changed": False,
+                "mutation_outcome": "not_started",
+                "recovery_status": "succeeded",
+                "recovered_by_effect_id": "effect_attempt_succeeded",
+                "error_code": "complex_create_requires_typed_effects",
+            },
+            {
+                "tool": "add_relationship",
+                "status": "ok",
+                "effective_arguments": {
+                    "source_id": "#V#person",
+                    "predicate": "#V#has_affiliation",
+                    "target_id": "#V#university",
+                },
+                "effect_id": "effect_attempt_succeeded",
+                "effect_status": "succeeded",
+                "changed": True,
+                "mutation_outcome": "succeeded",
+            },
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#person",
+                            "predicate_concept_id": "#V#has_affiliation",
+                            "target_concept_id": "#V#university",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    failed_effect = next(
+        effect
+        for effect in record["required_effects"]
+        if effect["effect_id"] == "effect_attempt_failed"
+    )
+    successful_effect = next(
+        effect
+        for effect in record["required_effects"]
+        if effect["effect_id"] == "effect_attempt_succeeded"
+    )
+    assert failed_effect["status"] == "satisfied"
+    assert failed_effect["failure_codes"] == []
+    assert failed_effect["recovery_status"] == "succeeded"
+    assert failed_effect["recovered_by_effect_id"] == "effect_attempt_succeeded"
+    assert failed_effect["postcondition_strategy"] == "execution_observed"
+    assert successful_effect["status"] == "satisfied"
+    checks = {
+        check["effect_id"]: check
+        for check in record["postcondition_checks"]
+        if check["effect_id"] in {"effect_attempt_failed", "effect_attempt_succeeded"}
+    }
+    assert checks["effect_attempt_failed"]["status"] == "verified"
+    assert checks["effect_attempt_failed"]["verification_mode"] == "execution_observed"
+    assert checks["effect_attempt_succeeded"]["status"] == "verified"
+    assert (
+        checks["effect_attempt_succeeded"]["verification_mode"]
+        == "state_requery_correlated"
+    )
+    assert record["completion_gate"]["decision"] == "completed"
+    assert record["completion_gate"]["safe_to_claim_completion"] is True
+    assert record["execution"]["tool_invocations"][0]["recovery_status"] == (
+        "succeeded"
+    )
+    assert (
+        record["execution"]["tool_invocations"][0]["recovered_by_effect_id"]
+        == "effect_attempt_succeeded"
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "recovery_status",
+        "recovered_by_effect_id",
+        "recovery_transport_succeeded",
+        "recovery_effect_status",
+    ),
+    [
+        ("succeeded", "effect_missing", True, "succeeded"),
+        ("succeeded", "effect_recovery", False, "failed"),
+        ("failed", "effect_recovery", True, "succeeded"),
+        ("succeeded", "effect_recovery", True, "partial"),
+    ],
+)
+def test_wrong_or_unlinked_recovery_metadata_remains_blocking(
+    recovery_status: str,
+    recovered_by_effect_id: str,
+    recovery_transport_succeeded: bool,
+    recovery_effect_status: str,
+) -> None:
+    recovery_invocation = {
+        "tool": "add_relationship",
+        "status": "ok" if recovery_transport_succeeded else "error",
+        "effective_arguments": {
+            "source_id": "#V#person",
+            "predicate": "#V#has_affiliation",
+            "target_id": "#V#university",
+        },
+        "effect_id": "effect_recovery",
+        "effect_status": recovery_effect_status,
+        "changed": recovery_transport_succeeded,
+        "mutation_outcome": recovery_effect_status,
+    }
+    invocations = [
+        {
+            "tool": "add_relationship",
+            "status": "error",
+            "effective_arguments": {
+                "source_id": "#V#person",
+                "predicate": "#V#has_affiliation",
+                "target_id": "#V#university",
+            },
+            "effect_id": "effect_failed",
+            "effect_status": "failed",
+            "changed": False,
+            "mutation_outcome": "not_started",
+            "recovery_status": recovery_status,
+            "recovered_by_effect_id": recovered_by_effect_id,
+        },
+        recovery_invocation,
+    ]
+    if recovery_effect_status == "succeeded":
+        invocations.append(
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#person",
+                            "predicate_concept_id": "#V#has_affiliation",
+                            "target_concept_id": "#V#university",
+                        }
+                    ],
+                },
+            }
+        )
+
+    record = _build_effect_projection_record(
+        "req-invalid-recovery-"
+        f"{recovery_status}-{recovered_by_effect_id}-"
+        f"{recovery_transport_succeeded}-{recovery_effect_status}",
+        invocations,
+    )
+
+    failed_effect = next(
+        effect
+        for effect in record["required_effects"]
+        if effect["effect_id"] == "effect_failed"
+    )
+    assert failed_effect["status"] == "not_executed"
+    assert failed_effect["recovery_status"] == recovery_status
+    assert failed_effect["recovered_by_effect_id"] == recovered_by_effect_id
+    assert failed_effect["failure_codes"]
+    assert (
+        next(
+            check
+            for check in record["postcondition_checks"]
+            if check["effect_id"] == "effect_failed"
+        )["status"]
+        == "not_verified"
+    )
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+
+
 @pytest.mark.parametrize(
     ("invocation_status", "effect_status", "mutation_outcome"),
     [
@@ -1262,6 +1447,9 @@ def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
         "instance_id": "instance-durable-late",
         "terminal_status": "completed",
         "effect_status": "succeeded",
+        "domain_postcondition_status": (
+            "not_established_by_workflow_terminal"
+        ),
         "changed": True,
         "outcome_finality": "canonical_durable_terminal",
         "final_state": "#V#completed_state",

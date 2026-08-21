@@ -2756,6 +2756,126 @@ def _upsert_text_relation(**kwargs):
         )
 
 
+_SCOPED_ASSERTION_EXACT_PREDICATE_ERROR = (
+    "predicate must be an exact #V# concept ID"
+)
+_SCOPED_ASSERTION_BARE_TEXT_PREDICATE_ERROR_CODE = (
+    "unsupported_text_relation_predicate"
+)
+_SCOPED_ASSERTION_CODE_PREDICATE_RE = re.compile(
+    r"^[A-Za-z0-9_][A-Za-z0-9._-]*$"
+)
+
+
+def _is_scoped_assertion_predicate_syntax_error(error: ValueError) -> bool:
+    from ...services.text_relation_predicate_validation_service import (
+        TextRelationPredicateResolutionError,
+    )
+
+    return (
+        str(error) == _SCOPED_ASSERTION_EXACT_PREDICATE_ERROR
+        or (
+            isinstance(error, TextRelationPredicateResolutionError)
+            and error.error_code
+            == _SCOPED_ASSERTION_BARE_TEXT_PREDICATE_ERROR_CODE
+        )
+    )
+
+
+def _exact_scoped_assertion_predicate_recovery(
+    *,
+    actor_scope: Any,
+    arguments: Mapping[str, Any],
+    error: ValueError,
+) -> dict[str, Any] | None:
+    """Return one executable syntax-only predicate repair, or no affordance."""
+
+    concept_predicate_syntax_error = (
+        str(error) == _SCOPED_ASSERTION_EXACT_PREDICATE_ERROR
+    )
+    text_predicate_syntax_error = (
+        _is_scoped_assertion_predicate_syntax_error(error)
+        and not concept_predicate_syntax_error
+    )
+    if not concept_predicate_syntax_error and not text_predicate_syntax_error:
+        return None
+    raw_predicate = str(arguments.get("predicate") or "").strip()
+    if (
+        not raw_predicate
+        or raw_predicate.startswith("#V#")
+        or _SCOPED_ASSERTION_CODE_PREDICATE_RE.fullmatch(raw_predicate) is None
+    ):
+        return None
+
+    target_text = arguments.get("target_text")
+    target_concept_id = str(arguments.get("target_concept_id") or "").strip()
+    has_text = isinstance(target_text, str) and bool(target_text.strip())
+    has_concept = bool(target_concept_id)
+    if has_text == has_concept:
+        return None
+    if concept_predicate_syntax_error != has_concept:
+        return None
+    if text_predicate_syntax_error != has_text:
+        return None
+    if has_concept and not target_concept_id.startswith("#V#"):
+        return None
+    evidence = arguments.get("evidence")
+    if evidence is not None and not isinstance(evidence, Mapping):
+        return None
+
+    from ...security.access_control import can_access_concept
+    from ...services.relationship_write_service import (
+        resolve_existing_predicate_value_kind,
+    )
+    from ...utils.concept_id_utils import canonicalise_vontology_concept_id
+
+    predicate_concept_id = canonicalise_vontology_concept_id(raw_predicate)
+    subject_concept_id = str(
+        arguments.get("subject_concept_id") or ""
+    ).strip()
+    if not predicate_concept_id or not subject_concept_id:
+        return None
+
+    expected_value_kind = "text" if has_text else "concept"
+    with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+        if not can_access_concept(subject_concept_id):
+            return None
+        if not can_access_concept(predicate_concept_id):
+            return None
+        if has_concept and not can_access_concept(target_concept_id):
+            return None
+        if (
+            resolve_existing_predicate_value_kind(predicate_concept_id)
+            != expected_value_kind
+        ):
+            return None
+
+    retry_arguments = {
+        field_name: arguments[field_name]
+        for field_name in (
+            "subject_concept_id",
+            "target_text",
+            "target_concept_id",
+            "language",
+            "scope_mode",
+            "evidence",
+        )
+        if field_name in arguments and arguments[field_name] is not None
+    }
+    retry_arguments["predicate"] = predicate_concept_id
+    return {
+        "action_type": "retry_exact_scoped_assertion_with_canonical_predicate_id",
+        "tool": "upsert_scoped_assertion",
+        "arguments": retry_arguments,
+        "resolution": {
+            "kind": "canonical_code_identifier",
+            "input_predicate": raw_predicate,
+            "predicate_concept_id": predicate_concept_id,
+            "value_kind": expected_value_kind,
+        },
+    }
+
+
 def _upsert_scoped_assertion(**kwargs):
     from ...services.rag_text_relation_change_hook_service import (
         maybe_sync_concept_text_relations_to_rag,
@@ -2852,11 +2972,44 @@ def _upsert_scoped_assertion(**kwargs):
             details={"subject_concept_id": subject_concept_id},
         )
     except ValueError as exc:
-        return make_error_response(
+        predicate_rejected = _is_scoped_assertion_predicate_syntax_error(exc)
+        try:
+            recovery = _exact_scoped_assertion_predicate_recovery(
+                actor_scope=actor_scope,
+                arguments=service_kwargs,
+                error=exc,
+            )
+        except Exception:
+            # Recovery discovery is a read-only convenience after a known
+            # pre-dispatch validation failure. A failed feasibility probe must
+            # not erase or weaken that authoritative no-change receipt.
+            logger.debug(
+                "Scoped assertion predicate recovery probe failed",
+                exc_info=True,
+            )
+            recovery = None
+        details = {
+            "subject_concept_id": subject_concept_id,
+        }
+        if predicate_rejected:
+            details["rejected_fields"] = ["predicate"]
+        if recovery is not None:
+            details["predicate_resolution"] = dict(recovery["resolution"])
+        payload = make_error_response(
             "invalid_scoped_assertion",
             str(exc),
-            details={"subject_concept_id": subject_concept_id},
+            details=details,
         )
+        payload.update(
+            {
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+            }
+        )
+        if recovery is not None:
+            payload["recovery_affordances"] = [recovery]
+        return payload
     except Exception as exc:
         return _indeterminate_effect_error(
             "The scoped-assertion operation raised unexpectedly.",
@@ -10208,8 +10361,13 @@ def _upsert_scoped_assertion_input_schema() -> Schema:
         description=(
             "upsert_scoped_assertion input: subject_concept_id and predicate, "
             "exactly one of target_text or target_concept_id, optional language, "
-            "scope_mode ('user' default or 'organisation'), and evidence. Actor, "
-            "organisation, namespace, turn, and non-publication are server-bound."
+            "scope_mode ('user' default or 'organisation'), and evidence. For a "
+            "concept target, and for any custom text predicate, predicate must be "
+            "one exact existing #V# predicate concept ID. A missing #V# prefix "
+            "fails without mutation and exposes one exact retry only when the "
+            "corresponding canonical code ID is visible, typed, and value-kind "
+            "compatible. Actor, organisation, "
+            "namespace, turn, and non-publication are server-bound."
         ),
     )
 
@@ -10304,6 +10462,7 @@ def _upsert_scoped_assertion_output_schema() -> Schema:
         },
         optional={
             "effect_status": (str, type(None)),
+            "mutation_outcome": (str, type(None)),
             "changed": (bool, type(None)),
             "assertion_id": (str, type(None)),
             "assertion": (dict, type(None)),
@@ -10311,13 +10470,18 @@ def _upsert_scoped_assertion_output_schema() -> Schema:
             "canonical_publication": (bool, type(None)),
             "storage_surface": (str, type(None)),
             "derived_maintenance": (dict, type(None)),
+            "recovery_affordances": (list, type(None)),
             "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
         },
         allow_unknown=True,
         description=(
             "Scoped assertion write receipt with durable read-back. "
             "canonical_publication is always false. derived_maintenance reports "
-            "best-effort index refresh scheduling without changing effect success."
+            "best-effort index refresh scheduling without changing effect success. "
+            "A syntax-only predicate repair is advertised only when one exact, "
+            "visible, correctly typed retry is executable."
         ),
     )
 
@@ -37802,7 +37966,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "canonical Vontology record. Use this instead of upsert_text_relation "
                 "or add_relationship when the actor can see but does not own the "
                 "canonical subject. Provide exactly one of target_text or "
-                "target_concept_id; choose scope_mode='organisation' only for "
+                "target_concept_id. A concept-valued assertion, or a custom text "
+                "predicate, requires one exact existing #V# predicate concept ID; "
+                "a syntax-only missing-prefix failure advertises an exact retry "
+                "only after visibility, typing, and value-kind checks. Choose "
+                "scope_mode='organisation' only for "
                 "knowledge intended to be shared with the authenticated organisation."
             ),
         ),

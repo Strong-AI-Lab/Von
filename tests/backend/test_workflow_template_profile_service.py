@@ -145,6 +145,9 @@ def test_entity_template_seed_pins_origin_main_unversioned_authority_digests() -
             "4": [
                 "bebaf90d6603fa63acdd1dcb363f8cb932c61d5ed45270064a7401c1f1cef23b"
             ],
+            "5": [
+                "33321addf574eeed20ea11bb0aa879d31cbfdf821ff1b12bbc2e46284b3d41a7"
+            ],
         },
         WORKFLOW_CREATION_COMPANY_TEMPLATE_ID: {
             "unversioned": [
@@ -152,6 +155,9 @@ def test_entity_template_seed_pins_origin_main_unversioned_authority_digests() -
             ],
             "4": [
                 "1b567d6c833201a3e48953e6c8df416913c118dcc31b4b446f1a2f316658aeef"
+            ],
+            "5": [
+                "39336dd71db1c92a53506d7a9ae8b863109cc39d2aaced06a9fdbaa80d50c7a9"
             ],
         },
         WORKFLOW_CREATION_EVENT_TEMPLATE_ID: {
@@ -161,6 +167,9 @@ def test_entity_template_seed_pins_origin_main_unversioned_authority_digests() -
             "4": [
                 "5c13822c0a2bc0f782dfda7b50966a2173029cf18797af64816479bc43360623"
             ],
+            "5": [
+                "ee854744c22e256a8757061f5d549c0bff1b6ce1fc96e18111d9cffcd4f91a73"
+            ],
         },
         WORKFLOW_CREATION_PLACE_TEMPLATE_ID: {
             "unversioned": [
@@ -168,6 +177,9 @@ def test_entity_template_seed_pins_origin_main_unversioned_authority_digests() -
             ],
             "4": [
                 "7eee095c5dd2d63ed60f5500350fdba48dc3c5fd87c16a1300a7e94ae411140d"
+            ],
+            "5": [
+                "eb5380690cddfbfea3b405c673d36665bbe0017cdcea61542fcdd9dc6828c181"
             ],
         },
     }
@@ -296,7 +308,10 @@ def test_resolve_workflow_spec_template_renders_person_representation_template(
     assert materialise_transitions[0]["to_state"] == "render_existing_ambiguity"
     assert materialise_transitions[1]["condition_spec"] == {"kind": "always"}
     assert materialise_transitions[1]["to_state"] == "read_back_concept"
-    assert steps_by_id["read_back_concept"]["inputs"]["tool_name"] == ("fetch_concept")
+    assert steps_by_id["read_back_concept"]["inputs"] == {
+        "tool_name": "fetch_concept",
+        "concept_id": {"$context_key": "entity_representation_concept_id"},
+    }
     assert steps_by_id["read_back_has_names"]["inputs"] == {
         "tool_name": "get_text_relations",
         "concept_id": {"$context_key": "entity_representation_concept_id"},
@@ -358,6 +373,16 @@ def test_resolve_workflow_spec_template_renders_person_representation_template(
         isinstance(item, dict)
         and item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
         for item in text_relations
+    )
+    discovery_payload = next(
+        json.loads(str(item["text"]))
+        for item in text_relations
+        if isinstance(item, dict)
+        and item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
+    )
+    assert any(
+        "smallest adequate read-only capability plan" in str(note)
+        for note in discovery_payload.get("routing_notes") or []
     )
 
 
@@ -456,6 +481,10 @@ def test_nonperson_templates_preserve_requested_fact_coverage_until_complete(
     assert materialise_transitions[0]["to_state"] == "render_existing_ambiguity"
     assert materialise_transitions[1]["condition_spec"] == {"kind": "always"}
     assert materialise_transitions[1]["to_state"] == "read_back_concept"
+    assert steps_by_id["read_back_concept"]["inputs"] == {
+        "tool_name": "fetch_concept",
+        "concept_id": {"$context_key": "entity_representation_concept_id"},
+    }
 
     finalise_assignments = {
         assignment["key"]: assignment
@@ -592,7 +621,7 @@ def test_entity_templates_migrate_only_exact_known_unversioned_authority(
             limit=5,
         )
         profile = json.loads(str(profile_rows[0]["text"]))
-        assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "5"
+        assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "6"
 
 
 def test_template_migration_accepts_an_exact_registered_numeric_legacy_payload(
@@ -628,7 +657,7 @@ def test_template_migration_accepts_an_exact_registered_numeric_legacy_payload(
         limit=5,
     )[0]
     profile = json.loads(str(profile_row["text"]))
-    assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "5"
+    assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "6"
     receipt = dict(profile_row.get("context") or {}).get(
         service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY
     )

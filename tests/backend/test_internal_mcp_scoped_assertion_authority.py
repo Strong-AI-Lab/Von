@@ -395,6 +395,287 @@ def test_authenticated_actor_is_bound_across_every_scoped_assertion_path(
     assert calls["relations"][-1]["context_view"] == "actor_effective"
 
 
+def test_invalid_bare_predicate_exposes_one_exact_executable_scoped_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.security.access_control import override_current_actor
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.upsert_scoped_assertion",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ValueError("predicate must be an exact #V# concept ID")
+        ),
+    )
+    accessed_concept_ids: list[str] = []
+
+    def can_access(concept_id: str) -> bool:
+        accessed_concept_ids.append(concept_id)
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.can_access_concept",
+        can_access,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service."
+        "resolve_existing_predicate_value_kind",
+        lambda predicate_id: (
+            "concept" if predicate_id == "#V#affiliated_with" else None
+        ),
+    )
+
+    with override_current_actor(TRUSTED_USER, TRUSTED_ORG):
+        result = _gateway().invoke(
+            "upsert_scoped_assertion",
+            {
+                "subject_concept_id": "#V#subject",
+                "predicate": "affiliated_with",
+                "target_concept_id": "#V#target",
+                "scope_mode": "organisation",
+                "evidence": {"source": "official staff page"},
+            },
+        ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "invalid_scoped_assertion"
+    assert result["effect_status"] == "not_started"
+    assert result["mutation_outcome"] == "not_started"
+    assert result["changed"] is False
+    assert result["error_details"]["rejected_fields"] == ["predicate"]
+    assert accessed_concept_ids == [
+        "#V#subject",
+        "#V#affiliated_with",
+        "#V#target",
+    ]
+    recovery = result["recovery_affordances"]
+    assert recovery == [
+        {
+            "action_type": (
+                "retry_exact_scoped_assertion_with_canonical_predicate_id"
+            ),
+            "tool": "upsert_scoped_assertion",
+            "arguments": {
+                "subject_concept_id": "#V#subject",
+                "predicate": "#V#affiliated_with",
+                "target_concept_id": "#V#target",
+                "scope_mode": "organisation",
+                "evidence": {"source": "official staff page"},
+            },
+            "resolution": {
+                "kind": "canonical_code_identifier",
+                "input_predicate": "affiliated_with",
+                "predicate_concept_id": "#V#affiliated_with",
+                "value_kind": "concept",
+            },
+        }
+    ]
+    retry_arguments = recovery[0]["arguments"]
+    assert "acting_user_concept_id" not in retry_arguments
+    assert "organisation_concept_id" not in retry_arguments
+    assert "namespace" not in retry_arguments
+    assert "canonical_publication" not in retry_arguments
+
+
+def test_invalid_bare_text_predicate_exposes_one_exact_executable_scoped_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services.text_relation_predicate_validation_service import (
+        TextRelationPredicateResolutionError,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.upsert_scoped_assertion",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            TextRelationPredicateResolutionError(
+                "unsupported_text_relation_predicate",
+                "Unsupported text-relation predicate 'has_email'.",
+                details={"predicate": "has_email"},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.can_access_concept",
+        lambda _concept_id: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service."
+        "resolve_existing_predicate_value_kind",
+        lambda predicate_id: "text" if predicate_id == "#V#has_email" else None,
+    )
+
+    with override_current_actor(TRUSTED_USER, TRUSTED_ORG):
+        result = _gateway().invoke(
+            "upsert_scoped_assertion",
+            {
+                "subject_concept_id": "#V#subject",
+                "predicate": "has_email",
+                "target_text": "person@example.test",
+                "language": "en-NZ",
+                "scope_mode": "organisation",
+                "evidence": {"source": "official staff page"},
+            },
+        ).payload
+
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+    assert result["error_details"]["rejected_fields"] == ["predicate"]
+    assert result["recovery_affordances"][0]["arguments"] == {
+        "subject_concept_id": "#V#subject",
+        "predicate": "#V#has_email",
+        "target_text": "person@example.test",
+        "language": "en-NZ",
+        "scope_mode": "organisation",
+        "evidence": {"source": "official staff page"},
+    }
+    assert result["recovery_affordances"][0]["resolution"]["value_kind"] == (
+        "text"
+    )
+
+
+def test_predicate_recovery_probe_failure_preserves_not_started_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.security.access_control import override_current_actor
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.upsert_scoped_assertion",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ValueError("predicate must be an exact #V# concept ID")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.can_access_concept",
+        lambda _concept_id: (_ for _ in ()).throw(RuntimeError("read unavailable")),
+    )
+
+    with override_current_actor(TRUSTED_USER, TRUSTED_ORG):
+        result = _gateway().invoke(
+            "upsert_scoped_assertion",
+            {
+                "subject_concept_id": "#V#subject",
+                "predicate": "affiliated_with",
+                "target_concept_id": "#V#target",
+            },
+        ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "invalid_scoped_assertion"
+    assert result["effect_status"] == "not_started"
+    assert result["mutation_outcome"] == "not_started"
+    assert result["changed"] is False
+    assert result["error_details"]["rejected_fields"] == ["predicate"]
+    assert "recovery_affordances" not in result
+
+
+@pytest.mark.parametrize(
+    (
+        "error_message",
+        "predicate",
+        "predicate_visible",
+        "predicate_kind",
+        "argument_overrides",
+    ),
+    [
+        (
+            "scope_mode must be 'user' or 'organisation'",
+            "affiliated_with",
+            True,
+            "concept",
+            {},
+        ),
+        (
+            "predicate must be an exact #V# concept ID",
+            "affiliated with",
+            True,
+            "concept",
+            {},
+        ),
+        (
+            "predicate must be an exact #V# concept ID",
+            "affiliated_with",
+            False,
+            "concept",
+            {},
+        ),
+        (
+            "predicate must be an exact #V# concept ID",
+            "affiliated_with",
+            True,
+            None,
+            {},
+        ),
+        (
+            "predicate must be an exact #V# concept ID",
+            "affiliated_with",
+            True,
+            "text",
+            {},
+        ),
+        (
+            "predicate must be an exact #V# concept ID",
+            "affiliated_with",
+            True,
+            "concept",
+            {"target_concept_id": "target"},
+        ),
+    ],
+    ids=[
+        "different-validation-error",
+        "not-a-code-identifier",
+        "hidden-predicate",
+        "untyped-predicate",
+        "wrong-value-kind",
+        "non-exact-target",
+    ],
+)
+def test_invalid_scoped_assertion_exposes_no_unexecutable_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    error_message: str,
+    predicate: str,
+    predicate_visible: bool,
+    predicate_kind: str | None,
+    argument_overrides: dict[str, Any],
+) -> None:
+    from src.backend.security.access_control import override_current_actor
+
+    monkeypatch.setattr(
+        "src.backend.services.scoped_assertion_service.upsert_scoped_assertion",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError(error_message)),
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.can_access_concept",
+        lambda concept_id: (
+            predicate_visible
+            if concept_id == "#V#affiliated_with"
+            else True
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service."
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate_id: predicate_kind,
+    )
+
+    with override_current_actor(TRUSTED_USER, TRUSTED_ORG):
+        arguments = {
+            "subject_concept_id": "#V#subject",
+            "predicate": predicate,
+            "target_concept_id": "#V#target",
+            "scope_mode": "organisation",
+            **argument_overrides,
+        }
+        result = _gateway().invoke(
+            "upsert_scoped_assertion",
+            arguments,
+        ).payload
+
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+    assert "recovery_affordances" not in result
+    assert "predicate_resolution" not in result["error_details"]
+
+
 def test_scoped_list_forwards_offset_and_reports_bounded_page(
     monkeypatch: pytest.MonkeyPatch,
 ):
