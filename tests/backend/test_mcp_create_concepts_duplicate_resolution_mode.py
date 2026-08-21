@@ -670,6 +670,57 @@ def test_duplicate_resolution_mode_schema_and_handler_reject_unknown_value() -> 
     ]
 
 
+def test_actor_scoped_collision_recovery_fields_are_explicit_in_catalogue() -> None:
+    schema = _concepts_create_input_schema()
+    assert schema.enum_values["collision_resolution_mode"] == [
+        "actor_scoped_referent",
+        None,
+    ]
+    assert "requested_concept_id" in schema.optional
+    assert "does not inspect or confirm whether that ID is occupied" in (
+        schema.description
+    )
+    valid, errors = validate_payload(
+        schema,
+        {
+            "parent_id": _PARENT_ID,
+            "concepts": [
+                {
+                    "concept_id": "#V#scoped_referent_person_0123456789abcdef01234567",
+                    "name": "Person",
+                    "kind": "instance",
+                }
+            ],
+            "collision_resolution_mode": "actor_scoped_referent",
+            "requested_concept_id": "#V#person",
+            "duplicate_resolution_mode": "canonical_id_only",
+            "scope_mode": "user_only_default",
+        },
+    )
+    assert valid is True
+    assert errors == []
+
+    invalid_mode = _create_concepts(
+        parent_id=_PARENT_ID,
+        concepts=[],
+        collision_resolution_mode="invent_alias",
+    )
+    assert invalid_mode["error_code"] == "invalid_parameter"
+    assert invalid_mode["error_details"][
+        "supported_collision_resolution_modes"
+    ] == ["actor_scoped_referent"]
+
+    missing_requested_id = _create_concepts(
+        parent_id=_PARENT_ID,
+        concepts=[],
+        collision_resolution_mode="actor_scoped_referent",
+    )
+    assert missing_requested_id["error_code"] == "invalid_parameter"
+    assert missing_requested_id["error_details"]["missing"] == [
+        "requested_concept_id"
+    ]
+
+
 def test_cancellation_after_duplicate_preflight_prevents_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

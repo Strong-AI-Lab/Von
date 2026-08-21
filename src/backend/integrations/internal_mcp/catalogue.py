@@ -37,6 +37,10 @@ from pathlib import Path
 from typing import Any, List, Mapping, Sequence, cast
 
 from pymongo import DESCENDING
+from src.backend.services.actor_scoped_referent_identity_service import (
+    ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+    ACTOR_SCOPED_REFERENT_RECOVERY_ACTION,
+)
 from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
 from .dynamic_tool_loader import load_dynamic_method_definitions
@@ -1566,6 +1570,45 @@ def _create_concepts_input_placement_error(
                     "Use duplicate_resolution_mode='canonical_id_only' only "
                     "for deterministic stable identities"
                 ),
+            ],
+        )
+    collision_resolution_mode = arguments.get("collision_resolution_mode")
+    if (
+        collision_resolution_mode is not None
+        and collision_resolution_mode != ACTOR_SCOPED_REFERENT_COLLISION_MODE
+    ):
+        return make_error_response(
+            "invalid_parameter",
+            (
+                "Invalid collision_resolution_mode "
+                f"'{collision_resolution_mode}'."
+            ),
+            details={
+                "collision_resolution_mode": collision_resolution_mode,
+                "supported_collision_resolution_modes": [
+                    ACTOR_SCOPED_REFERENT_COLLISION_MODE
+                ],
+            },
+            suggestions=[
+                (
+                    "Use only the exact arguments from a "
+                    f"{ACTOR_SCOPED_REFERENT_RECOVERY_ACTION} affordance"
+                )
+            ],
+        )
+    if collision_resolution_mode == ACTOR_SCOPED_REFERENT_COLLISION_MODE and not (
+        isinstance(arguments.get("requested_concept_id"), str)
+        and str(arguments.get("requested_concept_id")).strip()
+    ):
+        return make_error_response(
+            "invalid_parameter",
+            "Actor-scoped referent recovery requires requested_concept_id.",
+            details={"missing": ["requested_concept_id"]},
+            suggestions=[
+                (
+                    "Execute the complete arguments from the original "
+                    f"{ACTOR_SCOPED_REFERENT_RECOVERY_ACTION} affordance"
+                )
             ],
         )
     return None
@@ -10131,7 +10174,9 @@ def _concepts_create_input_schema() -> Schema:
             "concepts": list,
         },
         optional={
+            "collision_resolution_mode": (str, type(None)),
             "duplicate_resolution_mode": (str, type(None)),
+            "requested_concept_id": (str, type(None)),
             "namespace": (str, type(None)),
             "scope_mode": (str, type(None)),
             "visibility_scope_mode": (str, type(None)),
@@ -10139,6 +10184,10 @@ def _concepts_create_input_schema() -> Schema:
             "organisation_concept_id": (str, type(None)),
         },
         enum_values={
+            "collision_resolution_mode": [
+                ACTOR_SCOPED_REFERENT_COLLISION_MODE,
+                None,
+            ],
             "duplicate_resolution_mode": [
                 _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY,
                 None,
@@ -10154,6 +10203,16 @@ def _concepts_create_input_schema() -> Schema:
             "relationship type. duplicate_resolution_mode='canonical_id_only' "
             "skips semantic name resolution after an exact concept-ID miss; "
             "omitting it preserves the default semantic fallback. This governed "
+            "effect idempotently reuses an exact actor-visible concept only when "
+            "canonical read-back verifies the requested core. When an actor-hidden "
+            "ID collision prevents an instance create, the failure may advertise "
+            f"one executable {ACTOR_SCOPED_REFERENT_RECOVERY_ACTION} action. "
+            "Use that action's complete arguments to opt into "
+            "collision_resolution_mode='actor_scoped_referent'; the server derives "
+            "the actor-private ID from trusted actor context and does not create an "
+            "alias or identity/equivalence assertion. Recovery mode treats "
+            "requested_concept_id only as an identity seed; it does not inspect or "
+            "confirm whether that ID is occupied. This governed "
             "effect does not accept batched concepts, external identity or identity "
             "review fields, attributes, tags, linked concepts, duplicate suffixing, "
             "or multiple parents. Add further classifications or relationships "
@@ -10176,17 +10235,27 @@ def _concepts_create_output_schema() -> Schema:
             "successful": int,
         },
         optional={
+            "actor_scoped_referent": (dict,),
+            "created_concept_ids": (list,),
             "scope_selection": (dict,),
             "success": (bool,),
             "effect_status": (str,),
             "changed": (bool, type(None)),
+            "idempotent_reuse": (bool,),
+            "resolved_concept_ids": (list,),
             "partial_failure_count": (int,),
             "partial_failures": (list,),
             "indeterminate_failure_count": (int,),
             "indeterminate_failures": (list,),
         },
         allow_unknown=True,
-        description="create_concepts output: results (list of creation results), total (int), successful (int)",
+        description=(
+            "create_concepts output: results, total, and successful describe the "
+            "single governed outcome. A compatible actor-visible exact reuse sets "
+            "changed=false, idempotent_reuse=true, and resolved_concept_ids. "
+            "Actor-scoped collision recovery also returns actor_scoped_referent "
+            "metadata that explicitly says no alias or equivalence was asserted."
+        ),
     )
 
 
@@ -37732,8 +37801,16 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "concept specification with name and optional concept_id, kind, "
                 "description, notes, vontology_path, or instance_of_type. kind is "
                 "'instance' for an individual, 'type' for a subtype/default, or "
-                "'predicate' for a relationship type. This governed effect does "
-                "not bundle batches, external identities, identity review, "
+                "'predicate' for a relationship type. This governed effect "
+                "idempotently reuses an exact actor-visible concept when canonical "
+                "read-back verifies the requested core. An actor-hidden instance-ID "
+                "collision can expose one explicit executable actor-private "
+                "referent recovery action; executing its complete arguments creates "
+                "or reuses a server-derived ID without aliasing or asserting "
+                "identity. Recovery mode uses the requested ID only as a seed and "
+                "does not inspect or confirm whether it is occupied. It does not "
+                "bundle batches, external identities, "
+                "identity review, "
                 "attributes, tags, links, duplicate suffixing, or multiple parents. "
                 "Use separate add_relationship effects with exact existing "
                 "predicate IDs for further classifications or relationships, and "
