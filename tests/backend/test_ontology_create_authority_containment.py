@@ -129,10 +129,7 @@ def test_create_intent_fingerprints_exact_scope_and_complete_effect(
 
     with (
         authority.override_current_actor("#V#member", "#V#organisation_a"),
-        pytest.raises(
-            command.OntologyMutationCommandError,
-            match="ancillary or multi-parent effects",
-        ),
+        pytest.raises(command.OntologyMutationCommandError) as exc_info,
     ):
         command.build_ontology_mutation_intent(
             method_name="create_concepts",
@@ -146,6 +143,165 @@ def test_create_intent_fingerprints_exact_scope_and_complete_effect(
                 ],
             },
         )
+
+    assert exc_info.value.reason_code == "complex_create_requires_typed_effects"
+    assert exc_info.value.error_details == {
+        "rejected_fields": ["attributes"],
+        "supported_core_concept_fields": [
+            "concept_id",
+            "name",
+            "kind",
+            "description",
+            "notes",
+            "vontology_path",
+            "instance_of_type",
+        ],
+    }
+
+
+def test_governed_create_shape_rejections_are_exact_and_have_no_fake_recovery(
+    monkeypatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(
+        command,
+        "issue_agent_delegation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("shape rejection must happen before delegation")
+        ),
+    )
+
+    rejected_fields = sorted(
+        {
+            "allow_duplicate_instances",
+            "attributes",
+            "external_identifiers",
+            "identity_candidate_concept_ids",
+            "identity_rejected_candidate_concept_ids",
+            "linked_concepts",
+            "parent_concept_ids",
+            "system_tags",
+            "user_tags",
+        }
+    )
+    with authority.override_current_actor("#V#member", "#V#organisation_a"):
+        complex_result = command.issue_same_turn_method_delegation(
+            method_name="create_concepts",
+            arguments={
+                "concepts": [
+                    {
+                        "name": "Profiled person",
+                        "kind": "instance",
+                        "attributes": {"source": "registry"},
+                        "system_tags": ["system"],
+                        "user_tags": ["user"],
+                        "linked_concepts": [{"concept_id": "#V#linked"}],
+                        "external_identifiers": [
+                            {
+                                "scheme": "profiles.example",
+                                "canonical_value": "person-42",
+                                "role": "identity",
+                            }
+                        ],
+                        "identity_rejected_candidate_concept_ids": ["#V#rejected"],
+                    }
+                ],
+                "identity_candidate_concept_ids": ["#V#candidate"],
+                "parent_concept_ids": ["#V#person", "#V#researcher"],
+                "allow_duplicate_instances": True,
+            },
+            actor_concept_id="#V#member",
+            organisation_concept_id="#V#organisation_a",
+            delegate_concept_id="#V#von_system",
+            audience="adaptive_turn",
+            effect_id="effect-complex-create",
+            turn_id="turn-complex-create",
+        )
+        batch_result = command.issue_same_turn_method_delegation(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": "#V#person",
+                "concepts": [
+                    {"name": "Person one", "kind": "instance"},
+                    {"name": "Person two", "kind": "instance"},
+                ],
+            },
+            actor_concept_id="#V#member",
+            organisation_concept_id="#V#organisation_a",
+            delegate_concept_id="#V#von_system",
+            audience="adaptive_turn",
+            effect_id="effect-batch-create",
+            turn_id="turn-batch-create",
+        )
+
+    assert complex_result["error_code"] == "complex_create_requires_typed_effects"
+    assert complex_result["effect_status"] == "not_started"
+    assert complex_result["changed"] is False
+    assert complex_result["error_details"]["rejected_fields"] == rejected_fields
+    assert all(field in complex_result["error"] for field in rejected_fields)
+    assert "recovery_affordances" not in complex_result
+
+    assert batch_result["error_code"] == "multi_create_requires_individual_effects"
+    assert batch_result["effect_status"] == "not_started"
+    assert batch_result["changed"] is False
+    assert batch_result["error_details"] == {
+        "constraint": "exactly_one_core_concept_per_effect",
+        "received_concept_count": 2,
+    }
+    assert "Submit each concept as its own create_concepts effect" in (
+        batch_result["error"]
+    )
+    assert "recovery_affordances" not in batch_result
+
+
+def test_decorated_create_projects_rejected_fields_without_running_the_handler(
+    monkeypatch,
+) -> None:
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("rejected governed input must not reach the handler")
+        ),
+    )
+
+    result = catalogue._create_concepts(
+        parent_id="#V#person",
+        concepts=[
+            {
+                "name": "Profiled person",
+                "kind": "instance",
+                "external_identifiers": [
+                    {
+                        "scheme": "profiles.example",
+                        "canonical_value": "person-42",
+                        "role": "identity",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert result["error_code"] == "complex_create_requires_typed_effects"
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+    assert result["error_details"]["rejected_fields"] == [
+        "external_identifiers"
+    ]
+    assert "recovery_affordances" not in result
 
 
 def test_dual_user_org_create_is_rejected_and_org_publication_is_explicit(

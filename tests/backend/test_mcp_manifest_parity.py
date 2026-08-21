@@ -125,3 +125,38 @@ def test_predicate_relation_tools_explain_concept_id_anchor_contract() -> None:
     assert "Do not use top-level payload keys named subject or object" in (
         relation_lookup_schema["description"]
     )
+
+
+def test_create_concepts_contract_matches_the_governed_core_boundary() -> None:
+    canonical_payload = {
+        item["name"]: item for item in get_surface_tool_payloads(SURFACE_MANIFEST)
+    }
+
+    create_contract = canonical_payload["create_concepts"]
+    input_schema = create_contract["inputSchema"]
+    published_text = " ".join(
+        (
+            create_contract["description"],
+            input_schema["description"],
+        )
+    )
+
+    published_text_lower = published_text.casefold()
+    assert "exactly one" in published_text_lower
+    assert "core concept" in published_text_lower
+    assert "per effect" in published_text_lower
+    for supported_field in (
+        "concept_id",
+        "name",
+        "kind",
+        "description",
+        "notes",
+        "vontology_path",
+        "instance_of_type",
+    ):
+        assert supported_field in published_text
+
+    assert "one or more concepts" not in published_text_lower
+    assert "accepts an array of" not in published_text_lower
+    assert "supports singleton arrays" not in published_text_lower
+    assert "allow_duplicate_instances" not in input_schema["properties"]

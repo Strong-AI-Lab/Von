@@ -11203,6 +11203,153 @@ def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
     assert result.tool_invocations[1]["changed"] is False
 
 
+def test_predelegation_create_failure_is_suppressed_but_corrected_call_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delegation_calls: list[dict[str, Any]] = []
+    handler_calls: list[dict[str, Any]] = []
+
+    def issue_delegation(**kwargs: Any) -> dict[str, Any]:
+        delegation_calls.append(dict(kwargs))
+        concept = kwargs["arguments"]["concepts"][0]
+        if concept.get("external_identifiers"):
+            return {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "error_code": "complex_create_requires_typed_effects",
+                "error": (
+                    "This governed create path currently supports one exact core "
+                    "concept only. Rejected fields: external_identifiers."
+                ),
+                "error_details": {"rejected_fields": ["external_identifiers"]},
+            }
+        return {"delegation_id": f"delegation-{kwargs['effect_id']}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue_delegation,
+    )
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "create_concepts"
+        handler_calls.append(arguments)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_concept_ids": ["#V#profiled_person"],
+        }
+
+    rejected_arguments = {
+        "parent_id": "#V#person",
+        "concepts": [
+            {
+                "name": "Profiled person",
+                "kind": "instance",
+                "external_identifiers": [
+                    {
+                        "scheme": "profiles.example",
+                        "canonical_value": "person-42",
+                        "role": "identity",
+                    }
+                ],
+            }
+        ],
+    }
+    corrected_arguments = {
+        "parent_id": "#V#person",
+        "concepts": [{"name": "Profiled person", "kind": "instance"}],
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="complex-create-1",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": rejected_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="complex-create-2",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": rejected_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="core-create-corrected",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": corrected_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The corrected core concept was created."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Create this profiled person without repeating failed effects.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="turn-predelegation-create-repair",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(delegation_calls) == 2
+    assert delegation_calls[0]["arguments"]["concepts"] == (
+        rejected_arguments["concepts"]
+    )
+    assert delegation_calls[1]["arguments"]["concepts"] == (
+        corrected_arguments["concepts"]
+    )
+    assert len(handler_calls) == 1
+    assert handler_calls[0]["concepts"] == corrected_arguments["concepts"]
+
+    assert len(result.tool_invocations) == 3
+    first, repeated, corrected = result.tool_invocations
+    assert first["error_code"] == "complex_create_requires_typed_effects"
+    first_receipt = json.loads(first["evidence"]["preview"])
+    assert first_receipt["error_details"] == {
+        "rejected_fields": ["external_identifiers"]
+    }
+    assert "recovery_affordances" not in first_receipt
+    assert repeated["error_code"] == "effect_request_unchanged_after_terminal_failure"
+    repeated_receipt = json.loads(repeated["evidence"]["preview"])
+    assert repeated_receipt["prior_error_code"] == (
+        "complex_create_requires_typed_effects"
+    )
+    assert repeated["effect_status"] == "not_started"
+    assert repeated["changed"] is False
+    assert "recovery_affordances" not in repeated_receipt
+    assert corrected["effect_status"] == "succeeded"
+    assert corrected["changed"] is True
+
+
 @pytest.mark.parametrize(
     ("inspection_target", "concepts"),
     [
