@@ -75,6 +75,7 @@ _WORKFLOW_NON_EFFECT_OUTCOMES = frozenset(
         "blocked",
         "clarification_required",
         "failed",
+        "follow_up_required",
         "not_completed",
     }
 )

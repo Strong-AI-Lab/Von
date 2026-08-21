@@ -1,27 +1,39 @@
 {
   "family_id": "workflow_template_seed_bundle",
   "schema_version": "repo_seed_workflow_template_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "5",
   "source_tag": "JVNAUTOSCI-2577",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "workflow_creation.person_representation": {
       "unversioned": [
         "c05bf1c197105f1b827e6425ec65c9969d56e3167a9cab467b8950b0877cb72e"
+      ],
+      "4": [
+        "bebaf90d6603fa63acdd1dcb363f8cb932c61d5ed45270064a7401c1f1cef23b"
       ]
     },
     "workflow_creation.company_representation": {
       "unversioned": [
         "0d9410537439ef85891992a5a243460ea41e464773dd93d3da11343bcce7be90"
+      ],
+      "4": [
+        "1b567d6c833201a3e48953e6c8df416913c118dcc31b4b446f1a2f316658aeef"
       ]
     },
     "workflow_creation.event_representation": {
       "unversioned": [
         "1e959db513067495d7330da9615cfdc96ebb21313098150f471f715a36c118ae"
+      ],
+      "4": [
+        "5c13822c0a2bc0f782dfda7b50966a2173029cf18797af64816479bc43360623"
       ]
     },
     "workflow_creation.place_representation": {
       "unversioned": [
         "706e021bfd841e3faa7b8214a06492ee8eadc74bea122a71ef31baaee191410c"
+      ],
+      "4": [
+        "7eee095c5dd2d63ed60f5500350fdba48dc3c5fd87c16a1300a7e94ae411140d"
       ]
     }
   },
@@ -432,13 +444,13 @@
         "parent_type_id": "#V#ai_workflow",
         "required_effects": [
           "context:user_affirmation_policy=only_when_vital_info_missing",
-          "context:entity_representation_verified=True",
+          "context:entity_core_representation_verified=True",
           "context:entity_representation_readback_verified=True",
           "context:entity_representation_domain=person"
         ],
         "postcondition_probe": {
           "user_affirmation_policy": "only_when_vital_info_missing",
-          "entity_representation_verified": true,
+          "entity_core_representation_verified": true,
           "entity_representation_readback_verified": true,
           "entity_representation_domain": "person"
         },
@@ -496,7 +508,7 @@
             "llm_policy": {
               "policy_stage": "entity_representation_payload",
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, requested_facts, and response_text.",
               "context_fields": [
                 {
                   "context_key": "request_text",
@@ -548,6 +560,10 @@
                 "context_key": "entity_source_text"
               },
               {
+                "tool_output_field": "validated_json.requested_facts",
+                "context_key": "requested_facts"
+              },
+              {
                 "tool_output_field": "validated_json.response_text",
                 "context_key": "response_text"
               }
@@ -559,6 +575,7 @@
               "entity_description",
               "entity_aliases",
               "entity_source_text",
+              "requested_facts",
               "response_text"
             ],
             "conditional_transitions": [
@@ -628,7 +645,7 @@
                   "value": "resolved"
                 },
                 "reason": "reuse_exact_existing_person",
-                "to_state": "mark_existing_reuse"
+                "to_state": "materialise_entity"
               },
               {
                 "condition_spec": {
@@ -743,6 +760,9 @@
               },
               "entity_source_text": {
                 "$context_key": "entity_source_text"
+              },
+              "requested_facts": {
+                "$context_key": "requested_facts"
               }
             },
             "mutation_authority": {
@@ -754,6 +774,10 @@
               {
                 "tool_output_field": "entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_core_representation_verified",
+                "context_key": "entity_core_representation_verified"
               },
               {
                 "tool_output_field": "entity_representation_verified",
@@ -776,19 +800,72 @@
                 "context_key": "entity_representation_name"
               },
               {
+                "tool_output_field": "entity_representation_requested_facts_complete",
+                "context_key": "entity_representation_requested_facts_complete"
+              },
+              {
+                "tool_output_field": "entity_representation_unresolved_requested_facts",
+                "context_key": "entity_representation_unresolved_requested_facts"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_fact_count",
+                "context_key": "entity_representation_requested_fact_count"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_facts_payload_valid",
+                "context_key": "entity_representation_requested_facts_payload_valid"
+              },
+              {
+                "tool_output_field": "entity_representation_coverage",
+                "context_key": "entity_representation_coverage"
+              },
+              {
+                "tool_output_field": "entity_resolution_status",
+                "context_key": "entity_resolution_status"
+              },
+              {
+                "tool_output_field": "entity_resolution_candidates",
+                "context_key": "entity_resolution_candidates"
+              },
+              {
                 "tool_output_field": "response_text",
                 "context_key": "response_text"
               }
             ],
             "writes_context_keys": [
               "entity_representation_concept_id",
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_domain",
               "entity_representation_materialised",
               "entity_representation_reused_existing",
-              "entity_representation_name"
+              "entity_representation_name",
+              "entity_representation_requested_facts_complete",
+              "entity_representation_unresolved_requested_facts",
+              "entity_representation_requested_fact_count",
+              "entity_representation_requested_facts_payload_valid",
+              "entity_representation_coverage",
+              "entity_resolution_status",
+              "entity_resolution_candidates"
             ],
-            "next_state": "read_back_concept",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_resolution_status",
+                  "value": "ambiguous"
+                },
+                "reason": "materialise_race_found_ambiguity",
+                "to_state": "render_existing_ambiguity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "read_back_selected_person",
+                "to_state": "read_back_concept"
+              }
+            ],
             "on_failure_state": "failed"
           },
           {
@@ -863,8 +940,12 @@
             "inputs": {
               "assignments": [
                 {
-                  "key": "entity_representation_verified",
+                  "key": "entity_core_representation_verified",
                   "value": true
+                },
+                {
+                  "key": "entity_representation_verified",
+                  "value_from_context": "entity_representation_requested_facts_complete"
                 },
                 {
                   "key": "entity_representation_readback_verified",
@@ -881,12 +962,22 @@
               ]
             },
             "writes_context_keys": [
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_readback_verified",
               "entity_representation_domain",
               "requires_user_affirmation"
             ],
             "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_representation_verified",
+                  "value": false
+                },
+                "reason": "render_core_only_person_readback",
+                "to_state": "render_core_only_response"
+              },
               {
                 "condition_spec": {
                   "kind": "context_value_equals",
@@ -904,6 +995,59 @@
                 "to_state": "render_create_response"
               }
             ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_core_only_response",
+            "action_id": "workflow_control.context_template",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "response_text",
+                  "template": "Verified the Person core for '{{name}}' as {{concept_id}} by read-back, but the richer requested representation is not complete. Unresolved requested facts: {{unresolved_facts}}.",
+                  "variables": {
+                    "name": {
+                      "value_from_context": "entity_name"
+                    },
+                    "concept_id": {
+                      "value_from_context": "entity_representation_readback_concept_id",
+                      "transform": "concept_id"
+                    },
+                    "unresolved_facts": {
+                      "value_from_context": "entity_representation_unresolved_requested_facts",
+                      "transform": "json",
+                      "default": []
+                    }
+                  }
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "mark_core_only_follow_up",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_core_only_follow_up",
+            "action_id": "workflow_control.context_set",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "follow_up_required",
+                  "value": true
+                },
+                {
+                  "key": "semantic_outcome",
+                  "value": "follow_up_required"
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "follow_up_required",
+              "semantic_outcome"
+            ],
+            "next_state": "completed",
             "on_failure_state": "failed"
           },
           {
@@ -1031,13 +1175,13 @@
         "parent_type_id": "#V#ai_workflow",
         "required_effects": [
           "context:user_affirmation_policy=only_when_vital_info_missing",
-          "context:entity_representation_verified=True",
+          "context:entity_core_representation_verified=True",
           "context:entity_representation_readback_verified=True",
           "context:entity_representation_domain=company"
         ],
         "postcondition_probe": {
           "user_affirmation_policy": "only_when_vital_info_missing",
-          "entity_representation_verified": true,
+          "entity_core_representation_verified": true,
           "entity_representation_readback_verified": true,
           "entity_representation_domain": "company"
         },
@@ -1095,7 +1239,7 @@
             "llm_policy": {
               "policy_stage": "entity_representation_payload",
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, requested_facts, and response_text.",
               "context_fields": [
                 {
                   "context_key": "request_text",
@@ -1147,6 +1291,10 @@
                 "context_key": "entity_source_text"
               },
               {
+                "tool_output_field": "validated_json.requested_facts",
+                "context_key": "requested_facts"
+              },
+              {
                 "tool_output_field": "validated_json.response_text",
                 "context_key": "response_text"
               }
@@ -1158,6 +1306,7 @@
               "entity_description",
               "entity_aliases",
               "entity_source_text",
+              "requested_facts",
               "response_text"
             ],
             "conditional_transitions": [
@@ -1227,7 +1376,7 @@
                   "value": "resolved"
                 },
                 "reason": "reuse_exact_existing_company",
-                "to_state": "mark_existing_reuse"
+                "to_state": "materialise_entity"
               },
               {
                 "condition_spec": {
@@ -1342,6 +1491,9 @@
               },
               "entity_source_text": {
                 "$context_key": "entity_source_text"
+              },
+              "requested_facts": {
+                "$context_key": "requested_facts"
               }
             },
             "mutation_authority": {
@@ -1353,6 +1505,10 @@
               {
                 "tool_output_field": "entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_core_representation_verified",
+                "context_key": "entity_core_representation_verified"
               },
               {
                 "tool_output_field": "entity_representation_verified",
@@ -1375,19 +1531,72 @@
                 "context_key": "entity_representation_name"
               },
               {
+                "tool_output_field": "entity_representation_requested_facts_complete",
+                "context_key": "entity_representation_requested_facts_complete"
+              },
+              {
+                "tool_output_field": "entity_representation_unresolved_requested_facts",
+                "context_key": "entity_representation_unresolved_requested_facts"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_fact_count",
+                "context_key": "entity_representation_requested_fact_count"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_facts_payload_valid",
+                "context_key": "entity_representation_requested_facts_payload_valid"
+              },
+              {
+                "tool_output_field": "entity_representation_coverage",
+                "context_key": "entity_representation_coverage"
+              },
+              {
+                "tool_output_field": "entity_resolution_status",
+                "context_key": "entity_resolution_status"
+              },
+              {
+                "tool_output_field": "entity_resolution_candidates",
+                "context_key": "entity_resolution_candidates"
+              },
+              {
                 "tool_output_field": "response_text",
                 "context_key": "response_text"
               }
             ],
             "writes_context_keys": [
               "entity_representation_concept_id",
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_domain",
               "entity_representation_materialised",
               "entity_representation_reused_existing",
-              "entity_representation_name"
+              "entity_representation_name",
+              "entity_representation_requested_facts_complete",
+              "entity_representation_unresolved_requested_facts",
+              "entity_representation_requested_fact_count",
+              "entity_representation_requested_facts_payload_valid",
+              "entity_representation_coverage",
+              "entity_resolution_status",
+              "entity_resolution_candidates"
             ],
-            "next_state": "read_back_concept",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_resolution_status",
+                  "value": "ambiguous"
+                },
+                "reason": "materialise_race_found_ambiguity",
+                "to_state": "render_existing_ambiguity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "read_back_selected_company",
+                "to_state": "read_back_concept"
+              }
+            ],
             "on_failure_state": "failed"
           },
           {
@@ -1462,8 +1671,12 @@
             "inputs": {
               "assignments": [
                 {
-                  "key": "entity_representation_verified",
+                  "key": "entity_core_representation_verified",
                   "value": true
+                },
+                {
+                  "key": "entity_representation_verified",
+                  "value_from_context": "entity_representation_requested_facts_complete"
                 },
                 {
                   "key": "entity_representation_readback_verified",
@@ -1480,12 +1693,22 @@
               ]
             },
             "writes_context_keys": [
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_readback_verified",
               "entity_representation_domain",
               "requires_user_affirmation"
             ],
             "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_representation_verified",
+                  "value": false
+                },
+                "reason": "render_core_only_company_readback",
+                "to_state": "render_core_only_response"
+              },
               {
                 "condition_spec": {
                   "kind": "context_value_equals",
@@ -1503,6 +1726,59 @@
                 "to_state": "render_create_response"
               }
             ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_core_only_response",
+            "action_id": "workflow_control.context_template",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "response_text",
+                  "template": "Verified the Company core for '{{name}}' as {{concept_id}} by read-back, but the richer requested representation is not complete. Unresolved requested facts: {{unresolved_facts}}.",
+                  "variables": {
+                    "name": {
+                      "value_from_context": "entity_name"
+                    },
+                    "concept_id": {
+                      "value_from_context": "entity_representation_readback_concept_id",
+                      "transform": "concept_id"
+                    },
+                    "unresolved_facts": {
+                      "value_from_context": "entity_representation_unresolved_requested_facts",
+                      "transform": "json",
+                      "default": []
+                    }
+                  }
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "mark_core_only_follow_up",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_core_only_follow_up",
+            "action_id": "workflow_control.context_set",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "follow_up_required",
+                  "value": true
+                },
+                {
+                  "key": "semantic_outcome",
+                  "value": "follow_up_required"
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "follow_up_required",
+              "semantic_outcome"
+            ],
+            "next_state": "completed",
             "on_failure_state": "failed"
           },
           {
@@ -1631,13 +1907,13 @@
         "parent_type_id": "#V#ai_workflow",
         "required_effects": [
           "context:user_affirmation_policy=only_when_vital_info_missing",
-          "context:entity_representation_verified=True",
+          "context:entity_core_representation_verified=True",
           "context:entity_representation_readback_verified=True",
           "context:entity_representation_domain=event"
         ],
         "postcondition_probe": {
           "user_affirmation_policy": "only_when_vital_info_missing",
-          "entity_representation_verified": true,
+          "entity_core_representation_verified": true,
           "entity_representation_readback_verified": true,
           "entity_representation_domain": "event"
         },
@@ -1695,7 +1971,7 @@
             "llm_policy": {
               "policy_stage": "entity_representation_payload",
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, requested_facts, and response_text.",
               "context_fields": [
                 {
                   "context_key": "request_text",
@@ -1747,6 +2023,10 @@
                 "context_key": "entity_source_text"
               },
               {
+                "tool_output_field": "validated_json.requested_facts",
+                "context_key": "requested_facts"
+              },
+              {
                 "tool_output_field": "validated_json.response_text",
                 "context_key": "response_text"
               }
@@ -1758,6 +2038,7 @@
               "entity_description",
               "entity_aliases",
               "entity_source_text",
+              "requested_facts",
               "response_text"
             ],
             "conditional_transitions": [
@@ -1827,7 +2108,7 @@
                   "value": "resolved"
                 },
                 "reason": "reuse_exact_existing_event",
-                "to_state": "mark_existing_reuse"
+                "to_state": "materialise_entity"
               },
               {
                 "condition_spec": {
@@ -1942,6 +2223,9 @@
               },
               "entity_source_text": {
                 "$context_key": "entity_source_text"
+              },
+              "requested_facts": {
+                "$context_key": "requested_facts"
               }
             },
             "mutation_authority": {
@@ -1953,6 +2237,10 @@
               {
                 "tool_output_field": "entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_core_representation_verified",
+                "context_key": "entity_core_representation_verified"
               },
               {
                 "tool_output_field": "entity_representation_verified",
@@ -1975,19 +2263,72 @@
                 "context_key": "entity_representation_name"
               },
               {
+                "tool_output_field": "entity_representation_requested_facts_complete",
+                "context_key": "entity_representation_requested_facts_complete"
+              },
+              {
+                "tool_output_field": "entity_representation_unresolved_requested_facts",
+                "context_key": "entity_representation_unresolved_requested_facts"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_fact_count",
+                "context_key": "entity_representation_requested_fact_count"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_facts_payload_valid",
+                "context_key": "entity_representation_requested_facts_payload_valid"
+              },
+              {
+                "tool_output_field": "entity_representation_coverage",
+                "context_key": "entity_representation_coverage"
+              },
+              {
+                "tool_output_field": "entity_resolution_status",
+                "context_key": "entity_resolution_status"
+              },
+              {
+                "tool_output_field": "entity_resolution_candidates",
+                "context_key": "entity_resolution_candidates"
+              },
+              {
                 "tool_output_field": "response_text",
                 "context_key": "response_text"
               }
             ],
             "writes_context_keys": [
               "entity_representation_concept_id",
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_domain",
               "entity_representation_materialised",
               "entity_representation_reused_existing",
-              "entity_representation_name"
+              "entity_representation_name",
+              "entity_representation_requested_facts_complete",
+              "entity_representation_unresolved_requested_facts",
+              "entity_representation_requested_fact_count",
+              "entity_representation_requested_facts_payload_valid",
+              "entity_representation_coverage",
+              "entity_resolution_status",
+              "entity_resolution_candidates"
             ],
-            "next_state": "read_back_concept",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_resolution_status",
+                  "value": "ambiguous"
+                },
+                "reason": "materialise_race_found_ambiguity",
+                "to_state": "render_existing_ambiguity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "read_back_selected_event",
+                "to_state": "read_back_concept"
+              }
+            ],
             "on_failure_state": "failed"
           },
           {
@@ -2062,8 +2403,12 @@
             "inputs": {
               "assignments": [
                 {
-                  "key": "entity_representation_verified",
+                  "key": "entity_core_representation_verified",
                   "value": true
+                },
+                {
+                  "key": "entity_representation_verified",
+                  "value_from_context": "entity_representation_requested_facts_complete"
                 },
                 {
                   "key": "entity_representation_readback_verified",
@@ -2080,12 +2425,22 @@
               ]
             },
             "writes_context_keys": [
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_readback_verified",
               "entity_representation_domain",
               "requires_user_affirmation"
             ],
             "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_representation_verified",
+                  "value": false
+                },
+                "reason": "render_core_only_event_readback",
+                "to_state": "render_core_only_response"
+              },
               {
                 "condition_spec": {
                   "kind": "context_value_equals",
@@ -2103,6 +2458,59 @@
                 "to_state": "render_create_response"
               }
             ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_core_only_response",
+            "action_id": "workflow_control.context_template",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "response_text",
+                  "template": "Verified the Event core for '{{name}}' as {{concept_id}} by read-back, but the richer requested representation is not complete. Unresolved requested facts: {{unresolved_facts}}.",
+                  "variables": {
+                    "name": {
+                      "value_from_context": "entity_name"
+                    },
+                    "concept_id": {
+                      "value_from_context": "entity_representation_readback_concept_id",
+                      "transform": "concept_id"
+                    },
+                    "unresolved_facts": {
+                      "value_from_context": "entity_representation_unresolved_requested_facts",
+                      "transform": "json",
+                      "default": []
+                    }
+                  }
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "mark_core_only_follow_up",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_core_only_follow_up",
+            "action_id": "workflow_control.context_set",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "follow_up_required",
+                  "value": true
+                },
+                {
+                  "key": "semantic_outcome",
+                  "value": "follow_up_required"
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "follow_up_required",
+              "semantic_outcome"
+            ],
+            "next_state": "completed",
             "on_failure_state": "failed"
           },
           {
@@ -2231,13 +2639,13 @@
         "parent_type_id": "#V#ai_workflow",
         "required_effects": [
           "context:user_affirmation_policy=only_when_vital_info_missing",
-          "context:entity_representation_verified=True",
+          "context:entity_core_representation_verified=True",
           "context:entity_representation_readback_verified=True",
           "context:entity_representation_domain=place"
         ],
         "postcondition_probe": {
           "user_affirmation_policy": "only_when_vital_info_missing",
-          "entity_representation_verified": true,
+          "entity_core_representation_verified": true,
           "entity_representation_readback_verified": true,
           "entity_representation_domain": "place"
         },
@@ -2295,7 +2703,7 @@
             "llm_policy": {
               "policy_stage": "entity_representation_payload",
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, requested_facts, and response_text.",
               "context_fields": [
                 {
                   "context_key": "request_text",
@@ -2347,6 +2755,10 @@
                 "context_key": "entity_source_text"
               },
               {
+                "tool_output_field": "validated_json.requested_facts",
+                "context_key": "requested_facts"
+              },
+              {
                 "tool_output_field": "validated_json.response_text",
                 "context_key": "response_text"
               }
@@ -2358,6 +2770,7 @@
               "entity_description",
               "entity_aliases",
               "entity_source_text",
+              "requested_facts",
               "response_text"
             ],
             "conditional_transitions": [
@@ -2427,7 +2840,7 @@
                   "value": "resolved"
                 },
                 "reason": "reuse_exact_existing_place",
-                "to_state": "mark_existing_reuse"
+                "to_state": "materialise_entity"
               },
               {
                 "condition_spec": {
@@ -2542,6 +2955,9 @@
               },
               "entity_source_text": {
                 "$context_key": "entity_source_text"
+              },
+              "requested_facts": {
+                "$context_key": "requested_facts"
               }
             },
             "mutation_authority": {
@@ -2553,6 +2969,10 @@
               {
                 "tool_output_field": "entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_core_representation_verified",
+                "context_key": "entity_core_representation_verified"
               },
               {
                 "tool_output_field": "entity_representation_verified",
@@ -2575,19 +2995,72 @@
                 "context_key": "entity_representation_name"
               },
               {
+                "tool_output_field": "entity_representation_requested_facts_complete",
+                "context_key": "entity_representation_requested_facts_complete"
+              },
+              {
+                "tool_output_field": "entity_representation_unresolved_requested_facts",
+                "context_key": "entity_representation_unresolved_requested_facts"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_fact_count",
+                "context_key": "entity_representation_requested_fact_count"
+              },
+              {
+                "tool_output_field": "entity_representation_requested_facts_payload_valid",
+                "context_key": "entity_representation_requested_facts_payload_valid"
+              },
+              {
+                "tool_output_field": "entity_representation_coverage",
+                "context_key": "entity_representation_coverage"
+              },
+              {
+                "tool_output_field": "entity_resolution_status",
+                "context_key": "entity_resolution_status"
+              },
+              {
+                "tool_output_field": "entity_resolution_candidates",
+                "context_key": "entity_resolution_candidates"
+              },
+              {
                 "tool_output_field": "response_text",
                 "context_key": "response_text"
               }
             ],
             "writes_context_keys": [
               "entity_representation_concept_id",
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_domain",
               "entity_representation_materialised",
               "entity_representation_reused_existing",
-              "entity_representation_name"
+              "entity_representation_name",
+              "entity_representation_requested_facts_complete",
+              "entity_representation_unresolved_requested_facts",
+              "entity_representation_requested_fact_count",
+              "entity_representation_requested_facts_payload_valid",
+              "entity_representation_coverage",
+              "entity_resolution_status",
+              "entity_resolution_candidates"
             ],
-            "next_state": "read_back_concept",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_resolution_status",
+                  "value": "ambiguous"
+                },
+                "reason": "materialise_race_found_ambiguity",
+                "to_state": "render_existing_ambiguity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "read_back_selected_place",
+                "to_state": "read_back_concept"
+              }
+            ],
             "on_failure_state": "failed"
           },
           {
@@ -2662,8 +3135,12 @@
             "inputs": {
               "assignments": [
                 {
-                  "key": "entity_representation_verified",
+                  "key": "entity_core_representation_verified",
                   "value": true
+                },
+                {
+                  "key": "entity_representation_verified",
+                  "value_from_context": "entity_representation_requested_facts_complete"
                 },
                 {
                   "key": "entity_representation_readback_verified",
@@ -2680,12 +3157,22 @@
               ]
             },
             "writes_context_keys": [
+              "entity_core_representation_verified",
               "entity_representation_verified",
               "entity_representation_readback_verified",
               "entity_representation_domain",
               "requires_user_affirmation"
             ],
             "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "entity_representation_verified",
+                  "value": false
+                },
+                "reason": "render_core_only_place_readback",
+                "to_state": "render_core_only_response"
+              },
               {
                 "condition_spec": {
                   "kind": "context_value_equals",
@@ -2703,6 +3190,59 @@
                 "to_state": "render_create_response"
               }
             ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_core_only_response",
+            "action_id": "workflow_control.context_template",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "response_text",
+                  "template": "Verified the Place core for '{{name}}' as {{concept_id}} by read-back, but the richer requested representation is not complete. Unresolved requested facts: {{unresolved_facts}}.",
+                  "variables": {
+                    "name": {
+                      "value_from_context": "entity_name"
+                    },
+                    "concept_id": {
+                      "value_from_context": "entity_representation_readback_concept_id",
+                      "transform": "concept_id"
+                    },
+                    "unresolved_facts": {
+                      "value_from_context": "entity_representation_unresolved_requested_facts",
+                      "transform": "json",
+                      "default": []
+                    }
+                  }
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "mark_core_only_follow_up",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_core_only_follow_up",
+            "action_id": "workflow_control.context_set",
+            "inputs": {
+              "assignments": [
+                {
+                  "key": "follow_up_required",
+                  "value": true
+                },
+                {
+                  "key": "semantic_outcome",
+                  "value": "follow_up_required"
+                }
+              ]
+            },
+            "writes_context_keys": [
+              "follow_up_required",
+              "semantic_outcome"
+            ],
+            "next_state": "completed",
             "on_failure_state": "failed"
           },
           {

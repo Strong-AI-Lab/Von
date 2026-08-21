@@ -160,3 +160,32 @@ def test_create_concepts_contract_matches_the_governed_core_boundary() -> None:
     assert "accepts an array of" not in published_text_lower
     assert "supports singleton arrays" not in published_text_lower
     assert "allow_duplicate_instances" not in input_schema["properties"]
+
+
+def test_add_relationship_contract_matches_governed_exact_predicate_boundary() -> None:
+    canonical_payload = {
+        item["name"]: item for item in get_surface_tool_payloads(SURFACE_MANIFEST)
+    }
+
+    relationship_contract = canonical_payload["add_relationship"]
+    input_schema = relationship_contract["inputSchema"]
+    published_text = " ".join(
+        (
+            relationship_contract["description"],
+            input_schema["description"],
+        )
+    )
+    published_text_lower = published_text.casefold()
+
+    assert "predicate" in input_schema["properties"]
+    assert "predicate_ref" in input_schema["properties"]
+    assert "predicate_if_missing" not in input_schema["properties"]
+    assert "exact existing #v# predicate" in published_text_lower
+    assert "resolve_concept_by_name" in published_text
+    assert "instance_of='#V#predicate'" in published_text
+    assert "separate governed create_concepts effect" in published_text_lower
+    assert "does not resolve" in published_text_lower
+    assert "resolved natural-language name" not in published_text_lower
+    assert "create_typed_predicate" not in published_text
+    assert "on_missing" not in published_text
+    assert "predicate_if_missing" not in published_text

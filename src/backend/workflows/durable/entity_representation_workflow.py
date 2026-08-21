@@ -69,6 +69,58 @@ def _coerce_string_list(value: Any) -> list[str]:
     return values
 
 
+_REQUESTED_FACT_TEXT_FIELDS: tuple[str, ...] = (
+    "claim_text",
+    "relation_hint",
+    "target_name",
+    "identifier_scheme",
+    "identifier_value",
+    "evidence_text",
+    "source_locator",
+)
+
+
+def _normalise_requested_facts(value: Any) -> tuple[list[dict[str, str]], bool]:
+    """Preserve grounded non-core facts without interpreting their semantics."""
+
+    if not isinstance(value, Sequence) or isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return [], False
+
+    facts: list[dict[str, str]] = []
+    valid = True
+    for item in value:
+        if not isinstance(item, Mapping):
+            valid = False
+            continue
+        fact = {
+            field_name: text
+            for field_name in _REQUESTED_FACT_TEXT_FIELDS
+            if (text := _clean_text(item.get(field_name)))
+        }
+        if not fact.get("claim_text"):
+            valid = False
+            continue
+        facts.append(fact)
+    return facts, valid
+
+
+def _requested_fact_coverage_outputs(value: Any) -> dict[str, Any]:
+    facts, payload_valid = _normalise_requested_facts(value)
+    facts_complete = payload_valid and not facts
+    return {
+        "entity_representation_requested_facts": facts,
+        "entity_representation_unresolved_requested_facts": facts,
+        "entity_representation_requested_fact_count": len(facts),
+        "entity_representation_requested_facts_payload_valid": payload_valid,
+        "entity_representation_requested_facts_complete": facts_complete,
+        "entity_representation_coverage": (
+            "complete" if facts_complete else "core_only"
+        ),
+    }
+
+
 def _normalise_entity_domain(value: Any) -> str:
     raw = _clean_text(value).lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -175,6 +227,7 @@ def _read_only_existing_entity_result(
     entity_domain: str,
     entity_type_id: str,
     entity_name: str,
+    requested_fact_coverage: Mapping[str, Any],
 ) -> WorkflowActionResult:
     """Return an idempotent handoff without changing an existing concept.
 
@@ -187,12 +240,18 @@ def _read_only_existing_entity_result(
         status="success",
         outputs={
             "entity_representation_materialised": False,
-            "entity_representation_verified": True,
+            "entity_core_representation_verified": True,
+            "entity_representation_verified": bool(
+                requested_fact_coverage.get(
+                    "entity_representation_requested_facts_complete"
+                )
+            ),
             "entity_representation_domain": entity_domain,
             "entity_representation_type_id": entity_type_id,
             "entity_representation_concept_id": concept_id,
             "entity_representation_reused_existing": True,
             "entity_representation_name": entity_name,
+            **dict(requested_fact_coverage),
         },
     )
 
@@ -269,6 +328,14 @@ def _handle_materialise_from_payload(
         )
         if alias.casefold() != entity_name.casefold()
     ]
+    raw_requested_facts = (
+        request.inputs.get("requested_facts")
+        if "requested_facts" in request.inputs
+        else request.data.get("requested_facts")
+    )
+    requested_fact_coverage = _requested_fact_coverage_outputs(
+        raw_requested_facts
+    )
 
     verified_ids = _find_verified_named_instance_concept_ids(
         concept_name=entity_name,
@@ -276,9 +343,22 @@ def _handle_materialise_from_payload(
     )
     if len(verified_ids) > 1:
         return WorkflowActionResult(
-            status="failed",
-            error="entity_representation_entity_name_ambiguous",
+            status="success",
             outputs={
+                "entity_representation_materialised": False,
+                "entity_core_representation_verified": False,
+                "entity_representation_verified": False,
+                "entity_representation_domain": entity_domain,
+                "entity_representation_type_id": entity_type_id,
+                "entity_representation_concept_id": "",
+                "entity_representation_reused_existing": False,
+                "entity_representation_name": entity_name,
+                **dict(requested_fact_coverage),
+                "entity_representation_coverage": "not_started",
+                "entity_resolution_status": "ambiguous",
+                "entity_resolution_candidates": [
+                    {"concept_id": concept_id} for concept_id in verified_ids
+                ],
                 "response_text": (
                     f"I found multiple {entity_domain} concepts named "
                     f"'{entity_name}'. Please clarify which one you mean."
@@ -292,6 +372,7 @@ def _handle_materialise_from_payload(
             entity_domain=entity_domain,
             entity_type_id=entity_type_id,
             entity_name=entity_name,
+            requested_fact_coverage=requested_fact_coverage,
         )
 
     user_concept_id, org_concept_id = _resolve_actor_context(request)
@@ -330,6 +411,7 @@ def _handle_materialise_from_payload(
                 entity_domain=entity_domain,
                 entity_type_id=entity_type_id,
                 entity_name=entity_name,
+                requested_fact_coverage=requested_fact_coverage,
             )
         return WorkflowActionResult(
             status="failed",
@@ -389,12 +471,18 @@ def _handle_materialise_from_payload(
         status="success",
         outputs={
             "entity_representation_materialised": True,
-            "entity_representation_verified": True,
+            "entity_core_representation_verified": True,
+            "entity_representation_verified": bool(
+                requested_fact_coverage.get(
+                    "entity_representation_requested_facts_complete"
+                )
+            ),
             "entity_representation_domain": entity_domain,
             "entity_representation_type_id": entity_type_id,
             "entity_representation_concept_id": concept_id,
             "entity_representation_reused_existing": False,
             "entity_representation_name": entity_name,
+            **dict(requested_fact_coverage),
             "response_text": response_text,
         },
     )
@@ -406,10 +494,12 @@ def register_entity_representation_actions(registry: ActionRegistry) -> None:
             action_id=ENTITY_REPRESENTATION_MATERIALISE_ACTION_ID,
             handler=_handle_materialise_from_payload,
             description=(
-                "Additively materialise a typed entity concept from structured "
-                "payload fields. If an exact existing instance is encountered, "
-                "return a read-only idempotence handoff for represented workflow "
-                "readback instead of mutating it."
+                "Additively materialise and verify a typed entity core from "
+                "structured payload fields while preserving requested non-core "
+                "facts as explicit unresolved postconditions. If an exact "
+                "existing instance is encountered, return a read-only "
+                "idempotence handoff for represented workflow readback instead "
+                "of mutating it."
             ),
             side_effects="write",
         ),

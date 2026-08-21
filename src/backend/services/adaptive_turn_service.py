@@ -137,6 +137,16 @@ class _PreparedCapabilityCall:
     binding_diagnostics: Mapping[str, Any] | None = None
 
 
+@dataclass
+class _TerminalFailedEffectRequest:
+    """One exact non-retryable failure and any explicit missing dependency."""
+
+    effect_id: str
+    error_code: str | None
+    missing_dependency_concept_ids: frozenset[str]
+    dependency_materialised: bool = False
+
+
 @dataclass(frozen=True)
 class _ContainedCapabilityResult:
     """A capability result retained until request-thread evidence commit."""
@@ -1675,6 +1685,19 @@ def _scope_message(
         "restart with the exact represented predicate relevant to the requested "
         "relation; the partial neighbourhood cannot establish absence. Create "
         "only after that bounded reuse check finds no adequate existing object.\n"
+        "- In representation work, a created or reused core concept establishes "
+        "only its explicit core identity and type. A source-processing marker "
+        "establishes only processing. Neither establishes requested roles, "
+        "affiliations, identifiers, claim-level provenance, or other relations.\n"
+        "- Treat ancillary fields rejected by a core-create contract as unmet "
+        "postconditions, not discarded intent. Continue with the smallest "
+        "separately executable typed effects and read-backs for supported "
+        "remaining facts, including same-object scoped or standalone assertions "
+        "when faithful. Name any material fact for which no executable "
+        "representation exists; do not call the richer representation complete "
+        "merely because the core exists. An entity result with "
+        "entity_representation_coverage=core_only is a completed core sub-effect, "
+        "not terminal success for its preserved unresolved_requested_facts.\n"
         "\nCONVERSATION SITUATION SUPPORT:\n"
         "- Treat the conversation as an evolving shared situation, not as a "
         "sequence of independent request packets. Preserve established "
@@ -3438,6 +3461,59 @@ def _effect_request_signature(
             }
         )
     ).hexdigest()
+
+
+def _terminal_failure_missing_dependency_concept_ids(
+    raw_payload: Any,
+    *,
+    capability_name: str | None = None,
+    arguments: Mapping[str, Any] | None = None,
+) -> frozenset[str]:
+    """Extract explicit missing IDs plus one bounded non-disclosing denial case."""
+
+    if not isinstance(raw_payload, Mapping):
+        return frozenset()
+    error_code = str(raw_payload.get("error_code") or "").strip()
+    error_details = raw_payload.get("error_details")
+    error_details = error_details if isinstance(error_details, Mapping) else {}
+    nested_details = error_details.get("details")
+    nested_details = nested_details if isinstance(nested_details, Mapping) else {}
+    candidates: list[Any] = []
+    if (
+        error_code == "ontology_mutation_target_not_accessible"
+        and str(capability_name or "").strip().lower() == "add_relationship"
+        and isinstance(arguments, Mapping)
+    ):
+        # The governed pre-handler denial deliberately withholds which target is
+        # absent or merely inaccessible. Retain only exact request-local source
+        # and concept-target IDs so a later create proof can justify one retry;
+        # never add these candidates to the denial returned to the model.
+        candidates.extend((arguments.get("source_id"), arguments.get("target")))
+    elif error_code == "source_concept_not_found":
+        if str(error_details.get("role") or "").strip() == "source":
+            candidates.append(error_details.get("concept_id"))
+    elif error_code == "target_concept_not_found":
+        if str(error_details.get("role") or "").strip() == "target":
+            candidates.append(error_details.get("concept_id"))
+    elif error_code in {"source_not_found", "target_not_found"}:
+        if str(nested_details.get("error") or "").strip() == error_code:
+            candidates.append(nested_details.get("concept_id"))
+    elif error_code == "predicate_concept_not_found":
+        if str(nested_details.get("error") or "").strip() == error_code:
+            candidates.extend(
+                (nested_details.get("predicate"), error_details.get("predicate"))
+            )
+    elif error_code in {
+        "concept_not_found",
+        "ontology_mutation_target_not_found",
+    }:
+        candidates.append(error_details.get("concept_id"))
+
+    return frozenset(
+        concept_id
+        for value in candidates
+        if isinstance(value, str) and (concept_id := value.strip()).startswith("#V#")
+    )
 
 
 def _effect_result_target_ids(raw_payload: Any) -> list[str]:
@@ -5285,10 +5361,11 @@ def _effect_requires_turn_finality(
     """Keep operational workflow bookkeeping from becoming semantic failure.
 
     Represented workflows always use effect-grade dispatch because invoking one
-    may create or advance a durable instance. An input-schema rejection never
-    reaches a handler, and a represented-workflow attempt rejected before any
-    instance was created reports known no change; neither has an effect whose
-    finality can invalidate a successfully recovered answer.
+    may create or advance a durable instance. An input-schema rejection or
+    suppressed duplicate never reaches a handler, and a represented-workflow
+    attempt rejected before any instance was created reports known no change;
+    none has an effect whose finality can invalidate a successfully recovered
+    answer.
     """
 
     instance_id = (
@@ -5300,11 +5377,16 @@ def _effect_requires_turn_finality(
         effect_status == "not_started"
         and changed is False
         and isinstance(raw_payload, Mapping)
-        and raw_payload.get("error_code") == "capability_arguments_invalid"
+        and raw_payload.get("error_code")
+        in {
+            "capability_arguments_invalid",
+            "effect_request_unchanged_after_terminal_failure",
+        }
     ):
-        # Input validation runs before the handler.  The rejected call is useful
-        # feedback to the model, but there is no effect whose finality can poison
-        # a corrected invocation later in the same turn.
+        # Input validation and exact-request suppression both run before the
+        # handler. The feedback remains visible to the model, but neither guard
+        # dispatched another effect whose finality can poison a corrected or
+        # changed-strategy recovery later in the same turn.
         return False
     if capability_kind != "represented_workflow":
         return True
@@ -5972,35 +6054,129 @@ def execute_adaptive_turn(
     exact_read_observations: list[dict[str, Any]] = []
     effect_state_generation = 0
     last_partial_effect_generation = 0
-    successful_effect_mutation_generation = 0
-    terminal_failed_effect_requests: dict[str, tuple[int, str | None]] = {}
+    terminal_failed_effect_requests: dict[
+        str,
+        _TerminalFailedEffectRequest,
+    ] = {}
     indeterminate_effect_requests: dict[str, tuple[str, str | None]] = {}
     exact_absence_effect_requests: dict[str, str] = {}
     recoverable_effect_ids: dict[str, list[str]] = {}
 
     def remember_terminal_effect_failure(
         *,
+        effect_id: str | None,
         request_signature: str | None,
+        capability_name: str,
+        arguments: Mapping[str, Any],
         effect_status: str | None,
         payload: Any,
     ) -> None:
         """Prevent an unchanged, non-retryable failed effect from running twice."""
 
         if (
-            request_signature is None
+            effect_id is None
+            or request_signature is None
             or effect_status not in {"failed", "not_started"}
             or not isinstance(payload, Mapping)
             or payload.get("retryable") is True
         ):
             return
-        terminal_failed_effect_requests[request_signature] = (
-            successful_effect_mutation_generation,
-            (
-                str(payload.get("error_code")).strip()
-                if payload.get("error_code")
-                else None
-            ),
+        with effect_state_lock:
+            terminal_failed_effect_requests[request_signature] = (
+                _TerminalFailedEffectRequest(
+                    effect_id=effect_id,
+                    error_code=(
+                        str(payload.get("error_code")).strip()
+                        if payload.get("error_code")
+                        else None
+                    ),
+                    missing_dependency_concept_ids=(
+                        _terminal_failure_missing_dependency_concept_ids(
+                            payload,
+                            capability_name=capability_name,
+                            arguments=arguments,
+                        )
+                    ),
+                )
+            )
+
+    def note_materialised_create_dependencies(
+        *,
+        capability_name: str,
+        effect_status: str | None,
+        payload: Any,
+    ) -> None:
+        """Permit retry only when create materialised an explicitly missing ID."""
+
+        if (
+            capability_name != "create_concepts"
+            or effect_status != "succeeded"
+            or not isinstance(payload, Mapping)
+        ):
+            return
+        materialised_ids: set[str] = set()
+        if payload.get("changed") is True:
+            materialised_ids.update(
+                concept_id
+                for value in payload.get("created_concept_ids") or ()
+                if isinstance(value, str)
+                and (concept_id := value.strip()).startswith("#V#")
+            )
+        canonical_readback = payload.get("canonical_read_back")
+        if not isinstance(canonical_readback, Mapping):
+            canonical_readback = payload.get("canonical_readback")
+        canonical_concepts = (
+            canonical_readback.get("concepts")
+            if isinstance(canonical_readback, Mapping)
+            else None
         )
+        if isinstance(canonical_concepts, Sequence) and not isinstance(
+            canonical_concepts,
+            (str, bytes, bytearray),
+        ):
+            materialised_ids.update(
+                concept_id
+                for item in canonical_concepts
+                if isinstance(item, Mapping)
+                and item.get("exists") is True
+                and isinstance(item.get("concept_id"), str)
+                and (concept_id := str(item["concept_id"]).strip()).startswith("#V#")
+            )
+        if not materialised_ids:
+            return
+        with effect_state_lock:
+            for failure in terminal_failed_effect_requests.values():
+                if failure.missing_dependency_concept_ids.intersection(
+                    materialised_ids
+                ):
+                    failure.dependency_materialised = True
+
+    def reconcile_successful_dependency_retry(
+        *,
+        recovery_effect_id: str,
+        request_signature: str | None,
+        effect_status: str,
+    ) -> None:
+        """Resolve the prior failure after its exact dependency-enabled retry."""
+
+        nonlocal effect_state_generation
+        if effect_status != "succeeded" or not request_signature:
+            return
+        with effect_state_lock:
+            failure = terminal_failed_effect_requests.get(request_signature)
+            if failure is None or not failure.dependency_materialised:
+                return
+            failed_state = effect_states.get(failure.effect_id)
+            if (
+                failed_state is None
+                or failed_state.get("effect_status") not in {"failed", "not_started"}
+                or failed_state.get("changed") is not False
+            ):
+                return
+            failed_state["recovered_by_effect_id"] = recovery_effect_id
+            failed_state["recovery_status"] = "succeeded"
+            terminal_failed_effect_requests.pop(request_signature, None)
+            effect_state_generation += 1
 
     def scoped_assertion_recovery_key(
         capability_name: str,
@@ -8384,7 +8560,6 @@ def execute_adaptive_turn(
             deadline_monotonic: float | None,
             effect_window_denial: Mapping[str, Any] | None = None,
         ) -> tuple[int, _ContainedCapabilityResult]:
-            nonlocal successful_effect_mutation_generation
             index = item.index
             call = item.call
             canonical_name = item.capability_name
@@ -8473,11 +8648,21 @@ def execute_adaptive_turn(
                 if is_effect
                 else None
             )
-            prior_terminal_failure = (
-                terminal_failed_effect_requests.get(effect_request_signature)
-                if effect_request_signature is not None
-                else None
-            )
+            with effect_state_lock:
+                prior_terminal_failure = (
+                    terminal_failed_effect_requests.get(effect_request_signature)
+                    if effect_request_signature is not None
+                    else None
+                )
+                prior_terminal_failure_seen = bool(
+                    prior_terminal_failure is not None
+                    and not prior_terminal_failure.dependency_materialised
+                )
+                prior_terminal_error_code = (
+                    prior_terminal_failure.error_code
+                    if prior_terminal_failure_seen
+                    else None
+                )
             prior_indeterminate_request = (
                 indeterminate_effect_requests.get(effect_request_signature)
                 if effect_request_signature is not None
@@ -8521,26 +8706,23 @@ def execute_adaptive_turn(
                         ],
                     }
                 )
-            if (
-                prior_terminal_failure is not None
-                and prior_terminal_failure[0] == successful_effect_mutation_generation
-            ):
+            if prior_terminal_failure_seen:
                 repeated_failure_payload = {
                     **_error_payload(
                         "effect_request_unchanged_after_terminal_failure",
                         (
                             "This exact effect request was not repeated because "
-                            "it already failed terminally and no successful "
-                            "intervening effect changed the turn state."
+                            "it already failed terminally and the request has "
+                            "not changed."
                         ),
                     ),
                     "status": "not_started",
                     "mutation_outcome": "not_started",
                     "outcome_finality": "terminal_for_turn",
-                    "prior_error_code": prior_terminal_failure[1],
+                    "prior_error_code": prior_terminal_error_code,
                     "changed": False,
                 }
-                if prior_terminal_failure[1] not in {
+                if prior_terminal_error_code not in {
                     "complex_create_requires_typed_effects",
                     "multi_create_requires_individual_effects",
                 }:
@@ -8668,7 +8850,10 @@ def execute_adaptive_turn(
                         transport_result=None,
                     )
                     remember_terminal_effect_failure(
+                        effect_id=effect_identifier,
                         request_signature=effect_request_signature,
+                        capability_name=execution_method_name,
+                        arguments=arguments,
                         effect_status=delegation_effect_status,
                         payload=delegation_result,
                     )
@@ -8830,7 +9015,15 @@ def execute_adaptive_turn(
                 else None
             )
             remember_terminal_effect_failure(
+                effect_id=effect_identifier,
                 request_signature=effect_request_signature if is_effect else None,
+                capability_name=execution_method_name,
+                arguments=arguments,
+                effect_status=terminal_effect_status,
+                payload=raw_payload,
+            )
+            note_materialised_create_dependencies(
+                capability_name=canonical_name,
                 effect_status=terminal_effect_status,
                 payload=raw_payload,
             )
@@ -8855,14 +9048,6 @@ def execute_adaptive_turn(
                         else None
                     ),
                 )
-            elif (
-                is_effect
-                and terminal_effect_status in {"succeeded", "partial"}
-                and isinstance(raw_payload, Mapping)
-                and raw_payload.get("changed") is True
-            ):
-                successful_effect_mutation_generation += 1
-
             if effect_identifier is not None:
                 transport_metadata_fn = getattr(
                     transport_result,
@@ -9233,6 +9418,11 @@ def execute_adaptive_turn(
                         effect_status=effect_status,
                     )
                     reconcile_successful_exact_absence_retry(
+                        recovery_effect_id=effect_identifier,
+                        request_signature=current_effect_request_signature,
+                        effect_status=effect_status,
+                    )
+                    reconcile_successful_dependency_retry(
                         recovery_effect_id=effect_identifier,
                         request_signature=current_effect_request_signature,
                         effect_status=effect_status,

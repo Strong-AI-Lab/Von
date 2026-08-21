@@ -141,22 +141,34 @@ def test_entity_template_seed_pins_origin_main_unversioned_authority_digests() -
         WORKFLOW_CREATION_PERSON_TEMPLATE_ID: {
             "unversioned": [
                 "c05bf1c197105f1b827e6425ec65c9969d56e3167a9cab467b8950b0877cb72e"
-            ]
+            ],
+            "4": [
+                "bebaf90d6603fa63acdd1dcb363f8cb932c61d5ed45270064a7401c1f1cef23b"
+            ],
         },
         WORKFLOW_CREATION_COMPANY_TEMPLATE_ID: {
             "unversioned": [
                 "0d9410537439ef85891992a5a243460ea41e464773dd93d3da11343bcce7be90"
-            ]
+            ],
+            "4": [
+                "1b567d6c833201a3e48953e6c8df416913c118dcc31b4b446f1a2f316658aeef"
+            ],
         },
         WORKFLOW_CREATION_EVENT_TEMPLATE_ID: {
             "unversioned": [
                 "1e959db513067495d7330da9615cfdc96ebb21313098150f471f715a36c118ae"
-            ]
+            ],
+            "4": [
+                "5c13822c0a2bc0f782dfda7b50966a2173029cf18797af64816479bc43360623"
+            ],
         },
         WORKFLOW_CREATION_PLACE_TEMPLATE_ID: {
             "unversioned": [
                 "706e021bfd841e3faa7b8214a06492ee8eadc74bea122a71ef31baaee191410c"
-            ]
+            ],
+            "4": [
+                "7eee095c5dd2d63ed60f5500350fdba48dc3c5fd87c16a1300a7e94ae411140d"
+            ],
         },
     }
 
@@ -270,7 +282,20 @@ def test_resolve_workflow_spec_template_renders_person_representation_template(
     assert steps_by_id["materialise_entity"]["action_id"] == (
         "entity_representation.materialise_from_payload"
     )
-    assert steps_by_id["materialise_entity"]["next_state"] == "read_back_concept"
+    assert steps_by_id["materialise_entity"]["inputs"]["requested_facts"] == {
+        "$context_key": "requested_facts"
+    }
+    materialise_transitions = steps_by_id["materialise_entity"][
+        "conditional_transitions"
+    ]
+    assert materialise_transitions[0]["condition_spec"] == {
+        "kind": "context_value_equals",
+        "key": "entity_resolution_status",
+        "value": "ambiguous",
+    }
+    assert materialise_transitions[0]["to_state"] == "render_existing_ambiguity"
+    assert materialise_transitions[1]["condition_spec"] == {"kind": "always"}
+    assert materialise_transitions[1]["to_state"] == "read_back_concept"
     assert steps_by_id["read_back_concept"]["inputs"]["tool_name"] == ("fetch_concept")
     assert steps_by_id["read_back_has_names"]["inputs"] == {
         "tool_name": "get_text_relations",
@@ -286,6 +311,43 @@ def test_resolve_workflow_spec_template_renders_person_representation_template(
         "value_from_context": "entity_representation_readback_relationships",
         "transform": "json",
     }
+    assert (
+        "context:entity_core_representation_verified=True"
+        in rendered_spec["required_effects"]
+    )
+    assert (
+        "context:entity_representation_verified=True"
+        not in rendered_spec["required_effects"]
+    )
+    finalise_assignments = {
+        assignment["key"]: assignment
+        for assignment in steps_by_id["finalise_readback"]["inputs"][
+            "assignments"
+        ]
+    }
+    assert finalise_assignments["entity_representation_verified"] == {
+        "key": "entity_representation_verified",
+        "value_from_context": "entity_representation_requested_facts_complete",
+    }
+    core_only_step = steps_by_id["render_core_only_response"]
+    assert core_only_step["next_state"] == "mark_core_only_follow_up"
+    follow_up_step = steps_by_id["mark_core_only_follow_up"]
+    follow_up_assignments = {
+        assignment["key"]: assignment
+        for assignment in follow_up_step["inputs"]["assignments"]
+    }
+    assert follow_up_assignments["follow_up_required"] == {
+        "key": "follow_up_required",
+        "value": True,
+    }
+    assert follow_up_assignments["semantic_outcome"] == {
+        "key": "semantic_outcome",
+        "value": "follow_up_required",
+    }
+    assert {"follow_up_required", "semantic_outcome"}.issubset(
+        follow_up_step["writes_context_keys"]
+    )
+    assert follow_up_step["next_state"] == "completed"
     text_relations = rendered_spec.get("text_relations") or []
     assert any(
         isinstance(item, dict)
@@ -296,6 +358,132 @@ def test_resolve_workflow_spec_template_renders_person_representation_template(
         isinstance(item, dict)
         and item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
         for item in text_relations
+    )
+
+
+@pytest.mark.parametrize(
+    ("template_id", "entity_domain"),
+    [
+        (WORKFLOW_CREATION_COMPANY_TEMPLATE_ID, "company"),
+        (WORKFLOW_CREATION_EVENT_TEMPLATE_ID, "event"),
+        (WORKFLOW_CREATION_PLACE_TEMPLATE_ID, "place"),
+    ],
+)
+def test_nonperson_templates_preserve_requested_fact_coverage_until_complete(
+    _reset_mock_db: Any,
+    template_id: str,
+    entity_domain: str,
+) -> None:
+    rendered_spec, diagnostics = resolve_workflow_spec_template(
+        request_text=f"Represent this {entity_domain} and its grounded facts.",
+        explicit_template_id=template_id,
+        variables={
+            "workflow_id": f"#V#{entity_domain}_representation_workflow",
+            "workflow_name": f"{entity_domain.title()} Representation Workflow",
+            "workflow_description": (
+                f"Represent {entity_domain} entities and their grounded facts."
+            ),
+            "request_summary": f"represent {entity_domain} and facts",
+        },
+    )
+
+    assert diagnostics["template_id"] == template_id
+    assert (
+        "context:entity_core_representation_verified=True"
+        in rendered_spec["required_effects"]
+    )
+    assert (
+        "context:entity_representation_verified=True"
+        not in rendered_spec["required_effects"]
+    )
+    assert rendered_spec["postcondition_probe"][
+        "entity_core_representation_verified"
+    ] is True
+
+    steps_by_id = {
+        str(step.get("state_id") or ""): step
+        for step in rendered_spec["steps"]
+        if isinstance(step, dict)
+    }
+    extract_step = steps_by_id["extract_entity_payload"]
+    assert "requested_facts" in extract_step["llm_policy"][
+        "response_contract_text"
+    ]
+    assert {
+        "tool_output_field": "validated_json.requested_facts",
+        "context_key": "requested_facts",
+    } in extract_step["tool_output_context_mappings"]
+    assert "requested_facts" in extract_step["writes_context_keys"]
+
+    resolve_transitions = steps_by_id["resolve_existing_entity"][
+        "conditional_transitions"
+    ]
+    resolved_transition = next(
+        transition
+        for transition in resolve_transitions
+        if transition["condition_spec"].get("value") == "resolved"
+    )
+    assert resolved_transition["to_state"] == "materialise_entity"
+
+    materialise_step = steps_by_id["materialise_entity"]
+    assert materialise_step["inputs"]["requested_facts"] == {
+        "$context_key": "requested_facts"
+    }
+    materialise_outputs = {
+        mapping["context_key"]
+        for mapping in materialise_step["tool_output_context_mappings"]
+    }
+    expected_coverage_outputs = {
+        "entity_core_representation_verified",
+        "entity_representation_requested_facts_complete",
+        "entity_representation_unresolved_requested_facts",
+        "entity_representation_requested_fact_count",
+        "entity_representation_requested_facts_payload_valid",
+        "entity_representation_coverage",
+        "entity_resolution_status",
+        "entity_resolution_candidates",
+    }
+    assert expected_coverage_outputs.issubset(materialise_outputs)
+    assert expected_coverage_outputs.issubset(
+        set(materialise_step["writes_context_keys"])
+    )
+    materialise_transitions = materialise_step["conditional_transitions"]
+    assert materialise_transitions[0]["condition_spec"] == {
+        "kind": "context_value_equals",
+        "key": "entity_resolution_status",
+        "value": "ambiguous",
+    }
+    assert materialise_transitions[0]["to_state"] == "render_existing_ambiguity"
+    assert materialise_transitions[1]["condition_spec"] == {"kind": "always"}
+    assert materialise_transitions[1]["to_state"] == "read_back_concept"
+
+    finalise_assignments = {
+        assignment["key"]: assignment
+        for assignment in steps_by_id["finalise_readback"]["inputs"][
+            "assignments"
+        ]
+    }
+    assert finalise_assignments["entity_representation_verified"] == {
+        "key": "entity_representation_verified",
+        "value_from_context": "entity_representation_requested_facts_complete",
+    }
+    assert steps_by_id["finalise_readback"]["conditional_transitions"][0][
+        "to_state"
+    ] == "render_core_only_response"
+    core_only_step = steps_by_id["render_core_only_response"]
+    assert "richer requested representation is not complete" in core_only_step[
+        "inputs"
+    ]["assignments"][0]["template"]
+    assert core_only_step["next_state"] == "mark_core_only_follow_up"
+    follow_up_assignments = {
+        assignment["key"]: assignment
+        for assignment in steps_by_id["mark_core_only_follow_up"]["inputs"][
+            "assignments"
+        ]
+    }
+    assert follow_up_assignments["follow_up_required"]["value"] is True
+    assert follow_up_assignments["semantic_outcome"]["value"] == (
+        "follow_up_required"
     )
 
 
@@ -404,7 +592,7 @@ def test_entity_templates_migrate_only_exact_known_unversioned_authority(
             limit=5,
         )
         profile = json.loads(str(profile_rows[0]["text"]))
-        assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "4"
+        assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "5"
 
 
 def test_template_migration_accepts_an_exact_registered_numeric_legacy_payload(
@@ -440,7 +628,7 @@ def test_template_migration_accepts_an_exact_registered_numeric_legacy_payload(
         limit=5,
     )[0]
     profile = json.loads(str(profile_row["text"]))
-    assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "4"
+    assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "5"
     receipt = dict(profile_row.get("context") or {}).get(
         service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY
     )

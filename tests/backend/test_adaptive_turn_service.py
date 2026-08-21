@@ -688,6 +688,13 @@ def test_scope_message_carries_brief_approval_and_exact_recovery_state() -> None
     assert "normally use it in the same turn" in message
     assert "complete only unmet postconditions" in message
     assert "never repeat a confirmed effect" in message
+    assert "core concept establishes only" in message
+    assert "source-processing marker establishes only processing" in message
+    assert "ancillary fields rejected by a core-create contract" in message
+    assert "same-object scoped or standalone assertions" in message
+    assert "do not call the richer representation complete" in message
+    assert "entity_representation_coverage=core_only" in message
+    assert "not terminal success" in message
     assert "preserve its exact grounded candidate identifiers" in message
     assert "unresolved create-versus-reuse status" in message
     assert "Do not leave the only stable identity solely" in message
@@ -4638,6 +4645,210 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     assert result.response_text == ("The actor-scoped relationship was recorded.")
     assert denial["recovery_status"] == "succeeded"
     assert denial["recovered_by_effect_id"] == recovery["effect_id"]
+
+
+def test_multi_person_recovery_preserves_successes_and_only_repairs_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.db import mongo_client
+    from src.backend.services import relationship_write_service
+
+    class _Collection:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": {}}
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate: "concept",
+    )
+    persisted_subject_ids: list[str] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "upsert_scoped_assertion"
+        subject_id = arguments["subject_concept_id"]
+        persisted_subject_ids.append(subject_id)
+        assertion_id = f"ska_{subject_id.removeprefix('#V#')}"
+        readback = {
+            "schema_version": "scoped_knowledge_assertion.v1",
+            "assertion_id": assertion_id,
+            "subject_concept_id": subject_id,
+            "predicate": arguments["predicate"],
+            "object_kind": "concept",
+            "object_concept_id": arguments["target_concept_id"],
+            "object_text": None,
+            "scope": {
+                "mode": arguments["scope_mode"],
+                "user_concept_id": arguments["acting_user_concept_id"],
+                "organisation_concept_id": arguments[
+                    "organisation_concept_id"
+                ],
+                "namespace": arguments["namespace"],
+                "audience_keys": [
+                    f"org:{arguments['organisation_concept_id']}"
+                ],
+            },
+            "provenance": {
+                "asserted_by_user_concept_id": arguments[
+                    "acting_user_concept_id"
+                ],
+                "organisation_concept_id": arguments[
+                    "organisation_concept_id"
+                ],
+                "namespace": arguments["namespace"],
+            },
+            "canonical_publication": False,
+            "status": "asserted",
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": assertion_id,
+            "assertion": readback,
+            "canonical_read_back": readback,
+            "canonical_publication": False,
+        }
+
+    relationship_arguments = {
+        "source_id": "#V#person_b",
+        "predicate": "#V#affiliated_with",
+        "target": "#V#school_of_computer_science",
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="persist-person-a",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#person_a",
+                            "predicate": "#V#affiliated_with",
+                            "target_concept_id": "#V#school_of_computer_science",
+                            "scope_mode": "organisation",
+                        },
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="deny-person-b-canonical",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": relationship_arguments,
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="persist-person-c",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#person_c",
+                            "predicate": "#V#affiliated_with",
+                            "target_concept_id": "#V#school_of_computer_science",
+                            "scope_mode": "organisation",
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="repeat-person-b-terminal-denial",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": relationship_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="recover-person-b-scoped",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#person_b",
+                            "predicate": "#V#affiliated_with",
+                            "target_concept_id": "#V#school_of_computer_science",
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "All three people now have read-back organisation-scoped "
+                "affiliation assertions; only person B needed recovery."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt="Represent the same School affiliation for people A, B, and C.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-multi-person-partial-recovery",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert persisted_subject_ids == ["#V#person_a", "#V#person_c", "#V#person_b"]
+    relationship_attempts = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("tool") == "add_relationship"
+    ]
+    assert len(relationship_attempts) == 2
+    denial, repeated = relationship_attempts
+    assert denial["effect_status"] == "not_started"
+    assert denial["changed"] is False
+    assert repeated["error_code"] == (
+        "effect_request_unchanged_after_terminal_failure"
+    )
+    assert repeated["effect_status"] == "not_started"
+    assert repeated["changed"] is False
+    assert repeated["turn_finality_required"] is False
+    recoveries = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("tool") == "upsert_scoped_assertion"
+    ]
+    assert len(recoveries) == 3
+    assert all(invocation["effect_status"] == "succeeded" for invocation in recoveries)
+    assert all(
+        invocation.get("canonical_readback", {}).get("object_concept_id")
+        == "#V#school_of_computer_science"
+        for invocation in recoveries
+    )
+    assert denial["recovery_status"] == "succeeded"
+    assert denial["recovered_by_effect_id"] == recoveries[-1]["effect_id"]
+    assert result.terminal_status == "completed"
+    assert result.response_authority == "model"
+    assert result.response_text == (
+        "All three people now have read-back organisation-scoped affiliation "
+        "assertions; only person B needed recovery."
+    )
 
 
 @pytest.mark.parametrize(
@@ -11203,6 +11414,382 @@ def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
     assert result.tool_invocations[1]["changed"] is False
 
 
+@pytest.mark.parametrize(
+    (
+        "missing_dependency_kind",
+        "created_concept_id",
+        "create_changed",
+        "canonical_readback_exists",
+        "retry_runs",
+    ),
+    [
+        ("source", "#V#missing_source", True, False, True),
+        ("source", "#V#missing_source", False, True, True),
+        ("source", "#V#unrelated_source", True, False, False),
+        ("predicate", "#V#missing_predicate", True, False, True),
+    ],
+    ids=[
+        "exact-created-dependency",
+        "exact-idempotent-canonical-readback",
+        "unrelated-created-concept",
+        "exact-created-predicate-dependency",
+    ],
+)
+def test_terminal_failure_retry_requires_exact_materialised_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_dependency_kind: str,
+    created_concept_id: str,
+    create_changed: bool,
+    canonical_readback_exists: bool,
+    retry_runs: bool,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    missing_source_id = "#V#missing_source"
+    missing_predicate_id = "#V#missing_predicate"
+    relationship_predicate = (
+        missing_predicate_id
+        if missing_dependency_kind == "predicate"
+        else "#V#affiliated_with"
+    )
+    relationship_handler_calls = 0
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal relationship_handler_calls
+        if name == "create_concepts":
+            return {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": create_changed,
+                "created_concept_ids": ([created_concept_id] if create_changed else []),
+                "canonical_read_back": {
+                    "concepts": [
+                        {
+                            "concept_id": created_concept_id,
+                            "exists": canonical_readback_exists,
+                        }
+                    ]
+                },
+            }
+        assert name == "add_relationship"
+        relationship_handler_calls += 1
+        if relationship_handler_calls == 1:
+            if missing_dependency_kind == "predicate":
+                return {
+                    "success": False,
+                    "effect_status": "failed",
+                    "changed": False,
+                    "retryable": False,
+                    "error_code": "predicate_concept_not_found",
+                    "error_details": {
+                        "source_id": missing_source_id,
+                        "predicate": missing_predicate_id,
+                        "target": "#V#school_of_computer_science",
+                        "details": {
+                            "success": False,
+                            "error": "predicate_concept_not_found",
+                            "predicate": missing_predicate_id,
+                            "suggestion": "Create it as an instance of #V#predicate",
+                        },
+                    },
+                }
+            return {
+                "success": False,
+                "effect_status": "failed",
+                "changed": False,
+                "retryable": False,
+                "error_code": "source_not_found",
+                "error_details": {
+                    "source_id": missing_source_id,
+                    "predicate": relationship_predicate,
+                    "target": "#V#school_of_computer_science",
+                    "details": {
+                        "success": False,
+                        "error": "source_not_found",
+                        "concept_id": missing_source_id,
+                    },
+                },
+            }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "source_id": missing_source_id,
+            "predicate": relationship_predicate,
+            "target": "#V#school_of_computer_science",
+        }
+
+    relationship_arguments = {
+        "source_id": missing_source_id,
+        "predicate": relationship_predicate,
+        "target": "#V#school_of_computer_science",
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="relationship-before-dependency",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": relationship_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-relationship-dependency",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "parent_id": (
+                                "#V#predicate"
+                                if missing_dependency_kind == "predicate"
+                                else "#V#person"
+                            ),
+                            "concepts": [
+                                {
+                                    "concept_id": created_concept_id,
+                                    "name": "Relationship dependency",
+                                    "kind": (
+                                        "predicate"
+                                        if missing_dependency_kind == "predicate"
+                                        else "instance"
+                                    ),
+                                }
+                            ],
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="relationship-after-dependency",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": relationship_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The relationship succeeded after its exact dependency was "
+                "materialised."
+                if retry_runs
+                else (
+                    "The unrelated create did not make the failed relationship "
+                    "retryable."
+                )
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Create the missing dependency and retry this exact relationship.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=(
+            "turn-exact-dependency-retry-"
+            f"{missing_dependency_kind}-{created_concept_id}-{create_changed}"
+        ),
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert relationship_handler_calls == (2 if retry_runs else 1)
+    relationship_invocations = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("tool") == "add_relationship"
+    ]
+    assert len(relationship_invocations) == 2
+    first, retried = relationship_invocations
+    assert first["error_code"] == (
+        "predicate_concept_not_found"
+        if missing_dependency_kind == "predicate"
+        else "source_not_found"
+    )
+    if retry_runs:
+        assert retried["effect_status"] == "succeeded"
+        assert first["recovery_status"] == "succeeded"
+        assert first["recovered_by_effect_id"] == retried["effect_id"]
+        assert result.terminal_status == "completed"
+        assert result.response_authority == "model"
+    else:
+        assert retried["error_code"] == (
+            "effect_request_unchanged_after_terminal_failure"
+        )
+        assert retried["effect_status"] == "not_started"
+        assert retried["turn_finality_required"] is False
+
+
+def test_predelegation_target_denial_retries_after_exact_source_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_source_id = "#V#missing_source"
+    relationship_arguments = {
+        "source_id": missing_source_id,
+        "predicate": "#V#affiliated_with",
+        "target": "#V#school_of_computer_science",
+    }
+    delegation_calls: list[dict[str, Any]] = []
+    relationship_delegation_count = 0
+
+    def issue_delegation(**kwargs: Any) -> dict[str, Any]:
+        nonlocal relationship_delegation_count
+        delegation_calls.append(dict(kwargs))
+        if kwargs["method_name"] == "add_relationship":
+            relationship_delegation_count += 1
+            if relationship_delegation_count == 1:
+                return {
+                    "success": False,
+                    "effect_status": "not_started",
+                    "mutation_outcome": "not_started",
+                    "changed": False,
+                    "retryable": False,
+                    "error_code": "ontology_mutation_target_not_accessible",
+                    "error": (
+                        "The requested ontology target is not accessible in this "
+                        "context."
+                    ),
+                }
+        return {"delegation_id": f"delegation-{kwargs['effect_id']}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue_delegation,
+    )
+    handler_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        handler_calls.append((name, arguments))
+        if name == "create_concepts":
+            return {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "created_concept_ids": [missing_source_id],
+                "canonical_read_back": {
+                    "concepts": [{"concept_id": missing_source_id, "exists": True}]
+                },
+            }
+        assert name == "add_relationship"
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            **relationship_arguments,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="relationship-before-governed-create",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": relationship_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-governed-source",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "parent_id": "#V#person",
+                            "concepts": [
+                                {
+                                    "concept_id": missing_source_id,
+                                    "name": "Missing source",
+                                    "kind": "instance",
+                                }
+                            ],
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="relationship-after-governed-create",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": relationship_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The missing source and relationship now exist."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Create the missing source and retry the relationship.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-governed-predelegation-dependency-retry",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert [call["method_name"] for call in delegation_calls] == [
+        "add_relationship",
+        "create_concepts",
+        "add_relationship",
+    ]
+    assert [name for name, _arguments in handler_calls] == [
+        "create_concepts",
+        "add_relationship",
+    ]
+    relationship_invocations = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("tool") == "add_relationship"
+    ]
+    assert len(relationship_invocations) == 2
+    denied, retried = relationship_invocations
+    assert denied["error_code"] == "ontology_mutation_target_not_accessible"
+    denial_receipt = json.loads(denied["evidence"]["preview"])
+    assert "error_details" not in denial_receipt
+    assert "source_id" not in denial_receipt
+    assert "target" not in denial_receipt
+    assert retried["effect_status"] == "succeeded"
+    assert denied["recovery_status"] == "succeeded"
+    assert denied["recovered_by_effect_id"] == retried["effect_id"]
+    assert result.terminal_status == "completed"
+    assert result.response_authority == "model"
+
+
 def test_predelegation_create_failure_is_suppressed_but_corrected_call_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11348,6 +11935,200 @@ def test_predelegation_create_failure_is_suppressed_but_corrected_call_runs(
     assert "recovery_affordances" not in repeated_receipt
     assert corrected["effect_status"] == "succeeded"
     assert corrected["changed"] is True
+
+
+def test_successful_core_create_continues_with_scoped_semantic_postconditions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_same_turn_ontology_delegation(monkeypatch)
+    handler_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        handler_calls.append((name, arguments))
+        if name == "create_concepts":
+            return {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "created_concept_ids": ["#V#burkhard_wuensche"],
+                "canonical_read_back": {
+                    "status": "verified",
+                    "verified": True,
+                    "concept_id": "#V#burkhard_wuensche",
+                },
+            }
+        assert name == "upsert_scoped_assertion"
+        assertion_id = (
+            "ska_role"
+            if arguments["predicate"] == "#V#is_an_instance_of"
+            else "ska_affiliation"
+        )
+        readback = {
+            "schema_version": "scoped_knowledge_assertion.v1",
+            "assertion_id": assertion_id,
+            "subject_concept_id": arguments["subject_concept_id"],
+            "predicate": arguments["predicate"],
+            "object_kind": "concept",
+            "object_concept_id": arguments["target_concept_id"],
+            "object_text": None,
+            "scope": {
+                "mode": arguments["scope_mode"],
+                "user_concept_id": arguments["acting_user_concept_id"],
+                "organisation_concept_id": arguments[
+                    "organisation_concept_id"
+                ],
+                "namespace": arguments["namespace"],
+                "audience_keys": [
+                    f"org:{arguments['organisation_concept_id']}"
+                ],
+            },
+            "provenance": {
+                "asserted_by_user_concept_id": arguments[
+                    "acting_user_concept_id"
+                ],
+                "organisation_concept_id": arguments[
+                    "organisation_concept_id"
+                ],
+                "namespace": arguments["namespace"],
+                "evidence": arguments["evidence"],
+            },
+            "canonical_publication": False,
+            "status": "asserted",
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": assertion_id,
+            "assertion": readback,
+            "canonical_read_back": readback,
+            "canonical_publication": False,
+        }
+
+    source_evidence = {
+        "source_id": "staff-page-source",
+        "claim_text": "Burkhard Wuensche is academic staff at the School.",
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-wuensche-core",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "parent_id": "#V#person",
+                            "concepts": [
+                                {
+                                    "name": "Burkhard Wuensche",
+                                    "kind": "instance",
+                                }
+                            ],
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="assert-wuensche-role",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#burkhard_wuensche",
+                            "predicate": "#V#is_an_instance_of",
+                            "target_concept_id": "#V#academic_staff",
+                            "scope_mode": "organisation",
+                            "evidence": source_evidence,
+                        },
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="assert-wuensche-affiliation",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": "#V#burkhard_wuensche",
+                            "predicate": "#V#affiliated_with",
+                            "target_concept_id": "#V#school_of_computer_science",
+                            "scope_mode": "organisation",
+                            "evidence": source_evidence,
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The Person core and both organisation-scoped semantic facts "
+                "were recorded and read back."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt=(
+            "Represent Burkhard Wuensche as a Person, academic staff, and "
+            "affiliated with the School, preserving the source evidence."
+        ),
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-core-then-scoped-postconditions",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert [name for name, _arguments in handler_calls] == [
+        "create_concepts",
+        "upsert_scoped_assertion",
+        "upsert_scoped_assertion",
+    ]
+    create_arguments = handler_calls[0][1]
+    assert len(create_arguments["concepts"]) == 1
+    assert create_arguments["concepts"][0] == {
+        "name": "Burkhard Wuensche",
+        "kind": "instance",
+    }
+    for _name, assertion_arguments in handler_calls[1:]:
+        assert assertion_arguments["acting_user_concept_id"] == "#V#person"
+        assert assertion_arguments["organisation_concept_id"] == "#V#org"
+        assert assertion_arguments["namespace"] == "#V#person@org"
+        assert assertion_arguments["canonical_publication"] is False
+        assert assertion_arguments["evidence"] == source_evidence
+    assert "core concept establishes only" in client.calls[1]["system_message"]
+    assert "entity_representation_coverage=core_only" in client.calls[1][
+        "system_message"
+    ]
+    scoped_invocations = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("tool") == "upsert_scoped_assertion"
+    ]
+    assert len(scoped_invocations) == 2
+    assert all(
+        invocation.get("canonical_readback", {}).get("object_kind") == "concept"
+        for invocation in scoped_invocations
+    )
+    assert {
+        invocation["canonical_readback"]["object_concept_id"]
+        for invocation in scoped_invocations
+    } == {"#V#academic_staff", "#V#school_of_computer_science"}
+    assert result.terminal_status == "completed"
+    assert result.response_text == (
+        "The Person core and both organisation-scoped semantic facts were "
+        "recorded and read back."
+    )
 
 
 @pytest.mark.parametrize(

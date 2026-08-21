@@ -3768,6 +3768,7 @@ def _add_relationship(**kwargs):
     predicate_if_missing = kwargs.get("predicate_if_missing")
     predicate_resolution: dict[str, Any] | None = None
     predicate_value_kind = "concept"
+    predicate_value_kind_explicit = False
     mutation_dispatched = False
     predicate_dependency: dict[str, Any] | None = None
     predicate_dependency_changed = False
@@ -3827,8 +3828,13 @@ def _add_relationship(**kwargs):
                 ),
                 details={"on_missing": on_missing},
             )
+        raw_predicate_value_kind = predicate_ref.get("value_kind")
+        predicate_value_kind_explicit = bool(
+            isinstance(raw_predicate_value_kind, str)
+            and raw_predicate_value_kind.strip()
+        )
         predicate_value_kind = (
-            str(predicate_ref.get("value_kind") or "concept").strip().lower()
+            str(raw_predicate_value_kind or "concept").strip().lower()
         )
         if predicate_value_kind not in {"concept", "text"}:
             return make_error_response(
@@ -4111,13 +4117,149 @@ def _add_relationship(**kwargs):
                     }
                 )
             else:
+                canonical_missing_predicate_id = canonicalise_vontology_concept_id(
+                    predicate_str
+                )
+                recovery_affordances: list[dict[str, Any]] = [
+                    {
+                        "action_type": "resolve_exact_predicate",
+                        "sequence_step": 1,
+                        "tool": "resolve_concept_by_name",
+                        "arguments": {
+                            "name": predicate_str,
+                            "instance_of": "#V#predicate",
+                            "match_code_strings": False,
+                            "max_results": 5,
+                        },
+                    }
+                ]
+                recoverable_object_kind: str | None = None
+                recovery_limit: dict[str, str] | None = None
+                target_concept_id = (
+                    str(target).strip()
+                    if isinstance(target, str)
+                    and str(target).strip().startswith("#V#")
+                    else None
+                )
+                target_text = (
+                    target.strip()
+                    if isinstance(target, str) and target.strip()
+                    else None
+                )
+                if predicate_value_kind_explicit and predicate_value_kind == "text":
+                    recoverable_object_kind = "text"
+                elif target_concept_id is not None:
+                    recoverable_object_kind = "concept"
+                elif (
+                    predicate_value_kind_explicit
+                    and predicate_value_kind == "concept"
+                ):
+                    recovery_limit = {
+                        "reason_code": "relationship_target_concept_not_verified",
+                        "message": (
+                            "The requested predicate is concept-valued, but the "
+                            "target is not one verified exact concept ID. Resolve "
+                            "or create the target before creating a predicate or "
+                            "retrying the relationship."
+                        ),
+                    }
+                elif target_text is not None:
+                    recoverable_object_kind = "text"
+                else:
+                    recovery_limit = {
+                        "reason_code": "predicate_object_kind_not_safely_inferable",
+                        "message": (
+                            "The missing predicate's object kind cannot be inferred "
+                            "safely from this request. Resolve the predicate first; "
+                            "no predicate creation or relationship retry is "
+                            "advertised until its concept-or-text kind is known."
+                        ),
+                    }
+
+                if canonical_missing_predicate_id is None:
+                    recovery_limit = {
+                        "reason_code": "predicate_concept_id_not_canonicalisable",
+                        "message": (
+                            "The missing predicate name does not yield one exact "
+                            "canonical concept ID, so no creation or relationship "
+                            "retry is advertised."
+                        ),
+                    }
+                elif recoverable_object_kind is not None:
+                    predicate_parent_id = (
+                        "#V#binary_text_predicate"
+                        if recoverable_object_kind == "text"
+                        else "#V#predicate"
+                    )
+                    recovery_affordances.extend(
+                        [
+                            {
+                                "action_type": (
+                                    "create_singleton_typed_predicate_if_still_missing"
+                                ),
+                                "sequence_step": 2,
+                                "requires_prior_step_status": "not_found",
+                                "tool": "create_concepts",
+                                "arguments": {
+                                    "parent_id": predicate_parent_id,
+                                    "concepts": [
+                                        {
+                                            "name": predicate_str,
+                                            "concept_id": (
+                                                canonical_missing_predicate_id
+                                            ),
+                                            "kind": "predicate",
+                                            "instance_of_type": predicate_parent_id,
+                                        }
+                                    ],
+                                    "duplicate_resolution_mode": (
+                                        _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                                    ),
+                                },
+                            },
+                            {
+                                "action_type": "verify_exact_typed_predicate",
+                                "sequence_step": 3,
+                                "tool": "fetch_concept",
+                                "arguments": {
+                                    "concept_id": canonical_missing_predicate_id,
+                                    "include_relations_arg1": True,
+                                },
+                            },
+                            {
+                                "action_type": (
+                                    "retry_exact_relationship_after_verification"
+                                ),
+                                "sequence_step": 4,
+                                "tool": "add_relationship",
+                                "arguments": {
+                                    "source_id": source_id,
+                                    "predicate": canonical_missing_predicate_id,
+                                    "target": target,
+                                },
+                            },
+                        ]
+                    )
+
+                error_details: dict[str, Any] = {
+                    "predicate": predicate_str,
+                    "canonical_candidate_predicate_id": (
+                        canonical_missing_predicate_id
+                    ),
+                }
+                if recoverable_object_kind is not None:
+                    error_details["recoverable_object_kind"] = (
+                        recoverable_object_kind
+                    )
+                if recovery_limit is not None:
+                    error_details["recovery_limit"] = recovery_limit
                 response = make_error_response(
                     "predicate_reference_not_found",
                     (
                         "No accessible predicate matched that name. The "
                         "relationship was not started."
                     ),
-                    details={"predicate": predicate_str},
+                    details=error_details,
                 )
                 response.update(
                     {
@@ -4125,22 +4267,7 @@ def _add_relationship(**kwargs):
                         "changed": False,
                         "mutation_outcome": "not_started",
                         "predicate_resolution": predicate_resolution,
-                        "recovery_affordances": [
-                            {
-                                "action_type": "retry_with_predicate_concept_id",
-                                "predicate_ref": {
-                                    "concept_id": "#V#exact_predicate_id"
-                                },
-                            },
-                            {
-                                "action_type": "create_typed_predicate_then_retry",
-                                "predicate_ref": {
-                                    "name": predicate_str,
-                                    "on_missing": "create_typed_predicate",
-                                    "value_kind": "concept",
-                                },
-                            },
-                        ],
+                        "recovery_affordances": recovery_affordances,
                     }
                 )
                 return response
@@ -11087,19 +11214,22 @@ def _add_relationship_input_schema() -> Schema:
         optional={
             "predicate": (str, type(None)),
             "predicate_ref": (dict, type(None)),
-            "predicate_if_missing": (dict, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
         description=(
-            "add_relationship input: source_id and target plus exactly one useful "
-            "predicate reference. predicate accepts a structural relationship, "
-            "natural-language predicate name, or exact #V# predicate ID. "
-            "predicate_ref is the typed form: {concept_id} or {name, "
-            "on_missing?: 'fail'|'create_typed_predicate', value_kind?: "
-            "'concept'|'text', description?}. Legacy predicate_if_missing remains "
-            "supported for exact dynamic predicates. Creation is attempted only "
-            "when explicitly requested, then verified before the edge."
+            "Governed add_relationship input: source_id and target plus exactly "
+            "one predicate reference. predicate accepts a recognised structural "
+            "predicate alias, a core text predicate (hasContent, hasDescription, "
+            "or hasName), or an exact existing #V# predicate concept ID. "
+            "predicate_ref is an equivalent exact-ID form and supports only "
+            "{concept_id: '#V#...'}. Resolve a predicate name first with "
+            "resolve_concept_by_name using instance_of='#V#predicate'. If it is "
+            "genuinely missing, create one correctly typed predicate through a "
+            "separate governed create_concepts effect, verify the returned "
+            "concept, then retry add_relationship with its exact ID. This call "
+            "does not resolve natural-language predicate names or create "
+            "predicate dependencies."
         ),
     )
 
@@ -11132,8 +11262,8 @@ def _add_relationship_output_schema() -> Schema:
         allow_unknown=True,
         description=(
             "add_relationship output: success, effect_status, changed, edge "
-            "details, optional predicate_dependency create/reuse verification, "
-            "and typed partial or indeterminate failure evidence."
+            "details, governed authority receipt and canonical read-back when "
+            "available, and typed partial or indeterminate failure evidence."
         ),
     )
 
@@ -37827,13 +37957,15 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_effect=True,
             ordinary_turn_mutation_subject_argument="source_id",
             description=(
-                "Add one concept-to-concept or concept-to-text relationship. "
-                "Structural predicates use their aliases. A custom predicate may "
-                "be supplied by exact #V# ID or resolved natural-language name. "
-                "Use predicate_ref for typed ambiguity/not-found recovery and "
-                "explicitly request creation with on_missing="
-                "'create_typed_predicate' plus value_kind='concept' or 'text'. "
-                "Creation/reuse is verified before the relationship attempt."
+                "Add one governed concept-to-concept or concept-to-text "
+                "relationship using a recognised structural alias, a core text "
+                "predicate, or an exact existing #V# predicate ID (directly or "
+                "as predicate_ref={concept_id}). Resolve names separately with "
+                "resolve_concept_by_name(instance_of='#V#predicate'); create and "
+                "verify a genuinely missing predicate in its own governed "
+                "create_concepts effect before retrying. This tool does not "
+                "resolve predicate names or create predicate dependencies during "
+                "the relationship write."
             ),
         ),
         MethodDefinition(

@@ -7,6 +7,7 @@ Return JSON only with exactly these keys:
 - entity_description
 - entity_aliases
 - entity_source_text
+- requested_facts
 - response_text
 
 Rules:
@@ -24,3 +25,15 @@ Rules:
   main entity_name.
 - entity_source_text should preserve the best concise textual grounding for the
   representation.
+- requested_facts must be an array containing every grounded semantic fact
+  requested beyond the entity's core identity, expected domain type, name, and
+  aliases. Use an empty array only when the request contains no such fact. A
+  fact does not stop being requested merely because it is also repeated in
+  entity_description or entity_source_text.
+- Each requested_facts item must contain claim_text and may contain
+  relation_hint, target_name, identifier_scheme, identifier_value,
+  evidence_text, and source_locator. Preserve the source's meaning and evidence;
+  do not invent concept or predicate IDs, publication scope, or authority.
+- A requested role, affiliation, identifier, provenance, or other non-core
+  claim remains a requested fact even when the entity already exists. A prose
+  description or source-processing note does not establish it or satisfy the requested fact.
