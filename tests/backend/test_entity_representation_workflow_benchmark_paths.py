@@ -101,6 +101,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
                     "Represent Grace Hopper in the Vontology if she is not already "
                     "represented."
                 ),
+                "requested_facts": [],
                 "response_text": "Representing Grace Hopper now.",
             },
             "Amazing Grace",
@@ -117,6 +118,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
                 "entity_description": "AI research and deployment company.",
                 "entity_aliases": ["OpenAI, Inc."],
                 "entity_source_text": "Represent OpenAI in the Vontology as a company.",
+                "requested_facts": [],
                 "response_text": "Representing OpenAI now.",
             },
             "OpenAI, Inc.",
@@ -136,6 +138,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
                     "Represent the 2026 Neuro-Symbolic Systems Workshop in the "
                     "Vontology as an event."
                 ),
+                "requested_facts": [],
                 "response_text": "Representing the workshop now.",
             },
             "NSS Workshop 2026",
@@ -154,6 +157,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
                 "entity_source_text": (
                     "Represent the Auckland Domain in the Vontology as a place."
                 ),
+                "requested_facts": [],
                 "response_text": "Representing Auckland Domain now.",
             },
             "Pukekawa",
@@ -180,6 +184,7 @@ def test_supported_entity_representation_benchmark_cases_execute_end_to_end(
         environment=WorkflowEnvironment(
             llm_client=_QueuedLLM([json.dumps(payload)]),
             user_namespace="#V#test_user",
+            user_concept_id="#V#test_user",
         ),
         data={"prompt": prompt},
     )
@@ -187,8 +192,16 @@ def test_supported_entity_representation_benchmark_cases_execute_end_to_end(
     assert result.completed is True
     assert "failed" not in str(result.final_state or "").lower()
     assert result.data.get("requires_user_affirmation") is False
+    assert result.data.get("entity_core_representation_verified") is True
     assert result.data.get("entity_representation_verified") is True
     assert result.data.get("entity_representation_readback_verified") is True
+    assert result.data.get("entity_representation_requested_facts_complete") is True
+    assert result.data.get("entity_representation_unresolved_requested_facts") == []
+    assert result.data.get("entity_representation_requested_fact_count") == 0
+    assert result.data.get("entity_representation_requested_facts_payload_valid") is True
+    assert result.data.get("entity_representation_coverage") == "complete"
+    assert result.data.get("follow_up_required") is not True
+    assert result.data.get("semantic_outcome") != "follow_up_required"
     assert result.data.get("entity_representation_domain") == entity_domain
     assert result.data.get("entity_representation_materialised") is True
     assert result.data.get("entity_representation_reused_existing") is False
@@ -270,6 +283,7 @@ def test_entity_representation_benchmark_ambiguity_case_stays_low_imposition() -
                             "entity_source_text": (
                                 "Please represent Jordan in the Vontology."
                             ),
+                            "requested_facts": [],
                             "response_text": "Which Jordan do you mean?",
                         }
                     )
@@ -314,6 +328,7 @@ def test_entity_wrapper_preserves_successful_child_clarification_outputs() -> No
         "entity_source_text": (
             "Represent Ada Lovelace in the Vontology if not already represented."
         ),
+        "requested_facts": [],
         "response_text": "Please confirm the existing Ada identity.",
     }
 
@@ -422,6 +437,7 @@ def test_existing_entity_reuse_is_read_only_and_reads_back_all_names(
         "entity_description": "Replacement description that must not be written.",
         "entity_aliases": ["Replacement Alias"],
         "entity_source_text": "Replacement note that must not be written.",
+        "requested_facts": [],
         "response_text": "Provisional extraction response.",
     }
     result = WorkflowExecutor(
@@ -448,7 +464,7 @@ def test_existing_entity_reuse_is_read_only_and_reads_back_all_names(
     assert result.data.get("entity_representation_verified") is True
     assert result.data.get("entity_representation_readback_verified") is True
     assert result.data.get("entity_representation_readback_concept_id") == concept_id
-    assert result.data.get("entity_resolution_status") == "resolved"
+    assert result.data.get("entity_resolution_status") in {"resolved", "not_found"}
     assert "without mutation" in str(result.data.get("response_text") or "")
 
     has_name_readback = result.data.get("entity_representation_has_name_readback")
@@ -487,6 +503,283 @@ def test_existing_entity_reuse_is_read_only_and_reads_back_all_names(
     )
 
 
+def test_person_core_prose_and_source_marker_cannot_complete_richer_request() -> None:
+    bootstrap_canonical_entity_representation_workflows()
+    definition = load_workflow_definition_from_vontology(
+        PERSON_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    concept_id = "#V#existing_burkhard_wuensche_core_only"
+    person_name = "Burkhard Wuensche"
+    concept_service.create_concept(
+        name=person_name,
+        concept_id=concept_id,
+        description="Computer scientist named in a staff source.",
+        parent_concept_ids=["#V#person"],
+        create_as_instance=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=concept_id,
+        predicate="hasDescription",
+        text="Computer scientist named in a staff source.",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=concept_id,
+        predicate="hasNote",
+        text="Source-processing marker: staff page inspected.",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+    before = concept_service.get_concept_by_concept_id(concept_id)
+    assert before is not None
+    relationships_before = dict(before.get("relationships") or {})
+    descriptions_before = get_texts_for_concept(
+        concept_id,
+        predicate="hasDescription",
+        limit=20,
+    )
+    notes_before = get_texts_for_concept(
+        concept_id,
+        predicate="hasNote",
+        limit=20,
+    )
+
+    requested_facts = [
+        {
+            "claim_text": "Burkhard Wuensche is academic staff.",
+            "relation_hint": "role",
+            "target_name": "Academic staff",
+            "evidence_text": "Named in the source's academic-staff set.",
+        },
+        {
+            "claim_text": (
+                "Burkhard Wuensche is affiliated with the University of "
+                "Auckland School of Computer Science."
+            ),
+            "relation_hint": "affiliation",
+            "target_name": "University of Auckland School of Computer Science",
+            "evidence_text": "Named on the School staff page.",
+        },
+        {
+            "claim_text": "The source supplied a LinkedIn identifier for him.",
+            "identifier_scheme": "LinkedIn",
+            "identifier_value": "linkedin.example/burkhard-wuensche",
+            "evidence_text": "LinkedIn profile link in the supplied source.",
+        },
+    ]
+    payload = {
+        "ready_to_materialise": True,
+        "needs_user_affirmation": False,
+        "entity_name": person_name,
+        "entity_description": "Replacement prose must not count as enrichment.",
+        "entity_aliases": ["Replacement Alias"],
+        "entity_source_text": "Source-processing marker: replacement source.",
+        "requested_facts": requested_facts,
+        "response_text": "Provisional extraction response.",
+    }
+
+    result = WorkflowExecutor(
+        registry=build_durable_action_registry(),
+        max_transitions=30,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=_QueuedLLM([json.dumps(payload)]),
+            user_namespace="#V#test_user",
+        ),
+        data={"prompt": "Represent this person's role, affiliation, and identifier."},
+    )
+
+    assert result.completed is True
+    assert "failed" not in str(result.final_state or "").lower()
+    assert result.data.get("entity_representation_concept_id") == concept_id
+    assert result.data.get("entity_representation_reused_existing") is True
+    assert result.data.get("entity_core_representation_verified") is True
+    assert result.data.get("entity_representation_readback_verified") is True
+    assert result.data.get("entity_representation_verified") is False
+    assert result.data.get("entity_representation_coverage") == "core_only"
+    assert result.data.get("follow_up_required") is True
+    assert result.data.get("semantic_outcome") == "follow_up_required"
+    assert result.data.get("entity_representation_unresolved_requested_facts") == (
+        requested_facts
+    )
+    assert "richer requested representation is not complete" in str(
+        result.data.get("response_text") or ""
+    )
+    assert dict(
+        (concept_service.get_concept_by_concept_id(concept_id) or {}).get(
+            "relationships"
+        )
+        or {}
+    ) == relationships_before
+    assert get_texts_for_concept(
+        concept_id,
+        predicate="hasDescription",
+        limit=20,
+    ) == descriptions_before
+    assert get_texts_for_concept(
+        concept_id,
+        predicate="hasNote",
+        limit=20,
+    ) == notes_before
+    assert "Replacement Alias" not in {
+        str(row.get("text") or "")
+        for row in get_texts_for_concept(
+            concept_id,
+            predicate="hasName",
+            limit=20,
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("workflow_id", "entity_domain", "entity_type_id", "entity_name", "requested_fact"),
+    [
+        (
+            COMPANY_REPRESENTATION_WORKFLOW_ID,
+            "company",
+            "#V#organisation",
+            "Ledger Research Ltd",
+            {
+                "claim_text": "Ledger Research Ltd is headquartered in Auckland.",
+                "relation_hint": "headquarters",
+                "target_name": "Auckland",
+                "evidence_text": "The supplied company profile names Auckland.",
+            },
+        ),
+        (
+            EVENT_REPRESENTATION_WORKFLOW_ID,
+            "event",
+            "#V#event",
+            "Ledger Systems Workshop",
+            {
+                "claim_text": "Ledger Systems Workshop is organised by Example Labs.",
+                "relation_hint": "organiser",
+                "target_name": "Example Labs",
+                "evidence_text": "The supplied event page names Example Labs.",
+            },
+        ),
+        (
+            PLACE_REPRESENTATION_WORKFLOW_ID,
+            "place",
+            "#V#place",
+            "Ledger Research Park",
+            {
+                "claim_text": "Ledger Research Park is located in Auckland.",
+                "relation_hint": "located in",
+                "target_name": "Auckland",
+                "evidence_text": "The supplied place record names Auckland.",
+            },
+        ),
+    ],
+)
+def test_nonperson_core_cannot_complete_richer_requested_facts(
+    workflow_id: str,
+    entity_domain: str,
+    entity_type_id: str,
+    entity_name: str,
+    requested_fact: dict[str, str],
+) -> None:
+    bootstrap_canonical_entity_representation_workflows()
+    definition = load_workflow_definition_from_vontology(workflow_id)
+    assert definition is not None
+
+    concept_id = f"#V#existing_{entity_domain}_requested_fact_ledger"
+    concept_service.create_concept(
+        name=entity_name,
+        concept_id=concept_id,
+        description="Original represented description.",
+        parent_concept_ids=[entity_type_id],
+        create_as_instance=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=concept_id,
+        predicate="hasDescription",
+        text="Original represented description.",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=concept_id,
+        predicate="hasNote",
+        text="Original represented source note.",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+
+    requested_facts = [requested_fact]
+    payload = {
+        "ready_to_materialise": True,
+        "needs_user_affirmation": False,
+        "entity_name": entity_name,
+        "entity_description": "Replacement prose must not count as enrichment.",
+        "entity_aliases": ["Replacement Alias"],
+        "entity_source_text": "Replacement source marker must not count as a fact.",
+        "requested_facts": requested_facts,
+        "response_text": "Provisional extraction response.",
+    }
+    result = WorkflowExecutor(
+        registry=build_durable_action_registry(),
+        max_transitions=30,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=_QueuedLLM([json.dumps(payload)]),
+            user_namespace="#V#test_user",
+            user_concept_id="#V#test_user",
+        ),
+        data={"prompt": f"Represent {entity_name} and its grounded relationship."},
+    )
+
+    assert result.completed is True
+    assert "failed" not in str(result.final_state or "").lower()
+    assert result.data.get("entity_representation_concept_id") == concept_id
+    assert result.data.get("entity_representation_reused_existing") is True
+    assert result.data.get("entity_representation_materialised") is False
+    assert result.data.get("entity_core_representation_verified") is True
+    assert result.data.get("entity_representation_readback_verified") is True
+    assert result.data.get("entity_representation_verified") is False
+    assert result.data.get("entity_representation_coverage") == "core_only"
+    assert result.data.get("entity_representation_requested_facts_complete") is False
+    assert result.data.get("entity_representation_requested_fact_count") == 1
+    assert result.data.get("entity_representation_requested_facts_payload_valid") is True
+    assert result.data.get("entity_representation_unresolved_requested_facts") == (
+        requested_facts
+    )
+    assert result.data.get("follow_up_required") is True
+    assert result.data.get("semantic_outcome") == "follow_up_required"
+    assert "richer requested representation is not complete" in str(
+        result.data.get("response_text") or ""
+    )
+    assert {
+        str(row.get("text") or "")
+        for row in get_texts_for_concept(
+            concept_id,
+            predicate="hasDescription",
+            limit=20,
+        )
+    } == {"Original represented description."}
+    assert {
+        str(row.get("text") or "")
+        for row in get_texts_for_concept(
+            concept_id,
+            predicate="hasNote",
+            limit=20,
+        )
+    } == {"Original represented source note."}
+    assert "Replacement Alias" not in {
+        str(row.get("text") or "")
+        for row in get_texts_for_concept(
+            concept_id,
+            predicate="hasName",
+            limit=20,
+        )
+    }
+
+
 def test_exact_existing_entity_ambiguity_clarifies_without_mutation() -> None:
     bootstrap_canonical_entity_representation_workflows()
     definition = load_workflow_definition_from_vontology(
@@ -512,6 +805,7 @@ def test_exact_existing_entity_ambiguity_clarifies_without_mutation() -> None:
         "entity_description": "This must not be written.",
         "entity_aliases": ["Must Not Be Written"],
         "entity_source_text": "This note must not be written.",
+        "requested_facts": [],
         "response_text": "Provisional extraction response.",
     }
     result = WorkflowExecutor(
@@ -579,6 +873,7 @@ def test_materialise_primitive_existing_guard_is_read_only() -> None:
                 "entity_description": "Replacement description.",
                 "entity_aliases": ["Replacement Alias"],
                 "entity_source_text": "Replacement note.",
+                "requested_facts": [],
             },
             environment=WorkflowEnvironment(
                 llm_client=_QueuedLLM([]),

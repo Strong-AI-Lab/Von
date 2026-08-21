@@ -340,8 +340,38 @@ def test_workflow_can_report_a_typed_incomplete_semantic_outcome():
     )
 
     assert follow_up["effect_status"] == "succeeded"
-    assert follow_up["semantic_effect"] is None
+    assert follow_up["semantic_effect"] is False
     assert follow_up["semantic_outcome"] == "follow_up_required"
+
+
+def test_succeeded_person_core_only_workflow_receipt_requires_non_semantic_follow_up():
+    from src.backend.services.workflow_turn_capability_service import (
+        normalise_workflow_effect_receipt,
+    )
+
+    follow_up = normalise_workflow_effect_receipt(
+        {
+            "success": True,
+            "instance_id": "instance-person-core-only",
+            "created_new": True,
+            "final_status": "completed",
+            "workflow_execution": {
+                "outputs": {
+                    "entity_core_representation_verified": True,
+                    "entity_representation_verified": False,
+                    "follow_up_required": True,
+                    "semantic_outcome": "follow_up_required",
+                }
+            },
+        },
+        capability=_capability(),
+    )
+
+    assert follow_up["effect_status"] == "succeeded"
+    assert follow_up["operational_state_effect"] is True
+    assert follow_up["semantic_effect"] is False
+    assert follow_up["semantic_outcome"] == "follow_up_required"
+    assert follow_up["semantic_outcome"] != "completed"
 
 
 @pytest.mark.parametrize("semantic_outcome", ["blocked", "failed", "not_completed"])

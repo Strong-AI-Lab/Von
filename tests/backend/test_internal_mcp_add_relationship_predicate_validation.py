@@ -1,4 +1,36 @@
+import json
+
 import pytest
+
+
+def _assert_recovery_affordances_are_executable(result):
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.integrations.internal_mcp.schemas import validate_payload
+
+    affordances = result["recovery_affordances"]
+    rendered = json.dumps(result, sort_keys=True)
+    for forbidden in (
+        "#V#exact_predicate_id",
+        "on_missing",
+        "predicate_if_missing",
+        "create_typed_predicate",
+    ):
+        assert forbidden not in rendered
+
+    method_catalogue = catalogue.build_default_catalogue()
+    for affordance in affordances:
+        assert isinstance(affordance.get("tool"), str)
+        assert isinstance(affordance.get("arguments"), dict)
+        definition = method_catalogue.get(affordance["tool"])
+        valid, errors = validate_payload(
+            definition.input_schema,
+            affordance["arguments"],
+        )
+        assert valid, {
+            "tool": affordance["tool"],
+            "arguments": affordance["arguments"],
+            "errors": errors,
+        }
 
 
 def test_add_relationship_returns_typed_recovery_for_unknown_predicate_name(
@@ -42,10 +74,126 @@ def test_add_relationship_returns_typed_recovery_for_unknown_predicate_name(
     assert result["mutation_outcome"] == "not_started"
     assert result["changed"] is False
     assert result["predicate_resolution"]["status"] == "not_found"
-    assert result["recovery_affordances"][0]["action_type"] == (
-        "retry_with_predicate_concept_id"
-    )
+    assert [item["tool"] for item in result["recovery_affordances"]] == [
+        "resolve_concept_by_name",
+        "create_concepts",
+        "fetch_concept",
+        "add_relationship",
+    ]
+    create_arguments = result["recovery_affordances"][1]["arguments"]
+    assert create_arguments["parent_id"] == "#V#predicate"
+    assert create_arguments["concepts"] == [
+        {
+            "name": "has_item",
+            "concept_id": "#V#has_item",
+            "kind": "predicate",
+            "instance_of_type": "#V#predicate",
+        }
+    ]
+    assert result["recovery_affordances"][3]["arguments"] == {
+        "source_id": "#V#source",
+        "predicate": "#V#has_item",
+        "target": "#V#target",
+    }
+    _assert_recovery_affordances_are_executable(result)
     assert calls["update_one"] == []
+
+
+def test_add_relationship_does_not_invent_missing_predicate_object_kind(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda filter_doc, projection=None: (
+            {"concept_id": "#V#source", "relationships": {}}
+            if filter_doc.get("concept_id") == "#V#source"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **kwargs: {
+            "success": True,
+            "status": "not_found",
+            "resolved_concept_id": None,
+            "candidates": [],
+            "audit": [],
+        },
+    )
+
+    result = catalogue._add_relationship.__wrapped__(
+        source_id="#V#source",
+        predicate="Has summary",
+        target=42,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "predicate_reference_not_found"
+    assert [item["tool"] for item in result["recovery_affordances"]] == [
+        "resolve_concept_by_name"
+    ]
+    assert result["error_details"]["recovery_limit"]["reason_code"] == (
+        "predicate_object_kind_not_safely_inferable"
+    )
+    _assert_recovery_affordances_are_executable(result)
+
+
+def test_add_relationship_advertises_typed_text_predicate_recovery(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda filter_doc, projection=None: (
+            {"concept_id": "#V#source", "relationships": {}}
+            if filter_doc.get("concept_id") == "#V#source"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **kwargs: {
+            "success": True,
+            "status": "not_found",
+            "resolved_concept_id": None,
+            "candidates": [],
+            "audit": [],
+        },
+    )
+
+    result = catalogue._add_relationship.__wrapped__(
+        source_id="#V#source",
+        predicate="Has summary",
+        target="A concise summary",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "predicate_reference_not_found"
+    assert [item["tool"] for item in result["recovery_affordances"]] == [
+        "resolve_concept_by_name",
+        "create_concepts",
+        "fetch_concept",
+        "add_relationship",
+    ]
+    create_arguments = result["recovery_affordances"][1]["arguments"]
+    assert create_arguments["parent_id"] == "#V#binary_text_predicate"
+    assert create_arguments["concepts"] == [
+        {
+            "name": "Has summary",
+            "concept_id": "#V#has_summary",
+            "kind": "predicate",
+            "instance_of_type": "#V#binary_text_predicate",
+        }
+    ]
+    assert result["recovery_affordances"][3]["arguments"] == {
+        "source_id": "#V#source",
+        "predicate": "#V#has_summary",
+        "target": "A concise summary",
+    }
+    _assert_recovery_affordances_are_executable(result)
 
 
 def test_add_relationship_resolves_accessible_predicate_name_before_write(

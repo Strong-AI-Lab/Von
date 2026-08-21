@@ -2551,10 +2551,18 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
                 llm_client=request.environment.llm_client,
                 gateway=request.environment.gateway,
                 model=request.environment.model,
+                model_parameters=request.environment.model_parameters,
                 user_namespace=request.environment.user_namespace,
                 auxiliary_system_prompt=request.environment.auxiliary_system_prompt,
                 max_tool_invocations=request.environment.max_tool_invocations,
+                max_tool_result_chars=request.environment.max_tool_result_chars,
+                max_tool_result_field_chars=(
+                    request.environment.max_tool_result_field_chars
+                ),
                 default_gmail_profile=request.environment.default_gmail_profile,
+                user_concept_id=request.environment.user_concept_id,
+                org_concept_id=request.environment.org_concept_id,
+                step_callback=request.environment.step_callback,
             ),
             data=dict(verification_inputs_raw or {})
             if isinstance(verification_inputs_raw, Mapping)

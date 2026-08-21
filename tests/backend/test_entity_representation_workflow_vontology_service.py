@@ -53,7 +53,7 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     report = bootstrap_canonical_entity_representation_workflows()
 
     template_publication = report.get("template_publication") or {}
-    assert template_publication.get("repo_seed_version") == "4"
+    assert template_publication.get("repo_seed_version") == "5"
     assert (template_publication.get("counts") or {}).get("persisted_templates") == 4
 
     publication = report.get("publication") or {}
@@ -238,3 +238,6 @@ def test_entity_representation_prompt_support_seeds_content_from_repo_assets(
     assert isinstance(payload_text, str)
     assert "workflow_creation_prompt must begin with" in preflight_text
     assert "entity_source_text should preserve" in payload_text
+    assert "requested_facts must be an array" in payload_text
+    assert "does not stop being requested" in payload_text
+    assert "does not establish it or satisfy the requested fact" in payload_text

@@ -313,7 +313,7 @@ def test_v2_entity_templates_pass_creation_runtime_verification(
     bootstrap_report = bootstrap_canonical_entity_representation_workflows()
     assert (bootstrap_report.get("template_publication") or {}).get(
         "repo_seed_version"
-    ) == "4"
+    ) == "5"
     _seed_workflow_creation_synthesis_policy()
 
     payload = {
@@ -323,6 +323,7 @@ def test_v2_entity_templates_pass_creation_runtime_verification(
         "entity_description": f"Verification description for {entity_name}.",
         "entity_aliases": [entity_alias],
         "entity_source_text": prompt,
+        "requested_facts": [],
         "response_text": f"Representing {entity_name} now.",
     }
     result = _handle_verify_discoverability(
@@ -332,6 +333,7 @@ def test_v2_entity_templates_pass_creation_runtime_verification(
             environment=WorkflowEnvironment(
                 llm_client=_QueuedLLM([json.dumps(payload)]),
                 user_namespace="#V#test_user",
+                user_concept_id="#V#test_user",
             ),
             data={
                 "prompt": prompt,
@@ -959,6 +961,18 @@ def test_text_only_person_request_synthesises_discoverable_entity_workflow() -> 
                         "Represent Ada Lovelace in the Vontology. "
                         "She was a mathematician and writer."
                     ),
+                    "requested_facts": [
+                        {
+                            "claim_text": "Ada Lovelace was a mathematician.",
+                            "relation_hint": "role",
+                            "target_name": "Mathematician",
+                        },
+                        {
+                            "claim_text": "Ada Lovelace was a writer.",
+                            "relation_hint": "role",
+                            "target_name": "Writer",
+                        },
+                    ],
                     "response_text": "Representing Ada Lovelace now.",
                 }
             )
@@ -968,6 +982,7 @@ def test_text_only_person_request_synthesises_discoverable_entity_workflow() -> 
     env = WorkflowEnvironment(
         llm_client=creation_llm,
         user_namespace="#V#test_user",
+        user_concept_id="#V#test_user",
     )
     workflow_creation_definition = load_workflow_definition_from_vontology(
         WORKFLOW_CREATION_WORKFLOW_ID
@@ -1026,18 +1041,28 @@ def test_text_only_person_request_synthesises_discoverable_entity_workflow() -> 
                             "ready_to_materialise": True,
                             "needs_user_affirmation": False,
                             "entity_name": "Grace Hopper",
-                            "entity_description": "Computer scientist and rear admiral.",
+                            "entity_description": "Computer scientist.",
                             "entity_aliases": ["Amazing Grace"],
                             "entity_source_text": (
                                 "Represent Grace Hopper in the Vontology. "
                                 "She was a computer scientist."
                             ),
+                            "requested_facts": [
+                                {
+                                    "claim_text": (
+                                        "Grace Hopper was a computer scientist."
+                                    ),
+                                    "relation_hint": "role",
+                                    "target_name": "Computer scientist",
+                                }
+                            ],
                             "response_text": "Representing Grace Hopper now.",
                         }
                     )
                 ]
             ),
             user_namespace="#V#test_user",
+            user_concept_id="#V#test_user",
         ),
         data={
             "prompt": (
@@ -1049,7 +1074,18 @@ def test_text_only_person_request_synthesises_discoverable_entity_workflow() -> 
 
     assert generated_run.completed is True
     assert generated_run.data.get("requires_user_affirmation") is False
-    assert generated_run.data.get("entity_representation_verified") is True
+    assert generated_run.data.get("entity_core_representation_verified") is True
+    assert generated_run.data.get("entity_representation_verified") is False
+    assert generated_run.data.get("entity_representation_coverage") == "core_only"
+    assert generated_run.data.get(
+        "entity_representation_unresolved_requested_facts"
+    ) == [
+        {
+            "claim_text": "Grace Hopper was a computer scientist.",
+            "relation_hint": "role",
+            "target_name": "Computer scientist",
+        }
+    ]
     assert generated_run.data.get("entity_representation_domain") == "person"
 
     concept_id = str(
@@ -1066,7 +1102,7 @@ def test_text_only_person_request_synthesises_discoverable_entity_workflow() -> 
         limit=20,
     )
     assert any(
-        (row.get("text") or "") == "Computer scientist and rear admiral."
+        (row.get("text") or "") == "Computer scientist."
         for row in description_rows
         if isinstance(row, dict)
     )

@@ -87,8 +87,10 @@ _CANONICAL_REPRESENTATION_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
         "target_entity_class": "person",
         "effect_type": "representation_person",
         "description": (
-            "Ensure a person representation is materialised from the supplied "
-            "artefact context before final response completion."
+            "Ensure the core identity for a person is materialised and typed as "
+            "Person from the supplied artefact context. This core contract does "
+            "not establish requested roles, affiliations, identifiers, or "
+            "claim-level provenance; those remain separate effects."
         ),
         "intent_patterns": [
             r"\b("

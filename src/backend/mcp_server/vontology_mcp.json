@@ -33,7 +33,7 @@
         },
         {
             "name": "add_relationship",
-            "description": "Add one concept-to-concept or concept-to-text relationship. Structural predicates use their aliases. A custom predicate may be supplied by exact #V# ID or resolved natural-language name. Use predicate_ref for typed ambiguity/not-found recovery and explicitly request creation with on_missing='create_typed_predicate' plus value_kind='concept' or 'text'. Creation/reuse is verified before the relationship attempt.",
+            "description": "Add one governed concept-to-concept or concept-to-text relationship using a recognised structural alias, a core text predicate, or an exact existing #V# predicate ID (directly or as predicate_ref={concept_id}). Resolve names separately with resolve_concept_by_name(instance_of='#V#predicate'); create and verify a genuinely missing predicate in its own governed create_concepts effect before retrying. This tool does not resolve predicate names or create predicate dependencies during the relationship write.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -56,13 +56,6 @@
                         ],
                         "additionalProperties": true
                     },
-                    "predicate_if_missing": {
-                        "type": [
-                            "object",
-                            "null"
-                        ],
-                        "additionalProperties": true
-                    },
                     "ontology_delegation_id": {
                         "type": "string",
                         "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
@@ -77,7 +70,7 @@
                     "target"
                 ],
                 "additionalProperties": true,
-                "description": "add_relationship input: source_id and target plus exactly one useful predicate reference. predicate accepts a structural relationship, natural-language predicate name, or exact #V# predicate ID. predicate_ref is the typed form: {concept_id} or {name, on_missing?: 'fail'|'create_typed_predicate', value_kind?: 'concept'|'text', description?}. Legacy predicate_if_missing remains supported for exact dynamic predicates. Creation is attempted only when explicitly requested, then verified before the edge."
+                "description": "Governed add_relationship input: source_id and target plus exactly one predicate reference. predicate accepts a recognised structural predicate alias, a core text predicate (hasContent, hasDescription, or hasName), or an exact existing #V# predicate concept ID. predicate_ref is an equivalent exact-ID form and supports only {concept_id: '#V#...'}. Resolve a predicate name first with resolve_concept_by_name using instance_of='#V#predicate'. If it is genuinely missing, create one correctly typed predicate through a separate governed create_concepts effect, verify the returned concept, then retry add_relationship with its exact ID. This call does not resolve natural-language predicate names or create predicate dependencies."
             }
         },
         {
