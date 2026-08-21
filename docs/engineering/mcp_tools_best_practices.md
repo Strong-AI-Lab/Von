@@ -100,7 +100,7 @@ texts = get_texts_for_concept(
 
 ### 1.3 Creating and Updating Concepts
 
-**Scenario**: You need to create one or more concepts or modify concept properties.
+**Scenario**: You need to create one concept or modify concept properties.
 
 **WRONG** (Direct service call):
 ```python
@@ -130,20 +130,23 @@ result = create_vontology_concept(
 }
 ```
 
-**Bulk creation still uses MCP**:
+**Create further concepts as separate governed effects**:
 ```json
 {
   "tool": "create_concepts",
   "arguments": {
     "parent_id": "#V#person",
     "concepts": [
-      {"name": "researcher", "kind": "type"},
-      {"name": "student", "kind": "type"},
-      {"name": "professor", "kind": "type"}
+      {"name": "researcher", "kind": "type"}
     ]
   }
 }
 ```
+
+Repeat the call for `student` and `professor`. Governed creation accepts one
+core concept per effect so that each mutation has its own authority decision,
+receipt, and read-back. Add further classifications or relationships afterward
+with separate exact typed effects.
 
 ---
 
@@ -412,7 +415,7 @@ from src.backend.db.repositories.concepts_repository import ConceptsRepository
 
 | Tool | Purpose | Use When |
 |------|---------|----------|
-| `create_concepts` | Create one or more concepts | Adding new types, instances, predicates |
+| `create_concepts` | Create one governed core concept | Adding a new type, instance, or predicate |
 | `fetch_concept` | Get full concept details with relations | Understanding concept structure |
 | `search_concepts` | Find concepts by query/kind/type | Searching ontology |
 | `add_names` | Add multilingual names/aliases | Creating translations and abbreviations |
@@ -490,20 +493,23 @@ mcp_upsert_text_relation(
 # Intent: Create a hierarchy of concepts
 
 mcp_create_concepts(
-    parent_id="#V#thing",
+    parent_id="#V#person",
     concepts=[
-        {"name": "animal", "kind": "type"},
-        {"name": "person", "kind": "type"}
+        {"name": "researcher", "kind": "type"}
     ]
 )
-# Returns: {"results": [{"concept_id": "#V#animal"}, {"concept_id": "#V#person"}]}
+# Returns: {"results": [{"concept_id": "#V#researcher"}]}
+
+mcp_create_concepts(
+    parent_id="#V#researcher",
+    concepts=[
+        {"name": "machine learning researcher", "kind": "type"}
+    ]
+)
 
 mcp_create_concepts(
     parent_id="#V#person",
-    concepts=[
-        {"name": "researcher", "kind": "type"},
-        {"name": "student", "kind": "type"}
-    ]
+    concepts=[{"name": "student", "kind": "type"}]
 )
 ```
 

@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 class OntologyMutationCommandError(Exception):
     reason_code: str
     public_message: str
+    error_details: Mapping[str, Any] | None = None
 
     def __str__(self) -> str:
         return self.public_message
@@ -1121,9 +1122,15 @@ def build_ontology_mutation_intent(
             raise OntologyMutationCommandError(
                 "multi_create_requires_individual_effects",
                 (
-                    "Governed creation accepts one exact concept per effect so "
-                    "partial batch outcomes cannot cross the authority boundary."
+                    "Governed creation accepts exactly one core concept per effect; "
+                    f"received {len(concept_specs)}. Submit each concept as its own "
+                    "create_concepts effect so every outcome remains independently "
+                    "observable."
                 ),
+                error_details={
+                    "constraint": "exactly_one_core_concept_per_effect",
+                    "received_concept_count": len(concept_specs),
+                },
             )
         concept_spec = concept_specs[0]
         unsupported_create_fields = {
@@ -1133,13 +1140,16 @@ def build_ontology_mutation_intent(
             "user_tags": concept_spec.get("user_tags") or arguments.get("user_tags"),
             "linked_concepts": concept_spec.get("linked_concepts")
             or arguments.get("linked_concepts"),
-            "external_identifiers": concept_spec.get("external_identifiers"),
+            "external_identifiers": concept_spec.get("external_identifiers")
+            or arguments.get("external_identifiers"),
             "identity_candidate_concept_ids": concept_spec.get(
                 "identity_candidate_concept_ids"
-            ),
+            )
+            or arguments.get("identity_candidate_concept_ids"),
             "identity_rejected_candidate_concept_ids": concept_spec.get(
                 "identity_rejected_candidate_concept_ids"
-            ),
+            )
+            or arguments.get("identity_rejected_candidate_concept_ids"),
         }
         unsupported_present = sorted(
             key for key, value in unsupported_create_fields.items() if value
@@ -1149,14 +1159,28 @@ def build_ontology_mutation_intent(
         parent_concept_ids = list(arguments.get("parent_concept_ids") or [])
         if len(parent_concept_ids) > 1:
             unsupported_present.append("parent_concept_ids")
+        unsupported_present = sorted(set(unsupported_present))
         if unsupported_present:
             raise OntologyMutationCommandError(
                 "complex_create_requires_typed_effects",
                 (
                     "This governed create path currently supports one exact core "
-                    "concept only; ancillary or multi-parent effects require "
-                    "separate typed commands."
+                    "concept only. Rejected fields: "
+                    f"{', '.join(unsupported_present)}. No mutation was started, "
+                    "and no automatic recovery is available for this request shape."
                 ),
+                error_details={
+                    "rejected_fields": unsupported_present,
+                    "supported_core_concept_fields": [
+                        "concept_id",
+                        "name",
+                        "kind",
+                        "description",
+                        "notes",
+                        "vontology_path",
+                        "instance_of_type",
+                    ],
+                },
             )
         scope_mode = arguments.get("scope_mode") or arguments.get(
             "visibility_scope_mode"
@@ -2044,18 +2068,25 @@ def canonical_read_back_for_method(
 
 
 def _safe_command_error(exc: OntologyMutationCommandError) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "success": False,
         "effect_status": "not_started",
         "mutation_outcome": "not_started",
         "changed": False,
         "error_code": exc.reason_code,
         "error": exc.public_message,
-        "recovery_affordances": [
+    }
+    if exc.error_details is not None:
+        payload["error_details"] = dict(exc.error_details)
+    if exc.reason_code not in {
+        "complex_create_requires_typed_effects",
+        "multi_create_requires_individual_effects",
+    }:
+        payload["recovery_affordances"] = [
             {"action_type": "create_scoped_assertion"},
             {"action_type": "request_ontology_administrator_delegation"},
-        ],
-    }
+        ]
+    return payload
 
 
 def _verify_method_postcondition(

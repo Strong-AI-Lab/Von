@@ -18,8 +18,6 @@ from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 def test_create_concepts_rejects_top_level_identity_review_field(
     field_name: str,
 ) -> None:
-    expected_path = f"concepts[i].{field_name}"
-
     result = _create_concepts(
         parent_id="#V#parent_must_not_be_resolved",
         concepts=[{"name": "Imported record", "kind": "instance"}],
@@ -27,13 +25,13 @@ def test_create_concepts_rejects_top_level_identity_review_field(
     )
 
     assert result["success"] is False
-    assert result["error_code"] == "invalid_parameter"
-    assert expected_path in result["error"]
-    assert result["error_details"] == {
-        "misplaced_top_level_fields": [field_name],
-        "expected_concept_item_paths": [expected_path],
-    }
-    assert expected_path in result["suggestions"][0]
+    assert result["error_code"] == "complex_create_requires_typed_effects"
+    assert field_name in result["error"]
+    assert result["error_details"] == {"rejected_fields": [field_name]}
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+    assert "suggestions" not in result
+    assert "recovery_affordances" not in result
 
 
 def test_create_concepts_reports_every_misplaced_identity_review_field() -> None:
@@ -41,7 +39,6 @@ def test_create_concepts_reports_every_misplaced_identity_review_field() -> None
         "identity_candidate_concept_ids",
         "identity_rejected_candidate_concept_ids",
     ]
-    expected_paths = [f"concepts[i].{field_name}" for field_name in field_names]
 
     result = _create_concepts(
         parent_id="#V#parent_must_not_be_resolved",
@@ -51,21 +48,15 @@ def test_create_concepts_reports_every_misplaced_identity_review_field() -> None
     )
 
     assert result["success"] is False
-    assert result["error_code"] == "invalid_parameter"
-    assert result["error_details"] == {
-        "misplaced_top_level_fields": field_names,
-        "expected_concept_item_paths": expected_paths,
-    }
-    assert all(expected_path in result["error"] for expected_path in expected_paths)
-    assert all(
-        expected_path in suggestion
-        for expected_path, suggestion in zip(expected_paths, result["suggestions"])
-    )
+    assert result["error_code"] == "complex_create_requires_typed_effects"
+    assert result["error_details"] == {"rejected_fields": field_names}
+    assert all(field_name in result["error"] for field_name in field_names)
+    assert "suggestions" not in result
+    assert "recovery_affordances" not in result
 
 
 def test_create_concepts_gateway_preserves_misplaced_field_error() -> None:
     field_name = "identity_candidate_concept_ids"
-    expected_path = f"concepts[i].{field_name}"
     gateway = InternalMCPGateway(
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
@@ -82,5 +73,8 @@ def test_create_concepts_gateway_preserves_misplaced_field_error() -> None:
     ).payload
 
     assert result["success"] is False
-    assert result["error_code"] == "invalid_parameter"
-    assert result["error_details"]["expected_concept_item_paths"] == [expected_path]
+    assert result["error_code"] == "complex_create_requires_typed_effects"
+    assert result["error_details"]["rejected_fields"] == [field_name]
+    assert result["effect_status"] == "not_started"
+    assert "suggestions" not in result
+    assert "recovery_affordances" not in result

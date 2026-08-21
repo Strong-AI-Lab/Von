@@ -5978,6 +5978,30 @@ def execute_adaptive_turn(
     exact_absence_effect_requests: dict[str, str] = {}
     recoverable_effect_ids: dict[str, list[str]] = {}
 
+    def remember_terminal_effect_failure(
+        *,
+        request_signature: str | None,
+        effect_status: str | None,
+        payload: Any,
+    ) -> None:
+        """Prevent an unchanged, non-retryable failed effect from running twice."""
+
+        if (
+            request_signature is None
+            or effect_status not in {"failed", "not_started"}
+            or not isinstance(payload, Mapping)
+            or payload.get("retryable") is True
+        ):
+            return
+        terminal_failed_effect_requests[request_signature] = (
+            successful_effect_mutation_generation,
+            (
+                str(payload.get("error_code")).strip()
+                if payload.get("error_code")
+                else None
+            ),
+        )
+
     def scoped_assertion_recovery_key(
         capability_name: str,
         arguments: Mapping[str, Any],
@@ -8501,27 +8525,30 @@ def execute_adaptive_turn(
                 prior_terminal_failure is not None
                 and prior_terminal_failure[0] == successful_effect_mutation_generation
             ):
-                return index, contained(
-                    {
-                        **_error_payload(
-                            "effect_request_unchanged_after_terminal_failure",
-                            (
-                                "This exact effect request was not repeated because "
-                                "it already failed terminally and no successful "
-                                "intervening effect changed the turn state."
-                            ),
+                repeated_failure_payload = {
+                    **_error_payload(
+                        "effect_request_unchanged_after_terminal_failure",
+                        (
+                            "This exact effect request was not repeated because "
+                            "it already failed terminally and no successful "
+                            "intervening effect changed the turn state."
                         ),
-                        "status": "not_started",
-                        "mutation_outcome": "not_started",
-                        "outcome_finality": "terminal_for_turn",
-                        "prior_error_code": prior_terminal_failure[1],
-                        "changed": False,
-                        "recovery_affordances": [
-                            {"action_type": "change_arguments_or_use_typed_recovery"},
-                            {"action_type": "inspect_canonical_state_before_retry"},
-                        ],
-                    }
-                )
+                    ),
+                    "status": "not_started",
+                    "mutation_outcome": "not_started",
+                    "outcome_finality": "terminal_for_turn",
+                    "prior_error_code": prior_terminal_failure[1],
+                    "changed": False,
+                }
+                if prior_terminal_failure[1] not in {
+                    "complex_create_requires_typed_effects",
+                    "multi_create_requires_individual_effects",
+                }:
+                    repeated_failure_payload["recovery_affordances"] = [
+                        {"action_type": "change_arguments_or_use_typed_recovery"},
+                        {"action_type": "inspect_canonical_state_before_retry"},
+                    ]
+                return index, contained(repeated_failure_payload)
 
             effect_identifier = (
                 _effect_id(
@@ -8639,6 +8666,11 @@ def execute_adaptive_turn(
                     delegation_effect_status = _effect_status(
                         delegation_result,
                         transport_result=None,
+                    )
+                    remember_terminal_effect_failure(
+                        request_signature=effect_request_signature,
+                        effect_status=delegation_effect_status,
+                        payload=delegation_result,
                     )
                     persist_effect_observation_phase(
                         effect_id=effect_identifier,
@@ -8797,22 +8829,12 @@ def execute_adaptive_turn(
                 if is_effect
                 else None
             )
+            remember_terminal_effect_failure(
+                request_signature=effect_request_signature if is_effect else None,
+                effect_status=terminal_effect_status,
+                payload=raw_payload,
+            )
             if (
-                is_effect
-                and effect_request_signature is not None
-                and terminal_effect_status in {"failed", "not_started"}
-                and isinstance(raw_payload, Mapping)
-                and raw_payload.get("retryable") is not True
-            ):
-                terminal_failed_effect_requests[effect_request_signature] = (
-                    successful_effect_mutation_generation,
-                    (
-                        str(raw_payload.get("error_code")).strip()
-                        if raw_payload.get("error_code")
-                        else None
-                    ),
-                )
-            elif (
                 is_effect
                 and effect_request_signature is not None
                 and terminal_effect_status == "indeterminate"

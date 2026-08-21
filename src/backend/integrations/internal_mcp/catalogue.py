@@ -1517,28 +1517,24 @@ def _create_concepts_input_placement_error(
         if field_name in arguments
     ]
     if misplaced_fields:
-        expected_paths = [
-            f"concepts[i].{field_name}" for field_name in misplaced_fields
-        ]
-        return make_error_response(
-            "invalid_parameter",
+        payload = make_error_response(
+            "complex_create_requires_typed_effects",
             (
-                "Identity candidate review fields apply to one concept item and "
-                "cannot be supplied at the create_concepts top level. Move them "
-                f"to {', '.join(expected_paths)}. No concepts were created."
+                "This governed create path supports one exact core concept only. "
+                f"Rejected fields: {', '.join(misplaced_fields)}. No mutation was "
+                "started, and no automatic recovery is available for this request "
+                "shape."
             ),
-            details={
-                "misplaced_top_level_fields": misplaced_fields,
-                "expected_concept_item_paths": expected_paths,
-            },
-            suggestions=[
-                (
-                    f"Move {field_name} into the relevant concept object at "
-                    f"concepts[i].{field_name}"
-                )
-                for field_name in misplaced_fields
-            ],
+            details={"rejected_fields": misplaced_fields},
         )
+        payload.update(
+            {
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+            }
+        )
+        return payload
 
     duplicate_resolution_mode = arguments.get("duplicate_resolution_mode")
     if (
@@ -9855,7 +9851,6 @@ def _concepts_create_input_schema() -> Schema:
             "concepts": list,
         },
         optional={
-            "allow_duplicate_instances": (bool,),
             "duplicate_resolution_mode": (str, type(None)),
             "namespace": (str, type(None)),
             "scope_mode": (str, type(None)),
@@ -9871,38 +9866,24 @@ def _concepts_create_input_schema() -> Schema:
         },
         allow_unknown=True,
         description=(
-            "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), "
-            "concepts (list of {name, kind?, description?, notes?, "
-            "external_identifiers?, identity_candidate_concept_ids?, "
-            "identity_rejected_candidate_concept_ids?}). "
-            "external_identifiers accepts at most one explicit identity object, "
-            "for example {scheme:'registry.example', canonical_value:'record-1234', "
-            "role:'identity'}. The value must already be the canonical stable value "
-            "established by grounded evidence; create_concepts does not infer or "
-            "normalise domain-specific identifier syntax from names. Preserve the "
-            "same explicit identity on every repair or retry rather than falling "
-            "back to a title-derived create. A cited source is provenance, not "
-            "necessarily the target entity's identity. Legacy textual references "
-            "are returned only as unverified candidates. When grounded evidence "
-            "establishes one candidate as the identified entity, repeat the call "
-            "with its actor-visible concept ID in identity_candidate_concept_ids. "
-            "When every returned legacy candidate has been inspected and none "
-            "matches, repeat the exact returned set in "
-            "identity_rejected_candidate_concept_ids; partial or stale sets do "
-            "not bypass review. "
-            "An exact identity may reuse a same-kind concept under another parent "
-            "without silently changing its classifications. "
-            "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
-            "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
-            "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
-            "For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' "
-            "to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. "
-            "Governed creation defaults to actor-private visibility. "
-            "Use scope_mode='user_only_default' for an actor-private concept, "
-            "scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' "
-            "for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). "
-            "Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. "
-            "Unknown top-level fields are still tolerated for orchestrator-added context."
+            "Governed create_concepts input: parent_id is one exact semantic type "
+            "concept ID, and concepts must contain exactly one core concept "
+            "specification: {name, concept_id?, kind?, description?, notes?, "
+            "vontology_path?, instance_of_type?}. kind is 'instance' for an "
+            "individual, 'type' for a subtype (the default), or 'predicate' for a "
+            "relationship type. duplicate_resolution_mode='canonical_id_only' "
+            "skips semantic name resolution after an exact concept-ID miss; "
+            "omitting it preserves the default semantic fallback. This governed "
+            "effect does not accept batched concepts, external identity or identity "
+            "review fields, attributes, tags, linked concepts, duplicate suffixing, "
+            "or multiple parents. Add further classifications or relationships "
+            "after creation through separate add_relationship effects using exact "
+            "existing predicate IDs. Governed creation defaults to actor-private "
+            "visibility. Direct governed callers with matching authority may use "
+            "scope_mode='organisation_general' or scope_mode='global_general'. "
+            "Optional namespace is propagated for tenancy attribution. Unknown "
+            "top-level fields remain tolerated for orchestrator-added context but "
+            "do not enlarge the governed effect."
         ),
     )
 
@@ -37453,30 +37434,18 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             },
             ordinary_turn_effect=True,
             description=(
-                "Create one or more concepts (instances, types, or predicates). "
-                "Each concept needs name and kind ('instance' for individuals, "
-                "'type' for subtypes/default, 'predicate' for relationships). "
-                "Accepts an array of {name, kind?, description?, notes?, "
-                "external_identifiers?, identity_candidate_concept_ids?, "
-                "identity_rejected_candidate_concept_ids?}. An "
-                "external identity is one explicit opaque {scheme, "
-                "canonical_value, role:'identity'} pair grounded by the caller; "
-                "this tool does not infer or normalise domain-specific IDs from "
-                "names. Preserve that same pair on repair/retry. Unverified "
-                "actor-visible candidates may be explicitly confirmed through "
-                "identity_candidate_concept_ids. If every returned legacy "
-                "candidate was inspected and none matches, supply the exact set "
-                "in identity_rejected_candidate_concept_ids. For deterministic stable "
-                "identities, duplicate_resolution_mode='canonical_id_only' skips "
-                "semantic name resolution after an exact concept-id miss; "
-                "omitting it preserves the default semantic fallback. Ordinary-turn "
-                "creation and direct governed creation default to actor-private "
-                "visibility. Use "
-                "scope_mode='organisation_general' for organisation-shared "
-                "concepts, or scope_mode='global_general' for broadly visible "
-                "concepts when the concept is clearly general. Supports "
-                "singleton arrays. Use add_names afterward for alternative "
-                "names/translations."
+                "Create exactly one governed core concept per effect. Supply one "
+                "concept specification with name and optional concept_id, kind, "
+                "description, notes, vontology_path, or instance_of_type. kind is "
+                "'instance' for an individual, 'type' for a subtype/default, or "
+                "'predicate' for a relationship type. This governed effect does "
+                "not bundle batches, external identities, identity review, "
+                "attributes, tags, links, duplicate suffixing, or multiple parents. "
+                "Use separate add_relationship effects with exact existing "
+                "predicate IDs for further classifications or relationships, and "
+                "use add_names afterward for alternative names or translations. "
+                "Ordinary-turn creation is actor-private; direct governed callers "
+                "may select a broader scope only with matching authority."
             ),
         ),
         MethodDefinition(
