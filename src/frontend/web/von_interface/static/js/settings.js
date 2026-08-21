@@ -86,10 +86,20 @@ export async function loadAvailableOpenAIModels() {
   return data;
 }
 
-function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
+export async function loadAvailableGeminiModels() {
+  const { data } = await getJsonDetailed('/api/settings/models/gemini');
+  return data;
+}
+
+function premiumProviderLabel(provider) {
+  return provider === 'gemini' ? 'Gemini' : 'OpenAI';
+}
+
+function renderPremiumModelSelect(select, provider, models = [], selectedModel = null) {
   if (!select) return;
 
-  select.innerHTML = '<option value="">Select an OpenAI Model</option>';
+  const providerLabel = premiumProviderLabel(provider);
+  select.innerHTML = `<option value="">Select a ${providerLabel} Model</option>`;
 
   if (Array.isArray(models) && models.length > 0) {
     models.forEach(rawModelName => {
@@ -102,19 +112,19 @@ function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
       select.appendChild(option);
     });
   } else {
-    select.innerHTML = '<option value="">No OpenAI models available</option>';
+    select.innerHTML = `<option value="">No ${providerLabel} models available</option>`;
   }
 
-  const selectedOpenAiModel = normaliseLocalModelName(selectedModel);
-  if (selectedOpenAiModel) {
-    select.value = selectedOpenAiModel;
-    if (select.value !== selectedOpenAiModel) {
+  const selectedPremiumModel = normaliseLocalModelName(selectedModel);
+  if (selectedPremiumModel) {
+    select.value = selectedPremiumModel;
+    if (select.value !== selectedPremiumModel) {
       const currentOption = document.createElement('option');
-      currentOption.value = selectedOpenAiModel;
-      currentOption.textContent = `${selectedOpenAiModel} (current effective model; unavailable in loaded list)`;
+      currentOption.value = selectedPremiumModel;
+      currentOption.textContent = `${selectedPremiumModel} (current effective model; unavailable in loaded list)`;
       currentOption.dataset.currentEffective = 'true';
       select.appendChild(currentOption);
-      select.value = selectedOpenAiModel;
+      select.value = selectedPremiumModel;
     }
   }
 }
@@ -122,7 +132,13 @@ function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
 export function renderOpenAIModelOptions(selectElementId, models = [], selectedModel = null) {
   const select = document.getElementById(selectElementId);
   if (!select) return;
-  renderOpenAiModelSelect(select, models, selectedModel);
+  renderPremiumModelSelect(select, 'openai', models, selectedModel);
+}
+
+export function renderGeminiModelOptions(selectElementId, models = [], selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+  renderPremiumModelSelect(select, 'gemini', models, selectedModel);
 }
 
 export async function loadAvailablePeople() {
@@ -295,7 +311,7 @@ export async function populateOpenAIModelDropdown(selectElementId, selectedModel
 
   try {
     const models = await loadAvailableOpenAIModels();
-    renderOpenAiModelSelect(select, models, selectedModel);
+    renderPremiumModelSelect(select, 'openai', models, selectedModel);
     clearSelectRetryState(select);
   } catch (err) {
     console.error('Error populating OpenAI model dropdown:', err);
@@ -303,6 +319,24 @@ export async function populateOpenAIModelDropdown(selectElementId, selectedModel
       error: err,
       fallbackMessage: 'OpenAI models are temporarily unavailable.',
       retryAction: () => populateOpenAIModelDropdown(selectElementId, selectedModel)
+    });
+  }
+}
+
+export async function populateGeminiModelDropdown(selectElementId, selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+
+  try {
+    const models = await loadAvailableGeminiModels();
+    renderPremiumModelSelect(select, 'gemini', models, selectedModel);
+    clearSelectRetryState(select);
+  } catch (err) {
+    console.error('Error populating Gemini model dropdown:', err);
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'Gemini models are temporarily unavailable.',
+      retryAction: () => populateGeminiModelDropdown(selectElementId, selectedModel)
     });
   }
 }

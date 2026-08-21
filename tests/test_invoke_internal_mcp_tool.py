@@ -38,7 +38,7 @@ def test_plain_python_delegates_internal_mcp_helper_through_pdm():
     returncode = module._maybe_delegate_via_pdm(
         ["jira_get_myself"],
         environ={},
-        prefix="C:/Python311",
+        prefix=str(PROJECT_ROOT.parent / "foreign-python"),
         which=lambda name: "pdm.exe" if name == "pdm" else None,
         runner=fake_runner,
     )
@@ -88,7 +88,7 @@ def test_internal_mcp_helper_pdm_delegation_can_be_disabled():
     assert returncode is None
 
 
-def test_internal_mcp_helper_applies_openai_dotenv_override_keys():
+def test_internal_mcp_helper_applies_external_model_dotenv_override_keys():
     module = _load_module()
     captured: dict[str, object] = {}
 
@@ -102,4 +102,10 @@ def test_internal_mcp_helper_applies_openai_dotenv_override_keys():
     keys = captured["keys"]
     assert isinstance(keys, tuple)
     assert "OPENAI_API_KEY" in keys
+    assert "OPENAI_API_KEY_FILE" in keys
     assert "VON_DEFAULT_OPENAI_MODEL" in keys
+    assert "GEMINI_API_KEY" in keys
+    assert "GEMINI_API_KEY_FILE" in keys
+    assert "GOOGLE_API_KEY" in keys
+    assert "GOOGLE_API_KEY_FILE" in keys
+    assert "VON_DEFAULT_GEMINI_MODEL" in keys

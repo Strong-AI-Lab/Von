@@ -231,10 +231,14 @@ _apply_dotenv_overrides(
         "GITHUB_VON_TOKEN",
         "GITHUB_TOKEN",
         "GH_TOKEN",
-        # OpenAI credentials and default model overrides — allow .env to
-        # override stale inherited shell values after a local restart.
+        # External-model credentials and default model overrides — allow .env
+        # to override stale inherited shell values after a local restart.
         "OPENAI_API_KEY",
         "OPENAI_API_KEY_FILE",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_FILE",
+        "GOOGLE_API_KEY",
+        "GOOGLE_API_KEY_FILE",
         "VON_DEFAULT_OLLAMA_MODEL",
         "VON_DEFAULT_OPENAI_MODEL",
         "VON_DEFAULT_GEMINI_MODEL",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, session
 
 from src.backend.languagemodels import llm_interface
 
@@ -123,6 +125,191 @@ def test_actorless_external_execution_fails_closed_before_pool_lookup(
     assert "no authenticated user or organisation model scope" in str(
         exc_info.value
     )
+
+
+def test_legacy_identity_header_cannot_authorise_paid_external_model_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.security import access_control
+
+    app = Flask(__name__)
+    app.secret_key = "eligibility-test"
+    monkeypatch.setattr(
+        access_control,
+        "_validate_person_concept",
+        lambda _concept_id: "#V#claimed_user",
+    )
+    monkeypatch.setattr(
+        llm_interface,
+        "resolve_enabled_llm_settings",
+        lambda **_kwargs: pytest.fail(
+            "legacy-header identity must be rejected before model-pool lookup"
+        ),
+    )
+
+    with app.test_request_context(
+        headers={"X-User-Concept-ID": "#V#claimed_user"}
+    ), pytest.raises(llm_interface.ModelExecutionEligibilityError) as exc_info:
+        llm_interface.assert_model_execution_allowed(
+            provider="gemini",
+            model="gemini-3.7-flash",
+        )
+
+    assert exc_info.value.failure_kind == "model_scope_required"
+
+
+def test_authenticated_session_can_authorise_exact_enabled_gemini_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "eligibility-test"
+    monkeypatch.setattr(
+        llm_interface,
+        "resolve_enabled_llm_settings",
+        lambda **kwargs: (
+            [
+                {
+                    "provider": "gemini",
+                    "model": "gemini-3.7-flash",
+                    "scope": "user",
+                }
+            ]
+            if kwargs.get("user_concept_id") == "#V#current_user"
+            else []
+        ),
+    )
+
+    with app.test_request_context():
+        session["user_concept_id"] = "#V#current_user"
+        decision = llm_interface.assert_model_execution_allowed(
+            provider="gemini",
+            model="gemini-3.7-flash",
+        )
+
+    assert decision == {
+        "allowed": True,
+        "provider": "gemini",
+        "model": "gemini-3.7-flash",
+        "scope": "user",
+    }
+
+
+def test_gemini_factory_binds_the_trusted_actor_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(llm_interface, "initialize_clients", lambda **_kwargs: None)
+
+    def _fake_gemini_client(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(llm_interface, "GeminiClient", _fake_gemini_client)
+
+    result = llm_interface.get_llm_client(
+        client_type="gemini",
+        user_concept_id="#V#current_user",
+        org_concept_id="#V#current_org",
+    )
+
+    assert result is sentinel
+    assert captured["model_execution_user_concept_id"] == "#V#current_user"
+    assert captured["model_execution_org_concept_id"] == "#V#current_org"
+    assert captured["model_execution_actor_scope_bound"] is True
+
+
+def test_actorless_factory_bound_gemini_embedding_is_denied_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_calls: list[dict[str, Any]] = []
+
+    class _Models:
+        @staticmethod
+        def embed_content(**kwargs: Any) -> object:
+            provider_calls.append(kwargs)
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[0.25, 0.75])]
+            )
+
+    client = object.__new__(llm_interface.GeminiClient)
+    client.client = SimpleNamespace(models=_Models())
+    client._model_execution_user_concept_id = None
+    client._model_execution_org_concept_id = None
+    client._model_execution_actor_scope_bound = True
+    monkeypatch.setattr(
+        llm_interface,
+        "genai",
+        SimpleNamespace(
+            types=SimpleNamespace(EmbedContentConfig=lambda **kwargs: kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        llm_interface,
+        "resolve_enabled_llm_settings",
+        lambda **_kwargs: pytest.fail(
+            "actorless embedding must be rejected before model-pool lookup"
+        ),
+    )
+
+    with pytest.raises(llm_interface.ModelExecutionEligibilityError) as exc_info:
+        client.get_embedding("private interaction text", model="gemini-embedding-001")
+
+    assert exc_info.value.failure_kind == "model_scope_required"
+    assert provider_calls == []
+
+
+def test_exact_scoped_gemini_embedding_model_can_reach_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_calls: list[dict[str, Any]] = []
+
+    class _Models:
+        @staticmethod
+        def embed_content(**kwargs: Any) -> object:
+            provider_calls.append(kwargs)
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[0.25, 0.75])]
+            )
+
+    client = object.__new__(llm_interface.GeminiClient)
+    client.client = SimpleNamespace(models=_Models())
+    client._model_execution_user_concept_id = "#V#current_user"
+    client._model_execution_org_concept_id = None
+    client._model_execution_actor_scope_bound = True
+    monkeypatch.setattr(
+        llm_interface,
+        "genai",
+        SimpleNamespace(
+            types=SimpleNamespace(EmbedContentConfig=lambda **kwargs: kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        llm_interface,
+        "resolve_enabled_llm_settings",
+        lambda **kwargs: (
+            [
+                {
+                    "provider": "gemini",
+                    "model": "gemini-embedding-001",
+                    "scope": "user",
+                }
+            ]
+            if kwargs.get("user_concept_id") == "#V#current_user"
+            else []
+        ),
+    )
+
+    embedding = client.get_embedding(
+        "authorised interaction text",
+        model="gemini-embedding-001",
+    )
+
+    assert embedding == [0.25, 0.75]
+    assert len(provider_calls) == 1
+    assert provider_calls[0]["model"] == "gemini-embedding-001"
+    assert provider_calls[0]["contents"] == "authorised interaction text"
 
 
 def test_structured_generation_checks_eligibility_before_client_construction(

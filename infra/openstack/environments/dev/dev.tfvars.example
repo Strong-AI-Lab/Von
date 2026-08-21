@@ -92,11 +92,15 @@ bootstrap_google_oauth_enable_dynamic_redirects = false
 # Setting it to null here prevents runtime injection from reaching cloud-init.
 # bootstrap_openai_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
 bootstrap_openai_api_key_file = "/etc/von/secrets/openai_api_key"
+# Leave bootstrap_gemini_api_key unset when using TF_VAR_bootstrap_gemini_api_key.
+# bootstrap_gemini_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
+bootstrap_gemini_api_key_file = "/etc/von/secrets/gemini_api_key"
 
 # Optional: seed a scoped model setting after first deploy.
 # Set all three values together to seed the organisation default.
 # bootstrap_default_llm_provider = "openai"
 # bootstrap_default_llm_model = "gpt-5.5"
+# Gemini alternative: provider = "gemini", model = "gemini-3.7-flash".
 # bootstrap_default_llm_organisation_concept_id = "#V#university_of_auckland_strong_ai_lab"
 
 # Mongo Atlas hardening (dev can remain non-strict while preserving TLS defaults).

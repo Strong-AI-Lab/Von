@@ -31,6 +31,7 @@ from ..services.settings_service import (
     resolve_llm_setting,
 )
 from ..services.model_parameter_service import (
+    gemini_kwargs_from_model_parameters,
     openai_responses_kwargs_from_model_parameters,
 )
 from .model_defaults import (
@@ -45,6 +46,10 @@ from .structured_tool_calling import (
     get_llm_client as get_structured_client,
 )
 from .structured_tool_calling.client import resolve_safe_temperature_for_model
+from .structured_tool_calling.transport import (
+    sanitise_transport_telemetry_text,
+    sanitise_transport_telemetry_value,
+)
 from ..utils.runtime_env import load_secret_from_env_or_file
 
 try:  # Optional dependency (local model runtime) — imported lazily to avoid
@@ -718,22 +723,36 @@ def resolve_openai_model_name(model: Optional[str]) -> Optional[str]:
 def _resolve_effective_llm_actor_scope(
     user_concept_id: Optional[str] = None,
     org_concept_id: Optional[str] = None,
+    *,
+    allow_ambient_actor_scope: bool = True,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Resolve actor scope in HTTP and background workflow contexts alike."""
+    """Resolve trusted actor scope in HTTP and background workflow contexts.
+
+    Legacy identity headers remain valid compatibility inputs for reads, but
+    they are not authentication and cannot authorise paid external-model use.
+    Callers that already resolved a request actor may disable ambient lookup so
+    an intentionally actorless scope cannot be repopulated from request data.
+    """
 
     resolved_user = user_concept_id
     resolved_org = org_concept_id
     if resolved_user and resolved_org:
         return resolved_user, resolved_org
+    if not allow_ambient_actor_scope:
+        return resolved_user, resolved_org
     try:
         from ..security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
             get_effective_organisation_concept_id,
-            get_effective_user_concept_id,
+            get_effective_user_concept_id_with_source,
         )
 
         if not resolved_user:
-            resolved_user = get_effective_user_concept_id()
-        if not resolved_org:
+            candidate_user, actor_source = get_effective_user_concept_id_with_source()
+            if actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+                return None, resolved_org
+            resolved_user = candidate_user
+        if resolved_user and not resolved_org:
             resolved_org = get_effective_organisation_concept_id()
     except Exception:
         pass
@@ -777,6 +796,7 @@ def assert_model_execution_allowed(
     model: Any,
     user_concept_id: Optional[str] = None,
     org_concept_id: Optional[str] = None,
+    allow_ambient_actor_scope: bool = True,
 ) -> Mapping[str, Any]:
     """Require an exact scoped allow-list match for external model execution.
 
@@ -810,6 +830,7 @@ def assert_model_execution_allowed(
     resolved_user, resolved_org = _resolve_effective_llm_actor_scope(
         user_concept_id,
         org_concept_id,
+        allow_ambient_actor_scope=allow_ambient_actor_scope,
     )
     if not resolved_user and not resolved_org:
         raise ModelExecutionEligibilityError(
@@ -952,6 +973,33 @@ def _ensure_ollama_client() -> Optional["OllamaClient"]:
 class LLMInterface(ABC):
     """Abstract Base Class for Language Model interactions."""
 
+    def _assert_model_execution_allowed(
+        self,
+        *,
+        provider: Any,
+        model: Any,
+    ) -> Mapping[str, Any]:
+        """Apply the external-model gate using any factory-bound actor scope."""
+
+        scope_bound = bool(
+            getattr(self, "_model_execution_actor_scope_bound", False)
+        )
+        return assert_model_execution_allowed(
+            provider=provider,
+            model=model,
+            user_concept_id=getattr(
+                self,
+                "_model_execution_user_concept_id",
+                None,
+            ),
+            org_concept_id=getattr(
+                self,
+                "_model_execution_org_concept_id",
+                None,
+            ),
+            allow_ambient_actor_scope=not scope_bound,
+        )
+
     @abstractmethod
     def generate(
         self,
@@ -1003,7 +1051,7 @@ class LLMInterface(ABC):
 
         # Default implementation delegates to structured_tool_calling module
         config = self._get_structured_client_config(model)
-        assert_model_execution_allowed(
+        self._assert_model_execution_allowed(
             provider=config.provider,
             model=config.model,
         )
@@ -1974,7 +2022,7 @@ class OpenAIClient(LLMInterface):
         target_model = (
             resolve_openai_model_name(model or self.DEFAULT_MODEL) or self.DEFAULT_MODEL
         )
-        assert_model_execution_allowed(
+        self._assert_model_execution_allowed(
             provider="openai",
             model=target_model,
         )
@@ -2239,7 +2287,13 @@ class GeminiClient(LLMInterface):
     """Client for interacting with the Google Gemini API."""
 
     def __init__(
-        self, api_key: Optional[str] = None, default_model: str = DEFAULT_GEMINI_MODEL
+        self,
+        api_key: Optional[str] = None,
+        default_model: str = DEFAULT_GEMINI_MODEL,
+        *,
+        model_execution_user_concept_id: Optional[str] = None,
+        model_execution_org_concept_id: Optional[str] = None,
+        model_execution_actor_scope_bound: bool = False,
     ):
         if genai is None:
             raise ImportError(
@@ -2251,37 +2305,56 @@ class GeminiClient(LLMInterface):
                 "Gemini API key not provided or found in environment variables "
                 "(GEMINI_API_KEY or legacy GOOGLE_API_KEY)."
             )
-        try:
-            genai.configure(api_key=self.api_key)  # type: ignore[attr-defined]
-        except Exception:
-            logger.debug(
-                "genai.configure not available; continuing without explicit config"
-            )
         self.default_model = default_model
-        # Check if the default model exists upon initialization
+        self._model_execution_user_concept_id = model_execution_user_concept_id
+        self._model_execution_org_concept_id = model_execution_org_concept_id
+        self._model_execution_actor_scope_bound = bool(
+            model_execution_actor_scope_bound
+        )
         try:
-            try:
-                self.client = genai.GenerativeModel(self.default_model)  # type: ignore[attr-defined]
-            except Exception as e:
-                logger.error(f"Failed dynamic GenerativeModel init: {e}")
-                raise
-            logger.info(f"GeminiClient initialized with model: {self.default_model}")
+            self.client = genai.Client(api_key=self.api_key)  # type: ignore[attr-defined]
         except Exception as e:
-            logger.error(
-                f"Failed to initialize Gemini model '{self.default_model}': {e}"
-            )
             raise ValueError(
-                f"Failed to initialize Gemini model '{self.default_model}'. Check model name and API key."
+                "Failed to initialise the Gemini SDK client. Check the API key "
+                "and installed google-genai version."
             ) from e
+        self.last_response_metadata: Dict[str, Any] = {}
+        if self._uses_interactions(self.default_model):
+            self._require_interactions()
+        logger.info("GeminiClient initialised with model: %s", self.default_model)
 
     def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
+        target_model = model or self.default_model
         return LLMClientConfig(
-            model=model or self.default_model,
+            model=target_model,
             provider="gemini",
             api_key=self.api_key,
-            temperature=0.7,
+            connection_id="gemini_developer_api",
+            deployment_id=target_model,
+            requested_api_surface=(
+                "interactions"
+                if self._uses_interactions(target_model)
+                else "gemini_generate_content"
+            ),
+            temperature=None if self._uses_interactions(target_model) else 0.7,
         )
+
+    @staticmethod
+    def _uses_interactions(model: str) -> bool:
+        model_id = str(model or "").strip().lower()
+        if model_id.startswith("models/"):
+            model_id = model_id.split("/", 1)[1]
+        return model_id == "gemini-3.7-flash" or model_id.startswith(
+            "gemini-3.7-flash-"
+        )
+
+    def _require_interactions(self) -> None:
+        if getattr(self.client, "interactions", None) is None:
+            raise ImportError(
+                "Gemini 3.7 requires a google-genai release whose Client "
+                "exposes client.interactions."
+            )
 
     def generate(
         self,
@@ -2291,9 +2364,8 @@ class GeminiClient(LLMInterface):
         llm_params: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Generate a response using the Gemini API. Raises RuntimeError on failure."""
-        assert genai is not None
         target_model_name = model or self.default_model
-        assert_model_execution_allowed(
+        self._assert_model_execution_allowed(
             provider="gemini",
             model=target_model_name,
         )
@@ -2306,102 +2378,356 @@ class GeminiClient(LLMInterface):
             )
 
         try:
-            # Select the model - re-initialize if different from default
-            if target_model_name == self.default_model:
-                model_instance = self.client
-            else:
-                try:
-                    model_instance = genai.GenerativeModel(target_model_name)  # type: ignore[attr-defined]
-                    logger.info(f"Using specified Gemini model: {target_model_name}")
-                except Exception as e:
-                    logger.error(
-                        f"Failed to initialize specified Gemini model '{target_model_name}': {e}"
-                    )
-                    raise RuntimeError(
-                        f"Could not initialize Gemini model '{target_model_name}': {str(e)}"
-                    ) from e
-
-            gemini_config_params = {}
-            if llm_params:
-                if "temperature" in llm_params:
-                    gemini_config_params["temperature"] = llm_params["temperature"]
-                # Add other Gemini specific params like top_p, top_k, max_output_tokens
-
-            generation_config = None
-            if gemini_config_params:
-                try:
-                    generation_config = genai.types.GenerationConfig(
-                        **gemini_config_params
-                    )  # type: ignore[attr-defined]
-                except Exception:
-                    generation_config = None
-
-            send_kwargs: Dict[str, Any] = {}
-            if generation_config is not None:
-                send_kwargs["generation_config"] = generation_config
-
-            # Gemini handles history differently (pass directly to start_chat)
-            if context and isinstance(context, list):
-                history = to_gemini_history(_coerce_context(context))
-                chat = model_instance.start_chat(history=cast(Any, history))
-                response = chat.send_message(prompt, **send_kwargs)
-            else:
-                response = model_instance.generate_content(prompt, **send_kwargs)
-
-            if _should_log_llm_io():
-                logger.debug("Gemini raw response: %s", response)
-            # Handle potential safety blocks or empty responses
-            if response.parts:
-                content = response.text
-                if _should_log_llm_io():
-                    logger.debug(
-                        "[LLM RESPONSE][Gemini][%s]: %s",
-                        target_model_name,
-                        _truncate_for_log(content),
-                    )
-                return content
-            elif response.prompt_feedback and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason
-                logger.warning(f"Gemini response blocked due to: {block_reason}")
-                raise RuntimeError(f"Gemini response blocked due to {block_reason}.")
-            else:
-                logger.warning(
-                    "Gemini response was empty or blocked without specific reason."
+            coerced_context = _coerce_context(context or [])
+            system_parts = [
+                message["content"]
+                for message in coerced_context
+                if message["role"] == "system" and message["content"].strip()
+            ]
+            ordinary_context = [
+                message for message in coerced_context if message["role"] != "system"
+            ]
+            if self._uses_interactions(target_model_name):
+                content = self._generate_interaction_text(
+                    prompt=prompt,
+                    context=ordinary_context,
+                    system_instruction="\n\n".join(system_parts) or None,
+                    model=target_model_name,
+                    llm_params=llm_params,
                 )
-                raise RuntimeError("Gemini returned an empty or blocked response.")
-
+            else:
+                content = self._generate_content_text(
+                    prompt=prompt,
+                    context=ordinary_context,
+                    system_instruction="\n\n".join(system_parts) or None,
+                    model=target_model_name,
+                    llm_params=llm_params,
+                )
+            if _should_log_llm_io():
+                logger.debug(
+                    "[LLM RESPONSE][Gemini][%s]: %s",
+                    target_model_name,
+                    _truncate_for_log(content),
+                )
+            return content
         except Exception as e:
+            safe_error = sanitise_transport_telemetry_text(str(e))
             logger.error(
-                f"Error generating response with Gemini model {target_model_name}: {e}",
-                exc_info=True,
+                "Error generating response with Gemini model %s: %s",
+                target_model_name,
+                safe_error,
             )
-            raise RuntimeError(f"Gemini error: {str(e)}") from e
+            raise RuntimeError(f"Gemini error: {safe_error}") from e
+
+    def _generate_interaction_text(
+        self,
+        *,
+        prompt: str,
+        context: Sequence[LLMMessage],
+        system_instruction: str | None,
+        model: str,
+        llm_params: Mapping[str, Any] | None,
+    ) -> str:
+        self._require_interactions()
+        steps: list[dict[str, Any]] = []
+        for message in context:
+            role = (
+                "model_output"
+                if message["role"] in {"assistant", "model"}
+                else "user_input"
+            )
+            steps.append(
+                {
+                    "type": role,
+                    "content": [{"type": "text", "text": message["content"]}],
+                }
+            )
+        steps.append(
+            {
+                "type": "user_input",
+                "content": [{"type": "text", "text": prompt}],
+            }
+        )
+        projected = gemini_kwargs_from_model_parameters(
+            llm_params,
+            model=model,
+            api_surface="interactions",
+        )
+        generation_config: dict[str, Any] = {}
+        projected_generation = projected.get("generation_config")
+        if isinstance(projected_generation, Mapping):
+            generation_config.update(dict(projected_generation))
+        request: Dict[str, Any] = {
+            "model": model,
+            "input": steps,
+            "store": False,
+        }
+        if generation_config:
+            request["generation_config"] = generation_config
+        if system_instruction:
+            request["system_instruction"] = system_instruction
+        response = self.client.interactions.create(**request)
+        actual_model = getattr(response, "model", None)
+        status_value = getattr(response, "status", None)
+        status_text = getattr(status_value, "value", status_value)
+        status = (
+            str(status_text).strip().lower()
+            if status_text is not None and str(status_text).strip()
+            else None
+        )
+        provider_errors = self._gemini_interaction_errors(
+            getattr(response, "errors", None)
+        )
+        transport_metadata = {
+            "provider": "gemini",
+            "requested_model": model,
+            "effective_model": actual_model if isinstance(actual_model, str) else model,
+            "effective_api_surface": "interactions",
+            "connection_id": "gemini_developer_api",
+            "deployment_id": model,
+            "store": False,
+            "provider_status": status,
+        }
+        self.last_response_metadata = {
+            "provider": "gemini",
+            "api_surface": "interactions",
+            "requested_model": model,
+            "effective_model": actual_model if isinstance(actual_model, str) else model,
+            "store": False,
+            "usage": self._gemini_usage_mapping(getattr(response, "usage", None)),
+            "transport_metadata": transport_metadata,
+            "raw_response": {
+                "id": getattr(response, "id", None),
+                "model": actual_model,
+                "status": status,
+                "errors": provider_errors,
+            },
+        }
+        if (status is not None and status != "completed") or provider_errors:
+            raise RuntimeError(
+                "Gemini interaction failed with provider status "
+                f"{status or 'unknown'}."
+            )
+        output_text = getattr(response, "output_text", None)
+        if not isinstance(output_text, str) or not output_text.strip():
+            output_text = self._interaction_output_text(getattr(response, "steps", []))
+        if not output_text:
+            raise RuntimeError("Gemini returned an empty response.")
+        return output_text
+
+    def _generate_content_text(
+        self,
+        *,
+        prompt: str,
+        context: Sequence[LLMMessage],
+        system_instruction: str | None,
+        model: str,
+        llm_params: Mapping[str, Any] | None,
+    ) -> str:
+        assert genai is not None
+        contents = to_gemini_history(context)
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        config_values: Dict[str, Any] = {}
+        if isinstance(llm_params, Mapping) and isinstance(
+            llm_params.get("temperature"), (int, float)
+        ):
+            config_values["temperature"] = llm_params["temperature"]
+        config_values.update(
+            gemini_kwargs_from_model_parameters(
+                llm_params,
+                model=model,
+                api_surface="gemini_generate_content",
+            )
+        )
+        if system_instruction:
+            config_values["system_instruction"] = system_instruction
+        config = genai.types.GenerateContentConfig(**config_values)  # type: ignore[attr-defined]
+        response = self.client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+        content = getattr(response, "text", None)
+        if not isinstance(content, str) or not content.strip():
+            feedback = getattr(response, "prompt_feedback", None)
+            block_reason = getattr(feedback, "block_reason", None)
+            if block_reason:
+                raise RuntimeError(f"Gemini response blocked due to {block_reason}.")
+            raise RuntimeError("Gemini returned an empty or blocked response.")
+        actual_model = getattr(response, "model_version", None)
+        transport_metadata = {
+            "provider": "gemini",
+            "requested_model": model,
+            "effective_model": actual_model if isinstance(actual_model, str) else model,
+            "effective_api_surface": "gemini_generate_content",
+            "connection_id": "gemini_developer_api",
+            "deployment_id": model,
+        }
+        self.last_response_metadata = {
+            "provider": "gemini",
+            "api_surface": "gemini_generate_content",
+            "requested_model": model,
+            "effective_model": actual_model if isinstance(actual_model, str) else model,
+            "usage": self._gemini_usage_mapping(
+                getattr(response, "usage_metadata", None)
+            ),
+            "transport_metadata": transport_metadata,
+            "raw_response": {
+                "response_id": getattr(response, "response_id", None),
+                "model_version": actual_model,
+            },
+        }
+        return content
+
+    @staticmethod
+    def _interaction_output_text(steps: Any) -> str:
+        text_parts: list[str] = []
+        if not isinstance(steps, Sequence) or isinstance(
+            steps, (str, bytes, bytearray)
+        ):
+            return ""
+        for step in steps:
+            step_type = (
+                step.get("type")
+                if isinstance(step, Mapping)
+                else getattr(step, "type", None)
+            )
+            if step_type != "model_output":
+                continue
+            content = (
+                step.get("content")
+                if isinstance(step, Mapping)
+                else getattr(step, "content", None)
+            )
+            for part in content or []:
+                part_type = (
+                    part.get("type")
+                    if isinstance(part, Mapping)
+                    else getattr(part, "type", None)
+                )
+                text = (
+                    part.get("text")
+                    if isinstance(part, Mapping)
+                    else getattr(part, "text", None)
+                )
+                if part_type == "text" and isinstance(text, str):
+                    text_parts.append(text)
+        return "".join(text_parts)
+
+    @staticmethod
+    def _gemini_interaction_errors(value: Any) -> list[Dict[str, Any]]:
+        if value is None:
+            return []
+        raw_items = (
+            list(value)
+            if isinstance(value, Sequence)
+            and not isinstance(value, (str, bytes, bytearray))
+            else [value]
+        )
+        errors: list[Dict[str, Any]] = []
+        for item in raw_items[:10]:
+            if isinstance(item, Mapping):
+                raw_error: Any = dict(item)
+            else:
+                dump = getattr(item, "model_dump", None)
+                if callable(dump):
+                    try:
+                        raw_error = dump(mode="json", exclude_none=True)
+                    except TypeError:
+                        raw_error = dump(exclude_none=True)
+                elif isinstance(item, str):
+                    raw_error = {"message": item}
+                else:
+                    raw_error = {"error": "provider_error_details_unavailable"}
+            sanitised = sanitise_transport_telemetry_value(
+                raw_error,
+                key="provider_error",
+            )
+            if isinstance(sanitised, Mapping) and sanitised:
+                errors.append(dict(sanitised))
+        return errors
+
+    @staticmethod
+    def _gemini_usage_mapping(usage: Any) -> Dict[str, Any] | None:
+        if usage is None:
+            return None
+
+        def read(*names: str) -> Any:
+            for name in names:
+                value = (
+                    usage.get(name)
+                    if isinstance(usage, Mapping)
+                    else getattr(usage, name, None)
+                )
+                if isinstance(value, (int, float)):
+                    return value
+            return None
+
+        visible_output_tokens = read(
+            "candidates_token_count", "total_output_tokens", "visible_output_tokens"
+        )
+        thought_tokens = read(
+            "thoughts_token_count", "total_thought_tokens", "thought_tokens"
+        )
+        output_tokens = None
+        if isinstance(visible_output_tokens, (int, float)) or isinstance(
+            thought_tokens, (int, float)
+        ):
+            output_tokens = (visible_output_tokens or 0) + (thought_tokens or 0)
+        result = {
+            "input_tokens": read(
+                "prompt_token_count", "total_input_tokens", "input_tokens"
+            ),
+            "output_tokens": output_tokens,
+            "visible_output_tokens": visible_output_tokens,
+            "total_tokens": read("total_token_count", "total_tokens"),
+            "cached_input_tokens": read(
+                "cached_content_token_count", "total_cached_tokens", "cached_tokens"
+            ),
+            "thought_tokens": thought_tokens,
+            "tool_use_tokens": read("total_tool_use_tokens", "tool_use_tokens"),
+        }
+        return {
+            key: value for key, value in result.items() if value is not None
+        } or None
 
     def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
         """Generate an embedding using Gemini."""
-        # Ensure genai is available
         if genai is None:
             raise ImportError(
                 "google-genai package is required for Gemini embeddings. Install with: pdm add google-genai"
             )
 
-        # Cast to Any to avoid static analysis errors about exported members
-        genai_any = cast(Any, genai)
-
-        target_model = model or "models/embedding-001"
+        target_model = model or "gemini-embedding-001"
+        self._assert_model_execution_allowed(
+            provider="gemini",
+            model=target_model,
+        )
         try:
-            result = genai_any.embed_content(
+            result = self.client.models.embed_content(
                 model=target_model,
-                content=text,
-                task_type="retrieval_document",
-                title="Embedding of text",
+                contents=text,
+                config=genai.types.EmbedContentConfig(  # type: ignore[attr-defined]
+                    task_type="RETRIEVAL_DOCUMENT",
+                    title="Embedding of text",
+                    output_dimensionality=768,
+                ),
             )
-            return result["embedding"]
+            embeddings = getattr(result, "embeddings", None)
+            if not embeddings:
+                raise RuntimeError("Gemini returned no embedding values.")
+            values = getattr(embeddings[0], "values", None)
+            if not isinstance(values, list):
+                raise RuntimeError("Gemini returned an invalid embedding payload.")
+            return [float(value) for value in values]
         except Exception as e:
+            safe_error = sanitise_transport_telemetry_text(str(e))
             logger.error(
-                f"Failed to generate embedding with Gemini model {target_model}: {e}"
+                "Failed to generate embedding with Gemini model %s: %s",
+                target_model,
+                safe_error,
             )
-            raise RuntimeError(f"Gemini embedding error: {str(e)}") from e
+            raise RuntimeError(f"Gemini embedding error: {safe_error}") from e
 
     def list_models(self) -> List[str]:
         """List available models from Gemini."""
@@ -2409,25 +2735,26 @@ class GeminiClient(LLMInterface):
         assert genai is not None
 
         try:
-            model_names = []
-            try:
-                gm_iter = genai.list_models()  # type: ignore[attr-defined]
-            except Exception:
-                return []
-            for m in gm_iter:
-                name = getattr(m, "name", None)
-                methods = getattr(m, "supported_generation_methods", [])
-                if (
-                    isinstance(name, str)
-                    and isinstance(methods, list)
-                    and "generateContent" in methods
+            model_names: list[str] = []
+            for item in self.client.models.list():
+                name = getattr(item, "name", None)
+                methods = getattr(item, "supported_actions", None)
+                if methods is None:
+                    methods = getattr(item, "supported_generation_methods", None)
+                if isinstance(name, str) and (
+                    not methods or "generateContent" in methods
                 ):
-                    model_names.append(name)
-            logger.debug(f"Found Gemini models: {model_names}")
-            return sorted(model_names)
+                    canonical_name = (
+                        name.split("/", 1)[1] if name.startswith("models/") else name
+                    )
+                    model_names.append(canonical_name)
+            result = sorted(set(model_names))
+            logger.debug("Found Gemini models: %s", result)
+            return result
         except Exception as e:
-            logger.error(f"Error listing Gemini models: {e}", exc_info=True)
-            return []
+            safe_error = sanitise_transport_telemetry_text(str(e))
+            logger.error("Error listing Gemini models: %s", safe_error)
+            raise RuntimeError(f"Gemini model listing error: {safe_error}") from e
 
 
 def get_llm_client(
@@ -2592,15 +2919,28 @@ def get_llm_client(
 
     elif provider == "gemini":
         try:
-            return GeminiClient(**kwargs)
+            trusted_user_concept_id, trusted_org_concept_id = (
+                _resolve_effective_llm_actor_scope(
+                    user_concept_id,
+                    org_concept_id,
+                )
+            )
+            gemini_kwargs = dict(kwargs)
+            gemini_kwargs["model_execution_user_concept_id"] = (
+                trusted_user_concept_id
+            )
+            gemini_kwargs["model_execution_org_concept_id"] = (
+                trusted_org_concept_id
+            )
+            gemini_kwargs["model_execution_actor_scope_bound"] = True
+            return GeminiClient(**gemini_kwargs)
         except Exception as e:
-            logger.error(f"Failed to initialize Gemini client: {e}")
-            gemini_fb = _ensure_ollama_client()
-            if gemini_fb:
-                logger.warning("Falling back to Ollama client.")
-                return gemini_fb
-            else:
-                raise RuntimeError("No LLM clients available")
+            safe_error = sanitise_transport_telemetry_text(str(e))
+            logger.error("Failed to initialise Gemini client: %s", safe_error)
+            raise RuntimeError(
+                "Gemini was selected, but its client could not be initialised. "
+                "No cross-provider fallback was attempted."
+            ) from e
 
     else:
         # Invalid provider should raise ValueError instead of defaulting

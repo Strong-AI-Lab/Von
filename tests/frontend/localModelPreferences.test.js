@@ -351,4 +351,81 @@ describe('local model preferences', () => {
             },
         });
     });
+
+    test('persists Gemini as a first-class premium provider and resolves its exact request identity', async () => {
+        const {
+            buildLocalModelRequestFields,
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setLocalPremiumModelUseEnabled,
+            setStoredGeminiModelParameters,
+            setStoredGeminiSelectedModel,
+            setStoredPremiumModelProvider,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredPremiumModelProvider('gemini');
+        setStoredGeminiSelectedModel('gemini-3.7-flash');
+        setStoredGeminiModelParameters({ reasoning_effort: 'high' });
+        setLocalPremiumModelUseEnabled(true, 'gemini');
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'gemini',
+            premiumProvider: 'gemini',
+            openaiModel: null,
+            geminiModel: 'gemini-3.7-flash',
+            geminiModelParameters: { reasoning_effort: 'high' },
+            ollamaSelection: null,
+        });
+        const requested = resolveLocalRequestedLlm();
+        expect(requested).toEqual({
+            provider: 'gemini',
+            model: 'gemini-3.7-flash',
+            requestModel: 'gemini:gemini-3.7-flash',
+            model_parameters: { reasoning_effort: 'high' },
+        });
+        expect(buildLocalModelRequestFields(requested)).toEqual({
+            model: 'gemini-3.7-flash',
+            model_provider: 'gemini',
+            model_parameters: { reasoning_effort: 'high' },
+        });
+    });
+
+    test('rejects object events as premium providers without replacing the stored provider', async () => {
+        const {
+            getStoredPremiumModelProvider,
+            setStoredPremiumModelProvider,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredPremiumModelProvider('gemini');
+        setStoredPremiumModelProvider(new Event('change'));
+
+        expect(getStoredPremiumModelProvider()).toBe('gemini');
+        expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toMatchObject({
+            premiumProvider: 'gemini',
+        });
+    });
+
+    test('builds explicit provider fields for existing OpenAI and Ollama requests', async () => {
+        const { buildLocalModelRequestFields } = await import(
+            '../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js'
+        );
+
+        expect(buildLocalModelRequestFields({
+            provider: 'openai',
+            model: 'gpt-5.6-luna',
+            requestModel: 'openai:gpt-5.6-luna',
+        })).toEqual({
+            model: 'gpt-5.6-luna',
+            model_provider: 'openai',
+        });
+        expect(buildLocalModelRequestFields({
+            provider: 'ollama',
+            model: 'gemma4:latest',
+            requestModel: 'ollama:gemma4:latest',
+        })).toEqual({
+            model: 'gemma4:latest',
+            model_provider: 'ollama',
+        });
+    });
 });

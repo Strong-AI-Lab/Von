@@ -119,3 +119,43 @@ def test_provider_mapping_scopes_registry_policy_to_selected_profile(
     ) == {"reasoning": {"effort": "low"}}
     assert profile_ids
     assert set(profile_ids) == {"#V#selected_responses_profile"}
+
+
+def test_gemini_37_reasoning_effort_maps_to_supported_thinking_levels(
+    monkeypatch,
+) -> None:
+    import src.backend.services.model_parameter_service as mod
+
+    monkeypatch.setattr(mod, "_registry_parameter_policy", lambda **_kwargs: None)
+
+    capability = mod.build_model_parameter_capabilities(
+        provider="gemini",
+        model="gemini-3.7-flash",
+        api_surface="interactions",
+    )
+    reasoning = capability["parameters"]["reasoning_effort"]
+    assert reasoning["allowed_values"] == ["low", "medium", "high"]
+    assert "minimal" not in reasoning["allowed_values"]
+    assert reasoning["provider_api_mapping"]["interactions"] == {
+        "type": "nested_object",
+        "path": ["generation_config", "thinking_level"],
+    }
+    assert mod.gemini_kwargs_from_model_parameters(
+        {"reasoning_effort": "high"},
+        model="gemini-3.7-flash",
+        api_surface="interactions",
+    ) == {"generation_config": {"thinking_level": "high"}}
+    assert mod.gemini_kwargs_from_model_parameters(
+        {"reasoning_effort": "low"},
+        model="gemini-3.7-flash",
+        api_surface="gemini_generate_content",
+    ) == {"thinking_config": {"thinking_level": "low"}}
+    assert (
+        mod.normalise_model_parameters_for_storage(
+            {"reasoning_effort": "minimal"},
+            provider="gemini",
+            model="gemini-3.7-flash",
+            api_surface="interactions",
+        )
+        == {}
+    )

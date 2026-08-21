@@ -15,7 +15,10 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from ..languagemodels.model_defaults import DEFAULT_OPENAI_MODEL
+from ..languagemodels.model_defaults import DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_MODEL
+from ..languagemodels.structured_tool_calling.transport import (
+    sanitise_transport_telemetry_text,
+)
 from .llm_api_key_resolution import get_gemini_api_key
 
 logger = logging.getLogger(__name__)
@@ -1140,7 +1143,7 @@ def _describe_image_with_gemini(
             "model": model,
         }
 
-    target_model = model or "gemini-2.0-flash"
+    target_model = model or DEFAULT_GEMINI_MODEL
     eligibility_denial = _external_image_model_execution_denial(
         provider="gemini",
         model=target_model,
@@ -1148,11 +1151,16 @@ def _describe_image_with_gemini(
     if eligibility_denial is not None:
         return eligibility_denial
     mime = _normalise_optional_text(content_type) or "image/png"
+    client = None
     try:
-        genai.configure(api_key=api_key)  # type: ignore[attr-defined]
-        model_instance = genai.GenerativeModel(target_model)  # type: ignore[attr-defined]
-        response = model_instance.generate_content(
-            [prompt, {"mime_type": mime, "data": bytes(data_bytes)}]
+        client = genai.Client(api_key=api_key)  # type: ignore[attr-defined]
+        image_part = genai.types.Part.from_bytes(  # type: ignore[attr-defined]
+            data=bytes(data_bytes),
+            mime_type=mime,
+        )
+        response = client.models.generate_content(
+            model=target_model,
+            contents=[prompt, image_part],
         )
         response_text = getattr(response, "text", None)
         description = response_text.strip() if isinstance(response_text, str) else None
@@ -1175,10 +1183,17 @@ def _describe_image_with_gemini(
         return {
             "description": None,
             "method": "gemini_vision_failed",
-            "error": str(exc),
+            "error": sanitise_transport_telemetry_text(str(exc)),
             "provider": "gemini",
             "model": target_model,
         }
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.debug("Failed to close Gemini image client")
 
 
 def describe_image_semantics(

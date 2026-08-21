@@ -31,8 +31,7 @@ describe('settingsPage OpenAI key check', () => {
         const { checkOpenAiEnvVar } = await import(settingsPagePath);
         postJson.mockResolvedValue({
             exists: true,
-            masked_value: 'sk-***',
-            source: 'env'
+            source: 'process'
         });
 
         const result = await checkOpenAiEnvVar();
@@ -42,6 +41,9 @@ describe('settingsPage OpenAI key check', () => {
         expect(verifyButton.classList.contains('hidden')).toBe(false);
         expect(verifyButton.style.display).toBe('inline-block');
         expect(verifyButton.disabled).toBe(false);
+        expect(document.getElementById('openaiStatusMessage').textContent).toBe(
+            'OpenAI key found. Verify and test the selected model before enabling premium use.'
+        );
     });
 
     test('keeps the verify button hidden when the configured key is absent', async () => {

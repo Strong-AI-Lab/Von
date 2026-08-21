@@ -1,6 +1,10 @@
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
-import { getEffectiveLocalModelPreference, resolveLocalRequestedLlm } from './utils/localModelPreferences.js';
+import {
+    buildLocalModelRequestFields,
+    getEffectiveLocalModelPreference,
+    resolveLocalRequestedLlm,
+} from './utils/localModelPreferences.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
@@ -33719,6 +33723,7 @@ async function handleSendPrompt(options = {}) {
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
         const localRequestedLlm = resolveLocalRequestedLlm();
+        const localModelRequestFields = buildLocalModelRequestFields(localRequestedLlm);
         // Presenter-mode controls whether the backend produces two-channel output
         // (screen + spoken). This should be enabled regardless of whether auto-TTS
         // is enabled, so clicking Speak later never needs to read raw markdown.
@@ -33739,8 +33744,7 @@ async function handleSendPrompt(options = {}) {
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
-                ...(localRequestedLlm?.requestModel ? { model: localRequestedLlm.requestModel } : {}),
-                ...(localRequestedLlm?.model_parameters ? { model_parameters: localRequestedLlm.model_parameters } : {}),
+                ...localModelRequestFields,
                 ...(request.pendingFileCopyConceptId ? {
                     workflow_inputs: {
                         file_copy_concept_id: request.pendingFileCopyConceptId

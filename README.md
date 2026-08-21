@@ -187,11 +187,12 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 
 **Google Gemini:**
 1. Get your own API key from https://ai.google.dev
-2. Set `GEMINI_API_KEY` in `.env`
-3. Select Gemini model in Von's Settings panel
+2. Set `GEMINI_API_KEY` in `.env` (or `GEMINI_API_KEY_FILE` on a managed host)
+3. Select `gemini-3.7-flash` as the premium Gemini model in Von's Settings panel
 
 Von still accepts the legacy `GOOGLE_API_KEY` name for compatibility, but new
-setups should use `GEMINI_API_KEY`.
+setups should use `GEMINI_API_KEY`. Gemini 3.7 uses a stateless Interactions API
+profile in Von; provider response storage is disabled.
 
 ### 5. **UI Feature Flags**
 

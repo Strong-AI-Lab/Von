@@ -1267,6 +1267,7 @@ export async function setModelInfoFooterText() {
       // Pass the effective provider so the status check reflects the user's local model
       // preference rather than always checking the DB-stored (e.g. OpenAI) provider.
       if (effectiveLlm?.provider) llmParams.set('effective_provider', effectiveLlm.provider);
+      if (effectiveLlm?.model) llmParams.set('effective_model', effectiveLlm.model);
       const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
       llmInfo = await fetchJsonWithTimeout(llmUrl, {
         cache: 'no-store',

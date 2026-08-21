@@ -55,3 +55,15 @@ def test_von_main_overrides_swift_openstack_env_keys_from_dotenv() -> None:
     }
 
     assert expected.issubset(keys)
+
+
+def test_von_main_overrides_gemini_credentials_from_dotenv() -> None:
+    keys = _get_von_main_dotenv_override_keys()
+
+    assert {
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_FILE",
+        "GOOGLE_API_KEY",
+        "GOOGLE_API_KEY_FILE",
+        "VON_DEFAULT_GEMINI_MODEL",
+    }.issubset(keys)

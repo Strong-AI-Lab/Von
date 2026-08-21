@@ -303,47 +303,73 @@
                 </div>
             </div>
 
-            <h2>Premium Models (OpenAI)</h2>
-            <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
-            <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
-            <button id="verifyOpenAiApiKeyButton" class="hidden">Verify Key and Load Models</button>
+            <h2>Premium Models</h2>
+            <div class="inline-form inline-form-tight mb-1">
+                <label for="premiumProviderSelect">Provider:</label>
+                <select id="premiumProviderSelect" name="premium_provider">
+                    <option value="openai">OpenAI</option>
+                    <option value="gemini">Google Gemini</option>
+                </select>
+            </div>
             <div class="inline-form inline-form-tight mt-2">
                 <input type="checkbox" id="enableOpenAiPremiumToggle" />
-                <label for="enableOpenAiPremiumToggle"
-                    title="When enabled, this browser requests the selected OpenAI model for chat, provided the exact model is allowed for the selected scope. When disabled, it requests the selected Ollama model.">Use
-                    selected allowed OpenAI model for chat in this browser</label>
+                <label id="enablePremiumModelLabel" for="enableOpenAiPremiumToggle"
+                    title="When enabled, this browser requests the selected premium provider and model for chat, provided the exact pair is allowed for the selected scope. When disabled, it requests the selected Ollama model.">Use
+                    selected allowed premium model for chat in this browser</label>
             </div>
-            <small class="settings-note">First allow the exact OpenAI model for this scope and save. Turn this off
+            <small class="settings-note">First allow the exact provider and model for this scope and save. Turn this off
                 to use the selected Ollama model for browser chat. Editing or testing a model does not allow it.</small>
-            <div id="openaiModelsContainer" class="hidden">
-                <label for="openaiModelSelect">Select OpenAI Model:</label>
-                <select id="openaiModelSelect" name="openai_model">
-                    <!-- OpenAI models will be populated here -->
-                </select>
-                <div id="openaiReasoningEffortContainer" class="inline-form inline-form-tight mt-2 hidden">
-                    <label for="openaiReasoningEffortSelect">Reasoning effort:</label>
-                    <select id="openaiReasoningEffortSelect" name="openai_reasoning_effort"></select>
+
+            <div id="openaiProviderSettings">
+                <label for="openaiApiKeyEnvVar">OpenAI API key environment variable:</label>
+                <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
+                <button id="verifyOpenAiApiKeyButton" class="hidden">Verify key and load models</button>
+                <div id="openaiModelsContainer" class="hidden">
+                    <label for="openaiModelSelect">Select OpenAI model:</label>
+                    <select id="openaiModelSelect" name="openai_model">
+                        <!-- OpenAI models will be populated here -->
+                    </select>
+                    <div class="inline-form inline-form-tight mt-2">
+                        <button id="testOpenAiModelButton" class="btn-secondary" type="button" disabled>Test this model</button>
+                        <button id="addOpenAiToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
+                    </div>
+                    <div id="openaiModelEligibilityStatus" class="status-message" role="status">
+                        Select an OpenAI model to check whether it is allowed for this scope.
+                    </div>
+                    <div id="openaiModelStatusMessage" class="status-message" role="alert"></div>
                 </div>
-                <div class="inline-form inline-form-tight mt-2">
-                    <button id="testOpenAiModelButton" class="btn-secondary" type="button" disabled>Test this model</button>
-                    <button id="addOpenAiToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
-                </div>
-                <small class="settings-note">A test is a live paid-provider probe and is available only after the
-                    exact model is allowed and saved. It does not change the browser choice or scoped primary.</small>
-                <div id="openaiModelEligibilityStatus" class="status-message" role="status">
-                    Select an OpenAI model to check whether it is allowed for this scope.
-                </div>
-                <div id="openaiModelCostSummary"
-                    class="settings-note"
-                    role="status">
-                    Historical cost estimate unavailable until persisted usage and pricing evidence is provided.
-                </div>
-                <div id="openaiModelStatusMessage" class="status-message" role="alert">
-                    <!-- Status messages for the selected premium model will appear here -->
-                </div>
+                <div id="openaiStatusMessage" class="status-message" role="alert"></div>
             </div>
-            <div id="openaiStatusMessage" class="status-message" role="alert">
-                <!-- Status messages for OpenAI will appear here -->
+
+            <div id="geminiProviderSettings" class="hidden">
+                <label for="geminiApiKeyEnvVar">Gemini API key source:</label>
+                <input type="text" id="geminiApiKeyEnvVar" name="gemini_api_key_env_var" value="GEMINI_API_KEY" readonly aria-readonly="true">
+                <button id="verifyGeminiApiKeyButton" class="hidden">Verify key and load models</button>
+                <div id="geminiModelsContainer" class="hidden">
+                    <label for="geminiModelSelect">Select Gemini model:</label>
+                    <select id="geminiModelSelect" name="gemini_model">
+                        <!-- Gemini models will be populated here -->
+                    </select>
+                    <div class="inline-form inline-form-tight mt-2">
+                        <button id="testGeminiModelButton" class="btn-secondary" type="button" disabled>Test this model</button>
+                        <button id="addGeminiToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
+                    </div>
+                    <div id="geminiModelEligibilityStatus" class="status-message" role="status">
+                        Select a Gemini model to check whether it is allowed for this scope.
+                    </div>
+                    <div id="geminiModelStatusMessage" class="status-message" role="alert"></div>
+                </div>
+                <div id="geminiStatusMessage" class="status-message" role="alert"></div>
+            </div>
+
+            <div id="openaiReasoningEffortContainer" class="inline-form inline-form-tight mt-2 hidden">
+                <label for="openaiReasoningEffortSelect">Reasoning effort:</label>
+                <select id="openaiReasoningEffortSelect" name="premium_reasoning_effort"></select>
+            </div>
+            <small class="settings-note">A test is a live paid-provider probe and is available only after the
+                exact provider and model are allowed and saved. It does not change the browser choice or scoped primary.</small>
+            <div id="openaiModelCostSummary" class="settings-note" role="status">
+                Historical cost estimate unavailable until persisted usage and pricing evidence is provided.
             </div>
         </section>
 

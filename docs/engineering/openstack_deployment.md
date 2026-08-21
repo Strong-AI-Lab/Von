@@ -70,6 +70,8 @@ $env:TF_VAR_bootstrap_google_oauth_client_id = '<YOUR-CLIENT-ID-HERE>'
 $env:TF_VAR_bootstrap_google_oauth_client_secret = '<YOUR-CLIENT-SECRET-HERE>'
 $env:TF_VAR_bootstrap_mongo_uri = '<YOUR-MONGODB-URI-HERE>'
 $env:TF_VAR_bootstrap_openai_api_key = '<YOUR-OPENAI-KEY-HERE>'
+# or, for Gemini
+$env:TF_VAR_bootstrap_gemini_api_key = '<YOUR-GEMINI-KEY-HERE>'
 ```
 
 Set OpenStack auth profile (example):
@@ -150,6 +152,13 @@ For hosted LLM-backed workflows, set the scoped model seed values before apply:
 $env:TF_VAR_bootstrap_default_llm_provider = 'openai'
 $env:TF_VAR_bootstrap_default_llm_model = 'gpt-5.5'
 $env:TF_VAR_bootstrap_default_llm_organisation_concept_id = '#V#university_of_auckland_strong_ai_lab'
+```
+
+For Gemini 3.7 Flash, use the corresponding provider/model seed values:
+
+```powershell
+$env:TF_VAR_bootstrap_default_llm_provider = 'gemini'
+$env:TF_VAR_bootstrap_default_llm_model = 'gemini-3.7-flash'
 ```
 
 After deployment, check:
