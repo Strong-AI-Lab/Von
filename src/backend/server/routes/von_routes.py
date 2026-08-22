@@ -16878,7 +16878,7 @@ def move_chat_session_org():
 
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])
 def create_chat_session():
-    """Create and switch to a new named chat session for the current user."""
+    """Create and switch to a new chat session for the current user."""
     try:
         user_concept_id = session.get("user_concept_id")
         if not user_concept_id:

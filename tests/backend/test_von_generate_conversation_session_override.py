@@ -478,7 +478,7 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
         created_calls.append(dict(kwargs))
         return {
             "session_id": str(kwargs["session_id"]),
-            "session_name": "Chat 2026-04-13 18:30",
+            "session_name": None,
             "namespace": kwargs.get("namespace"),
         }
 
@@ -507,7 +507,7 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
     assert body["conversation_session_id"]
     assert body["session_id"] == body["conversation_session_id"]
     assert body["conversation_session_created"] is True
-    assert body["conversation_session_name"] == "Chat 2026-04-13 18:30"
+    assert body["conversation_session_name"] is None
 
     assert app.config["_ADAPTIVE_TURN_CALLS"]
     assert history_calls, "expected chat history writes"
