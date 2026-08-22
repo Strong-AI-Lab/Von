@@ -170,6 +170,253 @@ def test_generate_honours_explicit_conversation_session_id(monkeypatch):
     )
 
 
+def test_generate_assistant_opening_uses_empty_prompt_and_persists_only_assistant(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    completed: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_session_focus",
+        lambda **_kwargs: {"focal_concept_ids": []},
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "claim_chat_session_assistant_opening",
+        lambda **_kwargs: {"status": "claimed", "initiation_id": "opening-1"},
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "complete_chat_session_assistant_opening",
+        lambda **kwargs: completed.append(dict(kwargs)) or True,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "",
+            "conversation_session_id": "opening-session",
+            "turn_kind": "assistant_opening",
+            "initiation_id": "opening-1",
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    adaptive_call = app.config["_ADAPTIVE_TURN_CALLS"][0]
+    assert adaptive_call["prompt"] == ""
+    persisted_messages: list[dict[str, object]] = []
+    for call in history_calls:
+        message = call.get("message")
+        assert isinstance(message, dict)
+        persisted_messages.append(message)
+    assert not [
+        message for message in persisted_messages if message.get("role") == "user"
+    ]
+    assistant_messages = [
+        message
+        for message in persisted_messages
+        if message.get("role") == "assistant"
+    ]
+    assert assistant_messages == [
+        {
+            "role": "assistant",
+            "content": "ok",
+            "turn_kind": "assistant_opening",
+            "initiation_id": "opening-1",
+        }
+    ]
+    assert completed == [
+        {
+            "user_id": "#V#user",
+            "session_id": "opening-session",
+            "initiation_id": "opening-1",
+            "response_text": "ok",
+            "namespace": "#V#user@org",
+        }
+    ]
+
+
+def test_generate_uses_stored_focus_and_ignores_client_focus(monkeypatch) -> None:
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    projected: list[object] = []
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": None,
+            "focal_concept_ids": ["#V#stored_task"],
+        },
+    )
+
+    def _project_focus(focal_ids):  # noqa: ANN001
+        projected.append(focal_ids)
+        return [], []
+
+    monkeypatch.setattr(
+        von_routes,
+        "_build_focal_conversation_runtime_envelope",
+        _project_focus,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "What should I do next?",
+            "conversation_session_id": "focused-session",
+            "focal_concept_ids": ["#V#client_injected_object"],
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert projected == [["#V#stored_task"]]
+
+
+def test_generate_shared_focus_access_change_is_generic_and_blocks_model(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: (
+            "#V#owner",
+            {"session_id": "shared-focused", "inviter_user_id": "#V#owner"},
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": None,
+            "focal_concept_ids": ["#V#private_owner_task"],
+        },
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_build_focal_conversation_runtime_envelope",
+        lambda _focal_ids: ([], ["#V#private_owner_task"]),
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Continue",
+            "conversation_session_id": "shared-focused",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "focused_conversation_access_changed"}
+    assert "private_owner_task" not in response.get_data(as_text=True)
+    assert app.config["_ADAPTIVE_TURN_CALLS"] == []
+    assert history_calls == []
+
+
+def test_focal_runtime_envelope_uses_actor_effective_text_view(monkeypatch) -> None:
+    from src.backend.server.routes import von_routes
+
+    monkeypatch.setattr(
+        von_routes,
+        "_authorised_focal_concepts",
+        lambda _ids: (
+            ["#V#task"],
+            [{"concept_id": "#V#task", "name": "Task", "type_ids": []}],
+            [],
+        ),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _get_texts(concept_id: str, **kwargs: Any) -> list[dict[str, str]]:
+        calls.append({"concept_id": concept_id, **kwargs})
+        if kwargs.get("context_view") == "actor_effective":
+            return [{"text": "Visible task note"}]
+        return [{"text": "PRIVATE OTHER ACTOR NOTE"}]
+
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        _get_texts,
+    )
+
+    messages, unavailable = von_routes._build_focal_conversation_runtime_envelope(
+        ["#V#task"]
+    )
+
+    assert unavailable == []
+    assert calls == [
+        {
+            "concept_id": "#V#task",
+            "limit": 8,
+            "context_view": "actor_effective",
+        }
+    ]
+    assert "Visible task note" in messages[0]["content"]
+    assert "PRIVATE OTHER ACTOR NOTE" not in messages[0]["content"]
+
+
+def test_failed_assistant_opening_is_made_retryable(monkeypatch) -> None:
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    failures: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_session_focus",
+        lambda **_kwargs: {"focal_concept_ids": []},
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "claim_chat_session_assistant_opening",
+        lambda **_kwargs: {"status": "claimed", "initiation_id": "opening-fail"},
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "fail_chat_session_assistant_opening",
+        lambda **kwargs: failures.append(dict(kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "execute_adaptive_turn",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "",
+            "conversation_session_id": "opening-session",
+            "turn_kind": "assistant_opening",
+            "initiation_id": "opening-fail",
+        },
+    )
+
+    assert response.status_code == 500
+    assert failures == [
+        {
+            "user_id": "#V#user",
+            "session_id": "opening-session",
+            "initiation_id": "opening-fail",
+            "failure_kind": "RuntimeError",
+            "namespace": "#V#user@org",
+        }
+    ]
+
+
 def test_generate_reauthorises_shared_conversation_mailbox_memory_for_actor(
     monkeypatch,
 ) -> None:

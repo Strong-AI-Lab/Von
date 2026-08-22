@@ -32,7 +32,7 @@ function errorJson(status, data) {
 describe("Concept interaction session recovery", () => {
     beforeEach(() => {
         document.body.innerHTML = `
-      <div class="tab-content active" id="conceptTab_s1"></div>
+      <div class="tab-content active" id="conceptTab_s1" data-concept-id="#V#test_concept" data-concept-name="Test concept"></div>
 
       <div id="conceptStep1_s1" style="display:block"></div>
       <div id="conceptStep2_s1" style="display:none"></div>
@@ -46,6 +46,7 @@ describe("Concept interaction session recovery", () => {
       <input id="conceptAnswer_s1" />
 
       <button id="startInteractionButton_s1"></button>
+      <button id="discussConceptButton_s1"></button>
       <button id="submitAnswerButton_s1"></button>
       <button id="cancelInteractionButton_s1"></button>
       <button id="endInteractionButton_s1"></button>
@@ -102,5 +103,48 @@ describe("Concept interaction session recovery", () => {
         const submitBtn = document.getElementById("submitAnswerButton_s1");
         expect(startBtn.disabled).toBe(false);
         expect(submitBtn.disabled).toBe(true);
+    });
+
+    it("keeps ordinary discussion distinct from the guided interaction", () => {
+        const seen = [];
+        const handler = (event) => seen.push(event.detail);
+        document.addEventListener("von:discussConcept", handler);
+
+        document.getElementById("discussConceptButton_s1").click();
+
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toMatchObject({
+            conceptId: "#V#test_concept",
+            source: "concept",
+        });
+        expect(document.getElementById("startInteractionButton_s1").disabled).toBe(false);
+        document.removeEventListener("von:discussConcept", handler);
+    });
+
+    it("uses the local dynamic concept tab when another tab owns the global selection", () => {
+        document.body.innerHTML = `
+          <div class="tab-content" id="conceptTab_alpha" data-concept-id="#V#concept_alpha" data-concept-name="Alpha concept">
+            <button id="discussConceptButton_alpha"></button>
+          </div>
+          <div class="tab-content active" id="conceptTab_beta" data-concept-id="#V#concept_beta" data-concept-name="Beta concept">
+            <button id="discussConceptButton_beta"></button>
+          </div>
+        `;
+        setCurrentlySelectedConceptId("#V#concept_beta");
+        setupConceptTabEventListenersWithSuffix("alpha");
+        setupConceptTabEventListenersWithSuffix("beta");
+
+        const seen = [];
+        const handler = (event) => seen.push(event.detail);
+        document.addEventListener("von:discussConcept", handler);
+
+        document.getElementById("discussConceptButton_alpha").click();
+
+        expect(seen).toEqual([{
+            conceptId: "#V#concept_alpha",
+            conceptName: "Alpha concept",
+            source: "concept",
+        }]);
+        document.removeEventListener("von:discussConcept", handler);
     });
 });

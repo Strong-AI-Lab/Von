@@ -139,4 +139,44 @@ describe('message panel concept cartouches', () => {
             promoteExistingTab: true
         });
     });
+
+    test('offers a separate Discuss control for an individual message', async () => {
+        const { getJson, postJson } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const { initializeMessagePanel, showMessagesTab } = require(modulePath);
+        postJson.mockResolvedValue({});
+        getJson.mockImplementation(async (url) => {
+            if (url === '/api/messages/threads?limit=20') {
+                return { threads: [{ _id: ['#V#von_system'], last_message: {}, message_count: 1 }] };
+            }
+            if (url === '/api/messages/unread/count') return { unread_count: 0 };
+            if (url === '/api/messages/conversation/%23V%23von_system?limit=50') {
+                return {
+                    messages: [{
+                        concept_id: '#V#message_2675',
+                        relationships: { '#V#has_sender': ['#V#von_system'] },
+                        concept_data: { content_fallback: 'Discuss this message.' },
+                        created_at: '2026-08-22T10:00:00Z',
+                    }],
+                };
+            }
+            return {};
+        });
+
+        initializeMessagePanel();
+        await showMessagesTab();
+        document.querySelector('.message-thread-item').click();
+        await flushUi();
+
+        const seen = [];
+        const handler = (event) => seen.push(event.detail);
+        document.addEventListener('von:discussConcept', handler);
+        document.querySelector('.message-discuss-btn').click();
+
+        expect(seen).toEqual([{
+            conceptId: '#V#message_2675',
+            conceptName: 'Message',
+            source: 'message',
+        }]);
+        document.removeEventListener('von:discussConcept', handler);
+    });
 });

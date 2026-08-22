@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.backend.services import conversation_concept_service as service
+from src.backend.security.visibility_predicates import get_specific_to_user_values
 
 
 def _conversation_doc(concept_id: str) -> dict[str, Any]:
@@ -214,3 +215,37 @@ def test_lookup_rejects_text_relation_subject_that_is_not_visible_conversation(
     )
 
     assert service.get_conversation_concept_by_session_id(session_id) is None
+
+
+def test_created_conversation_projection_is_restricted_to_transcript_owner(
+    monkeypatch,
+) -> None:
+    inserted: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        service, "get_conversation_concept_by_session_id", lambda _session_id: None
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "insert_one",
+        lambda doc: inserted.append(dict(doc)),
+    )
+    monkeypatch.setattr(service, "upsert_text_for_concept", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_session_summary",
+        lambda **_kwargs: None,
+    )
+
+    conversation_id = service.get_or_create_conversation_concept(
+        "owner-scoped-session",
+        owner_concept_id="#V#owner",
+        namespace="#V#owner@org",
+    )
+
+    assert conversation_id == service._generate_conversation_concept_id(
+        "owner-scoped-session"
+    )
+    assert len(inserted) == 1
+    relationships = inserted[0]["relationships"]
+    assert relationships[service.PREDICATE_HAS_OWNER] == ["#V#owner"]
+    assert get_specific_to_user_values(relationships) == ["#V#owner"]

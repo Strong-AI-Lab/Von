@@ -44,6 +44,37 @@ export function initializeConceptTabState() {
 // Global interaction state
 let currentInteractionId = null;
 
+/**
+ * Open the ordinary Von-conversation launcher for the currently selected
+ * concept.  This deliberately does not use the legacy interaction session:
+ * that flow asks Q&A questions and may synthesise answers into concept notes.
+ */
+export function discussCurrentlySelectedConcept(suffix = '') {
+  // Dynamic concept tabs coexist, so their Discuss control must not borrow the
+  // process-wide selection last updated by another tab.
+  const conceptId = getSelectedConceptIdForSuffix(suffix, { fallbackToGlobal: !suffix });
+  if (!conceptId) {
+    alert('Select a concept before starting a discussion.');
+    return false;
+  }
+  const containerId = suffix ? `conceptTab_${suffix}` : 'conceptTab';
+  const container = document.getElementById(containerId);
+  const conceptName = String(
+    container?.dataset?.conceptName
+    || (suffix ? document.getElementById(`conceptFormTitleText_${suffix}`)?.textContent : elements?.conceptFormTitleText?.textContent)
+    || elements?.conceptTypeDisplayNamePluralElement?.textContent
+    || conceptId
+  ).trim();
+  document.dispatchEvent(new CustomEvent('von:discussConcept', {
+    detail: {
+      conceptId,
+      conceptName: conceptName || conceptId,
+      source: 'concept'
+    }
+  }));
+  return true;
+}
+
 // Browser-local preference: show CODE names in Names section (default: true)
 const LS_SHOW_CODE_NAMES = 'von_show_code_names';
 // Browser-local preference: filter NL names to preferred language (default: false)
@@ -74,7 +105,7 @@ function getFilterNlNamesToPreferredLanguageSetting() {
   }
 }
 
-function getSelectedConceptIdForSuffix(suffix) {
+function getSelectedConceptIdForSuffix(suffix, { fallbackToGlobal = true } = {}) {
   try {
     const containerId = suffix ? `conceptTab_${suffix}` : 'conceptTab';
     const container = document.getElementById(containerId) || document;
@@ -93,7 +124,7 @@ function getSelectedConceptIdForSuffix(suffix) {
   } catch (_) {
     // ignore
   }
-  return getCurrentlySelectedConceptId();
+  return fallbackToGlobal ? getCurrentlySelectedConceptId() : null;
 }
 
 function listOpenConceptTabSuffixes() {
@@ -993,8 +1024,17 @@ export function selectConceptWithSuffix(concept, suffix = '', radioId = null) {
   // PATCH /api/concepts/:id/notes targets the correct document. The backend
   // notes endpoint historically filtered only by concept_id (not Mongo _id),
   // so storing a raw _id here caused silent save failures.
-  setCurrentlySelectedConceptId(concept.concept_id || concept.id || concept._id);
+  const selectedConceptId = concept.concept_id || concept.id || concept._id;
+  setCurrentlySelectedConceptId(selectedConceptId);
   setSelectedConceptOriginalName(concept.display_name || concept.name);
+
+  // Keep enough local identity on a dynamic tab for controls that can be used
+  // while another concept tab owns the global selection.
+  const conceptContainer = getSuffixElement('conceptTab');
+  if (conceptContainer?.dataset) {
+    conceptContainer.dataset.conceptId = selectedConceptId || '';
+    conceptContainer.dataset.conceptName = concept.display_name || concept.name || selectedConceptId || '';
+  }
 
   // Store original notes for change detection - for now use direct access
   // TODO: Replace with proper API call to get full concept data
@@ -2163,6 +2203,7 @@ function initializeConceptTabDomElements() {
   elements.conceptTypeDisplayNamePluralElement = document.getElementById('conceptTypeDisplayNamePluralElement');
   elements.refreshConceptButton = document.getElementById('refreshConceptButton');
   elements.conceptStep1Div = document.getElementById('conceptStep1');
+  elements.discussConceptButton = document.getElementById('discussConceptButton');
   elements.startInteractionButton = document.getElementById('startInteractionButton');
   // Name input removed (managed via Names section now)
   elements.conceptNotesInput = document.getElementById('conceptNotes');
@@ -2273,6 +2314,10 @@ export function setupConceptTabEventListeners() {
   // Start interaction button
   if (elements.startInteractionButton) {
     elements.startInteractionButton.addEventListener('click', handleStartInteraction);
+  }
+
+  if (elements.discussConceptButton) {
+    elements.discussConceptButton.addEventListener('click', () => discussCurrentlySelectedConcept());
   }
 
   // Submit answer button
@@ -2436,6 +2481,7 @@ export function initializeConceptTabDomElementsWithSuffix(suffix) {
   elements.conceptTypeDisplayNamePluralElement = document.getElementById(`conceptTypeDisplayNamePluralElement_${suffix}`);
   elements.refreshConceptButton = document.getElementById(`refreshConceptButton_${suffix}`);
   elements.conceptStep1Div = document.getElementById(`conceptStep1_${suffix}`);
+  elements.discussConceptButton = document.getElementById(`discussConceptButton_${suffix}`);
   elements.startInteractionButton = document.getElementById(`startInteractionButton_${suffix}`);
   // Name field removed for suffixed tabs
   elements.conceptNotesInput = document.getElementById(`conceptNotes_${suffix}`);
@@ -2491,6 +2537,7 @@ export function setupConceptTabEventListenersWithSuffix(suffix = '') {
   // Get suffix-aware elements
   // Name input removed
   const conceptNotesInput = getSuffixElement('conceptNotes');
+  const discussConceptButton = getSuffixElement('discussConceptButton');
   const startInteractionButton = getSuffixElement('startInteractionButton');
   const submitAnswerButton = getSuffixElement('submitAnswerButton');
   const cancelInteractionButton = getSuffixElement('cancelInteractionButton');
@@ -2515,6 +2562,10 @@ export function setupConceptTabEventListenersWithSuffix(suffix = '') {
   // Start interaction button
   if (startInteractionButton) {
     startInteractionButton.addEventListener('click', handleStartInteraction);
+  }
+
+  if (discussConceptButton) {
+    discussConceptButton.addEventListener('click', () => discussCurrentlySelectedConcept(suffix));
   }
 
   // Submit answer button

@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import upsert_text_for_concept
 from ..utils.concept_id_utils import ensure_v_concept_prefix
+from ..security.visibility_predicates import set_specific_to_user_values
 
 logger = logging.getLogger(__name__)
 
@@ -269,8 +270,13 @@ def get_or_create_conversation_concept(
 
     if owner_concept_id:
         owner_concept_id = ensure_v_concept_prefix(owner_concept_id)
+        if owner_concept_id is None:
+            raise ConversationConceptError("owner_concept_id is invalid")
         relationships[PREDICATE_HAS_OWNER] = [owner_concept_id]
         relationships[PREDICATE_HAS_PARTICIPANT] = [owner_concept_id]
+        # Conversation concepts are projections of an owner-scoped transcript.
+        # Never publish this identity merely because it has a stable ID.
+        relationships = set_specific_to_user_values(relationships, [owner_concept_id])
 
     if organisation_concept_id:
         organisation_concept_id = ensure_v_concept_prefix(organisation_concept_id)

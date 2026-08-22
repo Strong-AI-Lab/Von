@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Iterable
+from typing import List, Dict, Any, Optional, Iterable, Mapping
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import (
     PyMongoError,
@@ -63,6 +63,7 @@ _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR: Optional[str] = None
 _CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME = (
     "namespace_user_recency_session_metadata_v1"
 )
+_MAX_FOCAL_CONCEPT_IDS = 4
 CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE = "browser_test_fixture"
 CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS = "benchmark_harness"
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
@@ -484,6 +485,19 @@ def _ensure_chat_history_indexes(collection) -> None:
                         ("test_artifact_kind", ASCENDING),
                     ],
                     name=_CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME,
+                )
+            if (
+                "namespace_1_user_id_1_focal_concept_ids_1_updated_at_-1"
+                not in existing_indexes
+            ):
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("focal_concept_ids", ASCENDING),
+                        ("updated_at", DESCENDING),
+                    ],
+                    name="namespace_1_user_id_1_focal_concept_ids_1_updated_at_-1",
                 )
         except Exception as exc:
             logger.warning(
@@ -1530,6 +1544,9 @@ def get_chat_history_session_state(
                             "conversation_situation": 1,
                             "conversation_observations": 1,
                             "conversation_observation_total": 1,
+                            "focal_concept_ids": 1,
+                            "focal_concept_ids_source": 1,
+                            "focal_concept_ids_updated_at": 1,
                         }
                     },
                 ]
@@ -1555,6 +1572,9 @@ def get_chat_history_session_state(
                     "conversation_situation": 1,
                     "conversation_observations": 1,
                     "conversation_observation_total": 1,
+                    "focal_concept_ids": 1,
+                    "focal_concept_ids_source": 1,
+                    "focal_concept_ids_updated_at": 1,
                 }
                 if include_history:
                     projection["history"] = 1
@@ -1589,6 +1609,9 @@ def get_chat_history_session_state(
         "history": history,
         **_conversation_state_from_doc(doc),
     }
+    focus = _focus_projection_from_doc(doc)
+    if focus["focal_concept_ids"]:
+        state.update(focus)
     if (
         include_history
         and isinstance(history_tail_limit, int)
@@ -3850,11 +3873,17 @@ def _build_session_summary_from_metadata(
         return None
 
     session_name = _normalise_session_name(doc.get("session_name"))
+    focus = _focus_projection_from_doc(doc)
     created_ts = _infer_created_timestamp(doc)
     last_ts = _coerce_datetime(doc.get("updated_at")) or created_ts
 
     # Metadata-only summaries intentionally avoid history reads for resilience.
-    if not session_name and last_ts is None and created_ts is None:
+    if (
+        not session_name
+        and not focus["focal_concept_ids"]
+        and last_ts is None
+        and created_ts is None
+    ):
         return None
 
     provenance = _session_provenance_from_doc(doc)
@@ -3869,6 +3898,7 @@ def _build_session_summary_from_metadata(
         "namespace": doc.get("namespace"),
         "organisation_concept_id": doc.get("organisation_concept_id"),
         "preview": None,
+        **focus,
         **provenance,
     }
 
@@ -3888,6 +3918,9 @@ def _get_chat_history_session_summaries_metadata_only(
             "updated_at": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
         }
     )
     cursor = _read_find(
@@ -4006,6 +4039,9 @@ def _load_chat_history_session_summaries(
                 "namespace": 1,
                 "organisation_concept_id": 1,
                 "session_name": 1,
+                "focal_concept_ids": 1,
+                "focal_concept_ids_source": 1,
+                "focal_concept_ids_updated_at": 1,
             }
         )
         docs = list(
@@ -4056,9 +4092,10 @@ def _load_chat_history_session_summaries(
                 history = []
 
             session_name = _normalise_session_name(doc.get("session_name"))
+            focus = _focus_projection_from_doc(doc)
             non_reset = list(_iter_non_reset_messages(history))
             has_messages = bool(non_reset)
-            if not has_messages and not session_name:
+            if not has_messages and not session_name and not focus["focal_concept_ids"]:
                 continue
 
             last_entry = None
@@ -4103,6 +4140,7 @@ def _load_chat_history_session_summaries(
                     "namespace": doc.get("namespace"),
                     "organisation_concept_id": doc.get("organisation_concept_id"),
                     "preview": preview,
+                    **focus,
                     **provenance,
                 }
             )
@@ -4266,6 +4304,9 @@ def get_chat_history_session_summary(
             "updated_at": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
         }
     )
     if light_mode:
@@ -4313,6 +4354,9 @@ def get_chat_history_session_summary(
             "namespace": 1,
             "organisation_concept_id": 1,
             "session_name": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
         }
     )
     try:
@@ -4384,9 +4428,10 @@ def get_chat_history_session_summary(
         history = []
 
     session_name = _normalise_session_name(doc.get("session_name"))
+    focus = _focus_projection_from_doc(doc)
     non_reset = list(_iter_non_reset_messages(history))
     has_messages = bool(non_reset)
-    if not has_messages and not session_name:
+    if not has_messages and not session_name and not focus["focal_concept_ids"]:
         return None
 
     last_entry = None
@@ -4428,6 +4473,7 @@ def get_chat_history_session_summary(
         "namespace": doc.get("namespace"),
         "organisation_concept_id": doc.get("organisation_concept_id"),
         "preview": preview,
+        **focus,
         **provenance,
     }
     _record_chat_history_read_success()
@@ -4447,6 +4493,7 @@ def create_chat_session(
     created_by_actor_type: Optional[str] = None,
     is_agent_created: Optional[bool] = None,
     test_artifact_kind: Optional[str] = None,
+    focal_concept_ids: Any = None,
 ) -> Dict[str, Any]:
     """Create a new chat session document if it does not already exist.
 
@@ -4491,6 +4538,7 @@ def create_chat_session(
             session_context={"organisation_concept_id": effective_org}, user_id=user_id
         )
     name = _normalise_session_name(session_name)
+    normalised_focus = normalise_focal_concept_ids(focal_concept_ids)
 
     set_on_insert: Dict[str, Any] = {
         "created_at": now,
@@ -4499,6 +4547,10 @@ def create_chat_session(
     }
     if name:
         set_on_insert["session_name"] = name
+    if normalised_focus:
+        set_on_insert["focal_concept_ids"] = normalised_focus
+        set_on_insert["focal_concept_ids_source"] = "conversation_launch"
+        set_on_insert["focal_concept_ids_updated_at"] = now
     if isinstance(ns, str) and ns.strip():
         set_on_insert["namespace"] = ns.strip()
     if isinstance(effective_org, str) and effective_org.strip():
@@ -4526,7 +4578,13 @@ def create_chat_session(
             upsert=True,
         )
         projection = _add_chat_session_provenance_projection(
-            {"session_name": 1, "namespace": 1}
+            {
+                "session_name": 1,
+                "namespace": 1,
+                "focal_concept_ids": 1,
+                "focal_concept_ids_source": 1,
+                "focal_concept_ids_updated_at": 1,
+            }
         )
         doc = chat_history_coll.find_one(
             {"user_id": user_id, "session_id": session_id},
@@ -4537,6 +4595,7 @@ def create_chat_session(
             "session_id": session_id,
             "session_name": _normalise_session_name((doc or {}).get("session_name")),
             "namespace": (doc or {}).get("namespace") or ns,
+            **_focus_projection_from_doc(doc),
             **stored_provenance,
         }
     except PyMongoError as e:
@@ -4609,6 +4668,455 @@ def _normalise_concept_id_list(values: Any) -> List[str]:
         seen.add(item)
         result.append(item)
     return result
+
+
+def normalise_focal_concept_ids(values: Any) -> List[str]:
+    """Return the bounded, ordered focal-object contract for one conversation.
+
+    This is deliberately separate from ``session_links``.  Links are optional
+    organisational metadata, whereas focal IDs select the source-backed
+    objects that must be re-authorised and hydrated for every ordinary turn.
+    """
+
+    return _normalise_concept_id_list(values)[:_MAX_FOCAL_CONCEPT_IDS]
+
+
+def _focus_projection_from_doc(doc: Mapping[str, Any] | None) -> Dict[str, Any]:
+    source = doc if isinstance(doc, Mapping) else {}
+    updated_at = _coerce_datetime(source.get("focal_concept_ids_updated_at"))
+    return {
+        "focal_concept_ids": normalise_focal_concept_ids(
+            source.get("focal_concept_ids")
+        ),
+        "focal_concept_ids_source": (
+            str(source.get("focal_concept_ids_source")).strip()
+            if isinstance(source.get("focal_concept_ids_source"), str)
+            and str(source.get("focal_concept_ids_source")).strip()
+            else None
+        ),
+        "focal_concept_ids_updated_at": (
+            updated_at.isoformat() if updated_at is not None else None
+        ),
+    }
+
+
+def get_chat_session_focus(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    """Read source-owned focus without altering conversation recency."""
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ChatHistoryServiceError("session_id is required.")
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    try:
+        doc = chat_history_coll.find_one(
+            query,
+            {
+                "focal_concept_ids": 1,
+                "focal_concept_ids_source": 1,
+                "focal_concept_ids_updated_at": 1,
+            },
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not read conversation focus: {exc}"
+        ) from exc
+    return _focus_projection_from_doc(doc)
+
+
+def set_chat_session_focus(
+    *,
+    user_id: str,
+    session_id: str,
+    focal_concept_ids: Any,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    source: str = "conversation_launch",
+) -> Dict[str, Any]:
+    """Set source-owned focus without changing transcript recency."""
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ChatHistoryServiceError("session_id is required.")
+    normalised = normalise_focal_concept_ids(focal_concept_ids)
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        result = chat_history_coll.update_one(
+            query,
+            {
+                "$set": {
+                    "focal_concept_ids": normalised,
+                    "focal_concept_ids_source": source,
+                    "focal_concept_ids_updated_at": now,
+                }
+            },
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not set conversation focus: {exc}"
+        ) from exc
+    return {
+        "matched": bool(getattr(result, "matched_count", 0) > 0),
+        "updated": bool(getattr(result, "modified_count", 0) > 0),
+        "focal_concept_ids": normalised,
+        "focal_concept_ids_source": source,
+        "focal_concept_ids_updated_at": now.isoformat(),
+    }
+
+
+def list_chat_sessions_for_focal_concept(
+    *,
+    user_id: str,
+    focal_concept_id: str,
+    namespace: Optional[str] = None,
+    limit: int = 25,
+) -> List[Dict[str, Any]]:
+    """Return recent source-owned sessions focussed on one exact concept ID."""
+
+    focal_ids = normalise_focal_concept_ids([focal_concept_id])
+    if not focal_ids:
+        raise ChatHistoryServiceError("focal_concept_id is required.")
+    safe_limit = min(max(int(limit or 25), 1), 100)
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("list_chat_sessions_for_focal_concept")
+    query = build_chat_history_query(
+        user_id=user_id,
+        namespace=namespace,
+        include_legacy=True,
+    )
+    query["focal_concept_ids"] = focal_ids[0]
+    projection = _add_chat_session_provenance_projection(
+        {
+            "_id": 0,
+            "session_id": 1,
+            "session_name": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "organisation_concept_id": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
+        }
+    )
+    try:
+        cursor = _read_find(
+            chat_history_coll,
+            query,
+            projection,
+            operation="list_chat_sessions_for_focal_concept.find",
+        )
+        try:
+            cursor = cursor.sort(
+                [("updated_at", DESCENDING), ("created_at", DESCENDING)]
+            )
+        except AttributeError:
+            pass
+        try:
+            cursor = cursor.limit(safe_limit)
+        except AttributeError:
+            pass
+        summaries = [
+            summary
+            for doc in cursor
+            if isinstance(doc, dict)
+            and (summary := _build_session_summary_from_metadata(doc)) is not None
+        ]
+        _record_chat_history_read_success()
+        return summaries[:safe_limit]
+    except PyMongoError as exc:
+        _record_chat_history_read_failure("list_chat_sessions_for_focal_concept", exc)
+        raise ChatHistoryServiceError(
+            f"Could not list conversations for focal concept: {exc}"
+        ) from exc
+
+
+def _assistant_opening_result_from_doc(
+    doc: Mapping[str, Any] | None,
+) -> Dict[str, Any] | None:
+    if not isinstance(doc, Mapping):
+        return None
+    opening = doc.get("assistant_opening")
+    if not isinstance(opening, Mapping):
+        return None
+    initiation_id = opening.get("initiation_id")
+    if not isinstance(initiation_id, str) or not initiation_id:
+        return None
+
+    response_text = opening.get("response_text")
+    if not isinstance(response_text, str):
+        response_text = None
+    history = doc.get("history")
+    if response_text is None and isinstance(history, list):
+        for message in reversed(history):
+            if (
+                not isinstance(message, Mapping)
+                or message.get("role") != "assistant"
+                or message.get("initiation_id") != initiation_id
+            ):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                response_text = content
+                break
+
+    if opening.get("status") == "completed" or response_text is not None:
+        return {
+            "status": "completed",
+            "initiation_id": initiation_id,
+            "response_text": response_text,
+        }
+    return {
+        "status": str(opening.get("status") or "in_progress"),
+        "initiation_id": initiation_id,
+    }
+
+
+def claim_chat_session_assistant_opening(
+    *,
+    user_id: str,
+    session_id: str,
+    initiation_id: str,
+    namespace: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Atomically claim the single assistant-first opening for a session."""
+
+    if not initiation_id or len(initiation_id) > 200:
+        raise ChatHistoryServiceError("initiation_id is required.")
+    coll = get_chat_history_collection_service()
+    if coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    session_query = build_chat_history_query(
+        user_id=user_id, session_id=session_id, namespace=namespace
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        existing = coll.find_one(
+            session_query,
+            {"assistant_opening": 1, "history": {"$slice": -20}},
+        )
+        if not isinstance(existing, Mapping):
+            return {"status": "missing"}
+        existing_result = _assistant_opening_result_from_doc(existing)
+        if existing_result is not None:
+            if existing_result["status"] == "completed":
+                # Recover a completed durable assistant message if the final
+                # state update failed after persistence.
+                opening = existing.get("assistant_opening")
+                if (
+                    isinstance(opening, Mapping)
+                    and opening.get("status") != "completed"
+                ):
+                    coll.update_one(
+                        session_query,
+                        {
+                            "$set": {
+                                "assistant_opening.status": "completed",
+                                "assistant_opening.completed_at": now,
+                                "assistant_opening.response_text": existing_result.get(
+                                    "response_text"
+                                ),
+                            }
+                        },
+                    )
+                return existing_result
+            if existing_result["status"] == "failed":
+                if existing_result.get("initiation_id") != initiation_id:
+                    return {
+                        "status": "already_claimed",
+                        "initiation_id": existing_result.get("initiation_id"),
+                    }
+                retry_query = {
+                    "$and": [
+                        session_query,
+                        {
+                            "assistant_opening.initiation_id": initiation_id,
+                            "assistant_opening.status": "failed",
+                        },
+                    ]
+                }
+                result = coll.update_one(
+                    retry_query,
+                    {
+                        "$set": {
+                            "assistant_opening.status": "in_progress",
+                            "assistant_opening.started_at": now,
+                        },
+                        "$unset": {
+                            "assistant_opening.failed_at": "",
+                            "assistant_opening.failure_kind": "",
+                        },
+                    },
+                )
+                if getattr(result, "matched_count", 0):
+                    return {"status": "claimed", "initiation_id": initiation_id}
+            if existing_result.get("initiation_id") == initiation_id:
+                return {
+                    "status": "in_progress",
+                    "initiation_id": initiation_id,
+                }
+            return {
+                "status": "already_claimed",
+                "initiation_id": existing_result.get("initiation_id"),
+            }
+
+        claim_query = {
+            "$and": [
+                session_query,
+                {
+                    "$or": [
+                        {"assistant_opening": {"$exists": False}},
+                        {"assistant_opening": None},
+                    ]
+                },
+            ]
+        }
+        result = coll.update_one(
+            claim_query,
+            {
+                "$set": {
+                    "assistant_opening": {
+                        "initiation_id": initiation_id,
+                        "status": "in_progress",
+                        "started_at": now,
+                    }
+                }
+            },
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not claim assistant opening: {exc}"
+        ) from exc
+    if getattr(result, "matched_count", 0):
+        return {"status": "claimed", "initiation_id": initiation_id}
+
+    # Another request may have won the atomic claim between our read and write.
+    try:
+        current = coll.find_one(
+            session_query,
+            {"assistant_opening": 1, "history": {"$slice": -20}},
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not reconcile assistant opening claim: {exc}"
+        ) from exc
+    current_result = _assistant_opening_result_from_doc(current)
+    if current_result is None:
+        return {"status": "missing"}
+    if current_result["status"] == "completed":
+        return current_result
+    if current_result.get("initiation_id") == initiation_id:
+        return {"status": "in_progress", "initiation_id": initiation_id}
+    return {
+        "status": "already_claimed",
+        "initiation_id": current_result.get("initiation_id"),
+    }
+
+
+def complete_chat_session_assistant_opening(
+    *,
+    user_id: str,
+    session_id: str,
+    initiation_id: str,
+    response_text: Optional[str] = None,
+    namespace: Optional[str] = None,
+) -> bool:
+    """Mark an opening complete only after its assistant message is durable."""
+
+    coll = get_chat_history_collection_service()
+    if coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id, session_id=session_id, namespace=namespace
+    )
+    query.update(
+        {
+            "assistant_opening.initiation_id": initiation_id,
+            "assistant_opening.status": "in_progress",
+        }
+    )
+    try:
+        completed_fields: Dict[str, Any] = {
+            "assistant_opening.status": "completed",
+            "assistant_opening.completed_at": datetime.now(timezone.utc),
+        }
+        if isinstance(response_text, str):
+            completed_fields["assistant_opening.response_text"] = response_text
+        result = coll.update_one(
+            query,
+            {"$set": completed_fields},
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not complete assistant opening: {exc}"
+        ) from exc
+    return bool(getattr(result, "matched_count", 0))
+
+
+def fail_chat_session_assistant_opening(
+    *,
+    user_id: str,
+    session_id: str,
+    initiation_id: str,
+    failure_kind: str,
+    namespace: Optional[str] = None,
+) -> bool:
+    """Make a claimed opening retryable when no assistant message was durable."""
+
+    coll = get_chat_history_collection_service()
+    if coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id, session_id=session_id, namespace=namespace
+    )
+    query.update(
+        {
+            "assistant_opening.initiation_id": initiation_id,
+            "assistant_opening.status": "in_progress",
+        }
+    )
+    safe_failure_kind = str(failure_kind or "opening_failed").strip()[:120]
+    try:
+        result = coll.update_one(
+            query,
+            {
+                "$set": {
+                    "assistant_opening.status": "failed",
+                    "assistant_opening.failed_at": datetime.now(timezone.utc),
+                    "assistant_opening.failure_kind": safe_failure_kind,
+                }
+            },
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(f"Could not fail assistant opening: {exc}") from exc
+    return bool(getattr(result, "matched_count", 0))
 
 
 def get_chat_session_links(

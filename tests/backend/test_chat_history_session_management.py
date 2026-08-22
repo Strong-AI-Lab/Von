@@ -78,6 +78,327 @@ def test_create_chat_session_preserves_explicit_name_and_leaves_unnamed_session_
     assert "session_name" not in unnamed_doc
 
 
+def test_create_chat_session_preserves_ordered_focal_concepts(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    stored = {}
+
+    class _FakeColl:
+        def update_one(self, query, update, upsert=False):
+            key = (query.get("user_id"), query.get("session_id"))
+            if key not in stored and upsert:
+                stored[key] = {
+                    "user_id": key[0],
+                    "session_id": key[1],
+                    **update.get("$setOnInsert", {}),
+                }
+            return types.SimpleNamespace(modified_count=1, matched_count=1)
+
+        def find_one(self, query, projection=None):
+            return stored.get((query.get("user_id"), query.get("session_id")))
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+    monkeypatch.setattr(chat_history_service, "get_session_context", lambda: {})
+
+    result = chat_history_service.create_chat_session(
+        user_id="#V#user",
+        session_id="focused-session",
+        focal_concept_ids=["#V#task", "#V#paper", "#V#task", "#V#person"],
+    )
+
+    assert result["focal_concept_ids"] == ["#V#task", "#V#paper", "#V#person"]
+    assert stored[("#V#user", "focused-session")]["focal_concept_ids"] == [
+        "#V#task",
+        "#V#paper",
+        "#V#person",
+    ]
+    assert result["focal_concept_ids_source"] == "conversation_launch"
+
+
+def test_completed_assistant_opening_returns_durable_assistant_text(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    class _FakeColl:
+        def find_one(self, query, projection=None):
+            return {
+                "assistant_opening": {
+                    "initiation_id": "open-1",
+                    "status": "completed",
+                },
+                "history": [
+                    {"role": "user", "content": "not an opening"},
+                    {
+                        "role": "assistant",
+                        "content": "How can I help with this task?",
+                        "initiation_id": "open-1",
+                    },
+                ],
+            }
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+
+    result = chat_history_service.claim_chat_session_assistant_opening(
+        user_id="#V#user",
+        session_id="focused-session",
+        initiation_id="open-1",
+    )
+
+    assert result == {
+        "status": "completed",
+        "initiation_id": "open-1",
+        "response_text": "How can I help with this task?",
+    }
+
+
+def test_assistant_opening_recovers_when_message_won_but_completion_write_did_not(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    updates = []
+
+    class _FakeColl:
+        def find_one(self, query, projection=None):
+            return {
+                "assistant_opening": {
+                    "initiation_id": "open-crash",
+                    "status": "in_progress",
+                },
+                "history": [
+                    {
+                        "role": "assistant",
+                        "content": "A durable opening",
+                        "initiation_id": "open-crash",
+                    }
+                ],
+            }
+
+        def update_one(self, query, update):
+            updates.append((query, update))
+            return types.SimpleNamespace(matched_count=1, modified_count=1)
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+
+    result = chat_history_service.claim_chat_session_assistant_opening(
+        user_id="#V#user",
+        session_id="focused-session",
+        initiation_id="open-crash",
+    )
+
+    assert result == {
+        "status": "completed",
+        "initiation_id": "open-crash",
+        "response_text": "A durable opening",
+    }
+    assert updates[0][1]["$set"]["assistant_opening.status"] == "completed"
+    assert (
+        updates[0][1]["$set"]["assistant_opening.response_text"] == "A durable opening"
+    )
+
+
+def test_assistant_opening_claim_uses_conditional_write_and_reconciles_race(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    reads = iter(
+        [
+            {"history": []},
+            {
+                "assistant_opening": {
+                    "initiation_id": "other-opening",
+                    "status": "in_progress",
+                },
+                "history": [],
+            },
+        ]
+    )
+    updates = []
+
+    class _FakeColl:
+        def find_one(self, query, projection=None):
+            return next(reads)
+
+        def update_one(self, query, update):
+            updates.append((query, update))
+            return types.SimpleNamespace(matched_count=0, modified_count=0)
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+
+    result = chat_history_service.claim_chat_session_assistant_opening(
+        user_id="#V#user",
+        session_id="focused-session",
+        initiation_id="my-opening",
+    )
+
+    assert result == {
+        "status": "already_claimed",
+        "initiation_id": "other-opening",
+    }
+    claim_query = updates[0][0]
+    assert "$and" in claim_query
+    assert claim_query["$and"][1] == {
+        "$or": [
+            {"assistant_opening": {"$exists": False}},
+            {"assistant_opening": None},
+        ]
+    }
+
+
+def test_failed_assistant_opening_can_be_reclaimed_with_same_initiation_id(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    writes = []
+
+    class _FakeColl:
+        def find_one(self, query, projection=None):
+            return {
+                "assistant_opening": {
+                    "initiation_id": "opening-retry",
+                    "status": "failed",
+                    "failure_kind": "RuntimeError",
+                },
+                "history": [],
+            }
+
+        def update_one(self, query, update):
+            writes.append((query, update))
+            return types.SimpleNamespace(matched_count=1, modified_count=1)
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+
+    result = chat_history_service.claim_chat_session_assistant_opening(
+        user_id="#V#user",
+        session_id="focused-session",
+        initiation_id="opening-retry",
+    )
+
+    assert result == {"status": "claimed", "initiation_id": "opening-retry"}
+    assert writes[0][1]["$set"]["assistant_opening.status"] == "in_progress"
+    assert "assistant_opening.failure_kind" in writes[0][1]["$unset"]
+
+
+def test_focus_update_does_not_change_transcript_recency(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    writes = []
+
+    class _FakeColl:
+        def update_one(self, query, update):
+            writes.append((query, update))
+            return types.SimpleNamespace(matched_count=1, modified_count=1)
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+
+    result = chat_history_service.set_chat_session_focus(
+        user_id="#V#user",
+        session_id="focused-session",
+        namespace="#V#user@org",
+        focal_concept_ids=["#V#task"],
+    )
+
+    assert result["updated"] is True
+    assert set(writes[0][1]) == {"$set"}
+    assert "updated_at" not in writes[0][1]["$set"]
+
+
+def test_focused_unnamed_empty_session_remains_listable():
+    from src.backend.services import chat_history_service
+
+    summary = chat_history_service._build_session_summary_from_metadata(
+        {
+            "session_id": "focused-session",
+            "user_id": "#V#user",
+            "focal_concept_ids": ["#V#task"],
+        }
+    )
+
+    assert summary is not None
+    assert summary["session_id"] == "focused-session"
+    assert summary["focal_concept_ids"] == ["#V#task"]
+
+
+def test_recent_focus_lookup_queries_exact_indexable_field(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    calls = []
+
+    class _Cursor(list):
+        def sort(self, fields):
+            calls.append(("sort", fields))
+            return self
+
+        def limit(self, limit):
+            calls.append(("limit", limit))
+            return self
+
+    class _FakeColl:
+        def find(self, query, projection=None, **kwargs):
+            calls.append(("find", query, projection))
+            return _Cursor(
+                [
+                    {
+                        "session_id": "focused-session",
+                        "user_id": "#V#user",
+                        "namespace": "#V#user@org",
+                        "session_name": "Task discussion",
+                        "focal_concept_ids": ["#V#task"],
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+    monkeypatch.setattr(
+        chat_history_service, "_guard_chat_history_read", lambda *_: None
+    )
+    monkeypatch.setattr(
+        chat_history_service, "_record_chat_history_read_success", lambda: None
+    )
+
+    result = chat_history_service.list_chat_sessions_for_focal_concept(
+        user_id="#V#user",
+        focal_concept_id="#V#task",
+        namespace="#V#user@org",
+        limit=5,
+    )
+
+    find_call = next(call for call in calls if call[0] == "find")
+    assert find_call[1]["focal_concept_ids"] == "#V#task"
+    assert find_call[1]["user_id"] == "#V#user"
+    assert ("limit", 5) in calls
+    assert [item["session_id"] for item in result] == ["focused-session"]
+
+
 def test_implicit_session_creation_does_not_derive_name_from_first_user_message(
     monkeypatch,
 ):
