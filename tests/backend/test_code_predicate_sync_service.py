@@ -14,6 +14,7 @@ def test_sync_code_predicate_creates_missing_concepts(monkeypatch):
         if concept_id in {
             sync_service.PREDICATE_TYPE_ID,
             sync_service.MENTIONED_IN_CODE_ID,
+            "#V#binary_text_predicate",
         }:
             return {"concept_id": concept_id, "relationships": {}}
         return None
@@ -40,6 +41,7 @@ def test_sync_code_predicate_creates_missing_concepts(monkeypatch):
     assert created[0]["parent_concept_ids"] == [
         sync_service.PREDICATE_TYPE_ID,
         sync_service.MENTIONED_IN_CODE_ID,
+        "#V#binary_text_predicate",
     ]
 
 
@@ -52,6 +54,7 @@ def test_sync_code_predicate_updates_instance_of(monkeypatch):
         if concept_id in {
             sync_service.PREDICATE_TYPE_ID,
             sync_service.MENTIONED_IN_CODE_ID,
+            "#V#binary_text_predicate",
         }:
             return {"concept_id": concept_id, "relationships": {}}
         if concept_id == "#V#hasContent":
@@ -82,6 +85,7 @@ def test_sync_code_predicate_updates_instance_of(monkeypatch):
     assert updates
     updated_inst_of = updates[0]["payload"]["relationships"]["is_an_instance_of"]
     assert sync_service.MENTIONED_IN_CODE_ID in updated_inst_of
+    assert "#V#binary_text_predicate" in updated_inst_of
 
 
 def test_sync_code_predicate_retags_non_predicate(monkeypatch):
@@ -93,6 +97,7 @@ def test_sync_code_predicate_retags_non_predicate(monkeypatch):
         if concept_id in {
             sync_service.PREDICATE_TYPE_ID,
             sync_service.MENTIONED_IN_CODE_ID,
+            "#V#binary_text_predicate",
         }:
             return {"concept_id": concept_id, "relationships": {}}
         if concept_id == "#V#has_blob_uri":
@@ -131,6 +136,7 @@ def test_sync_code_predicate_creates_for_virtual_concept(monkeypatch):
         if concept_id in {
             sync_service.PREDICATE_TYPE_ID,
             sync_service.MENTIONED_IN_CODE_ID,
+            "#V#binary_text_predicate",
         }:
             return {"concept_id": concept_id, "relationships": {}}
         if concept_id == "#V#hasContent":
@@ -156,3 +162,95 @@ def test_sync_code_predicate_creates_for_virtual_concept(monkeypatch):
 
     assert result.created == ["#V#hasContent"]
     assert created
+
+
+def test_sync_code_predicate_repairs_renderer_profile_text_type_additively(
+    monkeypatch,
+):
+    from src.backend.services import code_predicate_sync_service as sync_service
+
+    updates: List[Dict[str, Any]] = []
+
+    def _fake_get(concept_id: str):
+        if concept_id in {
+            sync_service.PREDICATE_TYPE_ID,
+            sync_service.MENTIONED_IN_CODE_ID,
+            "#V#binary_text_predicate",
+        }:
+            return {"concept_id": concept_id, "relationships": {}}
+        if concept_id == "#V#has_renderer_profile_json":
+            return {
+                "concept_id": concept_id,
+                "relationships": {
+                    "is_an_instance_of": [sync_service.PREDICATE_TYPE_ID],
+                    "related_to": ["#V#preserved_relationship"],
+                },
+            }
+        return None
+
+    def _fake_update(concept_id: str, payload: Dict[str, Any]):
+        updates.append({"concept_id": concept_id, "payload": payload})
+        return {"concept_id": concept_id}
+
+    monkeypatch.setattr(
+        sync_service.concept_service,
+        "get_concept_by_concept_id",
+        _fake_get,
+    )
+    monkeypatch.setattr(sync_service.concept_service, "update_concept", _fake_update)
+    monkeypatch.setattr(
+        sync_service,
+        "list_code_predicate_ids",
+        lambda: ["#V#has_renderer_profile_json"],
+    )
+
+    result = sync_service.sync_code_predicate_concepts()
+
+    assert result.updated == ["#V#has_renderer_profile_json"]
+    relationships = updates[0]["payload"]["relationships"]
+    assert relationships["related_to"] == ["#V#preserved_relationship"]
+    assert relationships["is_an_instance_of"] == [
+        sync_service.PREDICATE_TYPE_ID,
+        sync_service.MENTIONED_IN_CODE_ID,
+        "#V#binary_text_predicate",
+    ]
+
+
+def test_sync_resolves_each_shared_parent_at_most_once(monkeypatch):
+    from src.backend.services import code_predicate_sync_service as sync_service
+
+    looked_up: List[str] = []
+    parent_ids = {
+        sync_service.PREDICATE_TYPE_ID,
+        sync_service.MENTIONED_IN_CODE_ID,
+        "#V#binary_text_predicate",
+    }
+
+    def _fake_get(concept_id: str):
+        looked_up.append(concept_id)
+        if concept_id in parent_ids:
+            return {"concept_id": concept_id, "relationships": {}}
+        return None
+
+    monkeypatch.setattr(
+        sync_service.concept_service,
+        "get_concept_by_concept_id",
+        _fake_get,
+    )
+    monkeypatch.setattr(
+        sync_service.concept_service,
+        "create_concept",
+        lambda **kwargs: {"concept_id": kwargs["concept_id"]},
+    )
+    monkeypatch.setattr(sync_service.concept_service, "update_concept", lambda *a, **k: {})
+    monkeypatch.setattr(
+        sync_service,
+        "list_code_predicate_ids",
+        lambda: ["#V#hasContent", "#V#has_blob_uri"],
+    )
+
+    result = sync_service.sync_code_predicate_concepts()
+
+    assert result.created == ["#V#hasContent", "#V#has_blob_uri"]
+    for parent_id in parent_ids:
+        assert looked_up.count(parent_id) == 1

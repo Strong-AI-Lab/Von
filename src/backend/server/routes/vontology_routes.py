@@ -2547,6 +2547,66 @@ def search_concepts():
             use_two_pass=fallback_substring,
         )
 
+        # Built-in code concepts are valid public virtual concepts even before
+        # their first materialisation. The repository-backed search service
+        # cannot discover an absent row, so merge the cheap in-memory code
+        # registry here. Persisted results retain identity precedence, and we
+        # deliberately do not enumerate the heavier MCP-tool provider.
+        from ...vontology.code_concepts_registry import iter_code_concepts
+
+        merged_results = list(search_result.get("results") or [])
+        seen_result_ids = {
+            result.get("concept_id")
+            for result in merged_results
+            if isinstance(result, dict)
+        }
+        query_lower = q.lower()
+        for code_concept in iter_code_concepts():
+            if code_concept.concept_id in seen_result_ids:
+                continue
+            result_kind = (
+                code_concept.kind
+                if code_concept.kind in {"type", "predicate", "individual"}
+                else "individual"
+            )
+            if filter_kind and result_kind not in filter_kind:
+                continue
+            candidate_scores = []
+            for candidate in (
+                code_concept.display_name,
+                code_concept.concept_id,
+            ):
+                candidate_lower = candidate.lower()
+                if candidate_lower == query_lower:
+                    candidate_scores.append(100.0)
+                elif candidate_lower.startswith(query_lower):
+                    candidate_scores.append(
+                        90.0 + (len(query_lower) / len(candidate_lower) * 5.0)
+                    )
+                elif query_lower in candidate_lower:
+                    candidate_scores.append(
+                        70.0 + (len(query_lower) / len(candidate_lower) * 15.0)
+                    )
+            if not candidate_scores:
+                continue
+            merged_results.append(
+                {
+                    "concept_id": code_concept.concept_id,
+                    "name": code_concept.display_name,
+                    "kind": result_kind,
+                    "relevance_score": max(candidate_scores),
+                }
+            )
+            seen_result_ids.add(code_concept.concept_id)
+
+        merged_results.sort(
+            key=lambda result: (
+                -float(result.get("relevance_score") or 0.0),
+                str(result.get("name") or "").lower(),
+            )
+        )
+        search_result["results"] = merged_results[:limit]
+
         # Transform results to match expected frontend format
         # Frontend expects: [{"id": concept_id, "name": display_name, "kind": kind}, ...]
         # Service returns: [{"concept_id": ..., "name": ..., "kind": ..., "relevance_score": ...}, ...]
@@ -2578,6 +2638,26 @@ def search_concepts():
                         predicate_text_map[cid] = (
                             "#V#binary_text_predicate" in instance_of
                         )
+                    missing_predicate_ids = set(predicate_ids) - set(
+                        predicate_text_map
+                    )
+                    if missing_predicate_ids:
+                        from ...vontology.code_concepts_registry import (
+                            build_virtual_concept_doc,
+                        )
+
+                        for cid in missing_predicate_ids:
+                            virtual_doc = build_virtual_concept_doc(cid)
+                            if not virtual_doc:
+                                continue
+                            instance_of = virtual_doc.get("relationships", {}).get(
+                                "is_an_instance_of", []
+                            )
+                            if isinstance(instance_of, str):
+                                instance_of = [instance_of]
+                            predicate_text_map[cid] = (
+                                "#V#binary_text_predicate" in instance_of
+                            )
             except Exception:
                 predicate_text_map = {}
 

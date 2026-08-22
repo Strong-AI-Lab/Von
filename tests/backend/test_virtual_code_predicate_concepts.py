@@ -222,6 +222,42 @@ def test_relationships_route_allows_virtual_code_predicate(app_client, monkeypat
     assert payload.get("concept_id") == "#V#hasContent"
 
 
+def test_search_marks_virtual_renderer_profile_predicate_as_text(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.ConceptsRepository.find",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.TextRelationsRepository.find",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.TextValuesRepository.find",
+        lambda *a, **k: [],
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/search"
+        "?q=renderer&filter_kind=predicate&include_predicate_metadata=true"
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["results"] == [
+        {
+            "id": "#V#has_renderer_profile_json",
+            "name": "has_renderer_profile_json",
+            "kind": "predicate",
+            "relevance_score": 74.8,
+            "is_text_predicate": True,
+        }
+    ]
+
+
 def test_relationships_route_normalises_has_subtypes_alias(app_client, monkeypatch):
     _, client = app_client
 

@@ -8,29 +8,44 @@ for the concept tab's top summary panel.
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, cast
+from collections.abc import Mapping
+from typing import Any, cast
 
+from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+from .chat_history_service import ChatHistoryServiceError
 from .concept_predicate_metadata_service import get_relationship_kinds_set
-from .concept_summary_field_resolver import get_concept_summary_field_resolver
 from .concept_service import (
     ConceptNotFoundError,
     enrich_concept_with_text_relations,
     get_concept_by_concept_id,
+)
+from .concept_summary_field_resolver import get_concept_summary_field_resolver
+from .conversation_projection_service import (
+    ConversationProjectionAccessChangedError,
+    ConversationProjectionNotFoundError,
+    get_conversation_projection_for_session,
+    list_focal_conversation_backlinks,
 )
 from .renderer_applicability_service import resolve_renderer_applicability_from_metadata
 from .renderer_applicability_vontology_service import (
     load_renderer_definitions_from_concept_ids,
 )
 from .text_value_service import get_texts_for_concept
-from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
 
 CONCEPT_PAGE_RENDERER_CONCEPT_IDS: tuple[str, ...] = (
+    "#V#concept_page_conversation_renderer",
     "#V#concept_page_identity_renderer",
     "#V#concept_page_document_renderer",
     "#V#concept_page_task_renderer",
     "#V#concept_page_event_renderer",
     "#V#concept_page_location_renderer",
     "#V#concept_page_text_summary_renderer",
+)
+
+_CONVERSATION_RENDERER_ID = "#V#concept_page_conversation_renderer"
+_CONVERSATION_TYPE_ID = "#V#conversation"
+_CONVERSATION_SESSION_ID_PREDICATES = frozenset(
+    {"#V#hasSessionId", "hasSessionId"}
 )
 
 _GENERIC_TYPE_EXCLUSIONS: frozenset[str] = frozenset(
@@ -329,6 +344,156 @@ def _facts(*items: tuple[str, str | None]) -> list[dict[str, str]]:
             continue
         rows.append({"label": label, "value": text})
     return rows
+
+
+def _conversation_session_id(
+    concept: Mapping[str, Any], text_rows: list[dict[str, Any]]
+) -> str | None:
+    """Read the source locator without exposing the concept's stored metadata."""
+
+    metadata = concept.get("metadata")
+    raw_session_id = metadata.get("session_id") if isinstance(metadata, Mapping) else None
+    if isinstance(raw_session_id, str) and raw_session_id.strip():
+        return raw_session_id.strip()
+    for row in text_rows:
+        if row.get("predicate") not in _CONVERSATION_SESSION_ID_PREDICATES:
+            continue
+        text = row.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return None
+
+
+def _project_focal_concepts(raw: Any) -> list[dict[str, Any]]:
+    """Copy only renderer-safe fields from already actor-authorised focus cards."""
+
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw[:4]:
+        if not isinstance(item, Mapping):
+            continue
+        concept_id = item.get("concept_id")
+        if (
+            not isinstance(concept_id, str)
+            or not concept_id.strip().startswith("#V#")
+            or concept_id.strip() in seen
+        ):
+            continue
+        concept_id = concept_id.strip()
+        seen.add(concept_id)
+        display_name = item.get("display_name")
+        type_ids = item.get("type_ids")
+        result.append(
+            {
+                "concept_id": concept_id,
+                "display_name": (
+                    display_name.strip()
+                    if isinstance(display_name, str) and display_name.strip()
+                    else concept_id
+                ),
+                "type_ids": [
+                    type_id.strip()
+                    for type_id in type_ids[:12]
+                    if isinstance(type_id, str) and type_id.strip().startswith("#V#")
+                ]
+                if isinstance(type_ids, list)
+                else [],
+            }
+        )
+    return result
+
+
+def _project_open_conversation_action(raw: Any) -> dict[str, str] | None:
+    if not isinstance(raw, Mapping) or raw.get("kind") != "open_conversation":
+        return None
+    session_id = raw.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+    return {"kind": "open_conversation", "session_id": session_id.strip()}
+
+
+def _project_conversation_card(raw: Any) -> dict[str, Any] | None:
+    """Map a Stage 2 card to the renderer contract through an explicit allow-list."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    action = _project_open_conversation_action(raw.get("open_action"))
+    title = raw.get("title")
+    if action is None or not isinstance(title, str) or not title.strip():
+        return None
+    concept_id = raw.get("conversation_concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip().startswith("#V#"):
+        concept_id = None
+    last_activity_at = raw.get("last_activity_at")
+    access_mode = raw.get("access_mode")
+    projection_status = raw.get("projection_status")
+    return {
+        "schema_version": "conversation_projection.v1",
+        "conversation_concept_id": concept_id.strip() if concept_id else None,
+        "title": title.strip(),
+        "last_activity_at": (
+            last_activity_at.strip()
+            if isinstance(last_activity_at, str) and last_activity_at.strip()
+            else None
+        ),
+        "access_mode": access_mode if access_mode in {"owner", "shared"} else None,
+        "focal_concepts": _project_focal_concepts(raw.get("focal_concepts")),
+        "projection_status": (
+            projection_status
+            if projection_status in {"materialised", "source_backed", "pending"}
+            else None
+        ),
+        "open_action": action,
+    }
+
+
+def _project_conversation_backlinks(
+    raw: Any, *, source_concept_id: str
+) -> dict[str, Any]:
+    """Copy a bounded backlink projection without legacy or source-store fields."""
+
+    raw_mapping = raw if isinstance(raw, Mapping) else {}
+    cards: list[dict[str, Any]] = []
+    raw_items = raw_mapping.get("items")
+    if isinstance(raw_items, list):
+        for item in raw_items[:25]:
+            card = _project_conversation_card(item)
+            if card is not None:
+                cards.append(card)
+    more_count = raw_mapping.get("more_count")
+    return {
+        "schema_version": "conversation_backlinks.v1",
+        "source_concept_id": source_concept_id,
+        "items": cards,
+        "more_count": (
+            max(more_count, 0)
+            if isinstance(more_count, int) and not isinstance(more_count, bool)
+            else 0
+        ),
+    }
+
+
+def _build_conversation_panel(card: Mapping[str, Any]) -> dict[str, Any]:
+    last_activity_at = card.get("last_activity_at")
+    return {
+        "variant": "conversation",
+        "eyebrow": "Conversation",
+        "title": str(card.get("title") or "Conversation").strip() or "Conversation",
+        "subtitle": "Focused discussion" if card.get("focal_concepts") else "Discussion",
+        "badges": [],
+        "summary": "",
+        "facts": _facts(
+            (
+                "Last activity",
+                last_activity_at if isinstance(last_activity_at, str) else None,
+            )
+        ),
+        "expanded_sections": [],
+        "focal_concepts": list(card.get("focal_concepts") or []),
+        "open_action": card.get("open_action"),
+    }
 
 
 def _build_person_panel(
@@ -658,7 +823,13 @@ def _build_panel_for_renderer(
     )
 
 
-def load_concept_summary_renderer(concept_id: str) -> dict[str, Any]:
+def load_concept_summary_renderer(
+    concept_id: str,
+    *,
+    actor_user_id: str | None = None,
+    actor_namespace: str | None = None,
+    organisation_concept_id: str | None = None,
+) -> dict[str, Any]:
     """Resolve a concept-page summary renderer and build its payload."""
 
     concept = get_concept_by_concept_id(concept_id)
@@ -698,18 +869,53 @@ def load_concept_summary_renderer(concept_id: str) -> dict[str, Any]:
     selected = resolution.selected_renderers[0] if resolution.selected_renderers else None
     preview_cache: dict[str, str] = {}
     indexed_text_rows = _index_text_rows(text_rows)
-    panel = _build_panel_for_renderer(
-        renderer_id=selected.renderer_id if selected else None,
-        concept=concept,
-        relationships=relationships,
-        indexed_text_rows=indexed_text_rows,
-        direct_type_ids=direct_type_ids,
-        resolved_type_ids=resolved_type_ids,
-        preview_cache=preview_cache,
-        summary_field_keys=summary_field_keys,
-    )
+    selected_renderer_id = selected.renderer_id if selected else None
+    is_conversation = _CONVERSATION_TYPE_ID in resolved_type_ids
+    conversation_card: dict[str, Any] | None = None
+    if is_conversation:
+        session_id = _conversation_session_id(concept, text_rows)
+        if not actor_user_id or not session_id:
+            raise ConceptNotFoundError(f"Concept not found: {concept_id}")
+        try:
+            projection_result = get_conversation_projection_for_session(
+                actor_user_id=actor_user_id,
+                session_id=session_id,
+                actor_namespace=actor_namespace,
+                organisation_concept_id=organisation_concept_id,
+            )
+        except (
+            ConversationProjectionAccessChangedError,
+            ConversationProjectionNotFoundError,
+        ) as exc:
+            raise ConceptNotFoundError(f"Concept not found: {concept_id}") from exc
+        conversation_card = _project_conversation_card(
+            projection_result.get("conversation_projection")
+            if isinstance(projection_result, Mapping)
+            else None
+        )
+        if (
+            conversation_card is None
+            or conversation_card.get("access_mode") != "owner"
+            or conversation_card.get("conversation_concept_id") != concept_id
+        ):
+            raise ConceptNotFoundError(f"Concept not found: {concept_id}")
+    if selected_renderer_id == _CONVERSATION_RENDERER_ID:
+        if conversation_card is None:
+            raise ConceptNotFoundError(f"Concept not found: {concept_id}")
+        panel = _build_conversation_panel(conversation_card)
+    else:
+        panel = _build_panel_for_renderer(
+            renderer_id=selected_renderer_id,
+            concept=concept,
+            relationships=relationships,
+            indexed_text_rows=indexed_text_rows,
+            direct_type_ids=direct_type_ids,
+            resolved_type_ids=resolved_type_ids,
+            preview_cache=preview_cache,
+            summary_field_keys=summary_field_keys,
+        )
 
-    return {
+    payload = {
         "success": True,
         "concept_id": concept_id,
         "display_name": _display_name(concept),
@@ -723,3 +929,18 @@ def load_concept_summary_renderer(concept_id: str) -> dict[str, Any]:
             "renderer_resolution": resolution.to_dict(),
         },
     }
+    if actor_user_id and not is_conversation:
+        try:
+            backlink_result = list_focal_conversation_backlinks(
+                actor_user_id=actor_user_id,
+                focal_concept_id=concept_id,
+                actor_namespace=actor_namespace,
+            )
+        except (ConversationProjectionNotFoundError, ChatHistoryServiceError):
+            backlink_result = None
+        if isinstance(backlink_result, Mapping):
+            payload["conversation_backlinks"] = _project_conversation_backlinks(
+                backlink_result.get("conversation_backlinks"),
+                source_concept_id=concept_id,
+            )
+    return payload

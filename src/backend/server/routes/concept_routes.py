@@ -312,7 +312,15 @@ def get_concept_summary_renderer(concept_id: str) -> ResponseReturnValue:
     """Return the concept-page summary renderer payload for one concept."""
 
     try:
-        payload = load_concept_summary_renderer(concept_id)
+        actor_user_id = _get_current_user_concept_id()
+        payload = load_concept_summary_renderer(
+            concept_id,
+            actor_user_id=actor_user_id,
+            actor_namespace=_get_request_namespace() if actor_user_id else None,
+            organisation_concept_id=(
+                _get_current_org_concept_id() if actor_user_id else None
+            ),
+        )
         return jsonify(payload), 200
     except ConceptNotFoundError:
         return jsonify({"error": "Concept not found"}), 404

@@ -11358,6 +11358,100 @@ button.prompt-vontology-cartouche {
     margin: 0 0 4px;
 }
 
+.concept-summary-focus,
+.concept-summary-action {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.concept-summary-focus-label {
+    color: #64748b;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.concept-summary-focus-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.concept-summary-focus-link,
+.concept-summary-open-conversation {
+    border: 1px solid #99d5cc;
+    border-radius: 999px;
+    background: #f0fdfa;
+    color: #115e59;
+    cursor: pointer;
+    font-size: 0.84rem;
+    font-weight: 650;
+    padding: 6px 11px;
+}
+
+.concept-summary-focus-link:hover,
+.concept-summary-open-conversation:hover {
+    background: #ccfbf1;
+}
+
+.concept-summary-open-conversation:disabled {
+    cursor: wait;
+    opacity: 0.68;
+}
+
+.concept-summary-action-status {
+    color: #b42318;
+    font-size: 0.84rem;
+}
+
+.concept-summary-conversations {
+    display: grid;
+    gap: 8px;
+    border-top: 1px solid #d9e1ec;
+    padding-top: 10px;
+}
+
+.concept-summary-conversations-title,
+.concept-summary-conversation-title,
+.concept-summary-conversation-activity,
+.concept-summary-conversations-more {
+    margin: 0;
+}
+
+.concept-summary-conversations-title {
+    color: #0f172a;
+    font-size: 0.94rem;
+}
+
+.concept-summary-conversation-list {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.concept-summary-conversation-card {
+    display: grid;
+    gap: 7px;
+    border: 1px solid #d9e1ec;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.78);
+    padding: 10px;
+}
+
+.concept-summary-conversation-title {
+    color: #0f172a;
+    font-size: 0.92rem;
+}
+
+.concept-summary-conversation-activity,
+.concept-summary-conversations-more {
+    color: #64748b;
+    font-size: 0.8rem;
+}
+
 .concept-summary-card-identity {
     background:
         linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(248, 250, 252, 0.98)),
@@ -11386,6 +11480,12 @@ button.prompt-vontology-cartouche {
     background:
         linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(236, 253, 245, 0.98)),
         linear-gradient(135deg, rgba(22, 163, 74, 0.08), rgba(13, 148, 136, 0.05));
+}
+
+.concept-summary-card-conversation {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(240, 253, 250, 0.98)),
+        linear-gradient(135deg, rgba(13, 148, 136, 0.09), rgba(59, 130, 246, 0.05));
 }
 
 @media (max-width: 768px) {
