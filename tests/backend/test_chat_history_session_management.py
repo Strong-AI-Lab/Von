@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
 
 def test_create_chat_session_sets_name_and_namespace(monkeypatch):
     from src.backend.services import chat_history_service
@@ -214,3 +216,148 @@ def test_agent_created_provenance_backfill_marks_only_reliable_candidates(
     assert docs[2]["is_agent_created"] is True
     assert docs[2]["test_artifact_kind"] == "live_kb_tool_prompt_sampler_chat_session"
     assert "is_agent_created" not in docs[3]
+
+
+def test_delete_chat_history_targets_exact_namespace_and_reads_back(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    docs = [
+        {
+            "_id": "target",
+            "user_id": "#V#user",
+            "session_id": "same-session",
+            "namespace": "#V#user@org-a",
+        },
+        {
+            "_id": "other-namespace",
+            "user_id": "#V#user",
+            "session_id": "same-session",
+            "namespace": "#V#user@org-b",
+        },
+        {
+            "_id": "legacy",
+            "user_id": "#V#user",
+            "session_id": "same-session",
+        },
+    ]
+    calls = {"delete": [], "find": []}
+
+    def _matches(doc, query):
+        return all(doc.get(key) == value for key, value in query.items())
+
+    class _FakeColl:
+        def delete_one(self, query):
+            calls["delete"].append(dict(query))
+            for index, doc in enumerate(docs):
+                if _matches(doc, query):
+                    docs.pop(index)
+                    return types.SimpleNamespace(acknowledged=True, deleted_count=1)
+            return types.SimpleNamespace(acknowledged=True, deleted_count=0)
+
+        def find_one(self, query, projection=None, **_kwargs):
+            calls["find"].append(dict(query))
+            return next((dict(doc) for doc in docs if _matches(doc, query)), None)
+
+    coll = _FakeColl()
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: coll,
+    )
+
+    receipt = chat_history_service.delete_chat_history(
+        "#V#user",
+        "same-session",
+        namespace="#V#user@org-a",
+    )
+
+    assert receipt == {
+        "acknowledged": True,
+        "deleted_count": 1,
+        "canonical_absent": True,
+    }
+    assert calls["delete"] == [
+        {
+            "user_id": "#V#user",
+            "session_id": "same-session",
+            "namespace": "#V#user@org-a",
+        }
+    ]
+    assert calls["find"] == calls["delete"]
+    assert {doc["_id"] for doc in docs} == {"other-namespace", "legacy"}
+
+
+@pytest.mark.parametrize("namespace", ["", "   ", None])
+def test_delete_chat_history_requires_exact_namespace(monkeypatch, namespace):
+    from src.backend.services import chat_history_service
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: pytest.fail("collection should not be accessed"),
+    )
+
+    with pytest.raises(chat_history_service.ChatHistoryServiceError, match="namespace"):
+        chat_history_service.delete_chat_history(
+            "#V#user",
+            "session-1",
+            namespace=namespace,
+        )
+
+
+def test_delete_chat_history_receipt_exposes_zero_delete(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    class _FakeColl:
+        def delete_one(self, _query):
+            return types.SimpleNamespace(acknowledged=True, deleted_count=0)
+
+        def find_one(self, _query, _projection=None, **_kwargs):
+            return None
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: _FakeColl(),
+    )
+
+    receipt = chat_history_service.delete_chat_history(
+        "#V#user",
+        "missing-session",
+        namespace="#V#user@org",
+    )
+
+    assert receipt == {
+        "acknowledged": True,
+        "deleted_count": 0,
+        "canonical_absent": True,
+    }
+
+
+def test_delete_chat_history_receipt_exposes_remaining_duplicate(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    class _FakeColl:
+        def delete_one(self, _query):
+            return types.SimpleNamespace(acknowledged=True, deleted_count=1)
+
+        def find_one(self, _query, _projection=None, **_kwargs):
+            return {"_id": "duplicate-remains"}
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: _FakeColl(),
+    )
+
+    receipt = chat_history_service.delete_chat_history(
+        "#V#user",
+        "duplicate-session",
+        namespace="#V#user@org",
+    )
+
+    assert receipt == {
+        "acknowledged": True,
+        "deleted_count": 1,
+        "canonical_absent": False,
+    }

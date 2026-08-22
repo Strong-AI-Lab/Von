@@ -56,6 +56,81 @@ def test_get_chat_history_session_count_uses_aggregate_pipeline(monkeypatch):
     assert pipeline[0]["$match"]["namespace"] == "#V#u@org"
 
 
+def test_get_chat_history_session_message_count_is_exact_and_metadata_safe(
+    monkeypatch,
+):
+    coll = _AggregateCollection({"message_count": 0})
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: coll,
+    )
+
+    total = chat_history_service.get_chat_history_session_message_count(
+        "#V#u",
+        "empty-session",
+        namespace="#V#u@org",
+    )
+
+    assert total == 0
+    assert len(coll.aggregate_calls) == 1
+    pipeline = coll.aggregate_calls[0]["pipeline"]
+    assert pipeline[0] == {
+        "$match": {
+            "user_id": "#V#u",
+            "session_id": "empty-session",
+            "namespace": "#V#u@org",
+        }
+    }
+    assert pipeline[-1] == {"$limit": 1}
+    assert "$size" in pipeline[1]["$project"]["message_count"]
+
+
+def test_get_chat_history_session_message_count_returns_none_when_absent(
+    monkeypatch,
+):
+    class _EmptyAggregateCollection:
+        def aggregate(self, _pipeline, **_kwargs):
+            return iter([])
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _EmptyAggregateCollection(),
+    )
+
+    assert (
+        chat_history_service.get_chat_history_session_message_count(
+            "#V#u",
+            "missing-session",
+            namespace="#V#u@org",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("raw_count", [True, -1, None, "0"])
+def test_get_chat_history_session_message_count_rejects_invalid_counts(
+    monkeypatch, raw_count
+):
+    coll = _AggregateCollection({"message_count": raw_count})
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: coll,
+    )
+
+    with pytest.raises(
+        chat_history_service.ChatHistoryServiceError,
+        match="invalid message count",
+    ):
+        chat_history_service.get_chat_history_session_message_count(
+            "#V#u",
+            "session-1",
+            namespace="#V#u@org",
+        )
+
+
 def test_chat_history_length_retries_despite_recent_transient_timeout(monkeypatch):
     class _FailingAggregateCollection:
         def __init__(self):
