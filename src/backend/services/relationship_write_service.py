@@ -7,7 +7,9 @@ Authoritative pathway:
 1. All relationship writes flow through this service.
 2. Structural predicates (#V#is_a_type_of etc.) are normalised to field names.
 3. Kind derivation is computed from structural fields (is_a_type_of, is_an_instance_of).
-4. Inverse relationships are maintained for structural predicates.
+4. Structural inverses can be maintained when the caller is authorised to
+   mutate both concepts. Source-only callers leave the target unchanged and
+   use the derived relationship-extent index for incoming traversal.
 
 Usage:
     from src.backend.services.relationship_write_service import (
@@ -530,7 +532,10 @@ def add_structural_relationship(
         predicate: The predicate (will be normalised).
         target_id: The target concept ID.
         repo: Optional repository instance.
-        maintain_inverse: Whether to maintain inverse relationship.
+        maintain_inverse: Whether to store the inverse on the target concept.
+            Set this to ``False`` when the authorised effect covers only the
+            source assertion; incoming traversal remains available through the
+            derived relationship-extent index refreshed from that source.
 
     Returns:
         Result dict with success status and details.
@@ -779,6 +784,7 @@ def add_relationship(
     target: str,
     *,
     repo: Any = None,
+    maintain_inverse: bool = True,
 ) -> Dict[str, Any]:
     """Add a relationship using the appropriate pathway.
 
@@ -790,6 +796,9 @@ def add_relationship(
         predicate: The predicate (structural or dynamic).
         target: The target concept ID.
         repo: Optional repository instance.
+        maintain_inverse: Whether a structural edge may also mutate its target
+            by storing the canonical inverse. Governed source-only writes pass
+            ``False``; the default preserves explicit two-sided internal uses.
 
     Returns:
         Result dict with success status and details.
@@ -801,7 +810,13 @@ def add_relationship(
 
     is_structural = normalised in get_relationship_kinds_set()
     if is_structural:
-        result = add_structural_relationship(source_id, normalised, target, repo=repo)
+        result = add_structural_relationship(
+            source_id,
+            normalised,
+            target,
+            repo=repo,
+            maintain_inverse=maintain_inverse,
+        )
         predicate_for_invalidation = normalised
     else:
         result = add_dynamic_relationship(source_id, predicate, target, repo=repo)

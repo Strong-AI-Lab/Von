@@ -4794,6 +4794,10 @@ def _add_relationship(**kwargs):
             predicate=predicate_str,
             target=target,
             repo=repo,
+            # The governed effect authorises the exact assertion on the source.
+            # A visible target is a referent, not a second mutation subject;
+            # incoming traversal is served by the derived relationship extent.
+            maintain_inverse=False,
         )
 
         if not result.get("success"):
@@ -10202,9 +10206,15 @@ def _concepts_create_input_schema() -> Schema:
             "individual, 'type' for a subtype (the default), or 'predicate' for a "
             "relationship type. duplicate_resolution_mode='canonical_id_only' "
             "skips semantic name resolution after an exact concept-ID miss; "
-            "omitting it preserves the default semantic fallback. This governed "
-            "effect idempotently reuses an exact actor-visible concept only when "
-            "canonical read-back verifies the requested core. When an actor-hidden "
+            "omitting it preserves the default semantic duplicate check. A name "
+            "match may block a duplicate and return a candidate for inspection, "
+            "but it is never silently treated as person identity by this governed "
+            "command. This effect idempotently reuses only the exact requested "
+            "actor-visible concept. Reuse requires compatible kind and direct or "
+            "transitive requested typing, then returns that effective existing ID "
+            "and its actual publication context. Requested description, notes, "
+            "path, and creation scope are reported as satisfied or unapplied; "
+            "reuse never silently mutates them. When an actor-hidden "
             "ID collision prevents an instance create, the failure may advertise "
             f"one executable {ACTOR_SCOPED_REFERENT_RECOVERY_ACTION} action. "
             "Use that action's complete arguments to opt into "
@@ -10236,13 +10246,23 @@ def _concepts_create_output_schema() -> Schema:
         },
         optional={
             "actor_scoped_referent": (dict,),
+            "canonical_read_back": (dict,),
             "created_concept_ids": (list,),
+            "effective_concept_id": (str, type(None)),
             "scope_selection": (dict,),
             "success": (bool,),
             "effect_status": (str,),
             "changed": (bool, type(None)),
             "idempotent_reuse": (bool,),
+            "publication_context": (dict, type(None)),
+            "requested_concept_id": (str, type(None)),
+            "requested_publication_context": (dict, type(None)),
+            "requested_scope_applied": (bool,),
+            "requested_scope_satisfied": (bool,),
             "resolved_concept_ids": (list,),
+            "reuse_match_source": (str, type(None)),
+            "satisfied_fields": (list,),
+            "unapplied_fields": (list,),
             "partial_failure_count": (int,),
             "partial_failures": (list,),
             "indeterminate_failure_count": (int,),
@@ -10251,8 +10271,11 @@ def _concepts_create_output_schema() -> Schema:
         allow_unknown=True,
         description=(
             "create_concepts output: results, total, and successful describe the "
-            "single governed outcome. A compatible actor-visible exact reuse sets "
-            "changed=false, idempotent_reuse=true, and resolved_concept_ids. "
+            "single governed outcome. A compatible actor-visible exact-ID reuse "
+            "sets changed=false and idempotent_reuse=true, "
+            "returns requested_concept_id, effective_concept_id, "
+            "resolved_concept_ids, and the actual publication_context, and names "
+            "which ancillary requested fields were satisfied or unapplied. "
             "Actor-scoped collision recovery also returns actor_scoped_referent "
             "metadata that explicitly says no alias or equivalence was asserted."
         ),
@@ -11462,7 +11485,11 @@ def _add_relationship_input_schema() -> Schema:
             "separate governed create_concepts effect, verify the returned "
             "concept, then retry add_relationship with its exact ID. This call "
             "does not resolve natural-language predicate names or create "
-            "predicate dependencies."
+            "predicate dependencies. A visible concept, including a global "
+            "concept with no visibility-owner edge, may be used as the target. "
+            "The governed effect mutates only the source assertion; it does not "
+            "write an inverse relationship onto the target. Incoming traversal "
+            "uses the derived relationship-extent index."
         ),
     )
 
