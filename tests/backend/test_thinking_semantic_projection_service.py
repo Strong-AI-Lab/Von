@@ -580,6 +580,44 @@ def test_gmail_reads_project_mailbox_and_bounded_message_metadata_without_body()
     assert normalise_semantic_operation_projection(fetched) == fetched
 
 
+def test_conversation_get_projects_name_and_date_without_transcript_content() -> None:
+    projection = build_semantic_operation_projection(
+        operation_id="call-conversation-get",
+        capability_name="conversation_get",
+        execution_method="conversation_get",
+        capability_kind="registered_tool",
+        arguments={"session_id": "session-1"},
+        lifecycle_status="succeeded",
+        success=True,
+        result={
+            "success": True,
+            "session_name": "Mars project planning",
+            "last_message_at": "2026-08-21T10:30:00+00:00",
+            "created_at": "2026-08-20T08:00:00+00:00",
+            "segments": [[{"role": "user", "content": "Private transcript content"}]],
+        },
+    )
+
+    assert projection["observation"] == {
+        "items": [{"name": "Mars project planning"}],
+        "count_is_lower_bound": False,
+        "details": [
+            {
+                "label": "Date",
+                "source_field": "last_message_at",
+                "value_kind": "datetime",
+                "value": "2026-08-21T10:30:00+00:00",
+            }
+        ],
+    }
+    assert projection["summary"] == (
+        "Conversation Get returned Mars project planning "
+        "(Date: 2026-08-21T10:30:00+00:00)."
+    )
+    assert "Private transcript content" not in projection["summary"]
+    assert normalise_semantic_operation_projection(projection) == projection
+
+
 def test_fetch_concept_projects_requested_and_returned_concept() -> None:
     projection = build_semantic_operation_projection(
         operation_id="call-fetch",

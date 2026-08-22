@@ -17810,6 +17810,10 @@ _DELEGATED_TELEMETRY_PAGE_CONTEXT_FIELDS = (
     "requested_user_id",
     "namespace",
     "access_mode",
+    "session_name",
+    "session_name_source",
+    "last_message_at",
+    "created_at",
     "identifier_binding",
     "history_coverage",
 )
@@ -18277,6 +18281,36 @@ def _chat_history_get_segments(**kwargs):
         segments, meta = result, {"history_truncated": False}
 
     meta_mapping = meta if isinstance(meta, Mapping) else {}
+    session_name = _clean_optional_string(meta_mapping.get("session_name"))
+    session_name_source = "conversation" if session_name is not None else None
+    metadata_warnings: list[str] = []
+    if access.get("access_mode") != "owner":
+        from ...services.conversation_management_service import (
+            ConversationManagementError,
+            apply_conversation_preferences,
+        )
+
+        try:
+            preference_rows = apply_conversation_preferences(
+                actor_user_id=str(access["requested_user_id"]),
+                conversations=[
+                    {
+                        "session_id": str(access["session_id"]),
+                        "session_name": session_name,
+                    }
+                ],
+            )
+            preference_row = preference_rows[0] if preference_rows else {}
+            session_name = _clean_optional_string(preference_row.get("session_name"))
+            session_name_source = _clean_optional_string(
+                preference_row.get("session_name_source")
+            ) or ("conversation" if session_name is not None else None)
+        except ConversationManagementError as exc:
+            session_name = None
+            session_name_source = None
+            metadata_warnings.append(
+                f"conversation_name_preference_unavailable:{type(exc).__name__}"
+            )
     raw_situation = meta_mapping.get("conversation_situation")
     conversation_situation = (
         dict(raw_situation) if isinstance(raw_situation, Mapping) else None
@@ -18320,6 +18354,10 @@ def _chat_history_get_segments(**kwargs):
         "requested_user_id": access.get("requested_user_id"),
         "namespace": access.get("read_namespace"),
         "access_mode": access.get("access_mode"),
+        "session_name": session_name,
+        "session_name_source": session_name_source,
+        "last_message_at": _clean_optional_string(meta_mapping.get("last_message_at")),
+        "created_at": _clean_optional_string(meta_mapping.get("created_at")),
         "identifier_binding": access.get("identifier_binding"),
         "segments": segments,
         "segment_count": len(segments) if isinstance(segments, list) else 0,
@@ -18329,6 +18367,8 @@ def _chat_history_get_segments(**kwargs):
         "conversation_observations": conversation_observations,
         "conversation_observation_state": conversation_observation_state,
     }
+    if metadata_warnings:
+        payload["warnings"] = metadata_warnings
     if authorisation.get("delegated"):
         payload["read_delegation"] = authorisation.get("read_delegation")
     provenanced_payload = _with_rag_provenance(
@@ -18351,6 +18391,10 @@ def _chat_history_get_segments(**kwargs):
             "requested_user_id",
             "namespace",
             "access_mode",
+            "session_name",
+            "session_name_source",
+            "last_message_at",
+            "created_at",
             "identifier_binding",
             "read_delegation",
         ):
@@ -24557,6 +24601,10 @@ def _conversation_read_output_schema(*, list_result: bool) -> Schema:
             "requested_user_id": (str, type(None)),
             "namespace": (str, type(None)),
             "access_mode": (str, type(None)),
+            "session_name": (str, type(None)),
+            "session_name_source": (str, type(None)),
+            "last_message_at": (str, type(None)),
+            "created_at": (str, type(None)),
             "segments": (list, type(None)),
             "segment_count": (int, type(None)),
             "history_truncated": (bool, type(None)),
