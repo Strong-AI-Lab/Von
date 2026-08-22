@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
-
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 TURN_FAILURE_CAPSULE_SCHEMA_VERSION = "turn_failure_capsule.v1"
 TURN_FAILURE_CAPSULE_MAX_BYTES = 8 * 1024
@@ -91,7 +91,7 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _compact_json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -501,6 +501,53 @@ def build_turn_failure_capsule(
     )
     total_count = len(indexed_facts)
     initial_omitted_count = max(0, total_count - len(effects))
+    attempt_status_counts: dict[str, int] = {}
+    attempt_count = 0
+    canonically_verified_outcome_count = 0
+    unfinished_outcome_count = 0
+    for _index, fact in indexed_facts:
+        raw_attempt_counts = fact.get("attempt_status_counts")
+        if isinstance(raw_attempt_counts, Mapping) and all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            for value in raw_attempt_counts.values()
+        ):
+            counts = {
+                str(status or "unknown").strip() or "unknown": count
+                for status, count in raw_attempt_counts.items()
+            }
+        else:
+            status = str(fact.get("effect_status") or "unknown").strip() or "unknown"
+            counts = {status: 1}
+        for status, count in counts.items():
+            bounded_status = (
+                status
+                if status
+                in {
+                    "succeeded",
+                    "failed",
+                    "partial",
+                    "indeterminate",
+                    "not_started",
+                    "blocked",
+                    "error",
+                    "unknown",
+                }
+                else "other"
+            )
+            attempt_status_counts[bounded_status] = (
+                attempt_status_counts.get(bounded_status, 0) + count
+            )
+            attempt_count += count
+        if fact.get("canonical_readback_verified") is True:
+            canonically_verified_outcome_count += 1
+        if (
+            str(fact.get("effect_status") or "").strip() in _FAILURE_STATUSES
+            and fact.get("outcome_resolved") is not True
+            and not fact.get("recovered_by_effect_id")
+        ):
+            unfinished_outcome_count += 1
     producer = {
         key: value
         for key, value in (
@@ -523,6 +570,15 @@ def build_turn_failure_capsule(
             "total_count": total_count,
             "included_count": len(effects),
             "omitted_count": initial_omitted_count,
+            "attempt_count": attempt_count,
+            "attempt_status_counts": {
+                key: attempt_status_counts[key]
+                for key in sorted(attempt_status_counts)
+            },
+            "canonically_verified_outcome_count": (
+                canonically_verified_outcome_count
+            ),
+            "unfinished_outcome_count": unfinished_outcome_count,
         },
         "canonical_scope_modes": scope_modes,
         "redaction": {
@@ -698,7 +754,7 @@ def project_stored_turn_failure_capsule(
     summary_raw = value.get("effect_summary")
     if not isinstance(summary_raw, Mapping):
         return None
-    summary_values: dict[str, int] = {}
+    summary_values: dict[str, Any] = {}
     for key in ("total_count", "included_count", "omitted_count"):
         raw_count = summary_raw.get(key)
         if (
@@ -714,6 +770,64 @@ def project_stored_turn_failure_capsule(
         != summary_values["included_count"] + summary_values["omitted_count"]
     ):
         return None
+    optional_summary_counts: dict[str, int] = {}
+    for key in (
+        "attempt_count",
+        "canonically_verified_outcome_count",
+        "unfinished_outcome_count",
+    ):
+        raw_count = summary_raw.get(key)
+        if raw_count is None:
+            continue
+        if (
+            not isinstance(raw_count, int)
+            or isinstance(raw_count, bool)
+            or raw_count < 0
+        ):
+            return None
+        optional_summary_counts[key] = raw_count
+    raw_attempt_status_counts = summary_raw.get("attempt_status_counts")
+    attempt_status_counts: dict[str, int] | None = None
+    if raw_attempt_status_counts is not None:
+        if not isinstance(raw_attempt_status_counts, Mapping):
+            return None
+        attempt_status_counts = {}
+        allowed_attempt_statuses = {
+            "succeeded",
+            "failed",
+            "partial",
+            "indeterminate",
+            "not_started",
+            "blocked",
+            "error",
+            "unknown",
+            "other",
+        }
+        for status, raw_count in raw_attempt_status_counts.items():
+            if (
+                status not in allowed_attempt_statuses
+                or not isinstance(raw_count, int)
+                or isinstance(raw_count, bool)
+                or raw_count < 0
+            ):
+                return None
+            attempt_status_counts[str(status)] = raw_count
+        if (
+            "attempt_count" not in optional_summary_counts
+            or sum(attempt_status_counts.values())
+            != optional_summary_counts["attempt_count"]
+        ):
+            return None
+    if (
+        optional_summary_counts.get("canonically_verified_outcome_count", 0)
+        > summary_values["total_count"]
+        or optional_summary_counts.get("unfinished_outcome_count", 0)
+        > summary_values["total_count"]
+    ):
+        return None
+    summary_values.update(optional_summary_counts)
+    if attempt_status_counts is not None:
+        summary_values["attempt_status_counts"] = attempt_status_counts
 
     raw_scope_modes = value.get("canonical_scope_modes")
     if not isinstance(raw_scope_modes, list) or len(raw_scope_modes) > 3:

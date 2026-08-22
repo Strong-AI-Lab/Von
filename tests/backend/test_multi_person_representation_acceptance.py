@@ -469,6 +469,10 @@ def test_multi_person_resolution_create_reuse_link_and_repeat_are_complete(
         result["canonical_read_back"]["inverse_relationship_present"] is None
         for result in link_results
     )
+    assert all(
+        result["canonical_read_back"]["inverse_relationship_required"] is False
+        for result in link_results
+    )
     assert all(result["changed"] is False for result in repeat_results)
     assert all(
         docs[source_id]["relationships"][structural_predicate] == [target_id]

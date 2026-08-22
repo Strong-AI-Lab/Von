@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from ..models.text_value_models import RelationPredicate
 from . import concept_service
-
 
 _CORE_TEXT_PREDICATE_STORAGE_BY_CONCEPT_ID: dict[str, str] = {
     f"#V#{RelationPredicate.HAS_NAME}": RelationPredicate.HAS_NAME,
@@ -59,6 +59,26 @@ def predicate_concept_id_for_storage(predicate: Any) -> str | None:
         return predicate_text
     if predicate_text.startswith("#V#"):
         return predicate_text
+    # Structural relationships are stored under field names such as
+    # ``is_an_instance_of`` while their represented predicate identity remains
+    # ``#V#is_an_instance_of``. Resolve only a unique mapping from the live
+    # structural metadata; arbitrary natural-language predicates still fail.
+    try:
+        from .concept_predicate_metadata_service import (
+            get_structural_predicate_aliases,
+        )
+
+        candidates = sorted(
+            concept_id
+            for concept_id, storage_predicate in (
+                get_structural_predicate_aliases().items()
+            )
+            if storage_predicate == predicate_text and concept_id.startswith("#V#")
+        )
+        if len(candidates) == 1:
+            return candidates[0]
+    except Exception:  # noqa: BLE001 - callers must fail closed without metadata
+        return None
     return None
 
 
@@ -190,8 +210,8 @@ def resolve_text_relation_predicate_for_write(
 
 
 __all__ = [
-    "predicate_concept_id_for_storage",
     "TextRelationPredicateResolution",
     "TextRelationPredicateResolutionError",
+    "predicate_concept_id_for_storage",
     "resolve_text_relation_predicate_for_write",
 ]

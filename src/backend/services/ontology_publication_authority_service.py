@@ -364,6 +364,7 @@ class OntologyAuthorityDecision:
     executing_agent_concept_id: str | None = None
     audience: str | None = None
     trust_source: str | None = None
+    required_publication_context: PublicationContext | None = None
 
     def public_projection(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -387,6 +388,10 @@ class OntologyAuthorityDecision:
                 for item in self.role_evidence
             ],
         }
+        if self.required_publication_context is not None:
+            payload["required_publication_context"] = (
+                self.required_publication_context.to_mapping()
+            )
         return payload
 
 
@@ -892,6 +897,7 @@ def _decision(
     delegation_id: str | None = None,
     invocation: OntologyInvocationContext | None = None,
     trust_source: str | None = None,
+    required_publication_context: PublicationContext | None = None,
 ) -> OntologyAuthorityDecision:
     return OntologyAuthorityDecision(
         allowed=allowed,
@@ -908,6 +914,7 @@ def _decision(
         ),
         audience=invocation.audience if invocation else None,
         trust_source=trust_source,
+        required_publication_context=required_publication_context,
     )
 
 
@@ -977,6 +984,7 @@ def _direct_authority_decision(
             organisation_concept_id=active_org_id,
             invocation=invocation,
             trust_source=trust_source,
+            required_publication_context=unresolved_contexts[0],
         )
 
     # A dedicated, optimistic scope adoption is the one operation that may
@@ -1004,6 +1012,9 @@ def _direct_authority_decision(
                 organisation_concept_id=active_org_id,
                 invocation=invocation,
                 trust_source=trust_source,
+                required_publication_context=PublicationContext.global_context(
+                    source="historical_scope_adoption_authority"
+                ),
             )
 
     gathered: list[AuthorityRoleEvidence] = list(historical_adoption_evidence)
@@ -1072,6 +1083,7 @@ def _direct_authority_decision(
                 organisation_concept_id=active_org_id,
                 invocation=invocation,
                 trust_source=trust_source,
+                required_publication_context=context,
             )
         gathered.extend(context_evidence)
 
@@ -1681,7 +1693,7 @@ def ontology_authority_denial_payload(
     decision: OntologyAuthorityDecision,
     intent: OntologyMutationIntent,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "success": False,
         "effect_status": "not_started",
         "mutation_outcome": "not_started",
@@ -1692,6 +1704,86 @@ def ontology_authority_denial_payload(
         "authority_decision": decision.public_projection(),
         "publication_context": intent.publication_context.to_mapping(),
     }
+    authority_kind = {
+        "authenticated_actor_context_required": "trusted_actor_context",
+        "explicit_scope_adoption_required": "explicit_publication_scope_adoption",
+        "global_ontology_admin_authority_required": (
+            "global_ontology_administrator"
+        ),
+        "organisation_ontology_admin_authority_required": (
+            "organisation_ontology_administrator"
+        ),
+        "private_scope_canonical_publication_not_delegated": (
+            "private_publication_context_owner"
+        ),
+        "ontology_publication_authority_required": "ontology_publication_authority",
+    }.get(decision.reason_code)
+    if authority_kind is None:
+        return payload
+
+    raw_authority_subjects = intent.delta.get("authority_subject_concept_ids")
+    authority_subject_concept_ids = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in (
+                raw_authority_subjects
+                if isinstance(raw_authority_subjects, Sequence)
+                and not isinstance(raw_authority_subjects, (str, bytes))
+                else ()
+            )
+            if str(item).strip() in intent.target_concept_ids
+        )
+    )
+    if not authority_subject_concept_ids:
+        authority_subject_concept_ids = (
+            intent.target_concept_ids[:1]
+            if intent.operation.startswith("relationship.")
+            else intent.target_concept_ids
+        )
+
+    required_context = decision.required_publication_context
+    required_authority: dict[str, Any] = {
+        "authority_kind": authority_kind,
+        "operation": intent.operation,
+        "affected_concept_ids": list(intent.target_concept_ids),
+        "authority_subject_concept_ids": list(authority_subject_concept_ids),
+        "same_effect_retry_supported": decision.reason_code
+        != "explicit_scope_adoption_required",
+    }
+    if required_context is not None:
+        required_authority["publication_context"] = required_context.to_mapping()
+    payload["required_authority"] = required_authority
+
+    if decision.reason_code == "explicit_scope_adoption_required":
+        fingerprints = intent.delta.get("affected_scope_fingerprints")
+        fingerprint_by_concept = (
+            dict(fingerprints) if isinstance(fingerprints, Mapping) else {}
+        )
+        scope_subjects = [
+            {
+                "concept_id": concept_id,
+                **(
+                    {"scope_fingerprint": fingerprint_by_concept[concept_id]}
+                    if concept_id in fingerprint_by_concept
+                    else {}
+                ),
+            }
+            for concept_id in authority_subject_concept_ids
+        ]
+        payload["authority_recovery"] = {
+            "action_type": "inspect_scope_then_ask_for_explicit_adoption",
+            "inspection_tool": "get_concept_publication_scope",
+            "preview_tool": "preview_concept_publication_scope_change",
+            "scope_subjects": scope_subjects,
+            "automatic_scope_change_allowed": False,
+        }
+    else:
+        payload["authority_recovery"] = {
+            "action_type": "ask_for_exact_ontology_authority",
+            "required_authority": dict(required_authority),
+            "automatic_scope_change_allowed": False,
+        }
+    return payload
 
 
 def _bounded_projection(value: Any, *, max_chars: int = 16_000) -> Any:

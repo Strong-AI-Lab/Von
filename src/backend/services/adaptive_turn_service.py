@@ -3908,10 +3908,26 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
             "relation_present",
             "inverse_predicate",
             "inverse_relationship_present",
+            "inverse_relationship_required",
             "publication_context",
         )
         if key in readback
     }
+    raw_concepts = readback.get("concepts")
+    if isinstance(raw_concepts, Sequence) and not isinstance(
+        raw_concepts,
+        (str, bytes, bytearray),
+    ):
+        projected["concept_count"] = len(raw_concepts)
+        projected["concepts"] = [
+            {
+                key: concept.get(key)
+                for key in ("concept_id", "exists")
+                if key in concept
+            }
+            for concept in raw_concepts[:4]
+            if isinstance(concept, Mapping)
+        ]
     assertion_id = str(readback.get("assertion_id") or "").strip()
     subject_concept_id = str(readback.get("subject_concept_id") or "").strip()
     object_kind = str(readback.get("object_kind") or "").strip().lower()
@@ -4052,8 +4068,58 @@ def _canonical_relation_readback_matches_invocation(
         return False
     if readback.get("source_exists") is not True:
         return False
+    inverse_required = readback.get("inverse_relationship_required")
+    if inverse_required is True:
+        return readback.get("inverse_relationship_present") is expected_present
+    if inverse_required is False:
+        return True
+    if method == "add_relationship":
+        # Governed add_relationship has been source-owned since PR #422. Keep
+        # older durable receipts verifiable without inferring an inverse
+        # obligation merely because the read-back names the structural inverse.
+        return True
     return not bool(readback.get("inverse_predicate")) or (
         readback.get("inverse_relationship_present") is expected_present
+    )
+
+
+def _canonical_create_readback_matches_invocation(
+    invocation: Mapping[str, Any],
+    readback: Mapping[str, Any] | None,
+) -> bool:
+    """Verify one governed create against its exact effective concept ID."""
+
+    if not isinstance(readback, Mapping):
+        return False
+    method = str(
+        invocation.get("execution_method") or invocation.get("tool") or ""
+    ).strip()
+    if method != "create_concepts":
+        return False
+    arguments = invocation.get("effective_arguments")
+    concepts = arguments.get("concepts") if isinstance(arguments, Mapping) else None
+    if (
+        not isinstance(concepts, Sequence)
+        or isinstance(concepts, (str, bytes, bytearray))
+        or len(concepts) != 1
+        or not isinstance(concepts[0], Mapping)
+    ):
+        return False
+    expected_concept_id = str(concepts[0].get("concept_id") or "").strip()
+    observed_concepts = readback.get("concepts")
+    if (
+        not expected_concept_id
+        or readback.get("concept_count") != 1
+        or not isinstance(observed_concepts, Sequence)
+        or isinstance(observed_concepts, (str, bytes, bytearray))
+        or len(observed_concepts) != 1
+        or not isinstance(observed_concepts[0], Mapping)
+    ):
+        return False
+    observed = observed_concepts[0]
+    return bool(
+        observed.get("exists") is True
+        and str(observed.get("concept_id") or "").strip() == expected_concept_id
     )
 
 
@@ -4154,6 +4220,126 @@ def _canonical_scoped_assertion_readback_matches_invocation(
     )
 
 
+def _canonical_ontology_postcondition_matches_invocation(
+    invocation: Mapping[str, Any],
+    readback: Mapping[str, Any] | None,
+) -> bool:
+    method = str(
+        invocation.get("execution_method") or invocation.get("tool") or ""
+    ).strip()
+    if method in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+        return _canonical_relation_readback_matches_invocation(invocation, readback)
+    if method == "create_concepts":
+        return _canonical_create_readback_matches_invocation(invocation, readback)
+    if method == "upsert_scoped_assertion":
+        return _canonical_scoped_assertion_readback_matches_invocation(
+            invocation,
+            readback,
+        )
+    return False
+
+
+def _effect_postcondition_identity(
+    invocation: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Return a report-only exact identity for supported governed outcomes."""
+
+    method = str(
+        invocation.get("execution_method") or invocation.get("tool") or ""
+    ).strip()
+    arguments = invocation.get("effective_arguments")
+    if not isinstance(arguments, Mapping):
+        return None
+    identity: dict[str, Any]
+    if method == "create_concepts":
+        concepts = arguments.get("concepts")
+        if (
+            not isinstance(concepts, Sequence)
+            or isinstance(concepts, (str, bytes, bytearray))
+            or len(concepts) != 1
+            or not isinstance(concepts[0], Mapping)
+        ):
+            return None
+        concept_id = str(concepts[0].get("concept_id") or "").strip()
+        if not concept_id:
+            return None
+        identity = {
+            "kind": "concept_exists",
+            "concept_id": concept_id,
+        }
+    elif method in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+        source_id = str(arguments.get("source_id") or "").strip()
+        predicate = _normalise_relation_identity(arguments.get("predicate"))
+        target = str(arguments.get("target") or "").strip()
+        if not source_id or not predicate or not target:
+            return None
+        identity = {
+            "kind": "canonical_relationship",
+            "source_id": source_id,
+            "predicate": predicate,
+            "target": target,
+            "relationship_present": method == "add_relationship",
+        }
+    else:
+        return None
+    return hashlib.sha256(_json_bytes(identity)).hexdigest(), identity
+
+
+def _reconcile_effect_attempts_by_postcondition(
+    *,
+    tool_invocations: Sequence[Mapping[str, Any]],
+    effect_snapshot: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Resolve no-change attempts when the exact outcome succeeded in this turn.
+
+    This projection does not alter durable receipts. It only prevents attempts
+    at one exact user outcome from becoming separate terminal obligations.
+    """
+
+    projected = {effect_id: dict(state) for effect_id, state in effect_snapshot.items()}
+    successful_by_identity: dict[str, tuple[int, str]] = {}
+    identities_by_effect: dict[str, tuple[int, str]] = {}
+    for index, invocation in enumerate(tool_invocations):
+        effect_id = str(invocation.get("effect_id") or "").strip()
+        if not effect_id or effect_id not in projected:
+            continue
+        postcondition = _effect_postcondition_identity(invocation)
+        if postcondition is None:
+            continue
+        identity_key, _identity = postcondition
+        identities_by_effect[effect_id] = (index, identity_key)
+        state = projected[effect_id]
+        readback = state.get("canonical_readback")
+        if (
+            state.get("effect_status") == "succeeded"
+            and isinstance(readback, Mapping)
+            and _canonical_ontology_postcondition_matches_invocation(
+                invocation,
+                readback,
+            )
+        ):
+            successful_by_identity[identity_key] = (index, effect_id)
+
+    for effect_id, (index, identity_key) in identities_by_effect.items():
+        success = successful_by_identity.get(identity_key)
+        if success is None or success[1] == effect_id:
+            continue
+        state = projected[effect_id]
+        if (
+            state.get("effect_status") not in {"failed", "not_started"}
+            or state.get("changed") is not False
+        ):
+            continue
+        state["recovered_by_effect_id"] = success[1]
+        state["recovery_status"] = "succeeded"
+        state["reconciliation_basis"] = (
+            "later_exact_postcondition_success"
+            if success[0] > index
+            else "prior_exact_postcondition_success"
+        )
+    return projected
+
+
 def _cited_mutation_success_claim_fragment(
     response_text: str,
     *,
@@ -4220,17 +4406,28 @@ def _cited_ontology_mutation_claim_conflicts(
         reason: str | None = None
         if effect_status != "succeeded":
             reason = "effect_not_succeeded"
-        elif method in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+        elif method in {
+            *_ONTOLOGY_RELATION_POSTCONDITION_METHODS,
+            "create_concepts",
+        }:
             embedded_readback = state.get("canonical_readback")
-            relation_verified = _canonical_relation_readback_matches_invocation(
-                invocation,
-                embedded_readback if isinstance(embedded_readback, Mapping) else None,
+            postcondition_verified = (
+                _canonical_ontology_postcondition_matches_invocation(
+                    invocation,
+                    embedded_readback
+                    if isinstance(embedded_readback, Mapping)
+                    else None,
+                )
             )
             if (
-                not relation_verified
+                not postcondition_verified
                 and effect_id not in canonically_verified_effect_ids
             ):
-                reason = "canonical_relation_not_verified"
+                reason = (
+                    "canonical_create_not_verified"
+                    if method == "create_concepts"
+                    else "canonical_relation_not_verified"
+                )
         if reason is None or effect_id in seen_effect_ids:
             continue
         seen_effect_ids.add(effect_id)
@@ -4319,9 +4516,11 @@ def _canonically_verified_material_effect_ids(
                 invocation,
                 embedded_readback,
             )
+            or _canonical_create_readback_matches_invocation(
+                invocation, embedded_readback
+            )
             or _canonical_scoped_assertion_readback_matches_invocation(
-                invocation,
-                embedded_readback,
+                invocation, embedded_readback
             )
         ):
             verified_effect_ids.add(effect_id)
@@ -5051,6 +5250,74 @@ def _is_workflow_instance_operational_readback(
     )
 
 
+def _group_effect_outcome_facts(
+    facts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Present one exact supported postcondition once while retaining attempts."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    ordered: list[tuple[str, Any]] = []
+    for raw_fact in facts:
+        fact = dict(raw_fact)
+        identity = fact.get("postcondition_identity")
+        if not isinstance(identity, Mapping):
+            ordered.append(("fact", fact))
+            continue
+        identity_key = hashlib.sha256(_json_bytes(dict(identity))).hexdigest()
+        if identity_key not in grouped:
+            grouped[identity_key] = []
+            ordered.append(("group", identity_key))
+        grouped[identity_key].append(fact)
+
+    result: list[dict[str, Any]] = []
+    for item_kind, value in ordered:
+        if item_kind == "fact":
+            result.append(dict(value))
+            continue
+        attempts = grouped[str(value)]
+        verified_successes = [
+            fact
+            for fact in attempts
+            if fact.get("effect_status") == "succeeded"
+            and fact.get("canonical_readback_verified") is True
+        ]
+        representative = dict((verified_successes or attempts)[-1])
+        effect_ids = [
+            str(fact.get("effect_id") or "").strip()
+            for fact in attempts
+            if str(fact.get("effect_id") or "").strip()
+        ]
+        status_counts: dict[str, int] = {}
+        error_codes: list[str] = []
+        for fact in attempts:
+            status = str(fact.get("effect_status") or "unknown").strip() or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            error_code = str(fact.get("error_code") or "").strip()
+            if error_code and error_code not in error_codes:
+                error_codes.append(error_code)
+        representative["attempt_count"] = len(attempts)
+        representative["attempt_effect_ids"] = effect_ids
+        representative["attempt_status_counts"] = {
+            key: status_counts[key] for key in sorted(status_counts)
+        }
+        if error_codes:
+            representative["attempt_error_codes"] = error_codes
+        recovered_attempt_count = sum(
+            1
+            for fact in attempts
+            if fact.get("recovered_by_effect_id")
+            or (
+                fact.get("effect_status") in {"failed", "not_started"}
+                and fact.get("changed") is False
+                and verified_successes
+            )
+        )
+        if recovered_attempt_count:
+            representative["recovered_attempt_count"] = recovered_attempt_count
+        result.append(representative)
+    return result
+
+
 def _build_effect_outcome_report(
     *,
     terminal_status: str,
@@ -5128,20 +5395,33 @@ def _build_effect_outcome_report(
             or state.get("execution_method")
             or ""
         ).strip()
-        if execution_method in _ONTOLOGY_RELATION_POSTCONDITION_METHODS:
+        if execution_method in {
+            *_ONTOLOGY_RELATION_POSTCONDITION_METHODS,
+            "create_concepts",
+            "upsert_scoped_assertion",
+        }:
             canonical_readback_verified = (
-                _canonical_relation_readback_matches_invocation(
+                _canonical_ontology_postcondition_matches_invocation(
                     invocation,
                     canonical_readback,
                 )
             )
-        elif execution_method == "upsert_scoped_assertion":
-            canonical_readback_verified = (
-                _canonical_scoped_assertion_readback_matches_invocation(
-                    invocation,
-                    canonical_readback,
+            if (
+                execution_method == "create_concepts"
+                and _effect_postcondition_identity(invocation) is None
+                and isinstance(canonical_readback, Mapping)
+            ):
+                # Preserve older domain-effect receipts which had no exact
+                # governed create arguments but did carry a trusted generic
+                # verification marker. Exact governed creates take the strict
+                # concept-ID matcher above.
+                canonical_readback_verified = bool(
+                    canonical_readback.get("verified") is True
+                    or str(canonical_readback.get("status") or "")
+                    .strip()
+                    .lower()
+                    == "verified"
                 )
-            )
         else:
             canonical_readback_verified = bool(
                 isinstance(canonical_readback, Mapping)
@@ -5208,11 +5488,15 @@ def _build_effect_outcome_report(
             "recovered_by_effect_id": state.get("recovered_by_effect_id"),
             "argument_identity": argument_identity or None,
         }
+        postcondition = _effect_postcondition_identity(invocation)
+        if postcondition is not None:
+            fact["postcondition_identity"] = postcondition[1]
         facts.append({key: value for key, value in fact.items() if value is not None})
         scope_fact = _effect_scope_fact(state, trusted_scope=trusted_scope)
         if scope_fact and scope_fact not in scope_facts:
             scope_facts.append(scope_fact)
 
+    facts = _group_effect_outcome_facts(facts)
     heading = {
         "effect_partially_completed": "This turn completed only partially.",
         "effect_outcome_indeterminate": (
@@ -5308,6 +5592,13 @@ def _build_effect_outcome_report(
                     detail = "reported `succeeded`"
             else:
                 detail = f"receipt `{status}` was recovered by a later effect"
+            if int(fact.get("attempt_count") or 1) > 1:
+                detail += f" across {fact['attempt_count']} exact attempts"
+                if fact.get("recovered_attempt_count"):
+                    detail += (
+                        f", including {fact['recovered_attempt_count']} recovered "
+                        "earlier attempt(s)"
+                    )
             handles = []
             if fact.get("instance_id"):
                 handles.append(f"instance `{fact['instance_id']}`")
@@ -5330,6 +5621,10 @@ def _build_effect_outcome_report(
             label = f"`{fact['tool']}`"
             status = str(fact.get("effect_status") or "unknown")
             details = [f"status `{status}`"]
+            if int(fact.get("attempt_count") or 1) > 1:
+                details.append(
+                    f"{fact['attempt_count']} attempts for this exact postcondition"
+                )
             if fact.get("changed") is False:
                 details.append("reported no change")
             elif fact.get("changed") is True:
@@ -5540,6 +5835,16 @@ def _effect_requires_turn_finality(
     error_code = (
         raw_payload.get("error_code") if isinstance(raw_payload, Mapping) else None
     )
+    if (
+        changed is False
+        and isinstance(raw_payload, Mapping)
+        and raw_payload.get("preview") is True
+        and raw_payload.get("operational_state_effect") is True
+        and raw_payload.get("semantic_effect") is False
+    ):
+        # A governed preview has a durable authority receipt and remains visible
+        # in telemetry, but it does not change the requested domain outcome.
+        return False
     if changed is False and (
         (
             effect_status == "not_started"
@@ -5632,7 +5937,16 @@ def _exact_scoped_relationship_predicate(
     if isinstance(predicate, str) and predicate.strip():
         if predicate_ref is not None:
             return None
-        predicate_id = _exact_represented_concept_id(predicate)
+        try:
+            from .text_relation_predicate_validation_service import (
+                predicate_concept_id_for_storage,
+            )
+
+            predicate_id = _exact_represented_concept_id(
+                predicate_concept_id_for_storage(predicate)
+            )
+        except Exception:  # noqa: BLE001 - recovery must fail closed
+            return None
     else:
         if not isinstance(predicate_ref, Mapping):
             return None
@@ -6362,14 +6676,11 @@ def execute_adaptive_turn(
         predicate = str(arguments.get("predicate") or "").strip()
         if not subject_id or not predicate:
             return None
-        try:
-            from .text_relation_predicate_validation_service import (
-                predicate_concept_id_for_storage,
-            )
+        from .text_relation_predicate_validation_service import (
+            predicate_concept_id_for_storage,
+        )
 
-            predicate = predicate_concept_id_for_storage(predicate) or predicate
-        except Exception:
-            pass
+        predicate = predicate_concept_id_for_storage(predicate) or predicate
         target_text = arguments.get("target_text")
         target_concept_id = str(arguments.get("target_concept_id") or "").strip()
         has_text = isinstance(target_text, str) and bool(target_text.strip())
@@ -7594,9 +7905,13 @@ def execute_adaptive_turn(
         model_answer_completed = status == "completed"
         reconcile_indeterminate_ontology_effects()
         with effect_state_lock:
-            effect_snapshot = {
+            raw_effect_snapshot = {
                 effect_id: dict(state) for effect_id, state in effect_states.items()
             }
+        effect_snapshot = _reconcile_effect_attempts_by_postcondition(
+            tool_invocations=tool_invocations,
+            effect_snapshot=raw_effect_snapshot,
+        )
         incomplete_effects = [
             state
             for state in effect_snapshot.values()

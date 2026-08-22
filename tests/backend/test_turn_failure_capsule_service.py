@@ -5,6 +5,7 @@ import json
 from src.backend.services.turn_failure_capsule_service import (
     TURN_FAILURE_CAPSULE_MAX_BYTES,
     build_turn_failure_capsule,
+    project_stored_turn_failure_capsule,
     turn_failure_capsule_size_bytes,
 )
 
@@ -104,6 +105,14 @@ def test_capsule_projects_exact_paper_lock_incident_without_private_scope() -> N
         "total_count": 3,
         "included_count": 3,
         "omitted_count": 0,
+        "attempt_count": 3,
+        "attempt_status_counts": {
+            "failed": 1,
+            "indeterminate": 1,
+            "succeeded": 1,
+        },
+        "canonically_verified_outcome_count": 1,
+        "unfinished_outcome_count": 1,
     }
 
     download = next(
@@ -129,6 +138,7 @@ def test_capsule_projects_exact_paper_lock_incident_without_private_scope() -> N
     assert create["evidence_id"] == "evidence-paper-readback"
 
     assert capsule["pre_presentation_draft"]["authority"] == "non_authoritative"
+    assert project_stored_turn_failure_capsule(capsule) == capsule
     serialised = json.dumps(capsule, sort_keys=True)
     for forbidden in (
         "#V#michael_witbrock",
@@ -309,27 +319,82 @@ def test_capsule_hard_bound_is_deterministic_and_keeps_direct_failure() -> None:
         "canonical_scopes": [{"mode": "user"}],
         "model_draft": {"preview": "draft " + "d" * 20_000},
     }
-    kwargs = dict(
-        request_id="hard-bound",
-        terminal_status="effect_failed",
-        response_authority="canonical_outcome",
-        visible_response="visible " + "v" * 30_000,
-        outcome_report=report,
-        code_version="version-" + "c" * 500,
-        git_commit="a" * 500,
-        generated_at_utc="2026-08-18T00:00:00Z",
-    )
+    kwargs = {
+        "request_id": "hard-bound",
+        "terminal_status": "effect_failed",
+        "response_authority": "canonical_outcome",
+        "visible_response": "visible " + "v" * 30_000,
+        "outcome_report": report,
+        "code_version": "version-" + "c" * 500,
+        "git_commit": "a" * 500,
+        "generated_at_utc": "2026-08-18T00:00:00Z",
+    }
 
     first = build_turn_failure_capsule(**kwargs)
     second = build_turn_failure_capsule(**kwargs)
 
     assert first == second
     assert turn_failure_capsule_size_bytes(first) <= TURN_FAILURE_CAPSULE_MAX_BYTES
+    assert project_stored_turn_failure_capsule(first) == first
     assert first["terminal_status"] == "effect_failed"
     assert first["effects"][0]["error"]["code"] == "direct_failure_0"
     assert first["effect_summary"]["total_count"] == 100
     assert first["effect_summary"]["omitted_count"] > 0
+    assert first["effect_summary"]["attempt_count"] == 100
+    assert first["effect_summary"]["attempt_status_counts"] == {"failed": 100}
+    assert first["effect_summary"]["unfinished_outcome_count"] == 50
     assert first["redaction"]["truncated"] is True
+
+
+def test_error_first_capsule_keeps_all_fact_success_and_attempt_counts() -> None:
+    facts = [
+        {
+            "effect_id": f"failure-{index}",
+            "tool": "add_relationship",
+            "effect_status": "not_started",
+            "changed": False,
+            "canonical_readback_present": False,
+            "canonical_readback_verified": False,
+            "error_code": "organisation_ontology_admin_authority_required",
+        }
+        for index in range(12)
+    ]
+    facts.extend(
+        {
+            "effect_id": f"success-{index}",
+            "tool": "add_relationship",
+            "effect_status": "succeeded",
+            "changed": True,
+            "canonical_readback_present": True,
+            "canonical_readback_verified": True,
+        }
+        for index in range(5)
+    )
+
+    capsule = build_turn_failure_capsule(
+        request_id="error-first-all-fact-counts",
+        terminal_status="effect_partially_completed",
+        response_authority="canonical_outcome",
+        visible_response="Twelve outcomes remain unfinished; five were verified.",
+        outcome_report={
+            "schema_version": "adaptive_turn_effect_outcome_report.v1",
+            "facts": facts,
+            "canonical_scopes": [],
+        },
+        generated_at_utc="2026-08-22T00:00:00Z",
+    )
+
+    assert len(capsule["effects"]) == 8
+    assert all(effect["status"] == "not_started" for effect in capsule["effects"])
+    assert capsule["effect_summary"] == {
+        "total_count": 17,
+        "included_count": 8,
+        "omitted_count": 9,
+        "attempt_count": 17,
+        "attempt_status_counts": {"not_started": 12, "succeeded": 5},
+        "canonically_verified_outcome_count": 5,
+        "unfinished_outcome_count": 12,
+    }
 
 
 def test_completed_turn_capsule_has_no_fabricated_failure() -> None:
@@ -350,6 +415,10 @@ def test_completed_turn_capsule_has_no_fabricated_failure() -> None:
         "total_count": 0,
         "included_count": 0,
         "omitted_count": 0,
+        "attempt_count": 0,
+        "attempt_status_counts": {},
+        "canonically_verified_outcome_count": 0,
+        "unfinished_outcome_count": 0,
     }
     assert "turn_error" not in capsule
 
