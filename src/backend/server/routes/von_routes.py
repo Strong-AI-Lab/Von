@@ -17125,8 +17125,16 @@ def delete_chat_session():
     """
     MAX_DELETABLE_TURNS = 4
     try:
-        user_concept_id = session.get("user_concept_id")
-        if not user_concept_id:
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id_with_source,
+        )
+
+        user_concept_id, actor_source = get_effective_user_concept_id_with_source()
+        if (
+            not user_concept_id
+            or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
+        ):
             return jsonify({"error": "Not authenticated"}), 401
 
         data = request.get_json(silent=True) or {}
@@ -17140,21 +17148,30 @@ def delete_chat_session():
         effective = get_effective_context(
             window_session_id, dict(session), user_concept_id
         )
-        namespace = effective.get(
-            "namespace"
-        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        namespace = effective.get("namespace") or (
+            chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        )
+        if not isinstance(namespace, str) or not namespace.strip():
+            return (
+                jsonify(
+                    {
+                        "error": "Conversation namespace unavailable; deletion not attempted",
+                        "error_code": "conversation_namespace_unavailable",
+                    }
+                ),
+                503,
+            )
+        namespace = namespace.strip()
 
-        # Verify session exists and check message count
-        session_doc = chat_history_service.get_chat_history_session_summary(
+        # Count only the exact namespaced session without loading its full history.
+        message_count = chat_history_service.get_chat_history_session_message_count(
             user_id=user_concept_id,
             session_id=session_id,
             namespace=namespace,
-            summary_mode="light",
         )
-        if not session_doc:
+        if message_count is None:
             return jsonify({"error": "Session not found"}), 404
 
-        message_count = session_doc.get("message_count", 0)
         turn_count = max(0, (message_count + 1) // 2)
         if turn_count >= MAX_DELETABLE_TURNS:
             return (
@@ -17167,20 +17184,84 @@ def delete_chat_session():
                 403,
             )
 
-        chat_history_service.delete_chat_history(user_concept_id, session_id)
+        receipt = chat_history_service.delete_chat_history(
+            user_concept_id,
+            session_id,
+            namespace=namespace,
+        )
+        acknowledged = receipt.get("acknowledged") is True
+        deleted_count = receipt.get("deleted_count")
+        canonical_absent = receipt.get("canonical_absent") is True
+        deleted_once = (
+            isinstance(deleted_count, int)
+            and not isinstance(deleted_count, bool)
+            and deleted_count == 1
+        )
+        if not acknowledged or not deleted_once or not canonical_absent:
+            current_app.logger.warning(
+                "Conversation deletion could not be verified for %s: %s",
+                session_id,
+                receipt,
+            )
+            return (
+                jsonify(
+                    {
+                        "status": "delete_unverified",
+                        "error": "Conversation deletion could not be verified",
+                        "error_code": "conversation_delete_unverified",
+                        "session_id": session_id,
+                        "acknowledged": acknowledged,
+                        "deleted_count": deleted_count,
+                        "canonical_absent": canonical_absent,
+                    }
+                ),
+                409,
+            )
 
         return (
             jsonify(
                 {
                     "status": "deleted",
                     "session_id": session_id,
+                    "acknowledged": True,
+                    "deleted_count": 1,
+                    "canonical_absent": True,
                 }
             ),
             200,
         )
-    except Exception as e:
-        print(f"Error deleting chat session: {e}")
-        return jsonify({"error": str(e)}), 500
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "Window session does not belong to the authenticated user",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
+    except chat_history_service.ChatHistoryServiceError as exc:
+        current_app.logger.warning("Conversation deletion failed: %s", exc)
+        return (
+            jsonify(
+                {
+                    "error": "Chat history unavailable; deletion not confirmed",
+                    "error_code": "chat_history_unavailable",
+                }
+            ),
+            503,
+        )
+    except Exception:
+        current_app.logger.exception("Unexpected error deleting chat session")
+        return (
+            jsonify(
+                {
+                    "error": "Unexpected error deleting conversation",
+                    "error_code": "conversation_delete_failed",
+                }
+            ),
+            500,
+        )
 
 
 @von_bp.route("/api/session/chat_session_links", methods=["GET", "POST"])

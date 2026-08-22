@@ -3508,37 +3508,153 @@ def add_reset_marker_to_history(user_id: str, session_id: str) -> None:
         raise ChatHistoryServiceError(f"Could not add reset marker: {e}") from e
 
 
-def delete_chat_history(user_id: str, session_id: str) -> None:
-    """
-    Deletes the chat history for a specific user and session.
-    Note: This is kept for backward compatibility but add_reset_marker_to_history() is preferred.
+def get_chat_history_session_message_count(
+    user_id: str,
+    session_id: str,
+    *,
+    namespace: str,
+) -> Optional[int]:
+    """Return the exact session's non-reset message count without loading history."""
 
-    Args:
-        user_id: The user's concept ID
-        session_id: The session UUID
-    """
-    if not user_id or not session_id:
+    user_id_value = _safe_str(user_id)
+    session_id_value = _safe_str(session_id)
+    namespace_value = _safe_str(namespace)
+    if not user_id_value or not session_id_value:
         raise ChatHistoryServiceError("user_id and session_id are required.")
+    if not namespace_value:
+        raise ChatHistoryServiceError("namespace is required.")
+
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_session_message_count")
+    query = build_chat_history_query(
+        user_id=user_id_value,
+        session_id=session_id_value,
+        namespace=namespace_value,
+        include_legacy=False,
+    )
+    pipeline = [
+        {"$match": query},
+        {
+            "$project": {
+                "_id": 0,
+                "message_count": {
+                    "$size": {
+                        "$filter": {
+                            "input": _history_array_expr(),
+                            "as": "msg",
+                            "cond": {
+                                "$or": [
+                                    {"$ne": ["$$msg.role", "system"]},
+                                    {"$ne": ["$$msg.content", "__RESET__"]},
+                                ]
+                            },
+                        }
+                    }
+                },
+            }
+        },
+        {"$limit": 1},
+    ]
+
+    try:
+        summary = next(
+            _read_aggregate(
+                chat_history_coll,
+                pipeline,
+                operation="get_chat_history_session_message_count.aggregate",
+            ),
+            None,
+        )
+        if summary is None:
+            _record_chat_history_read_success()
+            return None
+        raw_count = summary.get("message_count") if isinstance(summary, dict) else None
+        if (
+            not isinstance(raw_count, int)
+            or isinstance(raw_count, bool)
+            or raw_count < 0
+        ):
+            raise ChatHistoryServiceError(
+                "Chat history session returned an invalid message count."
+            )
+        _record_chat_history_read_success()
+        return raw_count
+    except PyMongoError as e:
+        _record_chat_history_read_failure(
+            "get_chat_history_session_message_count", e
+        )
+        logger.exception(
+            "Error retrieving chat history session message count: %s",
+            e,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not retrieve chat history session message count: {e}"
+        ) from e
+
+
+def delete_chat_history(
+    user_id: str,
+    session_id: str,
+    *,
+    namespace: str,
+) -> Dict[str, Any]:
+    """Delete one exact namespaced chat session and read back its absence."""
+
+    user_id_value = _safe_str(user_id)
+    session_id_value = _safe_str(session_id)
+    namespace_value = _safe_str(namespace)
+    if not user_id_value or not session_id_value:
+        raise ChatHistoryServiceError("user_id and session_id are required.")
+    if not namespace_value:
+        raise ChatHistoryServiceError("namespace is required.")
 
     chat_history_coll = get_chat_history_collection_service()
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
+    query = build_chat_history_query(
+        user_id=user_id_value,
+        session_id=session_id_value,
+        namespace=namespace_value,
+        include_legacy=False,
+    )
     try:
-        result = chat_history_coll.delete_one(
-            {"user_id": user_id, "session_id": session_id}
+        result = chat_history_coll.delete_one(query)
+        acknowledged = bool(getattr(result, "acknowledged", True))
+        raw_deleted_count = getattr(result, "deleted_count", 0)
+        deleted_count = (
+            raw_deleted_count
+            if isinstance(raw_deleted_count, int)
+            and not isinstance(raw_deleted_count, bool)
+            and raw_deleted_count >= 0
+            else 0
         )
-
-        if result.deleted_count > 0:
-            logger.info(
-                f"Deleted chat history for user {user_id}, session {session_id}"
+        canonical_absent = (
+            _read_find_one(
+                chat_history_coll,
+                query,
+                {"_id": 1},
+                operation="delete_chat_history.canonical_readback",
             )
-        else:
-            logger.warning(
-                f"No history found to delete for user {user_id}, session {session_id}"
-            )
+            is None
+        )
+        receipt = {
+            "acknowledged": acknowledged,
+            "deleted_count": deleted_count,
+            "canonical_absent": canonical_absent,
+        }
+        logger.info(
+            "Chat history deletion receipt for user %s, session %s: %s",
+            user_id_value,
+            session_id_value,
+            receipt,
+        )
+        return receipt
     except PyMongoError as e:
-        logger.error(f"Error deleting chat history: {e}", exc_info=True)
+        logger.exception("Error deleting chat history: %s", e)
         raise ChatHistoryServiceError(f"Could not delete chat history: {e}") from e
 
 

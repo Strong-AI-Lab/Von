@@ -1710,7 +1710,7 @@ function toggleShowAgentCreatedSessions() {
 async function deleteConversation(sessionId) {
     if (!sessionId) return;
     try {
-        const resp = await fetch('/api/session/delete_chat_session', {
+        const resp = await fetch('/von/api/session/delete_chat_session', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1718,10 +1718,27 @@ async function deleteConversation(sessionId) {
             },
             body: JSON.stringify({ session_id: sessionId })
         });
-        const data = await resp.json();
+        let data = null;
+        try {
+            data = await resp.json();
+        } catch (_) {
+            // Preserve the HTTP failure below when a proxy or route returns HTML.
+        }
         if (!resp.ok) {
-            const errorMsg = data?.error || 'Failed to delete conversation';
+            const errorMsg = data?.error
+                || `Failed to delete conversation (HTTP ${resp.status || 'unknown'})`;
             showToast(errorMsg, 'error');
+            return false;
+        }
+        if (
+            data?.status !== 'deleted'
+            || data?.deleted_count !== 1
+            || data?.canonical_absent !== true
+        ) {
+            showToast(
+                data?.error || 'Conversation deletion could not be verified',
+                'error'
+            );
             return false;
         }
         // Remove from cache and re-render
@@ -37680,6 +37697,12 @@ export function __testOnly_setSessionTabsCache(sessions = []) {
     sessionTabsCache = normaliseConversationSessionViewModels(
         Array.isArray(sessions) ? sessions : []
     );
+}
+export function __testOnly_getSessionTabsCache() {
+    return sessionTabsCache.map((session) => ({ ...session }));
+}
+export async function __testOnly_deleteConversation(sessionId) {
+    return deleteConversation(sessionId);
 }
 export async function __testOnly_refreshChatPromptQueueFromServer() {
     return refreshChatPromptQueueFromServer({ silent: false });
