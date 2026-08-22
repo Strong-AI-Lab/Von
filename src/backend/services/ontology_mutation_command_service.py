@@ -49,6 +49,8 @@ from .ontology_publication_authority_service import (
     ontology_authority_resource_keys,
     ontology_mutation_resource_lock,
     publication_context_for_creation,
+    publication_context_from_mapping,
+    publication_context_identity_key,
     reconcile_indeterminate_mutation_receipt,
 )
 from .relationship_write_service import (
@@ -626,7 +628,7 @@ def _creation_scope_projection(
 ) -> dict[str, Any]:
     """Project the exact visibility edges the canonical create service stores."""
 
-    mode = (_clean_text(scope_mode) or "user_org_default").lower().replace("-", "_")
+    mode = (_clean_text(scope_mode) or "user_only_default").lower().replace("-", "_")
     actor_id = _normalise_concept_id(actor_concept_id)
     organisation_id = _normalise_concept_id(organisation_concept_id)
     supported_modes = {
@@ -917,7 +919,13 @@ def resolve_governed_ontology_arguments(
                 "invalid_create_scope_mode",
                 "The requested concept creation scope mode is unsupported.",
             )
-        resolved["scope_mode"] = canonical_scope_mode
+        if supplied_scope_modes:
+            resolved["scope_mode"] = canonical_scope_mode
+        else:
+            # Keep omission distinguishable from an explicit model choice. The
+            # governed create path interprets omission as actor-private at every
+            # authority, persistence, receipt, and read-back boundary.
+            resolved.pop("scope_mode", None)
         resolved.pop("visibility_scope_mode", None)
 
         raw_concepts = resolved.get("concepts")
@@ -1129,6 +1137,19 @@ def resolve_governed_ontology_arguments(
             resolved["requested_concept_id"] = requested_concept_id
             resolved["collision_resolution_mode"] = collision_mode
     if _clean_text(method_name) == "add_relationship":
+        supplied_scope = _clean_text(
+            resolved.get("scope_mode") or resolved.get("visibility_scope_mode")
+        )
+        if supplied_scope:
+            raise OntologyMutationCommandError(
+                "canonical_relationship_scope_is_source_bound",
+                (
+                    "A canonical relationship inherits the source concept's exact "
+                    "publication context. Use upsert_scoped_assertion with "
+                    "scope_mode='user' or 'organisation' when the assertion needs "
+                    "an independent audience."
+                ),
+            )
         predicate_ref = resolved.get("predicate_ref")
         if predicate_ref is not None:
             if not isinstance(predicate_ref, Mapping):
@@ -1213,16 +1234,13 @@ def build_ontology_mutation_intent(
     }:
         from .ontology_scope_change_service import (
             OntologyScopeChangePreconditionError,
+            OntologyScopeChangeRequestError,
             build_concept_publication_scope_change_intent,
         )
 
         try:
             return build_concept_publication_scope_change_intent(
                 concept_id=_clean_text(arguments.get("concept_id")),
-                destination_kind=_clean_text(arguments.get("destination_kind")),
-                destination_concept_id=(
-                    _clean_text(arguments.get("destination_concept_id")) or None
-                ),
                 expected_scope_fingerprint=_clean_text(
                     arguments.get("expected_scope_fingerprint")
                 ),
@@ -1233,9 +1251,23 @@ def build_ontology_mutation_intent(
                 preview=method == "preview_concept_publication_scope_change",
                 reason=_clean_text(arguments.get("reason")) or None,
                 invocation_tool_name=method,
+                destination_kind=(
+                    _clean_text(arguments.get("destination_kind")) or None
+                ),
+                destination_concept_id=(
+                    _clean_text(arguments.get("destination_concept_id")) or None
+                ),
+                scope_edit=(
+                    dict(arguments.get("scope_edit"))
+                    if isinstance(arguments.get("scope_edit"), Mapping)
+                    else arguments.get("scope_edit")
+                ),
                 idempotency_key=idempotency_key,
             )
-        except OntologyScopeChangePreconditionError as exc:
+        except (
+            OntologyScopeChangePreconditionError,
+            OntologyScopeChangeRequestError,
+        ) as exc:
             raise OntologyMutationCommandError(
                 exc.reason_code,
                 exc.public_message,
@@ -1375,6 +1407,22 @@ def build_ontology_mutation_intent(
                 organisation_concept_id=organisation_id,
             )
         except ValueError as exc:
+            requested_scope = _clean_text(scope_mode).lower().replace("-", "_")
+            if requested_scope in {
+                "organisation",
+                "organization",
+                "org",
+                "organisation_general",
+                "organization_general",
+                "org_general",
+            }:
+                raise OntologyMutationCommandError(
+                    "organisation_context_required",
+                    (
+                        "Trusted current-organisation context is required for "
+                        "organisation-scoped concept creation."
+                    ),
+                ) from exc
             raise OntologyMutationCommandError(
                 "authenticated_actor_context_required",
                 "Trusted actor context is required to derive concept creation scope.",
@@ -1763,18 +1811,15 @@ def build_ontology_mutation_intent(
                 "The identity-consolidation affected set is invalid.",
             )
         _visible_or_fail(affected_ids)
-        context_by_key: dict[tuple[str, str | None], PublicationContext] = {}
+        context_by_key: dict[tuple[Any, ...], PublicationContext] = {}
         for concept_id in affected_ids:
             context = concept_publication_context(concept_id)
             context_by_key.setdefault(
-                (context.kind.value, context.concept_id),
+                publication_context_identity_key(context),
                 context,
             )
         publication_context = concept_publication_context(target_id)
-        target_context_key = (
-            publication_context.kind.value,
-            publication_context.concept_id,
-        )
+        target_context_key = publication_context_identity_key(publication_context)
         source_contexts = tuple(
             context
             for key, context in context_by_key.items()
@@ -1901,6 +1946,24 @@ def _concept_read_back(concept_id: str) -> dict[str, Any]:
     }
 
 
+def _publication_context_mappings_match(
+    actual: Any,
+    expected: Any,
+) -> bool:
+    """Compare the exact authority-bearing shape while ignoring source labels."""
+
+    if not isinstance(actual, Mapping) or not isinstance(expected, Mapping):
+        return False
+    try:
+        actual_context = publication_context_from_mapping(actual)
+        expected_context = publication_context_from_mapping(expected)
+    except ValueError:
+        return False
+    return publication_context_identity_key(
+        actual_context
+    ) == publication_context_identity_key(expected_context)
+
+
 def _visible_concept_satisfies_requested_core(
     *,
     concept_id: str,
@@ -1916,10 +1979,9 @@ def _visible_concept_satisfies_requested_core(
         return False
     if required_publication_context is not None:
         actual_context = actual.get("publication_context")
-        if not isinstance(actual_context, Mapping) or (
-            actual_context.get("kind") != required_publication_context.get("kind")
-            or actual_context.get("concept_id")
-            != required_publication_context.get("concept_id")
+        if not _publication_context_mappings_match(
+            actual_context,
+            required_publication_context,
         ):
             return False
 
@@ -2720,10 +2782,10 @@ def _verify_method_postcondition(
         if (
             actual.get("exists") is not True
             or actual.get("concept_id") != expected_id
-            or not isinstance(actual.get("publication_context"), Mapping)
-            or actual["publication_context"].get("kind") != expected_context.get("kind")
-            or actual["publication_context"].get("concept_id")
-            != expected_context.get("concept_id")
+            or not _publication_context_mappings_match(
+                actual.get("publication_context"),
+                expected_context,
+            )
         ):
             return False
         parent_id = _normalise_concept_id(intent.delta.get("parent_id"))
@@ -2800,11 +2862,10 @@ def _verify_method_postcondition(
         # in the intent and specialised text updates use dedicated commands.
         return (
             canonical_state.get("exists") is True
-            and isinstance(canonical_state.get("publication_context"), Mapping)
-            and canonical_state["publication_context"].get("kind")
-            == intent.publication_context.kind.value
-            and canonical_state["publication_context"].get("concept_id")
-            == intent.publication_context.concept_id
+            and _publication_context_mappings_match(
+                canonical_state.get("publication_context"),
+                intent.publication_context.to_mapping(),
+            )
         )
     if method == "add_names_to_concept":
         # The handler reports one result per requested name; no partial result
@@ -2848,10 +2909,9 @@ def _visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[str, An
     canonical = _concept_read_back(concept_id or "") if concept_id else {}
     actual_context = canonical.get("publication_context")
     requested_context = intent.publication_context.to_mapping()
-    scope_satisfied = bool(
-        isinstance(actual_context, Mapping)
-        and actual_context.get("kind") == requested_context.get("kind")
-        and actual_context.get("concept_id") == requested_context.get("concept_id")
+    scope_satisfied = _publication_context_mappings_match(
+        actual_context,
+        requested_context,
     )
     text_rows = canonical.get("text_relations")
     text_rows = text_rows if isinstance(text_rows, list) else []
@@ -2990,23 +3050,10 @@ def _locked_visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[
 def _publication_context_from_payload(value: Any) -> PublicationContext | None:
     if not isinstance(value, Mapping):
         return None
-    from .ontology_publication_authority_service import PublicationContextKind
-
     try:
-        kind = PublicationContextKind(_clean_text(value.get("kind")))
+        return publication_context_from_mapping(value)
     except ValueError:
         return None
-    historical_predicates = tuple(
-        _clean_text(item)
-        for item in value.get("historical_predicates") or ()
-        if _clean_text(item)
-    )
-    return PublicationContext(
-        kind=kind,
-        concept_id=_normalise_concept_id(value.get("concept_id")),
-        source=_clean_text(value.get("source")) or "resolved",
-        historical_predicates=historical_predicates,
-    )
 
 
 def _intent_from_postcondition_reconciliation_contract(

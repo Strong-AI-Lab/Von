@@ -3,9 +3,14 @@ import {
     toggleUserRelation
 } from '../dynamicTabs.js';
 import {
-    deriveScopeControlDestination,
+    deriveScopeControlEdit,
     executeGovernedScopeControlChange
 } from '../utils/governedPublicationScope.js';
+
+const USER_ID = '#V#signed_in_user';
+const ORGANISATION_ID = '#V#trusted_organisation';
+const USER_PREDICATE = '#V#specific_to_user';
+const ORGANISATION_PREDICATE = '#V#specific_to_organisation';
 
 function jsonResponse(payload, status = 200) {
     return {
@@ -15,38 +20,77 @@ function jsonResponse(payload, status = 200) {
     };
 }
 
-function globalScope(conceptId = '#V#scope_fixture') {
-    return {
-        concept_id: conceptId,
-        publication_context: { kind: 'global', concept_id: null, source: 'concept_visibility' },
-        scope_edges: {},
-        scope_fingerprint: 'scope-global-before'
-    };
-}
-
-function userScope(conceptId = '#V#scope_fixture') {
+function scopeSnapshot({
+    conceptId = '#V#scope_fixture',
+    user = null,
+    organisation = null,
+    fingerprint = 'scope-before'
+} = {}) {
+    const scopeEdges = {};
+    if (user) scopeEdges[USER_PREDICATE] = [user];
+    if (organisation) scopeEdges[ORGANISATION_PREDICATE] = [organisation];
+    let publicationContext = { kind: 'global', concept_id: null };
+    if (user && organisation) {
+        publicationContext = {
+            kind: 'composite',
+            concept_id: null,
+            components: [
+                { kind: 'user', concept_id: user },
+                { kind: 'organisation', concept_id: organisation }
+            ]
+        };
+    }
+    else if (user) publicationContext = { kind: 'user', concept_id: user };
+    else if (organisation) {
+        publicationContext = { kind: 'organisation', concept_id: organisation };
+    }
     return {
         concept_id: conceptId,
         publication_context: {
-            kind: 'user',
-            concept_id: '#V#signed_in_user',
+            ...publicationContext,
             source: 'concept_visibility'
         },
-        scope_edges: {
-            '#V#specific_to_user': ['#V#signed_in_user']
-        },
-        scope_fingerprint: 'scope-user-before'
+        scope_edges: scopeEdges,
+        scope_fingerprint: fingerprint
     };
 }
 
-function previewPayload({ from, to, remove = [], add = [] }) {
+function scopeEdgeRows(snapshot) {
+    return Object.entries(snapshot.scope_edges).flatMap(([predicate, targets]) =>
+        targets.map((target) => ({ predicate, target }))
+    );
+}
+
+function edgeKey(edge) {
+    return `${edge.predicate}\u0000${edge.target}`;
+}
+
+function previewPayload(before, after, resolvedScopeEdit) {
+    const beforeRows = scopeEdgeRows(before);
+    const afterRows = scopeEdgeRows(after);
+    const beforeKeys = new Set(beforeRows.map(edgeKey));
+    const afterKeys = new Set(afterRows.map(edgeKey));
     return {
         success: true,
         preview: true,
         changed: false,
-        from,
-        to,
-        scope_delta: { remove, add }
+        from: before.publication_context,
+        to: after.publication_context,
+        resolved_scope_edit: resolvedScopeEdit,
+        destination_scope_edges: after.scope_edges,
+        scope_delta: {
+            remove: beforeRows.filter((edge) => !afterKeys.has(edgeKey(edge))),
+            add: afterRows.filter((edge) => !beforeKeys.has(edgeKey(edge)))
+        }
+    };
+}
+
+function successfulExecution(after) {
+    return {
+        success: true,
+        effect_status: 'succeeded',
+        mutation_outcome: 'succeeded',
+        canonical_read_back: after
     };
 }
 
@@ -75,92 +119,96 @@ describe('governed Concept-tab publication scope controls', () => {
     });
 
     test.each([
+        ['global adds user', scopeSnapshot(), 'user', { kind: 'user', enabled: true }],
         [
-            'user-only removal publishes globally',
-            { scope_edges: { '#V#specific_to_user': ['#V#person'] } },
-            'user',
-            { destination_kind: 'global' }
-        ],
-        [
-            'organisation-only removal publishes globally',
-            { scope_edges: { specific_to_org: ['#V#org'] } },
+            'global adds organisation',
+            scopeSnapshot(),
             'organisation',
-            { destination_kind: 'global' }
+            { kind: 'organisation', enabled: true }
         ],
         [
-            'global to user relies on the authenticated actor',
-            { scope_edges: {} },
+            'sole user removes user',
+            scopeSnapshot({ user: USER_ID }),
             'user',
-            { destination_kind: 'user' }
+            { kind: 'user', enabled: false }
         ],
         [
-            'global to organisation relies on trusted current context',
-            { scope_edges: {} },
+            'sole user adds organisation without removing user',
+            scopeSnapshot({ user: USER_ID }),
             'organisation',
-            { destination_kind: 'organisation' }
+            { kind: 'organisation', enabled: true }
         ],
         [
-            'mixed removal preserves the one exact organisation',
-            {
-                scope_edges: {
-                    specific_to_user: ['#V#person'],
-                    '#V#specific_to_org': ['#V#org']
-                }
-            },
+            'sole organisation removes organisation',
+            scopeSnapshot({ organisation: ORGANISATION_ID }),
+            'organisation',
+            { kind: 'organisation', enabled: false }
+        ],
+        [
+            'sole organisation adds user without removing organisation',
+            scopeSnapshot({ organisation: ORGANISATION_ID }),
             'user',
-            { destination_kind: 'organisation', destination_concept_id: '#V#org' }
+            { kind: 'user', enabled: true }
         ],
         [
-            'mixed removal preserves the one exact user',
-            {
-                scope_edges: {
-                    '#V#specific_to_user': ['#V#person'],
-                    specific_to_organisation: ['#V#org']
-                }
-            },
+            'mixed removes only user',
+            scopeSnapshot({ user: USER_ID, organisation: ORGANISATION_ID }),
+            'user',
+            { kind: 'user', enabled: false }
+        ],
+        [
+            'mixed removes only organisation',
+            scopeSnapshot({ user: USER_ID, organisation: ORGANISATION_ID }),
             'organisation',
-            { destination_kind: 'user', destination_concept_id: '#V#person' }
+            { kind: 'organisation', enabled: false }
         ]
     ])('%s', (_name, scopeReadBack, controlKind, expected) => {
-        expect(deriveScopeControlDestination(scopeReadBack, controlKind)).toEqual(expected);
+        expect(deriveScopeControlEdit(scopeReadBack, controlKind)).toEqual(expected);
     });
 
-    test('refuses to guess a remaining destination in ambiguous mixed scope', () => {
-        expect(() => deriveScopeControlDestination({
+    test('refuses ambiguous selected targets and malformed historical edges', () => {
+        expect(() => deriveScopeControlEdit({
             scope_edges: {
-                '#V#specific_to_user': ['#V#person'],
-                '#V#specific_to_organisation': ['#V#org_a', '#V#org_b']
+                [USER_PREDICATE]: ['#V#person_a', '#V#person_b']
             }
-        }, 'user')).toThrow('multiple or historical publication contexts');
-        expect(() => deriveScopeControlDestination({
+        }, 'user')).toThrow('multiple publication-scope targets');
+        expect(() => deriveScopeControlEdit({
             scope_edges: {
-                '#V#specific_to_user': ['#V#person_a', '#V#person_b']
+                [USER_PREDICATE]: ['legacy-user-id']
             }
-        }, 'user')).toThrow('No change was attempted');
+        }, 'organisation')).toThrow('malformed publication scope');
+        expect(() => deriveScopeControlEdit({
+            scope_edges: {
+                specific_to_user: [USER_ID]
+            }
+        }, 'user')).toThrow('non-canonical');
     });
 
-    test('user-only button follows GET, preview, confirmation and execute before changing state', async () => {
-        const events = [];
-        const before = userScope('#V#private_note');
-        const preview = previewPayload({
-            from: before.publication_context,
-            to: { kind: 'global', concept_id: null, source: 'scope_change_request' },
-            remove: [{ predicate: '#V#specific_to_user', target: '#V#signed_in_user' }]
+    test('organisation add preserves user through an actual control click and ignores late display state', async () => {
+        window.localStorage.setItem('von_current_user', '#V#forged_browser_user');
+        window.localStorage.setItem('von:organisation', '#V#forged_browser_org');
+        const before = scopeSnapshot({
+            conceptId: '#V#private_note',
+            user: USER_ID,
+            fingerprint: 'scope-user-before'
         });
-        const after = {
-            ...globalScope('#V#private_note'),
-            scope_fingerprint: 'scope-global-after'
-        };
+        const after = scopeSnapshot({
+            conceptId: '#V#private_note',
+            user: USER_ID,
+            organisation: ORGANISATION_ID,
+            fingerprint: 'scope-mixed-after'
+        });
+        const preview = previewPayload(before, after, {
+            kind: 'organisation',
+            enabled: true,
+            concept_id: ORGANISATION_ID
+        });
         const governedResponses = [
             jsonResponse(before),
             jsonResponse(preview),
-            jsonResponse({
-                success: true,
-                effect_status: 'succeeded',
-                mutation_outcome: 'succeeded',
-                canonical_read_back: after
-            })
+            jsonResponse(successfulExecution(after))
         ];
+        const events = [];
         let resolveInitialState;
         let initialStateJson;
         const initialStateResponse = new Promise((resolve) => {
@@ -168,7 +216,7 @@ describe('governed Concept-tab publication scope controls', () => {
                 const response = jsonResponse({
                     raw_doc: {
                         relationships: {
-                            '#V#specific_to_user': ['#V#signed_in_user']
+                            [USER_PREDICATE]: [USER_ID]
                         }
                     }
                 });
@@ -185,8 +233,9 @@ describe('governed Concept-tab publication scope controls', () => {
         });
         jest.spyOn(window, 'confirm').mockImplementation((message) => {
             events.push('confirm');
-            expect(message).toContain('global Vontology publication');
-            expect(message).toContain('removes the user/organisation-only publication restriction');
+            expect(message).toContain('combined user and organisation scope');
+            expect(message).toContain(`${ORGANISATION_PREDICATE} → ${ORGANISATION_ID}`);
+            expect(message).not.toContain(`Remove: ${USER_PREDICATE}`);
             return true;
         });
 
@@ -198,131 +247,116 @@ describe('governed Concept-tab publication scope controls', () => {
         expect(orgBtn.disabled).toBe(false);
         expect(userBtn.disabled).toBe(false);
 
-        // The click remains executable while the display read is pending; its
-        // fresh governed GET, rather than DOM state, decides the transition.
-        userBtn.click();
-        await flushUntil(() => events.length === 4 && userBtn.disabled === false);
-        expect(userBtn.getAttribute('aria-pressed')).toBe('false');
+        // The authoritative read/preview/execute path remains usable while
+        // the older raw display read is pending.
+        orgBtn.click();
+        await flushUntil(() => events.length === 4 && orgBtn.disabled === false);
+        expect(orgBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(userBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(orgBtn.title).toBe('Remove the organisation publication restriction');
+        expect(userBtn.title).toBe('Remove the user publication restriction');
 
-        // The older user-only response arrives after canonical global
-        // read-back and must not overwrite either scope control.
+        // A late user-only display response must not erase canonical mixed
+        // read-back from the completed governed edit.
         resolveInitialState();
         await flushUntil(() => initialStateJson?.mock.calls.length === 1);
         await Promise.resolve();
+        expect(orgBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(userBtn.getAttribute('aria-pressed')).toBe('true');
 
         expect(events).toEqual(['GET', 'POST', 'confirm', 'POST']);
         expect(global.fetch).toHaveBeenCalledTimes(4);
         const governedCalls = global.fetch.mock.calls.filter(([url]) =>
             String(url).startsWith('/api/ontology-authority/concepts/')
         );
-        const urls = governedCalls.map(([url]) => url);
-        expect(urls.every((url) => url === '/api/ontology-authority/concepts/%23V%23private_note/scope')).toBe(true);
-        expect(urls.some((url) => url.includes('/concept/user-relation'))).toBe(false);
+        expect(governedCalls).toHaveLength(3);
+        expect(governedCalls.every(([url]) => (
+            url === '/api/ontology-authority/concepts/%23V%23private_note/scope'
+        ))).toBe(true);
         const previewBody = JSON.parse(governedCalls[1][1].body);
         const executeBody = JSON.parse(governedCalls[2][1].body);
         expect(previewBody).toMatchObject({
-            destination_kind: 'global',
+            scope_edit: { kind: 'organisation', enabled: true },
             expected_scope_fingerprint: 'scope-user-before',
             preview: true,
             reason: 'concept_tab_publication_scope_change'
         });
+        expect(previewBody.scope_edit).not.toHaveProperty('concept_id');
+        expect(previewBody).not.toHaveProperty('destination_kind');
         expect(executeBody).toMatchObject({
-            destination_kind: 'global',
+            scope_edit: {
+                kind: 'organisation',
+                enabled: true,
+                concept_id: ORGANISATION_ID
+            },
             expected_scope_fingerprint: 'scope-user-before',
             preview: false,
             reason: 'concept_tab_publication_scope_change'
         });
-        expect(previewBody.request_id).toBeTruthy();
-        expect(executeBody.request_id).toBeTruthy();
         expect(executeBody.request_id).not.toBe(previewBody.request_id);
-        expect(userBtn.getAttribute('aria-pressed')).toBe('false');
-        expect(orgBtn.getAttribute('aria-pressed')).toBe('false');
-        expect(userBtn.disabled).toBe(false);
-        expect(orgBtn.disabled).toBe(false);
+        governedCalls.forEach(([, options]) => {
+            const requestHeaders = options?.headers || {};
+            expect(requestHeaders).not.toHaveProperty('X-User-Concept-ID');
+            expect(requestHeaders).not.toHaveProperty('X-User-Client-ID');
+            expect(requestHeaders).not.toHaveProperty('X-Organisation-Concept-ID');
+            expect(requestHeaders['X-Von-Window-Session']).toMatch(/^ws_/);
+        });
     });
 
-    test.each([
-        [
-            'user',
-            '#V#signed_in_user',
-            '#V#specific_to_user'
-        ],
-        [
-            'organisation',
-            '#V#trusted_organisation',
-            '#V#specific_to_organisation'
-        ]
-    ])('trusted %s default is resolved by preview and bound into execute', async (
-        destinationKind,
-        trustedDestination,
-        predicate
-    ) => {
+    test('user add preserves organisation through the dynamic helper path', async () => {
         window.localStorage.setItem('von_current_user', '#V#forged_browser_user');
         window.localStorage.setItem('von:organisation', '#V#forged_browser_org');
-        const before = globalScope();
-        const to = {
-            kind: destinationKind,
-            concept_id: trustedDestination,
-            source: 'scope_change_request'
-        };
-        const after = {
-            concept_id: '#V#scope_fixture',
-            publication_context: to,
-            scope_edges: { [predicate]: [trustedDestination] },
-            scope_fingerprint: 'scope-after'
-        };
-        const fetchImpl = jest
+        const before = scopeSnapshot({
+            organisation: ORGANISATION_ID,
+            fingerprint: 'scope-organisation-before'
+        });
+        const after = scopeSnapshot({
+            user: USER_ID,
+            organisation: ORGANISATION_ID,
+            fingerprint: 'scope-mixed-after'
+        });
+        global.fetch = jest
             .fn()
             .mockResolvedValueOnce(jsonResponse(before))
-            .mockResolvedValueOnce(jsonResponse(previewPayload({
-                from: before.publication_context,
-                to,
-                add: [{ predicate, target: trustedDestination }]
+            .mockResolvedValueOnce(jsonResponse(previewPayload(before, after, {
+                kind: 'user',
+                enabled: true,
+                concept_id: USER_ID
             })))
-            .mockResolvedValueOnce(jsonResponse({
-                success: true,
-                effect_status: 'succeeded',
-                canonical_read_back: after
-            }));
+            .mockResolvedValueOnce(jsonResponse(successfulExecution(after)));
+        jest.spyOn(window, 'confirm').mockReturnValue(true);
+        const orgBtn = document.createElement('button');
+        const userBtn = document.createElement('button');
 
-        const result = await executeGovernedScopeControlChange({
-            conceptId: '#V#scope_fixture',
-            controlKind: destinationKind,
-            fetchImpl,
-            confirmImpl: () => true,
-            requestIdFactory: (phase) => `request-${phase}`
-        });
+        const result = await toggleUserRelation('#V#scope_fixture', userBtn, orgBtn);
 
         expect(result.success).toBe(true);
-        const previewRequest = JSON.parse(fetchImpl.mock.calls[1][1].body);
-        const executeRequest = JSON.parse(fetchImpl.mock.calls[2][1].body);
-        expect(previewRequest.destination_kind).toBe(destinationKind);
-        expect(previewRequest).not.toHaveProperty('destination_concept_id');
-        expect(previewRequest).not.toHaveProperty('user_concept_id');
-        expect(previewRequest).not.toHaveProperty('organisation_concept_id');
-        expect(executeRequest.destination_concept_id).toBe(trustedDestination);
-        const requestHeaders = fetchImpl.mock.calls.map(([, options]) => options?.headers || {});
-        requestHeaders.forEach((headers) => {
-            expect(headers).not.toHaveProperty('X-User-Concept-ID');
-            expect(headers).not.toHaveProperty('X-User-Client-ID');
-            expect(headers).not.toHaveProperty('X-Organisation-Concept-ID');
-            expect(headers['X-Von-Window-Session']).toMatch(/^ws_/);
+        expect(orgBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(userBtn.getAttribute('aria-pressed')).toBe('true');
+        const previewBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+        const executeBody = JSON.parse(global.fetch.mock.calls[2][1].body);
+        expect(previewBody.scope_edit).toEqual({ kind: 'user', enabled: true });
+        expect(executeBody.scope_edit).toEqual({
+            kind: 'user',
+            enabled: true,
+            concept_id: USER_ID
         });
-        expect(requestHeaders[1]['Content-Type']).toBe('application/json');
-        expect(requestHeaders[2]['Content-Type']).toBe('application/json');
-        expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('/concept/user-relation'))).toBe(false);
-        expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('/concept/organization-relation'))).toBe(false);
+        expect(scopeEdgeRows(result.canonical_read_back)).toEqual(expect.arrayContaining([
+            { predicate: USER_PREDICATE, target: USER_ID },
+            { predicate: ORGANISATION_PREDICATE, target: ORGANISATION_ID }
+        ]));
     });
 
-    test('confirmation cancellation stops after preview and leaves canonical state unchanged', async () => {
-        const before = userScope();
+    test('confirmation cancellation stops after a valid preview and preserves canonical state', async () => {
+        const before = scopeSnapshot({ user: USER_ID, fingerprint: 'scope-user-before' });
+        const after = scopeSnapshot({ fingerprint: 'scope-global-after' });
         const fetchImpl = jest
             .fn()
             .mockResolvedValueOnce(jsonResponse(before))
-            .mockResolvedValueOnce(jsonResponse(previewPayload({
-                from: before.publication_context,
-                to: { kind: 'global', concept_id: null },
-                remove: [{ predicate: '#V#specific_to_user', target: '#V#signed_in_user' }]
+            .mockResolvedValueOnce(jsonResponse(previewPayload(before, after, {
+                kind: 'user',
+                enabled: false,
+                concept_id: USER_ID
             })));
 
         const result = await executeGovernedScopeControlChange({
@@ -338,10 +372,11 @@ describe('governed Concept-tab publication scope controls', () => {
         expect(fetchImpl).toHaveBeenCalledTimes(2);
     });
 
-    test('preview denial never executes', async () => {
+    test('authority denial never confirms or executes', async () => {
+        const confirmImpl = jest.fn().mockReturnValue(true);
         const fetchImpl = jest
             .fn()
-            .mockResolvedValueOnce(jsonResponse(userScope()))
+            .mockResolvedValueOnce(jsonResponse(scopeSnapshot({ user: USER_ID })))
             .mockResolvedValueOnce(jsonResponse({
                 success: false,
                 error_code: 'global_ontology_admin_authority_required',
@@ -352,52 +387,82 @@ describe('governed Concept-tab publication scope controls', () => {
             conceptId: '#V#scope_fixture',
             controlKind: 'user',
             fetchImpl,
-            confirmImpl: () => true,
+            confirmImpl,
             requestIdFactory: (phase) => `denied-${phase}`
         })).rejects.toMatchObject({ code: 'global_ontology_admin_authority_required' });
         expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(confirmImpl).not.toHaveBeenCalled();
     });
 
-    test('preview cannot substitute a different destination', async () => {
-        const before = globalScope();
+    test('preview cannot substitute a different restriction edit', async () => {
+        const before = scopeSnapshot({ user: USER_ID });
+        const after = scopeSnapshot({ user: USER_ID, organisation: ORGANISATION_ID });
+        const substituted = previewPayload(before, after, {
+            kind: 'user',
+            enabled: true,
+            concept_id: USER_ID
+        });
         const fetchImpl = jest
             .fn()
             .mockResolvedValueOnce(jsonResponse(before))
-            .mockResolvedValueOnce(jsonResponse(previewPayload({
-                from: before.publication_context,
-                to: { kind: 'user', concept_id: '#V#signed_in_user' },
-                add: [{ predicate: '#V#specific_to_user', target: '#V#signed_in_user' }]
-            })));
+            .mockResolvedValueOnce(jsonResponse(substituted));
 
         await expect(executeGovernedScopeControlChange({
             conceptId: '#V#scope_fixture',
             controlKind: 'organisation',
             fetchImpl,
             confirmImpl: () => true,
-            requestIdFactory: (phase) => `mismatch-${phase}`
-        })).rejects.toMatchObject({ code: 'scope_preview_destination_mismatch' });
+            requestIdFactory: (phase) => `substitution-${phase}`
+        })).rejects.toMatchObject({ code: 'scope_preview_edit_mismatch' });
         expect(fetchImpl).toHaveBeenCalledTimes(2);
     });
 
-    test('success response is rejected when canonical read-back disagrees', async () => {
-        const before = userScope();
+    test('preview cannot drop the complementary restriction or add a second edge', async () => {
+        const before = scopeSnapshot({ user: USER_ID });
+        const incorrectAfter = scopeSnapshot({ organisation: ORGANISATION_ID });
+        const invalidPreview = previewPayload(before, incorrectAfter, {
+            kind: 'organisation',
+            enabled: true,
+            concept_id: ORGANISATION_ID
+        });
         const fetchImpl = jest
             .fn()
             .mockResolvedValueOnce(jsonResponse(before))
-            .mockResolvedValueOnce(jsonResponse(previewPayload({
-                from: before.publication_context,
-                to: { kind: 'global', concept_id: null },
-                remove: [{ predicate: '#V#specific_to_user', target: '#V#signed_in_user' }]
-            })))
-            .mockResolvedValueOnce(jsonResponse({
-                success: true,
-                effect_status: 'succeeded',
-                canonical_read_back: before
-            }));
+            .mockResolvedValueOnce(jsonResponse(invalidPreview));
 
         await expect(executeGovernedScopeControlChange({
             conceptId: '#V#scope_fixture',
-            controlKind: 'user',
+            controlKind: 'organisation',
+            fetchImpl,
+            confirmImpl: () => true,
+            requestIdFactory: (phase) => `complement-${phase}`
+        })).rejects.toMatchObject({ code: 'scope_preview_edge_set_mismatch' });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    test('success response is rejected when exact canonical read-back disagrees', async () => {
+        const before = scopeSnapshot({
+            user: USER_ID,
+            organisation: ORGANISATION_ID,
+            fingerprint: 'scope-mixed-before'
+        });
+        const after = scopeSnapshot({
+            user: USER_ID,
+            fingerprint: 'scope-user-after'
+        });
+        const fetchImpl = jest
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(before))
+            .mockResolvedValueOnce(jsonResponse(previewPayload(before, after, {
+                kind: 'organisation',
+                enabled: false,
+                concept_id: ORGANISATION_ID
+            })))
+            .mockResolvedValueOnce(jsonResponse(successfulExecution(before)));
+
+        await expect(executeGovernedScopeControlChange({
+            conceptId: '#V#scope_fixture',
+            controlKind: 'organisation',
             fetchImpl,
             confirmImpl: () => true,
             requestIdFactory: (phase) => `readback-mismatch-${phase}`
@@ -407,25 +472,29 @@ describe('governed Concept-tab publication scope controls', () => {
 
     test('stale execute refreshes both controls from canonical read-back without retry', async () => {
         jest.spyOn(console, 'error').mockImplementation(() => {});
-        const before = userScope('#V#stale_scope');
-        const concurrent = {
-            concept_id: '#V#stale_scope',
-            publication_context: {
-                kind: 'organisation',
-                concept_id: '#V#concurrent_org'
-            },
-            scope_edges: {
-                '#V#specific_to_organisation': ['#V#concurrent_org']
-            },
-            scope_fingerprint: 'scope-concurrently-changed'
-        };
+        const before = scopeSnapshot({
+            conceptId: '#V#stale_scope',
+            user: USER_ID,
+            organisation: ORGANISATION_ID,
+            fingerprint: 'scope-mixed-before'
+        });
+        const reviewedAfter = scopeSnapshot({
+            conceptId: '#V#stale_scope',
+            organisation: ORGANISATION_ID,
+            fingerprint: 'scope-organisation-after'
+        });
+        const concurrent = scopeSnapshot({
+            conceptId: '#V#stale_scope',
+            user: USER_ID,
+            fingerprint: 'scope-concurrently-changed'
+        });
         global.fetch = jest
             .fn()
             .mockResolvedValueOnce(jsonResponse(before))
-            .mockResolvedValueOnce(jsonResponse(previewPayload({
-                from: before.publication_context,
-                to: { kind: 'global', concept_id: null },
-                remove: [{ predicate: '#V#specific_to_user', target: '#V#signed_in_user' }]
+            .mockResolvedValueOnce(jsonResponse(previewPayload(before, reviewedAfter, {
+                kind: 'user',
+                enabled: false,
+                concept_id: USER_ID
             })))
             .mockResolvedValueOnce(jsonResponse({
                 success: false,
@@ -443,8 +512,8 @@ describe('governed Concept-tab publication scope controls', () => {
         expect(result.success).toBe(false);
         expect(result.error.code).toBe('scope_precondition_failed');
         expect(global.fetch).toHaveBeenCalledTimes(3);
-        expect(orgBtn.getAttribute('aria-pressed')).toBe('true');
-        expect(userBtn.getAttribute('aria-pressed')).toBe('false');
+        expect(orgBtn.getAttribute('aria-pressed')).toBe('false');
+        expect(userBtn.getAttribute('aria-pressed')).toBe('true');
         expect(orgBtn.disabled).toBe(false);
         expect(userBtn.disabled).toBe(false);
     });

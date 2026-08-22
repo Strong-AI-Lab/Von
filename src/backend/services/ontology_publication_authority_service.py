@@ -96,6 +96,7 @@ class PublicationContextKind(StrEnum):
     USER = "user"
     ORGANISATION = "organisation"
     GLOBAL = "global"
+    COMPOSITE = "composite"
     HISTORICAL = "historical"
     MIXED = "mixed"
 
@@ -110,6 +111,7 @@ class PublicationContext:
     concept_id: str | None = None
     source: str = "resolved"
     historical_predicates: tuple[str, ...] = ()
+    components: tuple[PublicationContext, ...] = ()
 
     def to_mapping(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -119,6 +121,8 @@ class PublicationContext:
         }
         if self.historical_predicates:
             payload["historical_predicates"] = list(self.historical_predicates)
+        if self.components:
+            payload["components"] = [item.to_mapping() for item in self.components]
         return payload
 
     @classmethod
@@ -150,6 +154,134 @@ class PublicationContext:
             _normalise_concept_id(user_concept_id),
             source,
         )
+
+    @classmethod
+    def composite(
+        cls,
+        *,
+        user_concept_id: str,
+        organisation_concept_id: str,
+        source: str = "explicit",
+    ) -> PublicationContext:
+        user = cls.user(user_concept_id, source=source)
+        organisation = cls.organisation(
+            organisation_concept_id,
+            source=source,
+        )
+        if not user.concept_id or not organisation.concept_id:
+            raise ValueError("Composite publication context requires exact targets")
+        return cls(
+            PublicationContextKind.COMPOSITE,
+            None,
+            source,
+            components=(user, organisation),
+        )
+
+
+def expand_publication_contexts(
+    contexts: Sequence[PublicationContext],
+) -> tuple[PublicationContext, ...]:
+    """Expand an exact composite without reinterpreting unresolved mixed scope."""
+
+    expanded: list[PublicationContext] = []
+    for context in contexts:
+        if context.kind == PublicationContextKind.COMPOSITE:
+            if (
+                len(context.components) != 2
+                or {item.kind for item in context.components}
+                != {
+                    PublicationContextKind.USER,
+                    PublicationContextKind.ORGANISATION,
+                }
+                or any(not item.concept_id for item in context.components)
+            ):
+                # A malformed composite is unresolved, not an authority shortcut.
+                expanded.append(
+                    PublicationContext(
+                        PublicationContextKind.MIXED,
+                        None,
+                        "malformed_composite_publication_context",
+                    )
+                )
+                continue
+            expanded.extend(context.components)
+            continue
+        expanded.append(context)
+    return tuple(expanded)
+
+
+def publication_context_identity_key(
+    context: PublicationContext,
+) -> tuple[Any, ...]:
+    """Return the exact semantic identity of a publication context.
+
+    ``concept_id`` is intentionally absent on a composite, so callers must not
+    use the old ``(kind, concept_id)`` pair to deduplicate or compare contexts.
+    The source label is observation provenance rather than part of the
+    authority boundary.
+    """
+
+    return (
+        context.kind.value,
+        context.concept_id,
+        tuple(sorted(context.historical_predicates)),
+        tuple(
+            sorted(
+                publication_context_identity_key(component)
+                for component in context.components
+            )
+        ),
+    )
+
+
+def publication_context_from_mapping(value: Mapping[str, Any]) -> PublicationContext:
+    """Rehydrate an exact context carried by a fingerprinted server payload."""
+
+    try:
+        kind = PublicationContextKind(_clean_text(value.get("kind")))
+    except ValueError as exc:
+        raise ValueError("Unsupported publication context kind") from exc
+    historical_predicates = tuple(
+        _clean_text(item)
+        for item in value.get("historical_predicates") or ()
+        if _clean_text(item)
+    )
+    source = _clean_text(value.get("source")) or "resolved"
+    if kind == PublicationContextKind.COMPOSITE:
+        raw_components = value.get("components")
+        if not isinstance(raw_components, Sequence) or isinstance(
+            raw_components,
+            (str, bytes, bytearray),
+        ) or len(raw_components) != 2 or any(
+            not isinstance(item, Mapping) for item in raw_components
+        ):
+            raise ValueError("Composite publication context requires components")
+        components = tuple(
+            publication_context_from_mapping(item)
+            for item in raw_components
+        )
+        context = PublicationContext(
+            kind=kind,
+            source=source,
+            components=components,
+        )
+        if expand_publication_contexts((context,)) == (
+            PublicationContext(
+                PublicationContextKind.MIXED,
+                None,
+                "malformed_composite_publication_context",
+            ),
+        ):
+            raise ValueError("Malformed composite publication context")
+        return context
+    if "components" in value:
+        raise ValueError("Only composite publication context may carry components")
+    return PublicationContext(
+        kind=kind,
+        concept_id=_normalise_concept_id(value.get("concept_id")),
+        source=source,
+        historical_predicates=historical_predicates,
+    )
 
 
 @dataclass(frozen=True)
@@ -512,11 +644,27 @@ def concept_publication_context(concept_id: str) -> PublicationContext:
             "historical_visibility",
             tuple(sorted(set(historical_predicates))),
         )
+    legacy_scope_predicates_present = any(
+        predicate in relationship_map
+        and relationship_map.get(predicate) not in (None, [], "")
+        for predicate in (
+            *SPECIFIC_TO_USER_PREDICATES[:-1],
+            *SPECIFIC_TO_ORG_PREDICATES_READ[:-1],
+        )
+    )
+    if (
+        len(user_ids) == 1
+        and len(organisation_ids) == 1
+        and not legacy_scope_predicates_present
+    ):
+        return PublicationContext.composite(
+            user_concept_id=user_ids[0],
+            organisation_concept_id=organisation_ids[0],
+            source="concept_visibility",
+        )
     if user_ids and organisation_ids:
-        # Visibility shared by a user and organisation is not evidence that the
-        # organisation owns canonical publication. Historical dual-scope rows
-        # need explicit administrator adoption instead of silent authority
-        # inference.
+        # More than one target, or a dual scope involving legacy aliases, does
+        # not establish the exact jointly governed publication boundary.
         return PublicationContext(
             PublicationContextKind.MIXED,
             None,
@@ -544,7 +692,7 @@ def publication_context_for_creation(
     actor_concept_id: str | None,
     organisation_concept_id: str | None,
 ) -> PublicationContext:
-    mode = (_clean_text(scope_mode) or "user_org_default").lower().replace("-", "_")
+    mode = (_clean_text(scope_mode) or "user_only_default").lower().replace("-", "_")
     if mode in {"global", "global_general", "public"}:
         return PublicationContext.global_context(source="creation_scope")
     if mode in {
@@ -726,7 +874,9 @@ def _actor_bound_workflow_direct_authority_eligible(
 
     return all(
         context.kind == PublicationContextKind.USER and context.concept_id == actor_id
-        for context in (*intent.source_contexts, intent.publication_context)
+        for context in expand_publication_contexts(
+            (*intent.source_contexts, intent.publication_context)
+        )
     )
 
 
@@ -805,7 +955,9 @@ def _direct_authority_decision(
             trust_source=trust_source,
         )
 
-    contexts = (*intent.source_contexts, intent.publication_context)
+    contexts = expand_publication_contexts(
+        (*intent.source_contexts, intent.publication_context)
+    )
     unresolved_contexts = tuple(
         item
         for item in contexts
@@ -1505,7 +1657,9 @@ def ontology_authority_resource_keys(
     invocation = current_ontology_invocation()
     if invocation and invocation.delegation_id:
         keys.add(f"ontology-delegation:{_clean_text(invocation.delegation_id)}")
-    for context in (*intent.source_contexts, intent.publication_context):
+    for context in expand_publication_contexts(
+        (*intent.source_contexts, intent.publication_context)
+    ):
         if context.kind == PublicationContextKind.ORGANISATION and context.concept_id:
             keys.add(
                 "ontology-authority-role:"
@@ -2276,6 +2430,7 @@ __all__ = [
     "current_authorised_ontology_mutation",
     "current_ontology_invocation",
     "execute_authorised_ontology_mutation",
+    "expand_publication_contexts",
     "get_mutation_receipt_for_actor",
     "issue_agent_delegation",
     "list_actor_delegations",
@@ -2285,6 +2440,8 @@ __all__ = [
     "ontology_mutation_resource_lock",
     "parse_authority_role_storage_text",
     "publication_context_for_creation",
+    "publication_context_from_mapping",
+    "publication_context_identity_key",
     "reconcile_indeterminate_mutation_receipt",
     "resolve_delegation_principal",
     "resolve_live_semantic_roles",

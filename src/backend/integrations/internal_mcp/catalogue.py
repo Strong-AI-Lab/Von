@@ -611,6 +611,7 @@ def _run_concept_publication_scope_change(
     kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
     from ...services.ontology_scope_change_service import (
+        OntologyScopeChangeRequestError,
         change_concept_publication_scope,
     )
 
@@ -622,6 +623,7 @@ def _run_concept_publication_scope_change(
             concept_id=kwargs.get("concept_id"),
             destination_kind=kwargs.get("destination_kind"),
             destination_concept_id=kwargs.get("destination_concept_id"),
+            scope_edit=kwargs.get("scope_edit"),
             expected_scope_fingerprint=kwargs.get("expected_scope_fingerprint"),
             request_id=_scope_change_request_id(kwargs),
             preview=preview,
@@ -633,6 +635,8 @@ def _run_concept_publication_scope_change(
             "ontology_scope_target_not_found",
             "The requested ontology scope target is unavailable.",
         )
+    except OntologyScopeChangeRequestError as exc:
+        return make_error_response(exc.reason_code, exc.public_message)
     except ValueError as exc:
         return make_error_response("invalid_ontology_scope_change", str(exc))
     except RuntimeError:
@@ -1713,6 +1717,8 @@ def _create_concepts(**kwargs):
     if raw_scope_mode is None:
         raw_scope_mode = kwargs.get("visibility_scope_mode")
     scope_mode = _normalise_create_concepts_scope_mode(raw_scope_mode)
+    if raw_scope_mode is None:
+        scope_mode = _CREATE_CONCEPTS_SCOPE_USER_ONLY
     if (
         raw_scope_mode is not None
         and isinstance(raw_scope_mode, str)
@@ -2616,11 +2622,11 @@ def _create_concepts(**kwargs):
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
         "parent_resolution": parent_resolution.to_dict(),
         "scope_selection": {
-            "requested_scope_mode": scope_mode or _CREATE_CONCEPTS_SCOPE_DEFAULT,
+            "requested_scope_mode": scope_mode or _CREATE_CONCEPTS_SCOPE_USER_ONLY,
             "scope_mode_source": (
                 "request.scope_mode"
                 if isinstance(raw_scope_mode, str) and raw_scope_mode.strip()
-                else "default.user_org_default"
+                else "default.user_only_default"
             ),
             "created_by_concept_id": actor_user_id,
             "organisation_concept_id": actor_org_id,
@@ -10196,6 +10202,12 @@ def _concepts_create_input_schema() -> Schema:
                 _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY,
                 None,
             ],
+            "scope_mode": [
+                _CREATE_CONCEPTS_SCOPE_USER_ONLY,
+                _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+                _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
+                None,
+            ],
         },
         allow_unknown=True,
         description=(
@@ -10227,9 +10239,11 @@ def _concepts_create_input_schema() -> Schema:
             "review fields, attributes, tags, linked concepts, duplicate suffixing, "
             "or multiple parents. Add further classifications or relationships "
             "after creation through separate add_relationship effects using exact "
-            "existing predicate IDs. Governed creation defaults to actor-private "
-            "visibility. Direct governed callers with matching authority may use "
-            "scope_mode='organisation_general' or scope_mode='global_general'. "
+            "existing predicate IDs. Omit scope_mode for actor-private visibility, "
+            "or choose exactly 'user_only_default', 'organisation_general', or "
+            "'global_general' according to the intended audience. The requested "
+            "scope succeeds only under the authenticated actor's matching live "
+            "authority; denial never silently creates a narrower private concept. "
             "Optional namespace is propagated for tenancy attribution. Unknown "
             "top-level fields remain tolerated for orchestrator-added context but "
             "do not enlarge the governed effect."
@@ -10449,6 +10463,7 @@ def _upsert_scoped_assertion_input_schema() -> Schema:
             "scope_mode": (str, type(None)),
             "evidence": (dict, type(None)),
         },
+        enum_values={"scope_mode": ["user", "organisation", None]},
         allow_unknown=True,
         description=(
             "upsert_scoped_assertion input: subject_concept_id and predicate, "
@@ -10476,6 +10491,7 @@ def _store_text_assertion_input_schema() -> Schema:
             "evidence": (dict, type(None)),
             "concept_links": (list, type(None)),
         },
+        enum_values={"scope_mode": ["user", "organisation", None]},
         allow_unknown=True,
         description=(
             "store_text_assertion input: exact text plus optional language, "
@@ -11405,11 +11421,12 @@ def _concept_publication_scope_change_input_schema() -> Schema:
     return Schema(
         required={
             "concept_id": str,
-            "destination_kind": str,
             "expected_scope_fingerprint": str,
         },
         optional={
+            "destination_kind": (str, type(None)),
             "destination_concept_id": (str, type(None)),
+            "scope_edit": (dict, type(None)),
             "request_id": (str, type(None)),
             "reason": (str, type(None)),
             "namespace": (str, type(None)),
@@ -11421,14 +11438,19 @@ def _concept_publication_scope_change_input_schema() -> Schema:
                 "organisation",
                 "organization",
                 "org",
+                "user",
+                "private_user",
+                None,
             )
         },
         description=(
             "Preview or execute one exact publication-scope transition from a "
-            "canonical fingerprint. destination_concept_id is required for an "
-            "organisation destination. Actor, organisation, administrator, and "
-            "operator payload claims are ignored; an agent effect requires an "
-            "opaque exact server-issued delegation."
+            "canonical fingerprint. Provide exactly one whole-scope "
+            "destination_kind, or scope_edit={kind, enabled, concept_id?} to "
+            "change only one user/organisation restriction while preserving the "
+            "other. An omitted add target is resolved from trusted actor context; "
+            "execute must echo the preview-bound target. Actor, organisation, "
+            "administrator, and operator payload claims do not grant authority."
         ),
     )
 
@@ -11446,6 +11468,8 @@ def _concept_publication_scope_change_output_schema() -> Schema:
             "from": (dict, type(None)),
             "to": (dict, type(None)),
             "scope_delta": (dict, type(None)),
+            "resolved_scope_edit": (dict, type(None)),
+            "destination_scope_edges": (dict, type(None)),
             "authority_decision": (dict, type(None)),
             "receipt": (dict, type(None)),
             "canonical_read_back": (dict, type(None)),
@@ -11489,7 +11513,10 @@ def _add_relationship_input_schema() -> Schema:
             "concept with no visibility-owner edge, may be used as the target. "
             "The governed effect mutates only the source assertion; it does not "
             "write an inverse relationship onto the target. Incoming traversal "
-            "uses the derived relationship-extent index."
+            "uses the derived relationship-extent index. A canonical relationship "
+            "inherits the source concept's exact publication context and has no "
+            "independent scope_mode. For a user- or organisation-audience assertion "
+            "about a broader visible concept, use upsert_scoped_assertion instead."
         ),
     )
 
@@ -37753,9 +37780,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_mutation_subject_argument="concept_id",
             hard_timeout_enabled=False,
             description=(
-                "Preview one exact organisation/global publication-scope change "
-                "against a canonical fingerprint. The preview is authority-checked "
-                "and receipted but does not change visibility edges."
+                "Preview one exact whole-scope destination or one independent "
+                "user/organisation restriction edit against a canonical "
+                "fingerprint. The preview binds the complete destination edge set, "
+                "is authority-checked and receipted, and does not change visibility."
             ),
         ),
         MethodDefinition(
@@ -37769,11 +37797,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             hard_timeout_enabled=False,
             write_guardrail={"ordinary_turn_explicit_request": True},
             description=(
-                "Execute one explicitly requested, exact organisation/global "
-                "publication-scope transition after preview. The server requires "
-                "live source and destination semantic authority, an unchanged "
-                "fingerprint, exact same-turn agent delegation, a durable receipt, "
-                "and canonical read-back."
+                "Execute one reviewed exact whole-scope destination or independent "
+                "user/organisation restriction edit after preview. The server "
+                "preserves the complementary restriction and requires live source "
+                "and destination authority, an unchanged fingerprint, exact "
+                "same-turn agent delegation, a durable receipt, and canonical read-back."
             ),
         ),
         MethodDefinition(
@@ -37817,9 +37845,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "created_by_concept_id": "actor_user_concept_id",
             },
             ordinary_turn_fixed_arguments={
+                # Hide client/model organisation identity at the adapter. The
+                # governed normaliser injects the effective trusted organisation
+                # when one exists, without making an organisation mandatory for
+                # private or global creation.
                 "organisation_concept_id": None,
                 "org_id": None,
-                "scope_mode": _CREATE_CONCEPTS_SCOPE_USER_ONLY,
                 "visibility_scope_mode": None,
             },
             ordinary_turn_effect=True,
@@ -37842,8 +37873,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "Use separate add_relationship effects with exact existing "
                 "predicate IDs for further classifications or relationships, and "
                 "use add_names afterward for alternative names or translations. "
-                "Ordinary-turn creation is actor-private; direct governed callers "
-                "may select a broader scope only with matching authority."
+                "Choose scope_mode='user_only_default' for private particulars, "
+                "'organisation_general' for organisation knowledge, or "
+                "'global_general' for genuinely reusable general concepts. Omit "
+                "scope_mode to default to actor-private. The server binds actor and "
+                "organisation identity and rejects any requested scope beyond the "
+                "actor's live authority without silently creating a private fallback."
             ),
         ),
         MethodDefinition(
@@ -38009,9 +38044,14 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
                 "turn_id": "turn_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_concept_id": None,
+                "organisation_id": None,
+                "org_id": None,
             },
             ordinary_turn_effect=True,
             description=(
@@ -38031,11 +38071,16 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
                 "turn_id": "turn_id",
             },
-            ordinary_turn_fixed_arguments={"canonical_publication": False},
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_concept_id": None,
+                "organisation_id": None,
+                "org_id": None,
+                "canonical_publication": False,
+            },
             ordinary_turn_effect=True,
             description=(
                 "Store an exact provenance-bearing natural-language assertion in "
@@ -38057,11 +38102,16 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
                 "turn_id": "turn_id",
             },
-            ordinary_turn_fixed_arguments={"canonical_publication": False},
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_concept_id": None,
+                "organisation_id": None,
+                "org_id": None,
+                "canonical_publication": False,
+            },
             ordinary_turn_effect=True,
             description=(
                 "Assert provenance-bearing user- or organisation-scoped knowledge "
@@ -38086,8 +38136,13 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             category="write",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
+            },
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_concept_id": None,
+                "organisation_id": None,
+                "org_id": None,
             },
             ordinary_turn_effect=True,
             description=(
@@ -38108,7 +38163,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_concept_id": None,
+                "organisation_id": None,
+                "org_id": None,
             },
             description=(
                 "Read provenance-bearing non-canonical assertions visible to the "
@@ -38237,7 +38297,9 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "verify a genuinely missing predicate in its own governed "
                 "create_concepts effect before retrying. This tool does not "
                 "resolve predicate names or create predicate dependencies during "
-                "the relationship write."
+                "the relationship write. The canonical relationship inherits the "
+                "source concept's publication context; use upsert_scoped_assertion "
+                "for an independently user- or organisation-scoped assertion."
             ),
         ),
         MethodDefinition(

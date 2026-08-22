@@ -223,6 +223,8 @@ def test_scope_methods_are_bounded_ordinary_turn_contracts(
     assert execute.ordinary_turn_effect is True
     assert execute.write_guardrail == {"ordinary_turn_explicit_request": True}
     for definition in (preview, execute):
+        assert "destination_kind" not in definition.input_schema.required
+        assert "scope_edit" in definition.input_schema.optional
         assert "actor_concept_id" not in definition.input_schema.required
         assert "actor_concept_id" not in definition.input_schema.optional
         assert "organisation_concept_id" not in definition.input_schema.required
@@ -300,6 +302,115 @@ def test_preview_then_execute_uses_exact_same_turn_delegations_and_read_back(
     }
     assert state["scope_fingerprint"] == "scope-after"
     assert len(mutations) == 1
+
+
+def test_independent_scope_edit_preview_binds_target_for_exact_execute(
+    authority_stores,
+    gateway,
+    scope_state,
+) -> None:
+    service, _delegations, _receipts = authority_stores
+    _scope, state, mutations = scope_state
+    preview_arguments = {
+        "concept_id": "#V#research_concept",
+        "scope_edit": {"kind": "organisation", "enabled": True},
+        "expected_scope_fingerprint": "scope-before",
+        "reason": "share with the current research organisation",
+    }
+    preview_effect = "effect-scope-edit-preview"
+    preview_grant = _issue(
+        service=service,
+        method_name="preview_concept_publication_scope_change",
+        arguments=preview_arguments,
+        effect_id=preview_effect,
+    )
+    preview = _invoke_delegated(
+        gateway=gateway,
+        service=service,
+        method_name="preview_concept_publication_scope_change",
+        arguments=preview_arguments,
+        delegation_id=preview_grant["delegation_id"],
+        effect_id=preview_effect,
+    )
+
+    assert preview["success"] is True
+    assert preview["resolved_scope_edit"] == {
+        "kind": "organisation",
+        "enabled": True,
+        "concept_id": "#V#organisation_a",
+    }
+    assert preview["destination_scope_edges"] == {
+        "#V#specific_to_organisation": ["#V#organisation_a"]
+    }
+    assert preview["scope_delta"] == {
+        "remove": [],
+        "add": [
+            {
+                "predicate": "#V#specific_to_organisation",
+                "target": "#V#organisation_a",
+            }
+        ],
+    }
+    assert mutations == []
+
+    execute_arguments = {
+        **preview_arguments,
+        "scope_edit": dict(preview["resolved_scope_edit"]),
+    }
+    execute_effect = "effect-scope-edit-execute"
+    execute_grant = _issue(
+        service=service,
+        method_name="change_concept_publication_scope",
+        arguments=execute_arguments,
+        effect_id=execute_effect,
+    )
+    result = _invoke_delegated(
+        gateway=gateway,
+        service=service,
+        method_name="change_concept_publication_scope",
+        arguments=execute_arguments,
+        delegation_id=execute_grant["delegation_id"],
+        effect_id=execute_effect,
+    )
+
+    assert result["success"] is True
+    assert result["resolved_scope_edit"] == preview["resolved_scope_edit"]
+    assert result["canonical_read_back"]["publication_context"]["kind"] == (
+        "organisation"
+    )
+    assert state["scope_edges"] == {
+        "#V#specific_to_organisation": ["#V#organisation_a"]
+    }
+    assert len(mutations) == 1
+
+
+def test_scope_edit_delegation_preserves_typed_target_mismatch(
+    authority_stores,
+    scope_state,
+) -> None:
+    service, _delegations, _receipts = authority_stores
+    _scope, _state, mutations = scope_state
+    result = _issue(
+        service=service,
+        method_name="change_concept_publication_scope",
+        arguments={
+            "concept_id": "#V#research_concept",
+            "scope_edit": {
+                "kind": "organisation",
+                "enabled": True,
+                "concept_id": "#V#organisation_b",
+            },
+            "expected_scope_fingerprint": "scope-before",
+        },
+        effect_id="effect-scope-edit-other-organisation",
+    )
+
+    assert result["success"] is False
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+    assert result["error_code"] == "scope_edit_target_mismatch"
+    assert "delegation_id" not in result
+    assert mutations == []
 
 
 @pytest.mark.parametrize("mode", ("missing", "wrong_effect"))

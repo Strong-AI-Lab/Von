@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 18 August 2026
+- **Last reviewed:** 22 August 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -246,24 +246,46 @@ design/implementation boundary is
 candidate branch reference, not evidence that a deployment has represented
 roles or released the capability.
 
-**Current as of 11 August 2026**: When internal MCP is enabled, authenticated
-ordinary turns receive a bounded additive representation aperture. Trusted
-actor and namespace values are server-bound; creation scope is fixed; effects
-on existing subjects require actor- or organisation-scoped authority; and
-ordinary turns cannot change visibility scope. Gmail reads are projected only
-when a represented actor-to-profile relation authorises a configured profile,
-and the model may choose only among the actor-authorised stable resource
-selectors supplied by the trusted entry point. Runtime aliases are resolved
-server-side and every Gmail handler rechecks the selected profile against
-trusted invocation provenance and current represented authority. Revalidate the
-catalogue and adaptive-turn service before relying on this dated implementation
-claim.
+**Current candidate as of 22 August 2026**: When internal MCP is enabled,
+authenticated ordinary turns receive a bounded additive representation
+aperture. Trusted actor, current-organisation, and namespace values are
+server-bound. For `create_concepts`, the model may select actor-private,
+current-organisation, or global publication within the actor's live semantic
+authority; omission remains actor-private. A rejected wider scope is not
+silently downgraded, and selecting a scope cannot enlarge the actor's authority.
+Canonical relationships inherit their source concept's publication context;
+an independently scoped relation-like fact uses the provenance-bearing scoped
+assertion path. An invented canonical-relationship scope field fails without
+mutation instead of being silently ignored. Optional organisation context does
+not disable an otherwise actor-authorised user-scoped assertion capability:
+payload organisation claims are hidden and cleared, then any current
+organisation is recovered only from the already trusted ambient actor context.
+Where an executing agent needs a separate capability, the server issues an
+exact same-turn delegation only after resolving the effect and rechecking that
+live authority; no additional human confirmation is required.
+Post-creation publication-scope changes use the governed preview-and-execute
+path: user and organisation restrictions are independently added or removed,
+and an exact one-user-plus-one-organisation composite requires authority over
+both components. Legacy aliases, multiplicity, and malformed scope remain
+mixed or historical rather than being treated as a canonical composite. Gmail
+reads are projected only when a represented actor-to-profile relation
+authorises a configured profile, and the model may choose only among the
+actor-authorised stable resource selectors supplied by the trusted entry point.
+Runtime aliases are resolved server-side and every Gmail handler rechecks the
+selected profile against trusted invocation provenance and current represented
+authority. Revalidate the catalogue and adaptive-turn service before relying
+on this dated candidate implementation claim.
 
 **Protection**:
 - The ordinary-turn projection excludes undelegated effects; an operation's
   catalogue category alone does not establish authority
 - Gateway handlers distinguish trusted ambient actor context from raw
   tool-payload identity claims
+- Model-selected ontology scope is bounded by server-supplied actor/current-org
+  identity and live semantic-role checks; it is not an identity or authority
+  carrier
+- Governed scope edits bind an optimistic fingerprint and exact component
+  delta, preserve any unedited restriction, and require canonical read-back
 - Actor-private RAG, chat, turn, experiment, and critique-memory reads validate
   or derive namespace from the trusted actor context
 - Deployment-global diagnostics, host-local paths, connector accounts, and
@@ -607,6 +629,19 @@ be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-08-22**: Documented model-selectable governed creation scope and
+  independent publication-scope controls
+  - Kept omitted ordinary-turn creation actor-private while allowing explicit
+    organisation or global selection within server-bound identity and live
+    semantic authority
+  - Recognised exact one-user-plus-one-organisation publication as a canonical
+    composite requiring authority over both components
+  - Kept user-scoped assertion capabilities available without an organisation,
+    while clearing payload organisation claims and using trusted ambient context
+  - Made canonical relationship scope inheritance explicit and rejected ignored
+    scope fields in favour of the scoped-assertion path
+  - Kept legacy aliases, multiplicity, malformed scope, silent downgrade, and
+    automatic scope ladders outside the supported boundary
 - **2026-08-13**: Added the candidate boundary for canonical ontology
   publication authority
   - Distinguished organisation/global semantic roles from Von operational

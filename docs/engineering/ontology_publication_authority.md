@@ -7,7 +7,7 @@
 - **Authority scope:** Canonical Vontology publication, retraction, identity
   consolidation, and publication-scope change
 - **Owner:** Von maintainers
-- **Last reviewed:** 18 August 2026
+- **Last reviewed:** 22 August 2026
 - **Review trigger:** Merge, deployment, a role-lifecycle change, or a new
   canonical ontology mutation entry point
 - **Live authority or implementation evidence:** Initial activation completed
@@ -46,9 +46,11 @@ Two represented semantic roles are recognised:
   adoption of historical or mixed scope.
 
 An authenticated actor retains the existing bounded ability to create and edit
-canonical material in that actor's exact user-private publication context. That
-does not confer authority over an organisation, global publication, mixed
-history, or an inverse target in another context.
+canonical material in that actor's exact user-private publication context. The
+actor may also exercise a represented organisation or global semantic role
+through a trusted actor-bound turn when the final intent is checked live. A
+scope choice does not itself confer authority over an organisation, global
+publication, mixed history, or an inverse target in another context.
 
 `#V#von_administrator` remains an operational role. Its represented assignment
 uses a dedicated operational-administrator lifecycle and can authorise bounded
@@ -66,8 +68,11 @@ text value, and a grant succeeds only when that exact relation is read back.
 
 ## 3. Agent delegation
 
-An authorised human may authorise an agent to carry out one already-authorised
-ontology effect. The resulting capability is deliberately narrow:
+An authenticated actor may authorise an agent to carry out one ontology effect
+already covered by that actor's live semantic authority. For an ordinary
+actor-bound turn, the trusted server may derive that exact authorisation from
+the resolved effect without an additional per-effect confirmation. The
+resulting capability is deliberately narrow:
 
 - server-issued from the grantor's trusted identity and current role evidence;
 - bound to one agent, audience, tool, operation, target/delta fingerprint, and
@@ -75,23 +80,29 @@ ontology effect. The resulting capability is deliberately narrow:
 - short-lived, revocable, non-recursive, and non-amplifying; and
 - rechecked against the grantor's live semantic authority when used.
 
-There is no standing agent delegation. An agent, workflow, client, model, or
-tool payload cannot create, enlarge, or relay a semantic delegation. Sessionless
-gateway and stdio mutations are currently denied before target-sensitive reads;
-they must not recover a grantor's private visibility merely from an opaque grant.
+There is no standing delegation to a separately acting agent. An agent,
+workflow, client, model, or tool payload cannot create, enlarge, or relay a
+semantic delegation. Sessionless gateway and stdio mutations are currently
+denied before target-sensitive reads; they must not recover a grantor's private
+visibility merely from an opaque grant.
 
 An actor-bound workflow effect executed within the same trusted server does not
 become a separate authority handoff merely because an agent selected or
-composed it. After the resolved write passes the workflow mutation ceiling, it
-may use the authenticated actor's existing direct authority only when every
-source and publication context is that actor's exact user-private context. The
-governed MCP path still evaluates the final intent live and retains agent
-provenance, a durable effect receipt, and canonical read-back. Existing custom
-scholarly handlers do not yet share that receipt path; their bounded exception
-preflights every existing mutation target as the exact actor's private concept
-and requires global schema support to be preprovisioned. Organisation, global,
-historical/mixed, other-user, reserved-governance, sessionless, or otherwise
-separately delegated effects do not inherit this private path.
+composed it. After the resolved write passes the workflow mutation ceiling, an
+exact actor-private effect may retain the authenticated actor's direct
+authority. When an executing agent needs a separate capability, including for
+an ordinary-turn organisation or global creation, the server may issue one
+exact same-turn delegation only after resolving the final intent and checking
+the actor's corresponding live semantic role. This issuance is part of
+executing the authorised turn; it does not introduce an extra human
+confirmation or let the model enlarge its scope. The governed MCP path retains
+agent provenance, a durable effect receipt, and canonical read-back. Existing
+custom scholarly handlers do not yet share that receipt path; their bounded
+exception preflights every existing mutation target as the exact actor's
+private concept and requires global schema support to be preprovisioned.
+Historical/mixed, other-user, reserved-governance, sessionless, or separately
+delegated effects do not inherit this actor-bound path merely because the model
+requested them.
 
 ## 4. Governed effects and scope transition
 
@@ -117,19 +128,52 @@ read-back proves both the removal and the unchanged canonical-name snapshot.
 Natural-language values are not trimmed, case-folded, title-cased, or Unicode
 normalised by the deletion boundary.
 
-Governed creation defaults to the actor's exact user-private publication
-context. Organisation publication must be requested explicitly as
-`organisation_general` and requires that organisation's semantic authority.
-The legacy dual user-and-organisation visibility mode is rejected at this
-boundary because that visibility shape is mixed, not a canonical ownership or
-publication context.
+For ordinary-turn `create_concepts`, the model may select
+`user_only_default`, `organisation_general`, or `global_general` according to
+the intended concept semantics. Omitting the choice remains the conservative
+`user_only_default`. The server binds actor and current-organisation identity;
+the model cannot name a different user or organisation, and organisation or
+global creation executes only when the actor's corresponding live semantic
+authority permits it. Denial is reported as denial: the system must not
+silently downgrade a rejected organisation or global request to private
+creation. Scope selection is model judgement within that authority ceiling,
+not an automatic ladder, confirmation ritual, or hard-coded semantic
+classifier.
+
+Canonical relationships inherit the source concept's exact publication
+context; `add_relationship` does not take an independent scope choice. A
+caller-supplied `scope_mode` on that command is rejected rather than ignored.
+When a relationship-like fact needs an audience independent of a broader
+visible subject, the model may instead choose the provenance-bearing
+`upsert_scoped_assertion` path with user or organisation scope. Organisation
+identity remains server-bound and organisation scope requires a current trusted
+organisation, but the optional organisation binding must not make user-scoped
+assertion capabilities disappear for an authenticated actor who has no current
+organisation.
+
+An exact canonical publication context may contain no restriction, exactly one
+user restriction, exactly one organisation restriction, or exactly one of each.
+The last form is a supported composite context, and a mutation affecting it
+requires authority over both its user and organisation components. A scope
+shape containing legacy aliases, more than one user or organisation, malformed
+targets, or another unresolved combination remains historical or mixed; it is
+not reinterpreted as a canonical composite.
 
 Authority and visibility predicates are reserved to dedicated governance
 operations. Generic mutation is denied for unresolved historical or mixed
 scope. The dedicated scope-change path first exposes a scope read-back and
-preview, then requires an optimistic scope fingerprint, explicit destination,
-source-and-destination authority, and a request identifier. It is the only
-governed path that may adopt legacy/mixed scope; it must never silently
+preview, then requires an optimistic scope fingerprint, explicit edit,
+source-and-destination authority, and a request identifier. For a canonical
+scope, user and organisation controls are independent: enabling a component
+adds only that restriction and disabling it removes only that restriction,
+while preserving the complementary component. Consequently removing the sole
+restriction produces global scope; removing either component from a composite
+preserves the other. Additions are bound to the authenticated actor or current
+organisation, and execution verifies the exact edge delta and final read-back.
+The controls do not implement an automatic user-to-organisation-to-global
+ladder. Ambiguous legacy aliases, multiplicity, and malformed scope are rejected
+by this quick-edit contract; any controlled adoption of historical or mixed
+scope must use the broader explicit governed path and must never silently
 reinterpret malformed legacy data as global publication.
 
 Undo is deliberately fail-closed until it can carry an equally exact target,
@@ -195,9 +239,16 @@ global authority; operational-admin non-equivalence; expiry, revocation,
 tampering, and cross-audience delegation denial; alternate entry-point
 enforcement; private-context non-leakage; retry/concurrency behaviour; and
 receipt-backed canonical read-back of successful and partial effects.
-Where a supported workflow route uses direct actor-private authority, the
-positive evidence must exercise its normal production actor binding and write
-ceiling rather than a manually injected delegation value.
+Where a supported workflow route uses direct actor-private authority or
+same-turn exact delegation, the positive evidence must exercise its normal
+production actor and current-organisation binding, live role resolution,
+delegation issuance where applicable, and write ceiling rather than a manually
+injected delegation value. Creation evidence must cover private defaulting,
+explicit organisation and global selection, spoofed-identity containment,
+authority denial without downgrade or mutation, and exact canonical read-back.
+Scope-edit evidence must cover every add/remove state transition across global,
+user, organisation, and composite contexts, plus legacy/multiple-scope
+rejection and stale-preview refusal.
 
 For legacy inline-name cleanup, the bounded evidence additionally covers exact
 Unicode preservation, stale and repeated selector refusal, canonical-name

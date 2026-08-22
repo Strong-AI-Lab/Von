@@ -9,8 +9,7 @@ import pytest
 
 @pytest.fixture
 def consolidation_runtime(monkeypatch: pytest.MonkeyPatch):
-    from src.backend.db.repositories import concepts_repository
-    from src.backend.db.repositories import text_value_repository
+    from src.backend.db.repositories import concepts_repository, text_value_repository
     from src.backend.services import concept_merge_service as merge
     from src.backend.services import ontology_mutation_command_service as command
     from src.backend.services import ontology_publication_authority_service as authority
@@ -318,6 +317,119 @@ def test_merge_requires_authority_for_an_incoming_reference_context(
     }
     assert decision.allowed is False
     assert decision.reason_code == "organisation_ontology_admin_authority_required"
+
+
+def test_merge_keeps_distinct_composite_contexts_in_authority_plan(
+    consolidation_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+
+    authority, _merge, concepts, text_relations, text_values, _receipts = (
+        consolidation_runtime
+    )
+    source_id, target_id = _seed_private_merge(
+        concepts,
+        text_relations,
+        text_values,
+    )
+    concepts.update_many(
+        {"concept_id": {"$in": [source_id, target_id]}},
+        {
+            "$set": {
+                "relationships.#V#specific_to_organisation": ["#V#org_a"]
+            }
+        },
+    )
+    concepts.update_one(
+        {"concept_id": "#V#incoming"},
+        {
+            "$set": {
+                "relationships.#V#specific_to_organisation": ["#V#org_b"]
+            }
+        },
+    )
+    org_a_role = authority.AuthorityRoleEvidence(
+        role=authority.ORGANISATION_ONTOLOGY_ADMINISTRATOR_ROLE,
+        actor_concept_id="#V#admin",
+        organisation_concept_id="#V#org_a",
+        relation_id="role:org-a",
+        revision="1",
+    )
+    monkeypatch.setattr(
+        authority,
+        "resolve_live_semantic_roles",
+        lambda _actor: (org_a_role,),
+    )
+
+    with authority.override_current_actor("#V#admin", "#V#org_a"):
+        intent = command.build_ontology_mutation_intent(
+            method_name="merge_concepts",
+            arguments={
+                "source_id": source_id,
+                "target_id": target_id,
+                "simulate": False,
+            },
+        )
+        decision = authority.authorise_ontology_mutation(intent)
+
+    assert intent.publication_context.kind == authority.PublicationContextKind.COMPOSITE
+    assert any(
+        context.kind == authority.PublicationContextKind.COMPOSITE
+        and {
+            component.concept_id for component in context.components
+        } == {"#V#admin", "#V#org_b"}
+        for context in intent.source_contexts
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "organisation_ontology_admin_authority_required"
+
+
+def test_update_read_back_must_preserve_exact_composite_components() -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    intended = authority.PublicationContext.composite(
+        user_concept_id="#V#admin",
+        organisation_concept_id="#V#org_a",
+        source="intent",
+    )
+    intent = authority.OntologyMutationIntent(
+        operation="concept.update",
+        publication_context=intended,
+        target_concept_ids=("#V#subject",),
+        tool_name="update_concept",
+        delta={},
+    )
+    wrong_context = authority.PublicationContext.composite(
+        user_concept_id="#V#admin",
+        organisation_concept_id="#V#org_b",
+        source="concept_visibility",
+    )
+    exact_context = authority.PublicationContext.composite(
+        user_concept_id="#V#admin",
+        organisation_concept_id="#V#org_a",
+        source="concept_visibility",
+    )
+
+    assert command._verify_method_postcondition(
+        method_name="update_concept",
+        intent=intent,
+        result={"success": True},
+        canonical_state={
+            "exists": True,
+            "publication_context": wrong_context.to_mapping(),
+        },
+    ) is False
+    assert command._verify_method_postcondition(
+        method_name="update_concept",
+        intent=intent,
+        result={"success": True},
+        canonical_state={
+            "exists": True,
+            "publication_context": exact_context.to_mapping(),
+        },
+    ) is True
 
 
 def test_partial_identity_consolidation_is_receipted_as_indeterminate(

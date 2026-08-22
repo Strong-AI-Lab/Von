@@ -319,6 +319,18 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
             },
         )
     )
+    actor_without_org = set(
+        ordinary_turn_capability_delegation(
+            gateway,
+            user_concept_id="#V#ordinary_actor",
+            trusted_argument_values={
+                "turn_namespace": "#V#ordinary_actor",
+                "actor_user_concept_id": "#V#ordinary_actor",
+                "actor_organisation_concept_id": None,
+                "turn_id": "turn-no-org",
+            },
+        )
+    )
     delegated_effects = {
         name for name in actor_mail_reads if catalogue.get(name).category == "write"
     }
@@ -336,6 +348,14 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "workflow_list_instances",
     } <= actor_reads
     assert public_reads <= actor_reads
+    assert {
+        "create_concepts",
+        "add_text_assertion_concept_links",
+        "list_scoped_assertions",
+        "retract_scoped_assertion",
+        "store_text_assertion",
+        "upsert_scoped_assertion",
+    } <= actor_without_org
 
     # Capabilities that can persist state remain write-category even when
     # their primary output is a report or ranking.
@@ -427,9 +447,14 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     assert create_definition.ordinary_turn_fixed_arguments == {
         "organisation_concept_id": None,
         "org_id": None,
-        "scope_mode": "user_only_default",
         "visibility_scope_mode": None,
     }
+    assert create_definition.input_schema.enum_values["scope_mode"] == [
+        "user_only_default",
+        "organisation_general",
+        "global_general",
+        None,
+    ]
     marker_definition = catalogue.get("record_source_processing_marker")
     assert marker_definition.ordinary_turn_trusted_argument_bindings == {
         "namespace": "turn_namespace",
@@ -445,22 +470,33 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     scoped_definition = catalogue.get("upsert_scoped_assertion")
     assert scoped_definition.ordinary_turn_trusted_argument_bindings == {
         "acting_user_concept_id": "actor_user_concept_id",
-        "organisation_concept_id": "actor_organisation_concept_id",
         "namespace": "turn_namespace",
         "turn_id": "turn_id",
     }
     assert scoped_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+        "org_concept_id": None,
+        "organisation_id": None,
+        "org_id": None,
         "canonical_publication": False,
     }
+    assert scoped_definition.input_schema.enum_values["scope_mode"] == [
+        "user",
+        "organisation",
+        None,
+    ]
     assert scoped_definition.ordinary_turn_mutation_subject_argument is None
     text_assertion_definition = catalogue.get("store_text_assertion")
     assert text_assertion_definition.ordinary_turn_trusted_argument_bindings == {
         "acting_user_concept_id": "actor_user_concept_id",
-        "organisation_concept_id": "actor_organisation_concept_id",
         "namespace": "turn_namespace",
         "turn_id": "turn_id",
     }
     assert text_assertion_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+        "org_concept_id": None,
+        "organisation_id": None,
+        "org_id": None,
         "canonical_publication": False,
     }
     assert text_assertion_definition.ordinary_turn_effect is True
@@ -468,9 +504,14 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     link_definition = catalogue.get("add_text_assertion_concept_links")
     assert link_definition.ordinary_turn_trusted_argument_bindings == {
         "acting_user_concept_id": "actor_user_concept_id",
-        "organisation_concept_id": "actor_organisation_concept_id",
         "namespace": "turn_namespace",
         "turn_id": "turn_id",
+    }
+    assert link_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+        "org_concept_id": None,
+        "organisation_id": None,
+        "org_id": None,
     }
     assert link_definition.ordinary_turn_effect is True
     assert link_definition.ordinary_turn_mutation_subject_argument is None
@@ -484,8 +525,23 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     assert retract_definition.input_schema.optional == {}
     assert retract_definition.ordinary_turn_trusted_argument_bindings == {
         "acting_user_concept_id": "actor_user_concept_id",
-        "organisation_concept_id": "actor_organisation_concept_id",
         "namespace": "turn_namespace",
+    }
+    assert retract_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+        "org_concept_id": None,
+        "organisation_id": None,
+        "org_id": None,
+    }
+    list_definition = catalogue.get("list_scoped_assertions")
+    assert list_definition.ordinary_turn_trusted_argument_bindings == {
+        "acting_user_concept_id": "actor_user_concept_id",
+    }
+    assert list_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+        "org_concept_id": None,
+        "organisation_id": None,
+        "org_id": None,
     }
     assert catalogue.get(
         "search_knowledge_base"
@@ -504,7 +560,6 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         ).ordinary_turn_trusted_argument_bindings == {
             "namespace": "turn_namespace",
         }
-
     # Profile-scoped reads are absent until the entry point supplies the
     # actor-authorised constrained choice set. The model may select only from
     # those stable selectors; the server maps the selection to a runtime alias.
@@ -636,6 +691,76 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "turn_execution_build_context_answering_benchmark",
         "turn_execution_build_selector_benchmark",
     } <= actor_reads
+
+
+def test_no_org_scoped_assertion_contract_is_visible_and_identity_bound() -> None:
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+    from src.backend.services.adaptive_turn_service import (
+        _capability_catalogue,
+        _trusted_tool_payload,
+        ordinary_turn_capability_delegation,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    trusted = {
+        "turn_namespace": "#V#ordinary_actor",
+        "actor_user_concept_id": "#V#ordinary_actor",
+        "actor_organisation_concept_id": None,
+        "turn_id": "turn-no-org",
+    }
+    delegated = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#ordinary_actor",
+        trusted_argument_values=trusted,
+    )
+    assert "upsert_scoped_assertion" in delegated
+    capability = _capability_catalogue(
+        gateway,
+        delegated,
+        {"names": ["upsert_scoped_assertion"]},
+        trusted_argument_values=trusted,
+    )["capabilities"][0]
+    assert capability["input_schema"]["properties"]["scope_mode"]["enum"] == [
+        "user",
+        "organisation",
+        None,
+    ]
+    assert {
+        "acting_user_concept_id",
+        "organisation_concept_id",
+        "org_concept_id",
+        "organisation_id",
+        "org_id",
+        "namespace",
+        "turn_id",
+    }.isdisjoint(capability["input_schema"]["properties"])
+
+    payload = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="upsert_scoped_assertion",
+        model_payload={
+            "subject_concept_id": "#V#subject",
+            "predicate": "#V#related_to",
+            "target_concept_id": "#V#target",
+            "scope_mode": "user",
+            "organisation_concept_id": "#V#spoofed_org",
+            "org_id": "#V#spoofed_org_alias",
+        },
+        trusted_argument_values=trusted,
+    )
+    assert payload["acting_user_concept_id"] == "#V#ordinary_actor"
+    assert payload["namespace"] == "#V#ordinary_actor"
+    assert payload["organisation_concept_id"] is None
+    assert payload["org_id"] is None
+    assert payload["scope_mode"] == "user"
 
 
 def test_actor_scoped_private_reads_reject_payload_only_identity(monkeypatch):
