@@ -221,6 +221,7 @@ def test_created_conversation_projection_is_restricted_to_transcript_owner(
     monkeypatch,
 ) -> None:
     inserted: list[dict[str, Any]] = []
+    text_writes: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         service, "get_conversation_concept_by_session_id", lambda _session_id: None
@@ -230,10 +231,10 @@ def test_created_conversation_projection_is_restricted_to_transcript_owner(
         "insert_one",
         lambda doc: inserted.append(dict(doc)),
     )
-    monkeypatch.setattr(service, "upsert_text_for_concept", lambda **_kwargs: None)
     monkeypatch.setattr(
-        "src.backend.services.chat_history_service.get_chat_history_session_summary",
-        lambda **_kwargs: None,
+        service,
+        "upsert_text_for_concept",
+        lambda **kwargs: text_writes.append(kwargs),
     )
 
     conversation_id = service.get_or_create_conversation_concept(
@@ -249,3 +250,88 @@ def test_created_conversation_projection_is_restricted_to_transcript_owner(
     relationships = inserted[0]["relationships"]
     assert relationships[service.PREDICATE_HAS_OWNER] == ["#V#owner"]
     assert get_specific_to_user_values(relationships) == ["#V#owner"]
+    assert service.PREDICATE_HAS_NAME not in {
+        write["predicate"] for write in text_writes
+    }
+
+
+def test_source_backed_conversation_card_is_deterministic_and_minimal(
+    monkeypatch,
+) -> None:
+    session_id = "source-backed-session"
+    expected_conversation_id = service._generate_conversation_concept_id(session_id)
+    materialise = []
+
+    def _materialise(**kwargs):  # noqa: ANN003
+        materialise.append(kwargs)
+        return expected_conversation_id
+
+    monkeypatch.setattr(service, "get_or_create_conversation_concept", _materialise)
+
+    card = service.build_source_backed_conversation_projection(
+        session_id=session_id,
+        owner_concept_id="#V#owner",
+        authorised_focal_concepts=[
+            {"concept_id": "#V#task", "name": "Task", "type_ids": ["#V#task"]}
+        ],
+        access_mode="owner",
+        session_name="Current session title",
+        last_activity_at="2026-08-22T12:00:00+00:00",
+        materialise_owner_projection=True,
+    )
+
+    assert materialise[0]["session_id"] == session_id
+    assert card == {
+        "schema_version": "conversation_projection.v1",
+        "conversation_concept_id": expected_conversation_id,
+        "title": "Current session title",
+        "last_activity_at": "2026-08-22T12:00:00+00:00",
+        "access_mode": "owner",
+        "focal_concepts": [
+            {
+                "concept_id": "#V#task",
+                "display_name": "Task",
+                "type_ids": ["#V#task"],
+            }
+        ],
+        "projection_status": "materialised",
+        "open_action": {"kind": "open_conversation", "session_id": session_id},
+    }
+    assert "owner_concept_id" not in card
+    assert "history" not in card
+
+
+def test_shared_source_backed_card_does_not_materialise_owner_projection(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        service,
+        "get_or_create_conversation_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not materialise")),
+    )
+
+    card = service.build_source_backed_conversation_projection(
+        session_id="shared-session",
+        owner_concept_id="#V#owner",
+        authorised_focal_concepts=[],
+        access_mode="shared",
+    )
+
+    assert card["conversation_concept_id"] is None
+    assert card["projection_status"] == "source_backed"
+    assert card["title"] == "Conversation"
+
+
+def test_focal_conversation_backlinks_are_bounded_and_source_scoped() -> None:
+    card = {"schema_version": "conversation_projection.v1", "title": "One"}
+
+    backlinks = service.build_focal_conversation_backlinks(
+        source_concept_id="#V#task",
+        items=[card] * 30,
+        more_count=5,
+    )
+
+    assert backlinks["schema_version"] == "conversation_backlinks.v1"
+    assert backlinks["source_concept_id"] == "#V#task"
+    assert len(backlinks["items"]) == 25
+    assert backlinks["more_count"] == 5

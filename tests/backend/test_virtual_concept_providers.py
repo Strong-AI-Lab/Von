@@ -75,6 +75,12 @@ def test_provider_must_declare_a_source_id():
         vcp.register_provider(_StubProvider(source_id="  "))
 
 
+def test_private_conversation_ids_are_not_claimed_by_public_virtual_registry():
+    """Conversation projections must retain ordinary actor-filtered access."""
+
+    assert vcp.owning_provider("#V#conversation_0123456789ab") is None
+
+
 def test_duplicate_source_ids_are_refused(stub_registered):
     with pytest.raises(ValueError, match="Duplicate"):
         vcp.register_provider(_StubProvider(source_id=stub_registered.source_id))

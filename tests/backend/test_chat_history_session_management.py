@@ -399,6 +399,65 @@ def test_recent_focus_lookup_queries_exact_indexable_field(monkeypatch):
     assert [item["session_id"] for item in result] == ["focused-session"]
 
 
+def test_shared_session_metadata_batch_is_exact_bounded_and_transcript_free(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    calls = []
+
+    class _FakeColl:
+        def find(self, query, projection=None, **kwargs):
+            calls.append((query, projection, kwargs))
+            return [
+                {
+                    "user_id": "#V#owner_0",
+                    "session_id": "shared-0",
+                    "session_name": "Shared discussion",
+                    "focal_concept_ids": ["#V#task"],
+                },
+                {
+                    "user_id": "#V#not_requested",
+                    "session_id": "other-session",
+                    "session_name": "Must be ignored",
+                    "focal_concept_ids": ["#V#task"],
+                },
+            ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: _FakeColl(),
+    )
+    monkeypatch.setattr(
+        chat_history_service, "_guard_chat_history_read", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        chat_history_service, "_record_chat_history_read_success", lambda: None
+    )
+
+    result = chat_history_service.get_chat_history_session_summaries_for_owner_sessions(
+        [(f"#V#owner_{index}", f"shared-{index}") for index in range(55)],
+        limit=100,
+    )
+
+    assert list(result) == [("#V#owner_0", "shared-0")]
+    query, projection, _ = calls[0]
+    assert len(query["$or"]) == 50
+    assert query["$or"][0] == {
+        "user_id": "#V#owner_0",
+        "session_id": "shared-0",
+    }
+    assert query["$or"][-1] == {
+        "user_id": "#V#owner_49",
+        "session_id": "shared-49",
+    }
+    assert projection["user_id"] == 1
+    assert projection["session_id"] == 1
+    assert "history" not in projection
+    assert "messages" not in projection
+
+
 def test_implicit_session_creation_does_not_derive_name_from_first_user_message(
     monkeypatch,
 ):

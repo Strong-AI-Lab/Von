@@ -13,7 +13,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import upsert_text_for_concept
@@ -60,6 +60,202 @@ def _generate_conversation_concept_id(session_id: str) -> str:
 
     hash_suffix = hashlib.sha256(session_id.encode()).hexdigest()[:12]
     return f"#V#conversation_{hash_suffix}"
+
+
+def _normalise_projection_focal_concepts(values: Iterable[Any]) -> list[dict[str, Any]]:
+    """Return bounded focal cards already authorised by the caller.
+
+    This service deliberately does not determine concept visibility.  The
+    route that resolves an actor's current access supplies this small
+    projection after its own fresh authorisation check.
+    """
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        concept_id = value.get("concept_id")
+        if not isinstance(concept_id, str):
+            continue
+        concept_id = concept_id.strip()
+        if not concept_id or not concept_id.startswith("#V#"):
+            continue
+        if concept_id in seen:
+            continue
+        seen.add(concept_id)
+        name = value.get("name")
+        type_ids = value.get("type_ids")
+        result.append(
+            {
+                "concept_id": concept_id,
+                "display_name": (
+                    name.strip()
+                    if isinstance(name, str) and name.strip()
+                    else concept_id
+                ),
+                "type_ids": [
+                    item for item in type_ids if isinstance(item, str) and item.strip()
+                ]
+                if isinstance(type_ids, list)
+                else [],
+            }
+        )
+    return result
+
+
+def build_source_backed_conversation_projection(
+    *,
+    session_id: str,
+    owner_concept_id: str,
+    authorised_focal_concepts: Iterable[Any],
+    access_mode: str,
+    session_name: Optional[str] = None,
+    last_activity_at: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    materialise_owner_projection: bool = False,
+    materialised_concept_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the renderer-ready identity projection for one conversation.
+
+    Chat history remains authoritative for the transcript, title, lifecycle,
+    and current focus.  The card contains only a small current source
+    projection.  A session owner may lazily materialise the private Vontology
+    identity; an accepted participant receives an equally useful source card
+    without widening that concept's visibility.
+    """
+
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ConversationConceptError("session_id is required")
+    if not isinstance(owner_concept_id, str) or not owner_concept_id.strip():
+        raise ConversationConceptError("owner_concept_id is required")
+    if access_mode not in {"owner", "shared"}:
+        raise ConversationConceptError("access_mode is invalid")
+
+    session_id = session_id.strip()
+    owner_concept_id = owner_concept_id.strip()
+    conversation_concept_id = (
+        materialised_concept_id.strip()
+        if isinstance(materialised_concept_id, str)
+        and materialised_concept_id.strip()
+        else None
+    )
+    materialisation = "source_backed"
+    if conversation_concept_id:
+        materialisation = "materialised"
+    elif materialise_owner_projection:
+        try:
+            conversation_concept_id = get_or_create_conversation_concept(
+                session_id=session_id,
+                owner_concept_id=owner_concept_id,
+                organisation_concept_id=organisation_concept_id,
+                namespace=namespace,
+            )
+            materialisation = "materialised"
+        except Exception as exc:
+            # The conversation session remains usable.  A later owner read
+            # may repair this derived projection without copying source data
+            # into Vontology.
+            logger.warning(
+                "Conversation concept projection pending for session %s: %s",
+                session_id,
+                exc,
+            )
+            materialisation = "pending"
+
+    title = (
+        session_name.strip()
+        if isinstance(session_name, str) and session_name.strip()
+        else "Conversation"
+    )
+    return {
+        "schema_version": "conversation_projection.v1",
+        "conversation_concept_id": conversation_concept_id,
+        "title": title,
+        "last_activity_at": (
+            last_activity_at.strip()
+            if isinstance(last_activity_at, str) and last_activity_at.strip()
+            else None
+        ),
+        "access_mode": access_mode,
+        "focal_concepts": _normalise_projection_focal_concepts(
+            authorised_focal_concepts
+        ),
+        "projection_status": materialisation,
+        "open_action": {"kind": "open_conversation", "session_id": session_id},
+    }
+
+
+def get_visible_materialised_conversation_ids_for_sessions(
+    session_ids: Iterable[Any],
+) -> Dict[str, str]:
+    """Return actor-visible deterministic projection IDs in one bounded read.
+
+    This intentionally does not perform the legacy session lookup: catalogue
+    rendering must not fan out into compatibility scans.  Stage 1 focused
+    sessions use deterministic IDs, while older or pending sessions remain
+    useful source-backed cards.
+    """
+
+    normalised_session_ids: list[str] = []
+    for raw_session_id in session_ids:
+        if not isinstance(raw_session_id, str):
+            continue
+        session_id = raw_session_id.strip()
+        if session_id and session_id not in normalised_session_ids:
+            normalised_session_ids.append(session_id)
+    normalised_session_ids = normalised_session_ids[:25]
+    if not normalised_session_ids:
+        return {}
+
+    expected_by_concept_id = {
+        _generate_conversation_concept_id(session_id): session_id
+        for session_id in normalised_session_ids
+    }
+    try:
+        documents = ConceptsRepository.find(
+            {
+                "concept_id": {"$in": list(expected_by_concept_id)},
+                "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+            },
+            projection={"concept_id": 1, "relationships.is_an_instance_of": 1},
+            limit=len(expected_by_concept_id),
+        )
+    except Exception:
+        return {}
+    result: Dict[str, str] = {}
+    for document in documents:
+        concept_id = _visible_conversation_id(document)
+        if concept_id and concept_id in expected_by_concept_id:
+            result[expected_by_concept_id[concept_id]] = concept_id
+    return result
+
+
+def build_focal_conversation_backlinks(
+    *,
+    source_concept_id: str,
+    items: Iterable[Any],
+    more_count: int = 0,
+) -> Dict[str, Any]:
+    """Return a bounded source-backed backlink list for one focal concept.
+
+    It is intentionally not a Vontology relation: focus can change and the
+    transcript/session store is its authority.  Callers must only invoke this
+    after checking both the requested focal object and the session's complete
+    stored focus against the current actor.
+    """
+
+    if not isinstance(source_concept_id, str) or not source_concept_id.strip():
+        raise ConversationConceptError("source_concept_id is required")
+    source_concept_id = source_concept_id.strip()
+    projected_items = [item for item in items if isinstance(item, dict)][:25]
+    return {
+        "schema_version": "conversation_backlinks.v1",
+        "source_concept_id": source_concept_id,
+        "items": projected_items,
+        "more_count": max(int(more_count or 0), 0),
+    }
 
 
 def _session_id_text_fingerprint(session_id: str) -> str:
@@ -358,27 +554,9 @@ def get_or_create_conversation_concept(
         except Exception as e:
             logger.warning(f"Failed to store topic: {e}")
 
-    # Try to get conversation name from chat history
-    try:
-        from .chat_history_service import get_chat_history_session_summary
-
-        # Get summary to retrieve session name
-        summary = get_chat_history_session_summary(
-            user_id=owner_concept_id or "",
-            session_id=session_id,
-            summary_mode="light",
-        )
-        if summary:
-            session_name = summary.get("session_name")
-            if session_name:
-                upsert_text_for_concept(
-                    subject_concept_id=conversation_concept_id,
-                    predicate=PREDICATE_HAS_NAME,
-                    text=session_name,
-                    lang="en-NZ",
-                )
-    except Exception as e:
-        logger.debug(f"Could not retrieve conversation name from chat history: {e}")
+    # Deliberately do not copy a session title, transcript, or lifecycle state
+    # into the concept.  Those fields are source-owned chat-history data and
+    # are projected afresh only to an authorised viewer.
 
     return conversation_concept_id
 
@@ -533,6 +711,9 @@ def update_conversation_topic(conversation_concept_id: str, topic: str) -> bool:
 __all__ = [
     "CONVERSATION_TYPE_ID",
     "ConversationConceptError",
+    "build_source_backed_conversation_projection",
+    "build_focal_conversation_backlinks",
+    "get_visible_materialised_conversation_ids_for_sessions",
     "get_conversation_concept_by_session_id",
     "get_or_create_conversation_concept",
     "get_conversation_concept",
