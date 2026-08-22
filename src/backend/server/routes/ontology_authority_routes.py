@@ -45,6 +45,7 @@ from ...services.ontology_publication_authority_service import (
 from ...services.ontology_scope_change_service import (
     EXECUTE_SCOPE_CHANGE_TOOL_NAME,
     PREVIEW_SCOPE_CHANGE_TOOL_NAME,
+    OntologyScopeChangeRequestError,
     change_concept_publication_scope,
 )
 from ...services.von_operational_administrator_service import (
@@ -436,6 +437,7 @@ def change_concept_scope(concept_id: str):
     destination_kind = _clean(payload.get("destination_kind"))
     destination_kind_normalised = destination_kind.lower().replace("-", "_")
     destination_concept_id = _clean(payload.get("destination_concept_id")) or None
+    scope_edit = payload.get("scope_edit")
 
     # The Concept-tab self/organisation controls name the destination kind but
     # deliberately do not send browser-held identity. Resolve those defaults
@@ -470,18 +472,27 @@ def change_concept_scope(concept_id: str):
         else EXECUTE_SCOPE_CHANGE_TOOL_NAME
     )
     try:
-        result = change_concept_publication_scope(
-            concept_id=concept_id,
-            destination_kind=destination_kind,
-            destination_concept_id=destination_concept_id,
-            expected_scope_fingerprint=_clean(
+        change_arguments = {
+            "concept_id": concept_id,
+            "destination_kind": destination_kind,
+            "destination_concept_id": destination_concept_id,
+            "expected_scope_fingerprint": _clean(
                 payload.get("expected_scope_fingerprint")
             ),
-            request_id=_clean(payload.get("request_id")),
-            preview=preview,
-            reason=_clean(payload.get("reason")) or None,
-            invocation_tool_name=invocation_tool_name,
+            "request_id": _clean(payload.get("request_id")),
+            "preview": preview,
+            "reason": _clean(payload.get("reason")) or None,
+            "invocation_tool_name": invocation_tool_name,
+        }
+        if scope_edit is not None:
+            change_arguments["scope_edit"] = scope_edit
+        result = change_concept_publication_scope(
+            **change_arguments,
         )
+    except OntologyScopeChangeRequestError as exc:
+        return jsonify(
+            {"error": exc.reason_code, "message": exc.public_message}
+        ), 400
     except ValueError as exc:
         return jsonify(
             {"error": "invalid_ontology_scope_change", "message": str(exc)}

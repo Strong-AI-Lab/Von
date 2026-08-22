@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-
 TRUSTED_USER = "#V#trusted_user"
 TRUSTED_ORG = "#V#trusted_org"
 TRUSTED_NAMESPACE = "#V#trusted_user@trusted_org"
@@ -393,6 +392,35 @@ def test_authenticated_actor_is_bound_across_every_scoped_assertion_path(
     assert explicit_list["user_concept_id"] == TRUSTED_USER
     assert explicit_list["organisation_concept_id"] == TRUSTED_ORG
     assert calls["relations"][-1]["context_view"] == "actor_effective"
+
+
+def test_authenticated_user_without_org_can_use_user_scoped_assertions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.security.access_control import override_current_actor
+
+    calls = _install_route_fakes(monkeypatch)
+    gateway = _gateway()
+
+    with override_current_actor(TRUSTED_USER, None):
+        upsert = gateway.invoke(
+            "upsert_scoped_assertion",
+            {
+                "subject_concept_id": "#V#subject",
+                "predicate": "#V#related_to",
+                "target_concept_id": "#V#target",
+                "scope_mode": "user",
+            },
+        ).payload
+        listed = gateway.invoke("list_scoped_assertions", {}).payload
+
+    assert upsert["success"] is True
+    assert listed["success"] is True
+    assert calls["upsert"][-1]["_actor"] == (TRUSTED_USER, None)
+    assert calls["upsert"][-1]["acting_user_concept_id"] == TRUSTED_USER
+    assert calls["upsert"][-1]["organisation_concept_id"] is None
+    assert calls["upsert"][-1]["scope_mode"] == "user"
+    assert calls["list"][-1]["_actor"] == (TRUSTED_USER, None)
 
 
 def test_invalid_bare_predicate_exposes_one_exact_executable_scoped_retry(

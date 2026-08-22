@@ -6,6 +6,7 @@ when callers included additional top-level context.
 """
 
 import pytest
+
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.integrations.internal_mcp.catalogue import (
     _create_concepts as _governed_create_concepts,
@@ -179,8 +180,8 @@ def test_create_concepts_predicate_kind_creates_predicate_instance():
     assert first_result.get("success") is True or "concept_id" in first_result
 
 
-def test_create_concepts_defaults_to_user_org_scope_from_namespace():
-    """Default creation should scope to user+organisation when namespace has both."""
+def test_create_concepts_defaults_to_user_scope_from_namespace():
+    """Omitted scope should remain actor-private even when an organisation exists."""
     import uuid
 
     unique_name = f"scope_mode_test_default_{uuid.uuid4().hex[:8]}"
@@ -199,9 +200,10 @@ def test_create_concepts_defaults_to_user_org_scope_from_namespace():
     assert relationships.get(CANONICAL_SPECIFIC_TO_USER_PREDICATE) == [
         "#V#scope_user"
     ]
-    assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == ["#V#scope_org"]
+    assert not relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE)
     scope_selection = result.get("scope_selection") or {}
-    assert scope_selection.get("requested_scope_mode") == "user_org_default"
+    assert scope_selection.get("requested_scope_mode") == "user_only_default"
+    assert scope_selection.get("scope_mode_source") == "default.user_only_default"
 
 
 def test_create_concepts_scope_mode_organisation_general():
@@ -226,6 +228,7 @@ def test_create_concepts_scope_mode_organisation_general():
     assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == ["#V#scope_org"]
     scope_selection = result.get("scope_selection") or {}
     assert scope_selection.get("requested_scope_mode") == "organisation_general"
+    assert scope_selection.get("scope_mode_source") == "request.scope_mode"
     assert "organisation_general" in (scope_selection.get("effective_scope_modes") or [])
 
 
@@ -251,6 +254,7 @@ def test_create_concepts_scope_mode_global_general():
     assert "specific_to_org" not in relationships
     scope_selection = result.get("scope_selection") or {}
     assert scope_selection.get("requested_scope_mode") == "global_general"
+    assert scope_selection.get("scope_mode_source") == "request.scope_mode"
     assert "global_general" in (scope_selection.get("effective_scope_modes") or [])
 
 

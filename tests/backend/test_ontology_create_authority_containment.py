@@ -22,14 +22,24 @@ def _parent_resolution(parent_id: str):
     )
 
 
-def test_ordinary_create_is_explicitly_actor_private() -> None:
+def test_ordinary_create_exposes_scope_choice_but_binds_scope_identity() -> None:
     from src.backend.integrations.internal_mcp.catalogue import build_default_catalogue
 
     definition = build_default_catalogue().get("create_concepts")
 
-    assert definition.ordinary_turn_fixed_arguments["scope_mode"] == (
-        "user_only_default"
+    assert "scope_mode" not in definition.ordinary_turn_fixed_arguments
+    assert definition.ordinary_turn_fixed_arguments[
+        "organisation_concept_id"
+    ] is None
+    assert "organisation_concept_id" not in (
+        definition.ordinary_turn_trusted_argument_bindings
     )
+    assert definition.input_schema.enum_values["scope_mode"] == [
+        "user_only_default",
+        "organisation_general",
+        "global_general",
+        None,
+    ]
 
 
 def test_governed_create_preserves_default_type_and_one_exact_parent(
@@ -50,7 +60,11 @@ def test_governed_create_preserves_default_type_and_one_exact_parent(
         },
     )
     assert resolved["concepts"][0]["kind"] == "type"
-    assert resolved["scope_mode"] == "user_only_default"
+    assert "scope_mode" not in resolved
+    assert "scope_mode" not in command.resolve_governed_ontology_arguments(
+        "create_concepts",
+        resolved,
+    )
     assert resolved["parent_id"] == "#V#parent"
     assert resolved["parent_concept_ids"] == ["#V#parent"]
 
@@ -66,6 +80,239 @@ def test_governed_create_preserves_default_type_and_one_exact_parent(
                 "parent_concept_ids": ["#V#parent_b"],
             },
         )
+
+
+def test_governed_create_uses_trusted_org_and_keeps_omission_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", lambda _concept_id: False)
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+
+    supplied = {
+        "parent_id": "#V#research_object",
+        "concepts": [
+            {
+                "concept_id": "#V#lab_record",
+                "name": "Lab record",
+                "kind": "type",
+            }
+        ],
+        "created_by_concept_id": "#V#spoofed_user",
+        "organisation_concept_id": "#V#spoofed_org",
+        "org_id": "#V#spoofed_org_alias",
+        "namespace": "#V#spoofed_user@spoofed_org",
+    }
+    with authority.override_current_actor("#V#member", "#V#organisation_a"):
+        normalised = command.normalise_governed_ontology_arguments(
+            "create_concepts",
+            supplied,
+        )
+        resolved = command.resolve_governed_ontology_arguments(
+            "create_concepts",
+            normalised,
+        )
+        intent = command.build_ontology_mutation_intent(
+            method_name="create_concepts",
+            arguments=resolved,
+        )
+
+    assert normalised["created_by_concept_id"] == "#V#member"
+    assert normalised["organisation_concept_id"] == "#V#organisation_a"
+    assert "org_id" not in normalised
+    assert "namespace" not in normalised
+    assert normalised["maintain_relationship_inverses"] is False
+    assert normalised["resolve_visibility_from_event_namespace"] is False
+    assert "scope_mode" not in resolved
+    assert intent.publication_context.kind == authority.PublicationContextKind.USER
+    assert intent.publication_context.concept_id == "#V#member"
+    assert intent.delta["stored_scope"] == {
+        "effective_scope_mode": "user_only_default",
+        "specific_to_user_concept_ids": ["#V#member"],
+        "specific_to_organisation_concept_ids": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("scope_mode", "expected_kind", "role", "role_organisation"),
+    (
+        (None, "user", None, None),
+        (
+            "organisation_general",
+            "organisation",
+            "organisation_ontology_administrator",
+            "#V#organisation_a",
+        ),
+        ("global_general", "global", "global_ontology_administrator", None),
+    ),
+)
+def test_governed_create_authorises_each_exact_scope_with_matching_live_role(
+    monkeypatch: pytest.MonkeyPatch,
+    scope_mode: str | None,
+    expected_kind: str,
+    role: str | None,
+    role_organisation: str | None,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", lambda _concept_id: False)
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+    evidence = (
+        ()
+        if role is None
+        else (
+            authority.AuthorityRoleEvidence(
+                role=role,
+                actor_concept_id="#V#member",
+                organisation_concept_id=role_organisation,
+                relation_id=f"role:{role}",
+                revision="role-revision-1",
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        authority,
+        "resolve_live_semantic_roles",
+        lambda actor: evidence if actor == "#V#member" else (),
+    )
+    arguments: dict[str, Any] = {
+        "parent_id": "#V#research_object",
+        "concepts": [
+            {
+                "concept_id": f"#V#{expected_kind}_creation",
+                "name": f"{expected_kind.title()} creation",
+                "kind": "type",
+            }
+        ],
+    }
+    if scope_mode is not None:
+        arguments["scope_mode"] = scope_mode
+
+    with authority.override_current_actor("#V#member", "#V#organisation_a"):
+        intent = command.build_ontology_mutation_intent(
+            method_name="create_concepts",
+            arguments=arguments,
+        )
+        decision = authority.authorise_ontology_mutation(intent)
+
+    assert intent.publication_context.kind.value == expected_kind
+    assert decision.allowed is True
+    assert decision.reason_code == "semantic_ontology_authority_verified"
+
+
+def test_canonical_relationship_rejects_an_ignored_independent_scope() -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+
+    with pytest.raises(command.OntologyMutationCommandError) as exc_info:
+        command.resolve_governed_ontology_arguments(
+            "add_relationship",
+            {
+                "source_id": "#V#phd_student",
+                "predicate": "#V#supervised_by",
+                "target": "#V#supervisor",
+                "scope_mode": "organisation",
+            },
+        )
+
+    assert exc_info.value.reason_code == (
+        "canonical_relationship_scope_is_source_bound"
+    )
+    assert "upsert_scoped_assertion" in exc_info.value.public_message
+
+
+def test_organisation_create_without_current_org_has_exact_no_effect_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", lambda _concept_id: False)
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+
+    with (
+        authority.override_current_actor("#V#member", None),
+        pytest.raises(command.OntologyMutationCommandError) as exc_info,
+    ):
+        command.build_ontology_mutation_intent(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": "#V#research_object",
+                "concepts": [
+                    {
+                        "concept_id": "#V#organisation_creation_without_org",
+                        "name": "Organisation creation without org",
+                        "kind": "type",
+                    }
+                ],
+                "scope_mode": "organisation_general",
+            },
+        )
+
+    assert exc_info.value.reason_code == "organisation_context_required"
+
+
+def test_unauthorised_global_create_does_not_mutate_or_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        _parent_resolution,
+    )
+    monkeypatch.setattr(command, "_concept_exists_unfiltered", lambda _concept_id: False)
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(authority, "resolve_live_semantic_roles", lambda _actor: ())
+    mutation_calls = 0
+
+    def mutate() -> dict[str, Any]:
+        nonlocal mutation_calls
+        mutation_calls += 1
+        return {"success": True, "changed": True}
+
+    with authority.override_current_actor("#V#member", "#V#organisation_a"):
+        result = command.execute_governed_ontology_method(
+            method_name="create_concepts",
+            arguments={
+                "parent_id": "#V#research_object",
+                "concepts": [
+                    {
+                        "concept_id": "#V#unauthorised_global_creation",
+                        "name": "Unauthorised global creation",
+                        "kind": "type",
+                    }
+                ],
+                "scope_mode": "global_general",
+            },
+            mutate=mutate,
+        )
+
+    assert mutation_calls == 0
+    assert result["success"] is False
+    assert result["changed"] is False
+    assert result["effect_status"] == "not_started"
+    assert result["error_code"] == "global_ontology_admin_authority_required"
+    assert "scope_selection" not in result
 
 
 def test_governed_create_rejects_conflicting_instance_types_before_mutation(
@@ -419,11 +666,11 @@ def test_duplicate_reuse_cannot_repair_existing_identity_markers(
     monkeypatch,
 ) -> None:
     from src.backend.integrations.internal_mcp import catalogue
-    from src.backend.services.create_concepts_duplicate_guard_service import (
-        CreateConceptDuplicateGuardMatch,
-    )
     from src.backend.services.concept_external_identity_service import (
         ExternalIdentifier,
+    )
+    from src.backend.services.create_concepts_duplicate_guard_service import (
+        CreateConceptDuplicateGuardMatch,
     )
 
     monkeypatch.setattr(

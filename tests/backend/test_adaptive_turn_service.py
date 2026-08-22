@@ -917,6 +917,7 @@ def _effect_gateway(
     effect_admission_window_sec: float | None = None,
     include_scoped_assertion: bool = False,
     hard_timeout_enabled: bool = False,
+    selectable_create_scope: bool = False,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -937,7 +938,29 @@ def _effect_gateway(
             MethodDefinition(
                 name=name,
                 handler=lambda _name=name, **kwargs: handler(_name, kwargs),
-                input_schema=Schema(allow_unknown=True),
+                input_schema=(
+                    Schema(
+                        optional={
+                            "namespace": (str, type(None)),
+                            "created_by_concept_id": (str, type(None)),
+                            "organisation_concept_id": (str, type(None)),
+                            "org_id": (str, type(None)),
+                            "scope_mode": (str, type(None)),
+                            "visibility_scope_mode": (str, type(None)),
+                        },
+                        enum_values={
+                            "scope_mode": (
+                                "user_only_default",
+                                "organisation_general",
+                                "global_general",
+                                None,
+                            )
+                        },
+                        allow_unknown=True,
+                    )
+                    if name == "create_concepts" and selectable_create_scope
+                    else Schema(allow_unknown=True)
+                ),
                 output_schema=effect_output_schema,
                 category="write",
                 ordinary_turn_effect=True,
@@ -970,7 +993,11 @@ def _effect_gateway(
                     {
                         "organisation_concept_id": None,
                         "org_id": None,
-                        "scope_mode": "user_only_default",
+                        **(
+                            {}
+                            if selectable_create_scope
+                            else {"scope_mode": "user_only_default"}
+                        ),
                         "visibility_scope_mode": None,
                     }
                     if name == "create_concepts"
@@ -2354,10 +2381,16 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
     assert allocation["model_call_hard_timeout_seconds"] is None
 
 
-def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values(
+@pytest.mark.parametrize(
+    ("org_concept_id", "user_namespace"),
+    (("#V#org", "#V#person@org"), (None, "#V#person")),
+)
+def test_create_effect_scope_is_model_selected_and_identity_is_server_bound(
     monkeypatch: pytest.MonkeyPatch,
+    org_concept_id: str | None,
+    user_namespace: str,
 ) -> None:
-    _stub_same_turn_ontology_delegation(monkeypatch)
+    issued = _stub_same_turn_ontology_delegation(monkeypatch)
     seen: dict[str, Any] = {}
 
     def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2365,15 +2398,16 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values(
         seen.update(arguments)
         return {"success": True, "effect_status": "succeeded", "changed": True}
 
-    gateway = _effect_gateway(handler)
+    gateway = _effect_gateway(handler, selectable_create_scope=True)
     delegated = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#person",
         trusted_argument_values={
-            "turn_namespace": "#V#person@org",
+            "turn_namespace": user_namespace,
             "actor_user_concept_id": "#V#person",
         },
     )
+    assert "create_concepts" in delegated
     capability = _capability_catalogue(
         gateway,
         delegated,
@@ -2383,9 +2417,14 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values(
         "namespace",
         "created_by_concept_id",
         "organisation_concept_id",
-        "scope_mode",
         "visibility_scope_mode",
     }.isdisjoint(capability["input_schema"]["properties"])
+    assert capability["input_schema"]["properties"]["scope_mode"]["enum"] == [
+        "user_only_default",
+        "organisation_general",
+        "global_general",
+        None,
+    ]
 
     client = _SequenceClient(
         LLMResponse(
@@ -2417,20 +2456,25 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values(
         context=[],
         llm_client=client,
         model="test-model",
-        user_namespace="#V#person@org",
+        user_namespace=user_namespace,
         user_concept_id="#V#person",
-        org_concept_id="#V#org",
+        org_concept_id=org_concept_id,
         turn_id="create-scope",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
     )
 
-    assert seen["namespace"] == "#V#person@org"
+    assert seen["namespace"] == user_namespace
     assert seen["created_by_concept_id"] == "#V#person"
     assert seen["organisation_concept_id"] is None
     assert seen["org_id"] is None
-    assert seen["scope_mode"] == "user_only_default"
+    assert seen["scope_mode"] == "global_general"
     assert seen["visibility_scope_mode"] is None
+    assert len(issued) == 1
+    assert issued[0]["arguments"]["scope_mode"] == "global_general"
+    assert issued[0]["arguments"]["organisation_concept_id"] is None
+    assert issued[0]["actor_concept_id"] == "#V#person"
+    assert issued[0]["organisation_concept_id"] == org_concept_id
 
 
 def test_invalid_effect_arguments_are_returned_for_correction_without_poisoning_turn() -> (

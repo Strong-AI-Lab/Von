@@ -95,6 +95,20 @@ def test_concept_publication_context_does_not_globalise_malformed_history(
             "concept_id": "#V#legacy",
             "relationships": {"specific_to_org": ["organisation_a"]},
         },
+        "#V#composite": {
+            "concept_id": "#V#composite",
+            "relationships": {
+                "#V#specific_to_user": ["#V#member"],
+                "#V#specific_to_organisation": ["#V#organisation_a"],
+            },
+        },
+        "#V#legacy_dual": {
+            "concept_id": "#V#legacy_dual",
+            "relationships": {
+                "#V#specific_to_user": ["#V#member"],
+                "specific_to_organisation": ["#V#organisation_a"],
+            },
+        },
     }
     monkeypatch.setattr(
         service.ConceptsRepository,
@@ -112,6 +126,92 @@ def test_concept_publication_context_does_not_globalise_malformed_history(
     historical = service.concept_publication_context("#V#legacy")
     assert historical.kind == service.PublicationContextKind.HISTORICAL
     assert historical.historical_predicates == ("specific_to_org",)
+    composite = service.concept_publication_context("#V#composite")
+    assert composite.kind == service.PublicationContextKind.COMPOSITE
+    assert [item.to_mapping() for item in composite.components] == [
+        {
+            "kind": "user",
+            "concept_id": "#V#member",
+            "source": "concept_visibility",
+        },
+        {
+            "kind": "organisation",
+            "concept_id": "#V#organisation_a",
+            "source": "concept_visibility",
+        },
+    ]
+    assert (
+        service.concept_publication_context("#V#legacy_dual").kind
+        == service.PublicationContextKind.MIXED
+    )
+
+
+def test_exact_composite_requires_each_component_authority(
+    authority_stores,
+    monkeypatch,
+):
+    service, _delegations, _receipts = authority_stores
+    composite = service.PublicationContext.composite(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_a",
+    )
+    intent = _intent(service, context=composite)
+    monkeypatch.setattr(service, "resolve_live_semantic_roles", lambda _actor: ())
+    with service.override_current_actor("#V#member", "#V#organisation_a"):
+        denied = service.authorise_ontology_mutation(intent)
+    assert denied.allowed is False
+    assert denied.reason_code == "organisation_ontology_admin_authority_required"
+
+    organisation_role = _evidence(
+        service,
+        actor="#V#member",
+        role=service.ORGANISATION_ONTOLOGY_ADMINISTRATOR_ROLE,
+        organisation="#V#organisation_a",
+    )
+    monkeypatch.setattr(
+        service,
+        "resolve_live_semantic_roles",
+        lambda actor: (organisation_role,) if actor == "#V#member" else (),
+    )
+    with service.override_current_actor("#V#member", "#V#organisation_a"):
+        allowed = service.authorise_ontology_mutation(intent)
+    assert allowed.allowed is True
+    assert allowed.reason_code == "semantic_ontology_authority_verified"
+    assert service.ontology_authority_resource_keys(intent) == (
+        "ontology-authority-role:organisation_ontology_administrator:#V#organisation_a",
+    )
+
+
+def test_publication_context_identity_requires_exact_composite_components() -> None:
+    from src.backend.services import ontology_publication_authority_service as service
+
+    org_a = service.PublicationContext.composite(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#org_a",
+    )
+    org_b = service.PublicationContext.composite(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#org_b",
+    )
+
+    assert service.publication_context_identity_key(
+        org_a
+    ) != service.publication_context_identity_key(org_b)
+    assert service.publication_context_from_mapping(org_a.to_mapping()) == org_a
+    with pytest.raises(ValueError, match="requires components"):
+        service.publication_context_from_mapping(
+            {
+                **org_a.to_mapping(),
+                "components": [
+                    *org_a.to_mapping()["components"],
+                    {"kind": "global", "concept_id": None},
+                ],
+            }
+        )
+    with pytest.raises(ValueError, match="Only composite"):
+        service.publication_context_from_mapping(
+            {"kind": "global", "concept_id": None, "components": []}
+        )
 
 
 def test_organisation_authority_is_exact_and_does_not_imply_global(

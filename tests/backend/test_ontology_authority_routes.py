@@ -387,6 +387,79 @@ def test_scope_preview_and_execute_are_distinct_effects(monkeypatch) -> None:
     )
 
 
+def test_scope_route_passes_independent_edit_without_browser_identity(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def change(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "resolved_scope_edit": {
+                "kind": "user",
+                "enabled": False,
+                "concept_id": "#V#member",
+            },
+        }
+
+    monkeypatch.setattr(routes, "change_concept_publication_scope", change)
+    response = _authenticated_client("#V#member").post(
+        "/api/ontology-authority/concepts/%23V%23private-note/scope",
+        json={
+            "scope_edit": {"kind": "user", "enabled": False},
+            "expected_scope_fingerprint": "before",
+            "request_id": "scope-user-remove-preview",
+            "preview": True,
+            "user_concept_id": "#V#forged-browser-user",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["destination_kind"] == ""
+    assert captured["destination_concept_id"] is None
+    assert captured["scope_edit"] == {"kind": "user", "enabled": False}
+    assert "user_concept_id" not in captured
+
+
+def test_scope_route_returns_typed_independent_edit_contract_error(
+    monkeypatch,
+) -> None:
+    from src.backend.services.ontology_scope_change_service import (
+        OntologyScopeChangeRequestError,
+    )
+
+    monkeypatch.setattr(
+        routes,
+        "change_concept_publication_scope",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            OntologyScopeChangeRequestError(
+                "scope_edit_target_mismatch",
+                "The requested scope target changed after preview.",
+            )
+        ),
+    )
+    response = _authenticated_client("#V#member").post(
+        "/api/ontology-authority/concepts/%23V%23private-note/scope",
+        json={
+            "scope_edit": {
+                "kind": "user",
+                "enabled": False,
+                "concept_id": "#V#other_user",
+            },
+            "expected_scope_fingerprint": "before",
+            "request_id": "scope-user-remove-mismatch",
+            "preview": False,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": "scope_edit_target_mismatch",
+        "message": "The requested scope target changed after preview.",
+    }
+
+
 def test_scope_route_defaults_user_destination_to_authenticated_actor(
     monkeypatch,
 ) -> None:

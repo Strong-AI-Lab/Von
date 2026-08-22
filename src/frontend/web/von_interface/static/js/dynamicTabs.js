@@ -7633,8 +7633,8 @@ export function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = 
         // 2. Organization Relation Button
         const orgBtn = document.createElement('button');
         orgBtn.className = 'org-relation-button';
-        orgBtn.title = 'Move publication scope to the current organisation';
-        orgBtn.setAttribute('aria-label', 'Change publication scope to the current organisation');
+        orgBtn.title = 'Add the current-organisation publication restriction';
+        orgBtn.setAttribute('aria-label', 'Add the current-organisation publication restriction');
         orgBtn.setAttribute('data-keep-title', 'true');
         orgBtn.innerHTML = '🏢'; // Building emoji
         orgBtn.style.padding = '2px 6px';
@@ -7648,8 +7648,8 @@ export function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = 
         // 3. User Relation Button
         const userBtn = document.createElement('button');
         userBtn.className = 'user-relation-button';
-        userBtn.title = 'Move publication scope to your user context';
-        userBtn.setAttribute('aria-label', 'Change publication scope to your user context');
+        userBtn.title = 'Add your user publication restriction';
+        userBtn.setAttribute('aria-label', 'Add your user publication restriction');
         userBtn.setAttribute('data-keep-title', 'true');
         userBtn.innerHTML = '👤'; // Person emoji
         userBtn.style.padding = '2px 6px';
@@ -7922,8 +7922,8 @@ async function togglePublicationScopeControl(conceptId, controlKind, orgBtn, use
     }
 }
 
-// The existing icon controls now request governed whole-scope transitions;
-// they no longer toggle raw visibility relations or send browser identity.
+// The existing icon controls now request governed independent scope-edge
+// edits; they no longer toggle raw relations or send browser identity.
 export async function toggleOrganizationRelation(conceptId, orgBtn, userBtn = null) {
     return togglePublicationScopeControl(conceptId, 'organisation', orgBtn, userBtn);
 }
@@ -7952,13 +7952,13 @@ function updateOrgButtonState(orgBtn, hasRelation) {
     if (hasRelation) {
         orgBtn.style.background = '#dbeafe'; // Blue background when related
         orgBtn.style.borderColor = '#3b82f6';
-        orgBtn.title = 'Change publication scope away from this organisation';
-        orgBtn.setAttribute('aria-label', 'Change publication scope away from this organisation');
+        orgBtn.title = 'Remove the organisation publication restriction';
+        orgBtn.setAttribute('aria-label', 'Remove the organisation publication restriction');
     } else {
         orgBtn.style.background = '#f9fafb';
         orgBtn.style.borderColor = '#d1d5db';
-        orgBtn.title = 'Move publication scope to the current organisation';
-        orgBtn.setAttribute('aria-label', 'Change publication scope to the current organisation');
+        orgBtn.title = 'Add the current-organisation publication restriction';
+        orgBtn.setAttribute('aria-label', 'Add the current-organisation publication restriction');
     }
 }
 
@@ -7968,13 +7968,13 @@ function updateUserButtonState(userBtn, hasRelation) {
     if (hasRelation) {
         userBtn.style.background = '#dcfce7'; // Green background when related
         userBtn.style.borderColor = '#10b981';
-        userBtn.title = 'Change publication scope away from this user context';
-        userBtn.setAttribute('aria-label', 'Change publication scope away from this user context');
+        userBtn.title = 'Remove the user publication restriction';
+        userBtn.setAttribute('aria-label', 'Remove the user publication restriction');
     } else {
         userBtn.style.background = '#f9fafb';
         userBtn.style.borderColor = '#d1d5db';
-        userBtn.title = 'Move publication scope to your user context';
-        userBtn.setAttribute('aria-label', 'Change publication scope to your user context');
+        userBtn.title = 'Add your user publication restriction';
+        userBtn.setAttribute('aria-label', 'Add your user publication restriction');
     }
 }
 
