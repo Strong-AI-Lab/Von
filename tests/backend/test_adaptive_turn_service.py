@@ -40,6 +40,7 @@ from src.backend.services.adaptive_turn_service import (
     _bound_tool_results_for_model,
     _bounded_conversation_observation_projection,
     _build_effect_outcome_report,
+    _canonical_create_readback_matches_invocation,
     _canonical_effect_readback_receipt,
     _canonical_relation_readback_matches_invocation,
     _canonical_scoped_assertion_readback_matches_invocation,
@@ -50,14 +51,17 @@ from src.backend.services.adaptive_turn_service import (
     _compact_evidence_envelope,
     _compact_evidence_index,
     _effect_id,
+    _effect_postcondition_identity,
     _effect_requires_turn_finality,
     _effect_result_target_ids,
     _effect_subject_authorised,
     _effect_subject_authority_denial,
     _extract_conversation_situation_sidecar,
     _final_synthesis_context,
+    _group_effect_outcome_facts,
     _json_bytes,
     _ordinary_effect_argument_denial,
+    _reconcile_effect_attempts_by_postcondition,
     _scope_message,
     _trusted_tool_payload,
     build_effect_outcome_narration_context,
@@ -400,6 +404,261 @@ def test_embedded_ontology_relation_readback_verifies_the_exact_effect() -> None
         invocation,
         wrong_case_readback,
     )
+
+
+def test_source_owned_relationship_readback_does_not_invent_inverse_requirement() -> None:
+    invocation = {
+        "effect_id": "effect-source-owned",
+        "execution_method": "add_relationship",
+        "effective_arguments": {
+            "source_id": "#V#student_a",
+            "predicate": "is_an_instance_of",
+            "target": "#V#alumni",
+        },
+    }
+    readback = _canonical_effect_readback_receipt(
+        {
+            "canonical_read_back": {
+                "source_id": "#V#student_a",
+                "source_exists": True,
+                "predicate": "is_an_instance_of",
+                "target": "#V#alumni",
+                "relationship_present": True,
+                "inverse_predicate": "has_instance",
+                "inverse_relationship_present": None,
+                "inverse_relationship_required": False,
+            }
+        }
+    )
+
+    assert _canonical_relation_readback_matches_invocation(invocation, readback)
+    absent_forward = dict(readback or {})
+    absent_forward["relationship_present"] = False
+    assert not _canonical_relation_readback_matches_invocation(
+        invocation,
+        absent_forward,
+    )
+    wrong_target = dict(readback or {})
+    wrong_target["target"] = "#V#different_collection"
+    assert not _canonical_relation_readback_matches_invocation(
+        invocation,
+        wrong_target,
+    )
+
+
+def test_governed_create_projection_verifies_only_one_exact_existing_concept() -> None:
+    invocation = {
+        "effect_id": "effect-create",
+        "execution_method": "create_concepts",
+        "effective_arguments": {
+            "parent_id": "#V#first_order_collection",
+            "concepts": [
+                {
+                    "concept_id": "#V#sail_phd_alumni",
+                    "name": "SAIL PhD Alumni",
+                    "kind": "type",
+                }
+            ],
+            "scope_mode": "organisation_general",
+        },
+    }
+    readback = _canonical_effect_readback_receipt(
+        {
+            "canonical_read_back": {
+                "concepts": [
+                    {
+                        "concept_id": "#V#sail_phd_alumni",
+                        "exists": True,
+                        "publication_context": {
+                            "kind": "organisation",
+                            "concept_id": "#V#strong_ai_lab",
+                        },
+                        "text_relations": [
+                            {"text": "must not be copied into the turn receipt"}
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert readback == {
+        "concept_count": 1,
+        "concepts": [
+            {"concept_id": "#V#sail_phd_alumni", "exists": True}
+        ],
+    }
+    assert _canonical_create_readback_matches_invocation(invocation, readback)
+    wrong_id = {
+        **(readback or {}),
+        "concepts": [{"concept_id": "#V#other", "exists": True}],
+    }
+    assert not _canonical_create_readback_matches_invocation(invocation, wrong_id)
+    missing = {
+        **(readback or {}),
+        "concepts": [{"concept_id": "#V#sail_phd_alumni", "exists": False}],
+    }
+    assert not _canonical_create_readback_matches_invocation(invocation, missing)
+    multiple = {
+        "concept_count": 2,
+        "concepts": [
+            {"concept_id": "#V#sail_phd_alumni", "exists": True},
+            {"concept_id": "#V#other", "exists": True},
+        ],
+    }
+    assert not _canonical_create_readback_matches_invocation(invocation, multiple)
+
+
+def test_exact_later_create_reconciles_bad_parent_attempt_without_erasing_it() -> None:
+    failed_invocation = {
+        "effect_id": "effect-bad-parent",
+        "execution_method": "create_concepts",
+        "effective_arguments": {
+            "parent_id": "#V#thing",
+            "concepts": [
+                {"concept_id": "#V#sail_phd_alumni", "name": "SAIL PhD Alumni"}
+            ],
+        },
+    }
+    successful_invocation = {
+        "effect_id": "effect-good-parent",
+        "execution_method": "create_concepts",
+        "effective_arguments": {
+            "parent_id": "#V#first_order_collection",
+            "concepts": [
+                {"concept_id": "#V#sail_phd_alumni", "name": "SAIL PhD Alumni"}
+            ],
+        },
+    }
+    snapshot = {
+        "effect-bad-parent": {
+            "effect_status": "failed",
+            "changed": False,
+            "turn_finality_required": True,
+        },
+        "effect-good-parent": {
+            "effect_status": "succeeded",
+            "changed": True,
+            "turn_finality_required": True,
+            "canonical_readback": {
+                "concept_count": 1,
+                "concepts": [
+                    {"concept_id": "#V#sail_phd_alumni", "exists": True}
+                ],
+            },
+        },
+    }
+
+    reconciled = _reconcile_effect_attempts_by_postcondition(
+        tool_invocations=[failed_invocation, successful_invocation],
+        effect_snapshot=snapshot,
+    )
+
+    assert reconciled["effect-bad-parent"]["recovered_by_effect_id"] == (
+        "effect-good-parent"
+    )
+    assert reconciled["effect-bad-parent"]["recovery_status"] == "succeeded"
+    assert reconciled["effect-bad-parent"]["reconciliation_basis"] == (
+        "later_exact_postcondition_success"
+    )
+    assert snapshot["effect-bad-parent"].get("recovered_by_effect_id") is None
+    assert _effect_postcondition_identity(failed_invocation) == (
+        _effect_postcondition_identity(successful_invocation)
+    )
+
+
+def test_prior_exact_create_success_satisfies_redundant_later_failure() -> None:
+    effective_arguments = {
+        "concepts": [{"concept_id": "#V#sail_phd_alumni"}],
+    }
+    invocations = [
+        {
+            "effect_id": "effect-created",
+            "execution_method": "create_concepts",
+            "effective_arguments": effective_arguments,
+        },
+        {
+            "effect_id": "effect-redundant-conflict",
+            "execution_method": "create_concepts",
+            "effective_arguments": effective_arguments,
+        },
+    ]
+    snapshot = {
+        "effect-created": {
+            "effect_status": "succeeded",
+            "changed": True,
+            "canonical_readback": {
+                "concept_count": 1,
+                "concepts": [
+                    {"concept_id": "#V#sail_phd_alumni", "exists": True}
+                ],
+            },
+        },
+        "effect-redundant-conflict": {
+            "effect_status": "not_started",
+            "changed": False,
+            "error_code": "ontology_create_concept_id_conflict",
+        },
+    }
+
+    reconciled = _reconcile_effect_attempts_by_postcondition(
+        tool_invocations=invocations,
+        effect_snapshot=snapshot,
+    )
+
+    redundant = reconciled["effect-redundant-conflict"]
+    assert redundant["recovered_by_effect_id"] == "effect-created"
+    assert redundant["recovery_status"] == "succeeded"
+    assert redundant["reconciliation_basis"] == (
+        "prior_exact_postcondition_success"
+    )
+
+
+def test_outcome_facts_group_retries_by_exact_relationship_postcondition() -> None:
+    relationship_identity = {
+        "kind": "canonical_relationship",
+        "source_id": "#V#aaron_keesing",
+        "predicate": "is_an_instance_of",
+        "target": "#V#sail_phd_alumni",
+        "relationship_present": True,
+    }
+    facts = [
+        {
+            "effect_id": f"effect-aaron-{index}",
+            "tool": "add_relationship",
+            "effect_status": "not_started",
+            "changed": False,
+            "error_code": "explicit_scope_adoption_required",
+            "postcondition_identity": relationship_identity,
+        }
+        for index in range(4)
+    ]
+    facts.append(
+        {
+            "effect_id": "effect-beryl",
+            "tool": "add_relationship",
+            "effect_status": "not_started",
+            "changed": False,
+            "error_code": "organisation_ontology_admin_authority_required",
+            "postcondition_identity": {
+                **relationship_identity,
+                "source_id": "#V#beryl_qi",
+            },
+        }
+    )
+
+    grouped = _group_effect_outcome_facts(facts)
+
+    assert len(grouped) == 2
+    assert grouped[0]["attempt_count"] == 4
+    assert grouped[0]["attempt_status_counts"] == {"not_started": 4}
+    assert grouped[0]["attempt_effect_ids"] == [
+        "effect-aaron-0",
+        "effect-aaron-1",
+        "effect-aaron-2",
+        "effect-aaron-3",
+    ]
+    assert grouped[1]["attempt_count"] == 1
 
 
 def test_embedded_scoped_assertion_readback_verifies_the_exact_effect() -> None:
@@ -2803,6 +3062,42 @@ def test_only_pre_dispatch_argument_rejections_are_exempt_from_turn_finality(
             },
         )
         is expected
+    )
+
+
+def test_governed_scope_preview_is_receipted_but_not_semantic_finality() -> None:
+    assert (
+        _effect_requires_turn_finality(
+            capability_kind="registered_tool",
+            effect_status="not_started",
+            changed=False,
+            raw_payload={
+                "success": True,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "preview": True,
+                "operational_state_effect": True,
+                "semantic_effect": False,
+                "authority_receipt": {"status": "previewed"},
+            },
+        )
+        is False
+    )
+    assert (
+        _effect_requires_turn_finality(
+            capability_kind="registered_tool",
+            effect_status="not_started",
+            changed=False,
+            raw_payload={
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "preview": True,
+            },
+        )
+        is True
     )
 
 
@@ -5480,8 +5775,22 @@ def test_non_exact_relationship_denial_has_no_scoped_recovery(
             "concept",
             None,
         ),
+        (
+            {
+                "source_id": "#V#subject",
+                "predicate": "is_an_instance_of",
+                "target": "#V#sail_phd_alumni",
+            },
+            "concept",
+            "target_concept_id",
+        ),
     ],
-    ids=["concept-literal", "text-represented-looking-literal", "lowercase-id"],
+    ids=[
+        "concept-literal",
+        "text-represented-looking-literal",
+        "lowercase-id",
+        "structural-storage-alias",
+    ],
 )
 def test_relationship_recovery_uses_represented_predicate_kind(
     monkeypatch: pytest.MonkeyPatch,
@@ -5489,12 +5798,20 @@ def test_relationship_recovery_uses_represented_predicate_kind(
     canonical_kind: str,
     expected_target_field: str | None,
 ) -> None:
-    from src.backend.services import relationship_write_service
+    from src.backend.services import (
+        concept_predicate_metadata_service,
+        relationship_write_service,
+    )
 
     monkeypatch.setattr(
         relationship_write_service,
         "resolve_existing_predicate_value_kind",
         lambda _predicate: canonical_kind,
+    )
+    monkeypatch.setattr(
+        concept_predicate_metadata_service,
+        "get_structural_predicate_aliases",
+        lambda: {"#V#is_an_instance_of": "is_an_instance_of"},
     )
 
     denial = _effect_subject_authority_denial(
@@ -5510,7 +5827,14 @@ def test_relationship_recovery_uses_represented_predicate_kind(
         assert len(affordances) == 1
         recovery_arguments = affordances[0]["arguments"]
         assert recovery_arguments[expected_target_field] == arguments["target"]
-        assert "target_concept_id" not in recovery_arguments
+        unexpected_target_field = (
+            "target_text"
+            if expected_target_field == "target_concept_id"
+            else "target_concept_id"
+        )
+        assert unexpected_target_field not in recovery_arguments
+        if arguments.get("predicate") == "is_an_instance_of":
+            assert recovery_arguments["predicate"] == "#V#is_an_instance_of"
 
 
 def test_existing_predicate_value_kind_comes_from_canonical_typing() -> None:

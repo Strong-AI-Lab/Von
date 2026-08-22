@@ -194,9 +194,12 @@ non-success or indeterminate state with enough information for bounded
 reconciliation. Scope transitions use compensation where possible, but
 compensation is not a substitute for reporting the final canonical state.
 
-Denials are typed and non-leaking: callers receive the missing authority or
-delegation condition without disclosure of inaccessible concepts, roles, or
-contexts.
+Denials are typed and non-leaking. A disabling denial identifies the exact
+missing authority context, the authority-bearing mutation subject, and the
+bounded next action needed to ask for or establish that authority, without
+disclosing inaccessible concepts, roles, or contexts. A relationship target is
+not presented as needing a publication-scope change merely because it appears
+in the intended postcondition.
 
 ## 6. Bootstrap and operational limits
 

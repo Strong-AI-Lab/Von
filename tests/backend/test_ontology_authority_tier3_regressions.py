@@ -303,23 +303,29 @@ def test_motivating_candidature_and_taxonomy_changes_execute_with_read_back(
     assert all(
         result.get("authority_receipt", {}).get("status") == "succeeded"
         and result.get("canonical_read_back", {}).get("relationship_present") is True
+        and result.get("canonical_read_back", {}).get("inverse_relationship_required")
+        is False
         and result.get("canonical_read_back", {}).get("inverse_relationship_present")
-        is True
+        is None
         for result in results
     )
     for source_id in BLOCKED_CANDIDATURE_SOURCE_IDS:
         assert concepts.find_one({"concept_id": source_id})["relationships"][
             "is_an_instance_of"
         ] == ["#V#student"]
-    assert set(
-        concepts.find_one({"concept_id": "#V#student"})["relationships"]["has_instance"]
-    ) == set(BLOCKED_CANDIDATURE_SOURCE_IDS)
+    assert (
+        "has_instance"
+        not in concepts.find_one({"concept_id": "#V#student"})["relationships"]
+    )
     assert concepts.find_one({"concept_id": "#V#graduate_student"})["relationships"][
         "is_a_type_of"
     ] == ["#V#university_student"]
-    assert concepts.find_one({"concept_id": "#V#university_student"})["relationships"][
+    assert (
         "has_subtype"
-    ] == ["#V#graduate_student"]
+        not in concepts.find_one({"concept_id": "#V#university_student"})[
+            "relationships"
+        ]
+    )
 
 
 @pytest.mark.parametrize(

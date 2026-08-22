@@ -1678,6 +1678,7 @@ def build_ontology_mutation_intent(
             source_contexts = (concept_publication_context(target_id),)
         targets = tuple(item for item in visible_targets if item)
         delta = {
+            "authority_subject_concept_ids": [source_id],
             "target_concept_id": target_id,
             "target_text_sha256": (
                 None if target_id else _text_sha256(arguments.get("target"))
@@ -1736,6 +1737,7 @@ def build_ontology_mutation_intent(
         source_contexts = contexts[:-1]
         targets = all_affected_ids
         delta = {
+            "authority_subject_concept_ids": list(source_ids),
             "relationship_count": len(bulk_rows),
             "selectors_sha256": _effect_arguments_sha256({"relationships": bulk_rows}),
             "selector_projection_sha256": _effect_arguments_sha256(
@@ -2269,6 +2271,15 @@ def _relationship_read_back(
         "relationship_present": target_value in values,
         "inverse_predicate": inverse_predicate,
         "inverse_relationship_present": inverse_present,
+        # This is derived by the governed command boundary, not by caller
+        # arguments.  Adaptive finality can therefore distinguish a
+        # deliberately source-owned relationship from a command whose exact
+        # postcondition also includes the inverse edge.
+        "inverse_relationship_required": bool(
+            inspect_inverse
+            and inverse_predicate
+            and target_value.startswith("#V#")
+        ),
         "publication_context": concept_publication_context(source_id).to_mapping(),
     }
 
@@ -2616,6 +2627,14 @@ def _scoped_assertion_recovery_is_executable(
 
     source_id = _normalise_concept_id(resolved.get("source_id"))
     predicate_id = _clean_text(resolved.get("predicate"))
+    try:
+        from .text_relation_predicate_validation_service import (
+            predicate_concept_id_for_storage,
+        )
+
+        predicate_id = predicate_concept_id_for_storage(predicate_id) or predicate_id
+    except Exception:  # noqa: BLE001 - recovery eligibility must fail closed
+        return False
     target = resolved.get("target")
     if (
         not source_id
@@ -3703,6 +3722,7 @@ def issue_same_turn_method_delegation(
     effect_id: str,
     turn_id: str | None,
 ) -> dict[str, Any]:
+    intent: OntologyMutationIntent | None = None
     try:
         intent = build_ontology_mutation_intent(
             method_name=method_name,
@@ -3739,14 +3759,19 @@ def issue_same_turn_method_delegation(
     except OntologyMutationCommandError as exc:
         return _safe_command_error(exc)
     except PermissionError as exc:
-        payload: dict[str, Any] = {
-            "success": False,
-            "effect_status": "not_started",
-            "mutation_outcome": "not_started",
-            "changed": False,
-            "error_code": str(exc),
-            "error": "Semantic ontology authority is required for this effect.",
-        }
+        decision = authorise_ontology_mutation(intent) if intent is not None else None
+        payload: dict[str, Any]
+        if decision is not None and not decision.allowed:
+            payload = ontology_authority_denial_payload(decision, intent)
+        else:
+            payload = {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "error_code": str(exc),
+                "error": "The exact same-turn ontology delegation was not issued.",
+            }
         # This internal marker is immediately replaced by adaptive turn's fully
         # populated upsert_scoped_assertion call before model exposure.
         return _with_proven_scoped_recovery_marker(

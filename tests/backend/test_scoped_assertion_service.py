@@ -415,6 +415,11 @@ def test_scoped_assertions_do_not_cross_actor_or_organisation(monkeypatch):
         lambda: collection,
     )
     monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
     service.upsert_scoped_assertion(
         subject_concept_id="#V#gillian_dobbie",
         predicate="hasDescription",
@@ -1136,6 +1141,11 @@ def test_concept_target_assertion_is_retrievable_from_either_argument(monkeypatc
     monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
     monkeypatch.setattr(
         service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+    monkeypatch.setattr(
+        service,
         "validate_predicate_concept",
         lambda _predicate: (True, None, None),
     )
@@ -1203,7 +1213,7 @@ def test_trusted_tool_payload_replaces_model_supplied_scope():
     )
 
     assert payload["acting_user_concept_id"] == "#V#michael_witbrock"
-    assert payload["organisation_concept_id"] == "#V#trusted_org"
+    assert payload["organisation_concept_id"] is None
     assert payload["namespace"] == "#V#michael_witbrock@trusted_org"
     assert payload["turn_id"] == "trusted-turn"
     assert payload["canonical_publication"] is False
@@ -1224,6 +1234,11 @@ def test_actor_effective_text_read_merges_visible_scoped_assertions(monkeypatch)
         scoped_service,
         "can_access_concept",
         lambda _concept_id: True,
+    )
+    monkeypatch.setattr(
+        scoped_service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
     )
     monkeypatch.setattr(
         text_value_service.TextRelationsRepository,

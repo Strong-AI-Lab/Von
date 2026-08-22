@@ -263,6 +263,8 @@ def test_preview_then_execute_uses_exact_same_turn_delegations_and_read_back(
     assert preview["success"] is True
     assert preview["preview"] is True
     assert preview["changed"] is False
+    assert preview["operational_state_effect"] is True
+    assert preview["semantic_effect"] is False
     assert preview["canonical_read_back"]["scope_fingerprint"] == "scope-before"
     assert mutations == []
 

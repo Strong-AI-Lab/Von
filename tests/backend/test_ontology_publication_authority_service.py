@@ -161,6 +161,9 @@ def test_exact_composite_requires_each_component_authority(
         denied = service.authorise_ontology_mutation(intent)
     assert denied.allowed is False
     assert denied.reason_code == "organisation_ontology_admin_authority_required"
+    assert denied.required_publication_context == (
+        service.PublicationContext.organisation("#V#organisation_a")
+    )
 
     organisation_role = _evidence(
         service,
@@ -180,6 +183,104 @@ def test_exact_composite_requires_each_component_authority(
     assert service.ontology_authority_resource_keys(intent) == (
         "ontology-authority-role:organisation_ontology_administrator:#V#organisation_a",
     )
+
+
+def test_composite_denial_names_exact_missing_authority_and_preserves_retry() -> None:
+    from src.backend.services import ontology_publication_authority_service as service
+
+    composite = service.PublicationContext.composite(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_a",
+    )
+    intent = _intent(service, context=composite)
+    decision = service.OntologyAuthorityDecision(
+        allowed=False,
+        decision_id="decision-composite-denial",
+        reason_code="organisation_ontology_admin_authority_required",
+        message="Ontology publication authority for the exact organisation context is required.",
+        actor_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_a",
+        intent_fingerprint=intent.fingerprint,
+        required_publication_context=service.PublicationContext.organisation(
+            "#V#organisation_a"
+        ),
+    )
+
+    payload = service.ontology_authority_denial_payload(decision, intent)
+
+    assert payload["changed"] is False
+    assert payload["required_authority"] == {
+        "authority_kind": "organisation_ontology_administrator",
+        "operation": "relationship.add",
+        "affected_concept_ids": [
+            "#V#graduate_student",
+            "#V#university_student",
+        ],
+        "authority_subject_concept_ids": ["#V#graduate_student"],
+        "same_effect_retry_supported": True,
+        "publication_context": {
+            "kind": "organisation",
+            "concept_id": "#V#organisation_a",
+            "source": "explicit",
+        },
+    }
+    assert payload["authority_recovery"] == {
+        "action_type": "ask_for_exact_ontology_authority",
+        "required_authority": payload["required_authority"],
+        "automatic_scope_change_allowed": False,
+    }
+
+
+def test_legacy_scope_denial_exposes_inspection_not_automatic_promotion() -> None:
+    from src.backend.services import ontology_publication_authority_service as service
+
+    historical = service.PublicationContext(
+        service.PublicationContextKind.HISTORICAL,
+        None,
+        "legacy_visibility",
+        ("specific_to_org",),
+    )
+    intent = service.OntologyMutationIntent(
+        operation="relationship.add",
+        publication_context=historical,
+        target_concept_ids=("#V#legacy_person", "#V#alumni"),
+        tool_name="add_relationship",
+        predicate="#V#is_an_instance_of",
+        delta={
+            "affected_scope_fingerprints": {
+                "#V#legacy_person": "legacy-person-scope-fingerprint"
+            }
+        },
+    )
+    decision = service.OntologyAuthorityDecision(
+        allowed=False,
+        decision_id="decision-legacy-denial",
+        reason_code="explicit_scope_adoption_required",
+        message="Historical scope requires explicit adoption.",
+        actor_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_a",
+        intent_fingerprint=intent.fingerprint,
+        required_publication_context=historical,
+    )
+
+    payload = service.ontology_authority_denial_payload(decision, intent)
+
+    assert payload["required_authority"]["authority_kind"] == (
+        "explicit_publication_scope_adoption"
+    )
+    assert payload["required_authority"]["same_effect_retry_supported"] is False
+    assert payload["authority_recovery"] == {
+        "action_type": "inspect_scope_then_ask_for_explicit_adoption",
+        "inspection_tool": "get_concept_publication_scope",
+        "preview_tool": "preview_concept_publication_scope_change",
+        "scope_subjects": [
+            {
+                "concept_id": "#V#legacy_person",
+                "scope_fingerprint": "legacy-person-scope-fingerprint",
+            },
+        ],
+        "automatic_scope_change_allowed": False,
+    }
 
 
 def test_publication_context_identity_requires_exact_composite_components() -> None:

@@ -244,6 +244,21 @@ def test_authority_denial_retains_only_proven_scoped_recovery_marker(
             PermissionError("global_ontology_admin_authority_required")
         ),
     )
+    decision = authority.OntologyAuthorityDecision(
+        allowed=False,
+        decision_id="decision-global-required",
+        reason_code="global_ontology_admin_authority_required",
+        message="Global ontology publication authority is required.",
+        actor_concept_id="#V#member",
+        organisation_concept_id=None,
+        intent_fingerprint=intent.fingerprint,
+        required_publication_context=authority.PublicationContext.global_context(),
+    )
+    monkeypatch.setattr(
+        command,
+        "authorise_ontology_mutation",
+        lambda _intent: decision,
+    )
     monkeypatch.setattr(
         command,
         "_scoped_assertion_recovery_is_executable",
@@ -268,6 +283,12 @@ def test_authority_denial_retains_only_proven_scoped_recovery_marker(
     assert result["recovery_affordances"] == [
         {"action_type": "create_scoped_assertion"}
     ]
+    assert result["required_authority"]["authority_kind"] == (
+        "global_ontology_administrator"
+    )
+    assert result["authority_recovery"]["action_type"] == (
+        "ask_for_exact_ontology_authority"
+    )
     assert "request_ontology_administrator_delegation" not in repr(result)
 
 
@@ -325,6 +346,41 @@ def test_direct_authority_denial_adds_only_proven_scoped_recovery(
     assert "request_ontology_administrator_delegation" not in repr(result)
 
 
+def test_structural_storage_alias_proves_exact_scoped_recovery(monkeypatch) -> None:
+    from src.backend.services import (
+        concept_predicate_metadata_service,
+        relationship_write_service,
+    )
+    from src.backend.services import (
+        ontology_mutation_command_service as command,
+    )
+    from src.backend.services import (
+        ontology_publication_authority_service as authority,
+    )
+
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        concept_predicate_metadata_service,
+        "get_structural_predicate_aliases",
+        lambda: {"#V#is_an_instance_of": "is_an_instance_of"},
+    )
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda predicate: "concept" if predicate == "#V#is_an_instance_of" else None,
+    )
+
+    with authority.override_current_actor("#V#member", "#V#organisation_a"):
+        assert command._scoped_assertion_recovery_is_executable(
+            method_name="add_relationship",
+            arguments={
+                "source_id": "#V#aaron_keesing",
+                "predicate": "is_an_instance_of",
+                "target": "#V#sail_phd_alumni",
+            },
+        )
+
+
 def test_governed_add_relationship_authorises_and_reads_only_the_source(
     monkeypatch,
 ) -> None:
@@ -364,6 +420,7 @@ def test_governed_add_relationship_authorises_and_reads_only_the_source(
     assert intent.publication_context.kind.value == "user"
     assert intent.source_contexts == ()
     assert intent.target_concept_ids == (source_id, target_id)
+    assert intent.delta["authority_subject_concept_ids"] == [source_id]
     assert intent.delta["maintain_inverse"] is False
     assert (
         command.normalise_governed_ontology_arguments(

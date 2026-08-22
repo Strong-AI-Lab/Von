@@ -565,6 +565,8 @@ def change_concept_publication_scope(
                 "mutation_outcome": "not_started",
                 "changed": False,
                 "preview": True,
+                "operational_state_effect": True,
+                "semantic_effect": False,
                 "from": source.to_mapping(),
                 "to": destination.to_mapping(),
                 "resolved_scope_edit": (
