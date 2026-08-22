@@ -11,6 +11,7 @@ import { loadMyOrganisations } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { initializeTaskPanel, isTaskPanelVisible, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
 import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
+import { activateTab } from './tabNavigation.js';
 import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
 import {
@@ -188,6 +189,13 @@ let chatSessionMetadataOpenKey = null;
 // start this release furled once. Choices made with the new UI still persist.
 const LS_CHAT_SESSION_METADATA_COLLAPSED = 'von:chatSessionMetadataCollapsed:v2';
 let chatSessionMetadataCollapsed = null;
+
+// Focus is source-owned conversation state, not editable metadata.  It gives
+// a normal conversation stable referents without turning its situation into
+// canonical domain knowledge or authority.
+const chatSessionFocusCache = new Map();
+let activeChatSessionFocus = [];
+let focusedConversationEventBound = false;
 
 const chatSessionConceptMetaCache = new Map();
 const chatSessionConceptMetaInFlight = new Map();
@@ -23858,6 +23866,10 @@ function setActiveChatSession(sessionId, sessionName) {
         ? sessionName.trim()
         : null;
     activeChatSessionOwnerId = null;
+    activeChatSessionFocus = activeChatSessionId
+        ? (chatSessionFocusCache.get(activeChatSessionId) || [])
+        : [];
+    renderActiveChatSessionFocusChips(activeChatSessionFocus);
 
     if (previousSessionId !== activeChatSessionId) {
         chatSessionSelectionGeneration += 1;
@@ -23934,6 +23946,127 @@ function setChatSessionCount(count) {
 
 function getChatSessionMetadataEl() {
     return document.getElementById('chatSessionMetadata');
+}
+
+function getChatSessionFocusChipsEl() {
+    return document.getElementById('chatSessionFocusChips');
+}
+
+function normaliseFocusedConcepts(rawFocus) {
+    const values = Array.isArray(rawFocus) ? rawFocus : [];
+    const seen = new Set();
+    return values.flatMap((raw) => {
+        const item = typeof raw === 'string' ? { concept_id: raw } : raw;
+        const conceptId = String(item?.concept_id || item?.conceptId || item?.id || '').trim();
+        if (!conceptId || seen.has(conceptId)) return [];
+        seen.add(conceptId);
+        const displayName = String(item?.display_name || item?.displayName || item?.name || item?.label || '').trim();
+        return [{ conceptId, displayName: displayName || _deriveNameFromConceptId(conceptId) || conceptId }];
+    });
+}
+
+function getFocusFromPayload(payload) {
+    return normaliseFocusedConcepts(
+        payload?.focal_concepts
+        || payload?.focus?.focal_concepts
+        || payload?.chat_session_focus?.focal_concepts
+    );
+}
+
+function renderActiveChatSessionFocusChips(focalConcepts = activeChatSessionFocus) {
+    const element = getChatSessionFocusChipsEl();
+    if (!element) return;
+    const focus = normaliseFocusedConcepts(focalConcepts);
+    element.replaceChildren();
+    if (!focus.length) {
+        element.classList.add('is-hidden');
+        return;
+    }
+    element.classList.remove('is-hidden');
+    const label = document.createElement('span');
+    label.className = 'chat-session-focus-label';
+    label.textContent = 'Discussing';
+    element.appendChild(label);
+    focus.forEach((item) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chat-session-focus-chip';
+        chip.textContent = item.displayName;
+        chip.title = `Open ${item.displayName}`;
+        chip.setAttribute('aria-label', `Open focal concept ${item.displayName}`);
+        chip.addEventListener('click', () => {
+            document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+                detail: {
+                    conceptId: item.conceptId,
+                    createConceptTab: true,
+                    promoteExistingTab: true,
+                    modifierKeys: { shiftKey: true }
+                }
+            }));
+        });
+        element.appendChild(chip);
+    });
+}
+
+function acceptChatSessionFocus(sessionId, focalConcepts) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return [];
+    const focus = normaliseFocusedConcepts(focalConcepts);
+    chatSessionFocusCache.set(sid, focus);
+    if (sid === activeChatSessionId) {
+        activeChatSessionFocus = focus;
+        renderActiveChatSessionFocusChips(focus);
+    }
+    return focus;
+}
+
+function clearChatSessionFocus(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+    chatSessionFocusCache.delete(sid);
+    if (sid === activeChatSessionId) {
+        activeChatSessionFocus = [];
+        renderActiveChatSessionFocusChips([]);
+    }
+}
+
+async function loadChatSessionFocus(sessionId, { force = false } = {}) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        activeChatSessionFocus = [];
+        renderActiveChatSessionFocusChips([]);
+        return [];
+    }
+    const cached = chatSessionFocusCache.get(sid);
+    if (!force && cached) {
+        if (sid === activeChatSessionId) {
+            activeChatSessionFocus = cached;
+            renderActiveChatSessionFocusChips(cached);
+        }
+        return cached;
+    }
+    try {
+        const response = await fetch(`/von/api/session/chat_session_focus?session_id=${encodeURIComponent(sid)}`, {
+            method: 'GET',
+            headers: buildChatFetchHeaders({ 'Accept': 'application/json' }),
+            cache: 'no-store'
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            // Focus is an actor-authorised projection.  A cached label must not
+            // remain visible after the server denies this actor access.
+            clearChatSessionFocus(sid);
+            return [];
+        }
+        if (activeChatSessionId !== sid) return [];
+        return acceptChatSessionFocus(sid, getFocusFromPayload(data));
+    } catch (error) {
+        console.warn('[chatTab] Unable to load conversation focus', error);
+        // Fail closed: cache is only a rendering optimisation, never evidence
+        // that the current actor may still see the source concepts.
+        clearChatSessionFocus(sid);
+        return [];
+    }
 }
 
 function _resolveCurrentChatSessionTitle(sessionId) {
@@ -25691,9 +25824,13 @@ async function refreshChatSessionTabs() {
         // Only repair empty local selection from the server or most-recent list.
         // This preserves explicit user selection while still recovering startup/no-active state.
         if (!localActiveSessionId && adoptedSessionId) {
+            // A restored selection may be shared.  Do not revive cached focal
+            // context until the server has reauthorised it for this actor.
+            clearChatSessionFocus(adoptedSessionId);
             setActiveChatSession(adoptedSessionId, adoptedSession?.session_name);
             localActiveSessionId = adoptedSessionId;
             activeChatSessionOwnerId = adoptedSession?.shared_owner_user_id || null;
+            void loadChatSessionFocus(adoptedSessionId, { force: true });
         }
 
         renderChatSessionTabs(normalisedSessions, localActiveSessionId || activeSessionId);
@@ -26391,6 +26528,202 @@ function createNewChatSession() {
     return creation;
 }
 
+function normaliseFocusedConceptIds(rawIds) {
+    return normaliseFocusedConcepts(Array.isArray(rawIds) ? rawIds : [])
+        .map((item) => item.conceptId);
+}
+
+function getFocusedConversationLauncherElement() {
+    return document.getElementById('focusedConversationLauncher');
+}
+
+function closeFocusedConversationLauncher() {
+    getFocusedConversationLauncherElement()?.remove();
+}
+
+function focusComposerForConversation() {
+    const promptInput = getPromptInputElement();
+    if (promptInput) {
+        setPromptComposerValue(String(promptInput.value || ''), { promptInput, focus: true });
+    }
+}
+
+async function loadRecentFocusedConversationSessions(focalConceptId) {
+    const conceptId = String(focalConceptId || '').trim();
+    if (!conceptId) return [];
+    try {
+        const response = await fetch(
+            `/von/api/session/chat_session_focus?focal_concept_id=${encodeURIComponent(conceptId)}`,
+            {
+                method: 'GET',
+                headers: buildChatFetchHeaders({ 'Accept': 'application/json' }),
+                cache: 'no-store'
+            }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return [];
+        const sessions = Array.isArray(data?.sessions)
+            ? data.sessions
+            : (Array.isArray(data?.recent_sessions) ? data.recent_sessions : []);
+        return sessions.filter((session) => String(session?.session_id || '').trim());
+    } catch (error) {
+        console.warn('[chatTab] Unable to load focused conversations', error);
+        return [];
+    }
+}
+
+async function beginFocusedConversation({ focalConceptIds, mode, sessionId = null, sessionName = null }) {
+    const focus = normaliseFocusedConceptIds(focalConceptIds);
+    if (!focus.length) {
+        throw new Error('A focal concept is required to start a discussion.');
+    }
+    if (mode === 'assistant_opening' && hasAnyLiveChatRequest()) {
+        throw new Error('Wait for the current response before asking Von to open another discussion.');
+    }
+
+    activateTab('chatTab');
+    let targetSessionId = String(sessionId || '').trim();
+    let targetSessionName = String(sessionName || '').trim() || null;
+    if (targetSessionId) {
+        const switched = await switchToChatSession(targetSessionId);
+        if (!switched?.ok) {
+            throw new Error(switched?.error || 'Unable to open the selected conversation.');
+        }
+    } else {
+        const created = await createChatSession('', { focalConceptIds: focus });
+        targetSessionId = String(created?.session_id || activeChatSessionId || '').trim();
+        targetSessionName = String(created?.session_name || activeChatSessionName || '').trim() || null;
+        if (!targetSessionId) {
+            throw new Error('Von did not create a conversation.');
+        }
+    }
+
+    if (mode === 'assistant_opening') {
+        if (hasAnyLiveChatRequest()) {
+            throw new Error('Wait for the current response before asking Von to open another discussion.');
+        }
+        // The request owns its visible thinking/error state.  Do not leave the
+        // launch choice open for the duration of a potentially long response.
+        void handleSendPrompt({
+            sessionId: targetSessionId,
+            sessionName: targetSessionName,
+            promptOverride: '',
+            turnKind: 'assistant_opening',
+            initiationId: `assistant-opening:${targetSessionId}:${Date.now()}`,
+            allowEmptyPrompt: true,
+            skipPromptQueueRecord: true
+        });
+    } else {
+        focusComposerForConversation();
+    }
+    return { sessionId: targetSessionId, mode };
+}
+
+function renderFocusedConversationLauncher({ focalConcepts, recentSessions }) {
+    closeFocusedConversationLauncher();
+    const focus = normaliseFocusedConcepts(focalConcepts);
+    if (!focus.length || !document.body) return null;
+
+    const launcher = document.createElement('section');
+    launcher.id = 'focusedConversationLauncher';
+    launcher.className = 'focused-conversation-launcher';
+    launcher.setAttribute('role', 'dialog');
+    launcher.setAttribute('aria-modal', 'true');
+    launcher.setAttribute('aria-label', `Discuss ${focus.map((item) => item.displayName).join(', ')}`);
+
+    const title = document.createElement('h3');
+    title.textContent = `Discuss ${focus.map((item) => item.displayName).join(', ')}`;
+    const description = document.createElement('p');
+    description.textContent = recentSessions.length
+        ? 'Continue a recent discussion, or start a new one.'
+        : 'Start a discussion in your own words, or have Von open it.';
+    const actions = document.createElement('div');
+    actions.className = 'focused-conversation-launcher-actions';
+
+    const addAction = (label, action, primary = false) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = primary ? 'btn btn-primary' : 'btn btn-secondary';
+        button.textContent = label;
+        button.addEventListener('click', async () => {
+            button.disabled = true;
+            try {
+                await action();
+                closeFocusedConversationLauncher();
+            } catch (error) {
+                console.error('[chatTab] Unable to begin focused conversation', error);
+                showToast(error?.message || 'Could not start that conversation.', 'error');
+                button.disabled = false;
+            }
+        });
+        actions.appendChild(button);
+        return button;
+    };
+
+    if (recentSessions.length) {
+        const recent = recentSessions[0];
+        addAction(
+            `Continue${recent?.session_name ? `: ${recent.session_name}` : ''}`,
+            () => beginFocusedConversation({ focalConceptIds: focus.map((item) => item.conceptId), mode: 'user_first', sessionId: recent.session_id, sessionName: recent.session_name }),
+            true
+        );
+    }
+    addAction(
+        recentSessions.length ? 'New conversation — I’ll start' : 'I’ll start',
+        () => beginFocusedConversation({ focalConceptIds: focus.map((item) => item.conceptId), mode: 'user_first' }),
+        !recentSessions.length
+    );
+    addAction(
+        recentSessions.length ? 'New conversation — Von starts' : 'Have Von start',
+        () => beginFocusedConversation({ focalConceptIds: focus.map((item) => item.conceptId), mode: 'assistant_opening' })
+    );
+    addAction('Cancel', async () => {});
+
+    launcher.append(title, description, actions);
+    document.body.appendChild(launcher);
+    actions.querySelector('button')?.focus();
+    return launcher;
+}
+
+/**
+ * Shared entry point for concept, task, and message Discuss controls.
+ * The focal reference is stored on the conversation session; it is never
+ * smuggled into a synthetic user prompt.
+ */
+export async function openFocusedConversationLauncher(options = {}) {
+    const focalConceptIds = normaliseFocusedConceptIds(
+        options.focalConceptIds || [options.conceptId]
+    );
+    if (!focalConceptIds.length) {
+        showToast('This item has no usable concept reference.', 'error');
+        return null;
+    }
+    const suppliedFocus = Array.isArray(options.focalConcepts)
+        ? options.focalConcepts
+        : focalConceptIds.map((conceptId, index) => ({
+            concept_id: conceptId,
+            display_name: index === 0 ? options.conceptName : ''
+        }));
+    const recentSessions = await loadRecentFocusedConversationSessions(focalConceptIds[0]);
+    return renderFocusedConversationLauncher({
+        focalConcepts: suppliedFocus,
+        recentSessions
+    });
+}
+
+function bindFocusedConversationEvents() {
+    if (focusedConversationEventBound) return;
+    focusedConversationEventBound = true;
+    document.addEventListener('von:discussConcept', (event) => {
+        const detail = event?.detail || {};
+        void openFocusedConversationLauncher({
+            conceptId: detail.conceptId,
+            conceptName: detail.conceptName,
+            focalConceptIds: detail.focalConceptIds
+        });
+    });
+}
+
 async function promptRenameChatSession(sessionId, currentName) {
     console.log('[chatTab] promptRenameChatSession called', { sessionId, currentName });
     const proposed = window.prompt('Rename chat', currentName || '');
@@ -26419,6 +26752,10 @@ async function createChatSession(sessionName, options = {}) {
     if (typeof sessionName === 'string' && sessionName.trim()) {
         payload.session_name = sessionName.trim();
     }
+    const focalConceptIds = normaliseFocusedConceptIds(options.focalConceptIds);
+    if (focalConceptIds.length) {
+        payload.focal_concept_ids = focalConceptIds;
+    }
 
     const response = await fetch('/von/api/session/create_chat_session', {
         method: 'POST',
@@ -26433,6 +26770,10 @@ async function createChatSession(sessionName, options = {}) {
     }
 
     setActiveChatSession(data?.session_id, data?.session_name);
+    const createdFocus = getFocusFromPayload(data);
+    if (data?.session_id) {
+        acceptChatSessionFocus(data.session_id, createdFocus);
+    }
     _acceptConversationSituationPayload(
         _conversationSituationPayloadHasCarrierState(data)
             ? data
@@ -26477,6 +26818,9 @@ async function createChatSession(sessionName, options = {}) {
             ...sessionTabsCache.filter(s => String(s?.session_id || '') !== effectiveSessionId)
         ]);
         renderChatSessionTabs(sessionTabsCache, effectiveSessionId);
+        if (!createdFocus.length && focalConceptIds.length) {
+            void loadChatSessionFocus(effectiveSessionId, { force: true });
+        }
     }
 
     // Metadata editor: start with a fresh load for the new session.
@@ -26671,6 +27015,10 @@ async function switchToChatSession(sessionId) {
         cache_reuse: shouldReuseCachedHistory
     });
 
+    // Focus projections are actor-scoped.  Clear any local rendering cache
+    // before selecting the session; it will be repopulated only by the
+    // server-authorised focus read after the switch succeeds.
+    clearChatSessionFocus(sid);
     setActiveChatSession(sid, cachedSession?.session_name);
     const selectionGeneration = chatSessionSelectionGeneration;
     const isCurrentSelection = () => (
@@ -26792,6 +27140,7 @@ async function switchToChatSession(sessionId) {
             : sid;
         chatSessionMetadataOpenKey = null;
         void loadChatSessionLinks(effectiveMetaSessionId, { force: true });
+        void loadChatSessionFocus(effectiveMetaSessionId, { force: true });
 
         if (shouldReuseCachedHistory) {
             const cached = getSessionHistoryCache(sid);
@@ -31401,6 +31750,7 @@ export function initializeChatTab() {
     }
     chatTabInitialised = true;
     console.log("Initializing chat tab...");
+    bindFocusedConversationEvents();
 
     if (!document.__vonConversationRuntimeCostRuntimeListenerBound) {
         document.__vonConversationRuntimeCostRuntimeListenerBound = true;
@@ -31989,7 +32339,8 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
     }
     if (retryButton) {
-        retryButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        const canRetryThinkingRequest = isThinking && request?.turnKind !== 'assistant_opening';
+        retryButton.setAttribute('aria-hidden', canRetryThinkingRequest ? 'false' : 'true');
     }
     if (copyDiagnosticsButton) {
         copyDiagnosticsButton.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
@@ -32430,6 +32781,61 @@ function retryActiveChatRequest() {
             fileCopyDisplayName
         });
     }, 0);
+}
+
+function retryAssistantOpeningRequest(request) {
+    const sessionId = normaliseHistorySessionId(request?.sessionId);
+    const initiationId = String(request?.initiationId || '').trim();
+    if (request?.turnKind !== 'assistant_opening' || !sessionId || !initiationId) {
+        return false;
+    }
+    if (hasAnyLiveChatRequest()) {
+        showToast('Wait for the current response before retrying Von’s opening.', 'info');
+        return false;
+    }
+
+    setFinishedThinkingCardForSession(sessionId, null);
+    void handleSendPrompt({
+        sessionId,
+        sessionName: request?.sessionName || null,
+        promptOverride: '',
+        turnKind: 'assistant_opening',
+        initiationId,
+        allowEmptyPrompt: true,
+        skipPromptQueueRecord: true
+    });
+    return true;
+}
+
+function appendAssistantOpeningRetryAction(request, turnId) {
+    if (
+        request?.turnKind !== 'assistant_opening'
+        || !String(request?.initiationId || '').trim()
+    ) {
+        return null;
+    }
+    const messageContainer = getMessageContainerByTurnId(turnId);
+    if (!(messageContainer instanceof HTMLElement)) {
+        return null;
+    }
+    const existing = messageContainer.querySelector('.assistant-opening-retry-button');
+    if (existing instanceof HTMLButtonElement) {
+        return existing;
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-secondary assistant-opening-retry-button';
+    button.textContent = 'Retry Von opening';
+    button.title = 'Retry this assistant opening without adding a user message';
+    button.addEventListener('click', () => {
+        button.disabled = true;
+        if (!retryAssistantOpeningRequest(request)) {
+            button.disabled = false;
+        }
+    });
+    messageContainer.appendChild(button);
+    return button;
 }
 
 async function copyActiveThinkingDiagnostics(button = null, requestOverride = null) {
@@ -33542,6 +33948,8 @@ async function handleSendPrompt(options = {}) {
         : (selectedQueueEntry ? null : (typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null));
     const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
     const promptText = promptForSend.trim();
+    const assistantOpening = options?.turnKind === 'assistant_opening';
+    const allowEmptyPrompt = assistantOpening && options?.allowEmptyPrompt === true;
     const directComposerSubmission = (
         !fromQueue
         && !hasPromptOverride
@@ -33588,7 +33996,7 @@ async function handleSendPrompt(options = {}) {
 
     ensureAbortButtonBound();
 
-    if (!promptText) {
+    if (!promptText && !allowEmptyPrompt) {
         if (!fromQueue) {
             alert('Please enter a prompt.');
         }
@@ -33654,6 +34062,8 @@ async function handleSendPrompt(options = {}) {
         sessionKey: getChatRequestSessionKey(targetSessionId),
         sessionName: targetSessionName,
         promptRaw,
+        turnKind: assistantOpening ? 'assistant_opening' : null,
+        initiationId: assistantOpening ? String(options?.initiationId || '').trim() || null : null,
         promptQueueRecordId,
         selectionStart,
         selectionEnd,
@@ -33679,7 +34089,7 @@ async function handleSendPrompt(options = {}) {
         thinkingCardMode: loadStoredThinkingCardMode(),
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
     };
-    request.promptQueueRecordPromise = request.promptQueueRecordId
+    request.promptQueueRecordPromise = request.promptQueueRecordId || options?.skipPromptQueueRecord === true
         ? null
         : createPersistedChatPromptQueueEntry({
             promptRaw,
@@ -33717,7 +34127,9 @@ async function handleSendPrompt(options = {}) {
     if (isRequestVisible()) {
         setThinkingState(true, request);
         setLoadingIndicatorText(
-            formatToolUseProgressText(buildInitialThinkingProgressPlaceholder(clientRequestId), request)
+            assistantOpening
+                ? 'Von is opening this discussion…'
+                : formatToolUseProgressText(buildInitialThinkingProgressPlaceholder(clientRequestId), request)
         );
     } else {
         syncActiveChatSessionThinkingState();
@@ -33728,7 +34140,7 @@ async function handleSendPrompt(options = {}) {
     const assistantTurnId = `a-${Date.now()}`;
 
     // Add user message to chat with turnId
-    if (isRequestVisible()) {
+    if (isRequestVisible() && !assistantOpening && promptText) {
         appendMessage('User', promptText, userTurnId);
         // Fire-and-forget annotate user turn (do not await) - only if toggle is enabled
         const annotationToggle = document.getElementById('annotationToggle');
@@ -33912,6 +34324,7 @@ async function handleSendPrompt(options = {}) {
         request.resultTurnId = errorTurnId;
         if (isRequestVisible()) {
             appendMessage('Error', data?.error || data?.detail || fallbackMessage, errorTurnId, !!data?.llm_debug);
+            appendAssistantOpeningRetryAction(request, errorTurnId);
         }
         return true;
     };
@@ -33946,7 +34359,9 @@ async function handleSendPrompt(options = {}) {
 
     if (!fromQueue) {
         // Clear input only for direct sends; queued execution should preserve current draft text.
-        rememberLastSubmittedUserPrompt(promptRaw);
+        if (promptText) {
+            rememberLastSubmittedUserPrompt(promptRaw);
+        }
         setPromptComposerValue('', { promptInput });
     }
 
@@ -33976,6 +34391,8 @@ async function handleSendPrompt(options = {}) {
                 prompt: promptText,
                 client_request_id: request.clientRequestId,
                 conversation_session_id: targetSessionId,
+                ...(request.turnKind ? { turn_kind: request.turnKind } : {}),
+                ...(request.initiationId ? { initiation_id: request.initiationId } : {}),
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
@@ -34036,6 +34453,7 @@ async function handleSendPrompt(options = {}) {
             request.resultTurnId = `e-${Date.now()}`;
             if (isRequestVisible()) {
                 appendMessage('Error', 'Server error', request.resultTurnId);
+                appendAssistantOpeningRetryAction(request, request.resultTurnId);
             }
             return;
         }
@@ -34082,6 +34500,7 @@ async function handleSendPrompt(options = {}) {
         request.resultTurnId = `e-${Date.now()}`;
         if (isRequestVisible()) {
             appendMessage('Error', failureSummary, request.resultTurnId);
+            appendAssistantOpeningRetryAction(request, request.resultTurnId);
         }
     } finally {
         releaseRequestFileCopyBinding(request);
@@ -37785,6 +38204,9 @@ export function __testOnly_resetChatRequestState() {
     activeChatSessionId = null;
     activeChatSessionName = null;
     activeChatSessionOwnerId = null;
+    chatSessionFocusCache.clear();
+    activeChatSessionFocus = [];
+    renderActiveChatSessionFocusChips([]);
     _clearConversationSituationState({ closePanel: true });
     renderChatTaskQueuePanel();
     updateSendButtonForCurrentChatState();
@@ -37840,6 +38262,28 @@ export function __testOnly_scrollConversationToSessionList(options = {}) {
 }
 export function __testOnly_appendMessage(...args) {
     return appendMessage(...args);
+}
+export function __testOnly_renderChatSessionFocusChips(focalConcepts = []) {
+    activeChatSessionFocus = normaliseFocusedConcepts(focalConcepts);
+    renderActiveChatSessionFocusChips(activeChatSessionFocus);
+}
+export function __testOnly_acceptChatSessionFocus(sessionId, focalConcepts = []) {
+    return acceptChatSessionFocus(sessionId, focalConcepts);
+}
+export async function __testOnly_loadChatSessionFocus(sessionId, options = {}) {
+    return loadChatSessionFocus(sessionId, options);
+}
+export async function __testOnly_openFocusedConversationLauncher(options = {}) {
+    return openFocusedConversationLauncher(options);
+}
+export async function __testOnly_beginFocusedConversation(options = {}) {
+    return beginFocusedConversation(options);
+}
+export function __testOnly_setLiveChatRequest(sessionId, request = null) {
+    setLiveChatRequestForSession(sessionId, request);
+}
+export async function __testOnly_sendChatPrompt(options = {}) {
+    return handleSendPrompt(options);
 }
 export function __testOnly_toggleSpeakTurn(turnId, text, button) {
     return toggleSpeakTurn(turnId, text, button);

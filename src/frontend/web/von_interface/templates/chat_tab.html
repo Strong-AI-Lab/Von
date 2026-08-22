@@ -12,7 +12,11 @@
 
       <div class="chat-conversation-main">
         <div class="chat-conversation-masthead">
-          <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
+          <div class="chat-conversation-context">
+            <div id="chatSessionFocusChips" class="chat-session-focus-chips is-hidden"
+              aria-label="Conversation focus"></div>
+            <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
+          </div>
           <div class="chat-header-controls" role="group" aria-label="Conversation tools">
             <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
               title="Inspect this conversation's shared situation" aria-label="Inspect conversation situation"

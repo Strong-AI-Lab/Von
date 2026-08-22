@@ -105,3 +105,41 @@ def test_persist_generate_turn_messages_offloads_tool_message_content(
     assert stored_tool_message["content"]["field_path"] == "content"
     assert captured_messages[1] == {"role": "assistant", "content": "answer"}
     assert updated_context == []
+
+
+def test_persist_generate_assistant_opening_does_not_write_a_synthetic_user_message():
+    captured_messages: list[dict[str, Any]] = []
+
+    _persist_generate_turn_messages(
+        history_user_id="#V#michael_witbrock",
+        user_message_persisted_early=False,
+        prompt_text="",
+        user_concept_id="#V#michael_witbrock",
+        session_id="assistant-opening",
+        tool_messages=[],
+        response_text="I can help examine this concept.",
+        llm_debug_info={},
+        user_namespace="#V#michael@org",
+        org_concept_id="#V#org",
+        role_in_org=None,
+        current_context=[],
+        truncate_large_tool_results_fn=lambda messages, **_kwargs: messages,
+        add_chat_history_message_fn=lambda **kwargs: captured_messages.append(
+            dict(kwargs["message"])
+        ),
+        limit_context_size_fn=lambda messages, **_kwargs: list(messages),
+        persist_user_message=False,
+        assistant_message_metadata={
+            "turn_kind": "assistant_opening",
+            "initiation_id": "opening-1",
+        },
+    )
+
+    assert captured_messages == [
+        {
+            "role": "assistant",
+            "content": "I can help examine this concept.",
+            "turn_kind": "assistant_opening",
+            "initiation_id": "opening-1",
+        }
+    ]

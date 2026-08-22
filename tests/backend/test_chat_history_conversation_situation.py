@@ -177,9 +177,12 @@ def test_session_state_returns_history_and_optional_situation_without_changing_h
         "_id": 0,
         "session_id": 1,
         "history": 1,
-        "conversation_situation": 1,
-        "conversation_observations": 1,
-        "conversation_observation_total": 1,
+            "conversation_situation": 1,
+            "conversation_observations": 1,
+            "conversation_observation_total": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
     }
 
     legacy_history = chat_history_service.get_chat_history(
@@ -231,9 +234,12 @@ def test_session_state_can_read_carrier_metadata_without_loading_history(
     assert collection.find_calls[0][1] == {
         "_id": 0,
         "session_id": 1,
-        "conversation_situation": 1,
-        "conversation_observations": 1,
-        "conversation_observation_total": 1,
+            "conversation_situation": 1,
+            "conversation_observations": 1,
+            "conversation_observation_total": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
     }
 
 

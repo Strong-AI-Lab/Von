@@ -1939,6 +1939,40 @@ body {
     flex-wrap: wrap;
 }
 
+.task-discuss-btn,
+.message-discuss-btn,
+.concept-discuss-button {
+    border: 1px solid #86efac;
+    border-radius: 5px;
+    background: #f0fdf4;
+    color: #166534;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.task-discuss-btn {
+    padding: 4px 8px;
+    font-size: 0.75rem;
+}
+
+.message-discuss-btn {
+    margin-left: 7px;
+    padding: 1px 5px;
+    font-size: 0.68rem;
+}
+
+.concept-discuss-button {
+    margin-right: 6px;
+    padding: 5px 10px;
+}
+
+.task-discuss-btn:hover,
+.message-discuss-btn:hover,
+.concept-discuss-button:hover {
+    background: #dcfce7;
+    border-color: #4ade80;
+}
+
 .task-detail-toggle-btn {
     padding: 4px 8px;
     font-size: 0.75rem;
@@ -7691,6 +7725,79 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     padding: 0;
     margin: 0;
     border: 0;
+}
+
+.chat-conversation-context {
+    min-width: 0;
+}
+
+.chat-session-focus-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 7px;
+}
+
+.chat-session-focus-chips.is-hidden {
+    display: none;
+}
+
+.chat-session-focus-label {
+    color: #475569;
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.chat-session-focus-chip {
+    max-width: min(100%, 280px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 3px 8px;
+    border: 1px solid #86efac;
+    border-radius: 999px;
+    background: #f0fdf4;
+    color: #166534;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.chat-session-focus-chip:hover,
+.chat-session-focus-chip:focus-visible {
+    border-color: #4ade80;
+    background: #dcfce7;
+}
+
+.focused-conversation-launcher {
+    position: fixed;
+    z-index: 1100;
+    top: 50%;
+    left: 50%;
+    width: min(420px, calc(100vw - 32px));
+    transform: translate(-50%, -50%);
+    padding: 20px;
+    border: 1px solid #bbf7d0;
+    border-radius: 10px;
+    background: #ffffff;
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.25);
+}
+
+.focused-conversation-launcher h3 {
+    margin: 0 0 8px;
+    color: #14532d;
+}
+
+.focused-conversation-launcher p {
+    margin: 0 0 16px;
+    color: #475569;
+}
+
+.focused-conversation-launcher-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .chat-session-current-title {

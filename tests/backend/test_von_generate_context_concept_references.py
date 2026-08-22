@@ -20,7 +20,15 @@ def app(monkeypatch):
         lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.resolve_llm_setting",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_buttonify_model_enabled",
         lambda: False,
     )
     monkeypatch.setattr(
@@ -38,6 +46,31 @@ def app(monkeypatch):
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
         lambda _user_id, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.PromptTemplateService.resolve_prompt_text",
+        lambda _self, *_args, **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_model_registry_snapshot",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_turn_scope_service.build_gmail_profile_turn_scope",
+        lambda **_kwargs: {
+            "success": False,
+            "reason_code": "mail_profile_actor_not_represented",
+            "profile_id": None,
+            "choices": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._snapshot_tool_progress_for_request",
+        lambda *_args, **_kwargs: None,
     )
 
     def _stub_node_content(

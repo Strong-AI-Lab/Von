@@ -1394,6 +1394,14 @@ function getTaskId(task) {
     return task.task_concept_id || task.concept_id || '';
 }
 
+function renderTaskDiscussButton(task, className = '') {
+    const taskId = String(getTaskId(task) || '').trim();
+    if (!taskId.startsWith('#V#')) return '';
+    const title = String(task?.title || 'this task').trim() || 'this task';
+    return `<button type="button" class="task-discuss-btn ${className}" data-concept-id="${escapeHtml(taskId)}"
+        data-concept-name="${escapeHtml(title)}" title="Discuss this task with Von">Discuss</button>`;
+}
+
 function normaliseTaskConceptId(value) {
     if (typeof value !== 'string') return '';
     const trimmed = value.trim();
@@ -2080,6 +2088,7 @@ function renderTaskInspector(task, detailState) {
                 <div class="task-inspector-badges">
                     <span class="task-status-badge">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
                     <span class="task-priority-chip">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</span>
+                    ${renderTaskDiscussButton(detailTask, 'task-inspector-discuss-btn')}
                 </div>
             </div>
 
@@ -2420,6 +2429,7 @@ function renderTaskItem(task) {
                     🔗 ${linksCount}
                 </span>
                 <div class="task-actions">
+                    ${renderTaskDiscussButton(task)}
                     <button class="task-detail-toggle-btn" data-task-id="${taskId}" title="${_isGlobalTabMode ? 'Inspect task details' : 'Show task details'}">
                         ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Details')}
                     </button>
@@ -2752,6 +2762,22 @@ function attachTaskEventListeners() {
                         showToast('Could not open conversation', 'error');
                     }
                 }
+            });
+        });
+
+        root.querySelectorAll('.task-discuss-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const conceptId = String(event.currentTarget.dataset.conceptId || '').trim();
+                if (!conceptId) return;
+                document.dispatchEvent(new CustomEvent('von:discussConcept', {
+                    detail: {
+                        conceptId,
+                        conceptName: String(event.currentTarget.dataset.conceptName || '').trim() || conceptId,
+                        source: 'task'
+                    }
+                }));
             });
         });
     });

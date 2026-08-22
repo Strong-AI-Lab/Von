@@ -162,6 +162,41 @@ describe('task panel concept links', () => {
         document.removeEventListener('open-concept-tab', handler);
     });
 
+    test('offers a separate Discuss control for a task concept', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') return Promise.resolve(buildTaxonomyResponse());
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
+                return Promise.resolve({
+                    tasks: [{
+                        task_concept_id: '#V#task_2675',
+                        title: 'Focused discussions',
+                        status: 'pending',
+                        priority: 'medium',
+                        task_type_ids: ['#V#one_off_task_specification'],
+                        task_source_id: '#V#von_native_task_source',
+                    }],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+
+        const seen = [];
+        const handler = (event) => seen.push(event.detail);
+        document.addEventListener('von:discussConcept', handler);
+        document.querySelector('.task-discuss-btn').click();
+
+        expect(seen).toEqual([{
+            conceptId: '#V#task_2675',
+            conceptName: 'Focused discussions',
+            source: 'task',
+        }]);
+        document.removeEventListener('von:discussConcept', handler);
+    });
+
     test('inspector loading still works when using the global task controls', async () => {
         const { getJson } = require(apiServiceModulePath);
         const task = {

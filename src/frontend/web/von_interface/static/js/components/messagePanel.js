@@ -749,6 +749,9 @@ async function renderMessages() {
                 ` : ''}
                 <div class="message-meta">
                     <span class="message-time">${timestamp ? formatTime(timestamp) : ''}</span>
+                    ${msg.concept_id ? `<button type="button" class="message-discuss-btn"
+                        data-concept-id="${escapeHtml(msg.concept_id)}"
+                        title="Discuss this message with Von">Discuss with Von</button>` : ''}
                 </div>
             </div>
         `;
@@ -769,6 +772,21 @@ async function renderMessages() {
             if (messageId) {
                 void loadMessageRecommendationReview(messageId);
             }
+        });
+    });
+    contentEl.querySelectorAll('.message-discuss-btn').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const conceptId = String(event.currentTarget.dataset.conceptId || '').trim();
+            if (!conceptId) return;
+            document.dispatchEvent(new CustomEvent('von:discussConcept', {
+                detail: {
+                    conceptId,
+                    conceptName: 'Message',
+                    source: 'message'
+                }
+            }));
         });
     });
     await hydrateConceptCartouchesInRoot(contentEl);

@@ -199,6 +199,7 @@ def list_invites_for_user(
     status: Optional[str] = None,
     direction: str = "incoming",
     session_id: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     coll = _get_collection()
     if coll is None:
@@ -217,6 +218,8 @@ def list_invites_for_user(
         query["session_id"] = session_id.strip()
 
     cursor = coll.find(query, {"_id": 0}).sort("updated_at", DESCENDING)
+    if isinstance(limit, int) and limit > 0:
+        cursor = cursor.limit(min(limit, 200))
     return [doc for doc in cursor if isinstance(doc, dict)]
 
 
@@ -243,11 +246,14 @@ def get_accepted_invite_for_user_session(
     return doc if isinstance(doc, dict) else None
 
 
-def list_accepted_invites_for_user(*, user_concept_id: str) -> List[Dict[str, Any]]:
+def list_accepted_invites_for_user(
+    *, user_concept_id: str, limit: Optional[int] = None
+) -> List[Dict[str, Any]]:
     return list_invites_for_user(
         user_concept_id=user_concept_id,
         status="accepted",
         direction="incoming",
+        limit=limit,
     )
 
 

@@ -322,6 +322,8 @@ def _persist_generate_turn_messages(
     limit_context_size_fn: Callable[..., list[dict[str, Any]]],
     timing_recorder: Any | None = None,
     refresh_llm_debug_timing_fn: Callable[[dict[str, Any]], None] | None = None,
+    persist_user_message: bool = True,
+    assistant_message_metadata: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     def _maybe_span(
         *, operation_name: str, attributes: Mapping[str, Any] | None = None
@@ -380,7 +382,7 @@ def _persist_generate_turn_messages(
     ]
 
     if history_user_id:
-        if not user_message_persisted_early:
+        if persist_user_message and not user_message_persisted_early:
             with _maybe_span(operation_name="persist_user_message"):
                 add_chat_history_message_fn(
                     user_id=history_user_id,
@@ -415,7 +417,15 @@ def _persist_generate_turn_messages(
             add_chat_history_message_fn(
                 user_id=history_user_id,
                 session_id=session_id,
-                message={"role": "assistant", "content": response_text},
+                message={
+                    "role": "assistant",
+                    "content": response_text,
+                    **(
+                        dict(assistant_message_metadata)
+                        if isinstance(assistant_message_metadata, Mapping)
+                        else {}
+                    ),
+                },
                 llm_debug_data=llm_debug_payload,
                 namespace=user_namespace,
                 organisation_concept_id=org_concept_id,
@@ -425,7 +435,8 @@ def _persist_generate_turn_messages(
     else:
         if callable(refresh_llm_debug_timing_fn):
             refresh_llm_debug_timing_fn(llm_debug_payload)
-        updated_context.append({"role": "user", "content": prompt_text})
+        if persist_user_message:
+            updated_context.append({"role": "user", "content": prompt_text})
         updated_context.extend(storage_tool_messages)
         updated_context.append({"role": "assistant", "content": response_text})
 
