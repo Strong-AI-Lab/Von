@@ -10,9 +10,7 @@ import pytest
 def test_json_safe_treats_naive_pymongo_datetimes_as_utc() -> None:
     from src.backend.services import ontology_publication_authority_service as service
 
-    stored = datetime(2026, 8, 13, 17, 5, 57, 150000, tzinfo=UTC).replace(
-        tzinfo=None
-    )
+    stored = datetime(2026, 8, 13, 17, 5, 57, 150000, tzinfo=UTC).replace(tzinfo=None)
 
     assert service._json_safe(stored) == "2026-08-13T17:05:57.150000+00:00"
 
@@ -734,20 +732,33 @@ def test_admitted_actor_bound_workflow_retains_exact_private_authority(
 
 
 @pytest.mark.parametrize(
-    "publication_context,source_contexts",
+    "publication_context,source_contexts,expected_reason_code",
     (
-        ("other_user", ()),
-        ("organisation", ()),
-        ("global", ()),
-        ("historical", ()),
-        ("private", ("other_user",)),
+        (
+            "other_user",
+            (),
+            "private_scope_canonical_publication_not_delegated",
+        ),
+        (
+            "organisation",
+            (),
+            "organisation_ontology_admin_authority_required",
+        ),
+        ("global", (), "global_ontology_admin_authority_required"),
+        ("historical", (), "explicit_scope_adoption_required"),
+        (
+            "private",
+            ("other_user",),
+            "private_scope_canonical_publication_not_delegated",
+        ),
     ),
 )
-def test_actor_bound_workflow_cannot_cross_private_context_boundary(
+def test_actor_bound_workflow_rechecks_each_requested_context_live(
     authority_stores,
     monkeypatch,
     publication_context,
     source_contexts,
+    expected_reason_code,
 ):
     service, _delegations, _receipts = authority_stores
     monkeypatch.setattr(
@@ -789,7 +800,65 @@ def test_actor_bound_workflow_cannot_cross_private_context_boundary(
         decision = service.authorise_ontology_mutation(intent)
 
     assert decision.allowed is False
-    assert decision.reason_code == "ontology_agent_delegation_required"
+    assert decision.reason_code == expected_reason_code
+
+
+@pytest.mark.parametrize("scope_kind", ("organisation", "global"))
+def test_actor_bound_workflow_may_exercise_matching_live_semantic_role(
+    authority_stores,
+    monkeypatch,
+    scope_kind,
+):
+    service, _delegations, _receipts = authority_stores
+    monkeypatch.setattr(
+        service,
+        "_gateway_actor_trust_source",
+        lambda: "preexisting_authenticated_or_workflow_context",
+    )
+    if scope_kind == "organisation":
+        context = service.PublicationContext.organisation("#V#organisation")
+        role = _evidence(
+            service,
+            actor="#V#actor",
+            role=service.ORGANISATION_ONTOLOGY_ADMINISTRATOR_ROLE,
+            organisation="#V#organisation",
+        )
+    else:
+        context = service.PublicationContext.global_context()
+        role = _evidence(
+            service,
+            actor="#V#actor",
+            role=service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE,
+        )
+    monkeypatch.setattr(
+        service,
+        "resolve_live_semantic_roles",
+        lambda actor: (role,) if actor == "#V#actor" else (),
+    )
+    intent = service.OntologyMutationIntent(
+        operation="concept.create",
+        publication_context=context,
+        target_concept_ids=("#V#paper",),
+        tool_name="create_concepts",
+        delta={"names": ["A paper"]},
+    )
+
+    with (
+        service.override_current_actor("#V#actor", "#V#organisation"),
+        service.bind_ontology_invocation(
+            surface="workflow",
+            executing_agent_concept_id="#V#von_system",
+            audience="workflow",
+            effect_id=f"workflow:paper:create:{scope_kind}",
+            workflow_id="#V#paper_workflow",
+            actor_bound_workflow_effect=True,
+        ),
+    ):
+        decision = service.authorise_ontology_mutation(intent)
+
+    assert decision.allowed is True
+    assert decision.reason_code == "semantic_ontology_authority_verified"
+    assert decision.role_evidence == (role,)
 
 
 def test_actor_bound_workflow_marker_requires_workflow_and_gateway_trust(

@@ -17,19 +17,23 @@ from src.backend.services.paper_representation_workflow_vontology_service import
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+    SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID,
     SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
     SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
     bootstrap_canonical_paper_representation_workflows,
     diff_canonical_paper_representation_workflow_repo_seed_bundle,
     export_canonical_paper_representation_workflow_repo_seed_bundle,
 )
-from src.backend.services.workflow_discovery_service import (
-    invalidate_workflow_discovery_executability_caches,
-)
 from src.backend.services.text_value_service import (
     delete_text_relation,
     get_texts_for_concept,
     upsert_singleton_text_relation,
+)
+from src.backend.services.workflow_discovery_service import (
+    invalidate_workflow_discovery_executability_caches,
+)
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
 )
 from src.backend.workflows.action_registry import (
     ActionRegistry,
@@ -38,9 +42,7 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows import (
-    workflow_concept_authority_service as authority_service,
-)
+from src.backend.workflows.durable import registry_factory
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
@@ -50,7 +52,6 @@ from src.backend.workflows.durable.paper_representation_workflow import (
 from src.backend.workflows.durable.subworkflow_actions import (
     register_subworkflow_actions,
 )
-from src.backend.workflows.durable import registry_factory
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -159,7 +160,9 @@ def _delete_workflow_text_relations(
         delete_text_relation(workflow_id, relation_id, garbage_collect=True)
 
 
-def _snapshot_concept_text_relations(concept_id: str) -> list[tuple[str, str, str, str]]:
+def _snapshot_concept_text_relations(
+    concept_id: str,
+) -> list[tuple[str, str, str, str]]:
     return sorted(
         (
             str(row.get("predicate") or ""),
@@ -398,11 +401,39 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
     authority_service.clear_workflow_type_resolution_cache()
 
+    from src.backend.services import ontology_publication_authority_service
+
+    monkeypatch.setattr(
+        ontology_publication_authority_service,
+        "resolve_live_semantic_roles",
+        lambda actor_id: (
+            (
+                ontology_publication_authority_service.AuthorityRoleEvidence(
+                    role=(
+                        ontology_publication_authority_service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE
+                    ),
+                    actor_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+                    organisation_concept_id=None,
+                    relation_id="test:paper-workflow-global-authority",
+                    revision="test-revision-1",
+                ),
+            )
+            if actor_id == _LIVE_ARXIV_ACCEPTANCE_USER_ID
+            else ()
+        ),
+    )
+
     from src.backend.db.mongo_client import get_db
 
     db = get_db()
     if db is not None:
-        for collection_name in ("concepts", "text_relations", "text_values"):
+        for collection_name in (
+            "concepts",
+            "text_relations",
+            "text_values",
+            "scoped_knowledge_assertions",
+            "ontology_mutation_receipts",
+        ):
             try:
                 db.drop_collection(collection_name)
             except Exception:
@@ -420,11 +451,18 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 5
+    assert counts.get("workflows_published") == 6, json.dumps(
+        report, sort_keys=True, default=str
+    )
     assert counts.get("errors") == 0
     support_concepts = report.get("support_concepts") or {}
     assert support_concepts.get("errors") == []
-    created_support_ids = support_concepts.get("created_concept_ids") or []
+    publication_scope_profiles = report.get("publication_scope_profiles") or {}
+    assert publication_scope_profiles.get("success") is True
+    created_support_ids = {
+        *(support_concepts.get("created_concept_ids") or []),
+        *(publication_scope_profiles.get("created_concept_ids") or []),
+    }
     assert "#V#scholarly_article" in created_support_ids
     assert "#V#person" in created_support_ids
     assert "#V#research_topic" in created_support_ids
@@ -463,6 +501,11 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
     )
     assert metadata_definition is not None
+
+    public_author_definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID
+    )
+    assert public_author_definition is not None
 
     scholarly_definition = load_workflow_definition_from_vontology(
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -528,9 +571,12 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
         state_id="failed",
     )
-    assert source_neutral_definition.metadata["terminal_success_contract"][
-        "failed_terminal_error_code"
-    ] == "paper_reference_ingestion_no_items_succeeded"
+    assert (
+        source_neutral_definition.metadata["terminal_success_contract"][
+            "failed_terminal_error_code"
+        ]
+        == "paper_reference_ingestion_no_items_succeeded"
+    )
     source_required_effects = source_neutral_definition.metadata.get(
         "required_effects_contract"
     )
@@ -580,16 +626,22 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
         state_id="ingest_metadata_reference",
     )
-    assert item_definition.states[ingest_metadata_state_id].metadata[
-        "subworkflow_contract"
-    ]["workflow_id"] == SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    assert (
+        item_definition.states[ingest_metadata_state_id].metadata[
+            "subworkflow_contract"
+        ]["workflow_id"]
+        == SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
     ingest_file_state_id = authority_service._step_concept_id(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
         state_id="ingest_file_copy_reference",
     )
-    assert item_definition.states[ingest_file_state_id].metadata[
-        "subworkflow_contract"
-    ]["workflow_id"] == SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
+    assert (
+        item_definition.states[ingest_file_state_id].metadata["subworkflow_contract"][
+            "workflow_id"
+        ]
+        == SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
     route_arxiv_targets_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="route_arxiv_targets",
@@ -674,7 +726,6 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         == extract_metadata_state_id
     )
 
-
     extract_metadata_action = metadata_definition.states[
         extract_metadata_state_id
     ].actions[0]
@@ -712,29 +763,25 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         and "source_uri" in item.get("value_from_context_options", [])
         for item in assignments
     )
-    normalise_metadata_transitions = {
-        transition.reason: transition
-        for transition in metadata_definition.states[
-            normalise_metadata_state_id
-        ].transitions
-    }
-    assert normalise_metadata_transitions[
-        "existing_article_concept_supplied"
-    ].condition_spec == {
-        "kind": "all",
-        "conditions": [
-            {
-                "kind": "context_exists",
-                "key": "paper_concept_id",
-                "expected": True,
-            },
-            {
-                "kind": "context_is_null",
-                "key": "paper_concept_id",
-                "expected": False,
-            },
-        ],
-    }
+    resolve_paper_scope_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="resolve_paper_instance_scope",
+    )
+    assert (
+        metadata_definition.states[normalise_metadata_state_id].transitions[0].to_state
+        == resolve_paper_scope_state_id
+    )
+    resolve_paper_scope_action = metadata_definition.states[
+        resolve_paper_scope_state_id
+    ].actions[0]
+    assert resolve_paper_scope_action.action_id == "resolve_publication_scope_profile"
+    assert resolve_paper_scope_action.inputs.get("plane") == "instance"
+    assert resolve_paper_scope_action.inputs.get("type_concept_ids") == [
+        "#V#scholarly_article"
+    ]
+    assert resolve_paper_scope_action.inputs.get("source_kind") == (
+        "public_scholarly_metadata"
+    )
     normalise_external_identity_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="normalise_external_identity",
@@ -742,7 +789,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert any(
         transition.to_state == normalise_external_identity_state_id
         for transition in metadata_definition.states[
-            normalise_metadata_state_id
+            resolve_paper_scope_state_id
         ].transitions
     )
     normalise_external_identity_state = metadata_definition.states[
@@ -759,23 +806,30 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="create_article_by_external_identity",
     )
-    assert external_identity_transitions[
-        "canonical_external_identity_available"
-    ].to_state == create_external_identity_state_id
+    assert (
+        external_identity_transitions["canonical_external_identity_available"].to_state
+        == create_external_identity_state_id
+    )
     attach_metadata_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="attach_metadata",
     )
-    assert external_identity_transitions[
-        "actor_private_external_identity_resolved"
-    ].to_state == attach_metadata_state_id
+    assert (
+        external_identity_transitions["global_external_identity_resolved"].to_state
+        == attach_metadata_state_id
+    )
+    assert (
+        external_identity_transitions["supplied_global_article_validated"].to_state
+        == attach_metadata_state_id
+    )
     create_external_identity_state = metadata_definition.states[
         create_external_identity_state_id
     ]
     create_external_identity_action = create_external_identity_state.actions[0]
     assert create_external_identity_action.action_id == "create_concepts"
-    assert create_external_identity_action.inputs.get("scope_mode") == (
-        "user_only_default"
+    assert (
+        create_external_identity_action.inputs.get("scope_mode", {}).get("$context_key")
+        == "paper_instance_scope_mode"
     )
     assert create_external_identity_action.inputs.get("duplicate_resolution_mode") == (
         "canonical_id_only"
@@ -783,8 +837,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert create_external_identity_action.inputs["concepts"][0]["concept_id"] == {
         "$context_key": "paper_external_identity_concept_id"
     }
-    assert "external_identifiers" not in (
-        create_external_identity_action.inputs["concepts"][0]
+    assert (
+        "external_identifiers"
+        not in (create_external_identity_action.inputs["concepts"][0])
     )
     assert create_external_identity_state.metadata.get("mutation_authority") == {
         "maximum_level": "additive_vontology",
@@ -805,9 +860,12 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             resolve_existing_article_state_id
         ].transitions
     }
-    assert resolve_existing_article_transitions[
-        "title_match_without_stable_identity_requires_review"
-    ].to_state == reject_title_reuse_state_id
+    assert (
+        resolve_existing_article_transitions[
+            "title_match_without_stable_identity_requires_review"
+        ].to_state
+        == reject_title_reuse_state_id
+    )
     resolve_topics_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="resolve_topics",
@@ -920,6 +978,8 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "hasDescription",
         "#V#has_doi",
         "#V#has_source_uri",
+        "#V#has_publication_date",
+        "#V#has_topic_labels",
     ]
     read_back_text_relations_transitions = {
         transition.reason: transition
@@ -928,8 +988,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ].transitions
     }
     assert (
-        read_back_text_relations_transitions["next_step"].to_state
-        == completed_state_id
+        read_back_text_relations_transitions["next_step"].to_state == completed_state_id
     )
     summary_transition = read_back_text_relations_transitions[
         "representation_evidence_summary_required"
@@ -1165,7 +1224,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert "author_names" in contract["provided_inputs"]
     assert "topic_labels" in contract["provided_inputs"]
     delegate_action = delegate_state.actions[0]
-    assert delegate_action.inputs.get("require_representation_evidence_summary") is False
+    assert (
+        delegate_action.inputs.get("require_representation_evidence_summary") is False
+    )
     assert delegate_action.inputs.get("paper_concept_id") == {
         "$context_key": "paper_concept_id",
         "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_paper_concept_id_to_paper_concept_id_parameter",
@@ -1284,9 +1345,10 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ],
         "kind": "all",
     }
-    assert "finalise_cached_pdf" not in recovery_transition.condition_spec[
-        "conditions"
-    ][1]["values"]
+    assert (
+        "finalise_cached_pdf"
+        not in recovery_transition.condition_spec["conditions"][1]["values"]
+    )
     build_pdf_import_action = arxiv_definition.states[
         build_pdf_import_state_id
     ].actions[0]
@@ -1345,9 +1407,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     optional_pdf_diagnostics = record_pdf_import_skipped_action.inputs.get(
         "assignments"
     )[3:]
-    assert {
-        assignment["key"] for assignment in optional_pdf_diagnostics
-    } == {
+    assert {assignment["key"] for assignment in optional_pdf_diagnostics} == {
         "arxiv_pdf_import_error",
         "arxiv_pdf_import_message",
         "arxiv_pdf_import_status_code",
@@ -1556,7 +1616,9 @@ def _build_source_neutral_execution_registry(
             definition=definition,
             registration_source="vontology" if definition is not None else "unknown",
             known_workflow_ids=(),
-            error_code=None if definition is not None else "workflow_concept_not_accessible",
+            error_code=None
+            if definition is not None
+            else "workflow_concept_not_accessible",
             diagnostics={
                 "actor_scoped_authority_required": True,
                 "shared_registry_definition_trusted": False,
@@ -1621,7 +1683,9 @@ def _build_source_neutral_execution_registry(
     return registry, calls
 
 
-def _load_source_neutral_test_definitions() -> tuple[WorkflowDefinition, WorkflowDefinition]:
+def _load_source_neutral_test_definitions() -> tuple[
+    WorkflowDefinition, WorkflowDefinition
+]:
     parent_definition = load_workflow_definition_from_vontology(
         SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
     )
@@ -1691,7 +1755,15 @@ def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_
         },
     )
 
-    assert result.completed is True
+    assert result.completed is True, json.dumps(
+        {
+            key: value
+            for key, value in result.data.items()
+            if key.startswith("last_") or "scope" in key or "error" in key
+        },
+        sort_keys=True,
+        default=str,
+    )
     assert result.final_state.endswith("_completed")
     assert result.data["paper_reference_item_count"] == 5
     assert result.data["for_each_success_count"] == 4
@@ -1895,7 +1967,7 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
 ) -> None:
     first_report = bootstrap_canonical_paper_representation_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 5
+    assert first_counts.get("workflows_published") == 6
 
     second_report = bootstrap_canonical_paper_representation_workflows()
     second_authority = second_report.get("authority_contract") or {}
@@ -2052,7 +2124,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "26" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "27" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2071,8 +2143,9 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     ]
     assert required_effect["required_payload_fields"] == ["paper_concept_id"]
     assert required_effect["targets_extractor"] == "arxiv_id_list"
-    assert "workflow_discovery_result.discovery_query_input" in (
-        required_effect["targets_source_expressions"]
+    assert (
+        "workflow_discovery_result.discovery_query_input"
+        in (required_effect["targets_source_expressions"])
     )
 
 
@@ -2534,7 +2607,15 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
         },
     )
 
-    assert result.completed is True
+    assert result.completed is True, json.dumps(
+        {
+            key: value
+            for key, value in result.data.items()
+            if key.startswith("last_") or "scope" in key or "error" in key
+        },
+        sort_keys=True,
+        default=str,
+    )
     assert result.final_state.endswith("_completed"), result.data.get(
         "last_action_outputs"
     )
@@ -2550,8 +2631,24 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     assert paper_doc is not None
     relationships = paper_doc.get("relationships") or {}
     assert "#V#scholarly_article" in (relationships.get("is_an_instance_of") or [])
-    assert relationships.get("#V#authored_by")
-    assert relationships.get("#V#about")
+    author_concept_ids = relationships.get("#V#authored_by") or []
+    assert author_concept_ids
+    from src.backend.services import ontology_publication_authority_service
+
+    assert (
+        ontology_publication_authority_service.concept_publication_context(
+            paper_concept_id
+        ).kind
+        == ontology_publication_authority_service.PublicationContextKind.GLOBAL
+    )
+    assert all(
+        ontology_publication_authority_service.concept_publication_context(
+            author_concept_id
+        ).kind
+        == ontology_publication_authority_service.PublicationContextKind.GLOBAL
+        for author_concept_id in author_concept_ids
+    )
+    assert relationships.get("#V#about") is None
 
     names = [
         row.get("text")
@@ -2580,6 +2677,15 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
         )
     ]
     assert "https://dl.acm.org/doi/full/10.1145/3743093.3770985" in (source_uri_values)
+    topic_label_values = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="#V#has_topic_labels",
+            limit=5,
+        )
+    ]
+    assert "computer vision, story illustration" in topic_label_values
     text_relation_summary = result.data.get("article_text_relations_summary")
     assert isinstance(text_relation_summary, dict)
     summary_predicates = {
@@ -2589,6 +2695,8 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     }
     assert "#V#has_doi" in summary_predicates
     assert "#V#has_source_uri" in summary_predicates
+    assert "#V#has_publication_date" in summary_predicates
+    assert "#V#has_topic_labels" in summary_predicates
 
     descriptions = [
         row.get("text")
@@ -2599,6 +2707,249 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
         )
     ]
     assert "A paper about composable identity control." in descriptions
+
+
+def test_metadata_workflow_reuses_global_papers_across_authorised_actors_but_not_name_only_people(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import ontology_publication_authority_service
+
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    second_actor_id = "#V#second_public_paper_actor"
+    authorised_actor_ids = {
+        _LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        second_actor_id,
+    }
+
+    def _roles(actor_id: str):
+        if actor_id not in authorised_actor_ids:
+            return ()
+        return (
+            ontology_publication_authority_service.AuthorityRoleEvidence(
+                role=(
+                    ontology_publication_authority_service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE
+                ),
+                actor_concept_id=actor_id,
+                organisation_concept_id=None,
+                relation_id=f"test:global-paper-role:{actor_id}",
+                revision="test-revision-cross-actor-1",
+            ),
+        )
+
+    monkeypatch.setattr(
+        ontology_publication_authority_service,
+        "resolve_live_semantic_roles",
+        _roles,
+    )
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    )
+    first_environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+    second_environment = WorkflowEnvironment(
+        llm_client=None,
+        user_namespace=(
+            f"{second_actor_id}@{_LIVE_ARXIV_ACCEPTANCE_ORG_ID.removeprefix('#V#')}"
+        ),
+        user_concept_id=second_actor_id,
+        org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+    )
+
+    first = executor.run(
+        definition,
+        environment=first_environment,
+        data={
+            "paper_metadata": {
+                "title": "Cross-actor Public Paper",
+                "doi": "10.5555/cross-actor-public-paper",
+                "authors": ["Alex Kim"],
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+    same_paper = executor.run(
+        definition,
+        environment=second_environment,
+        data={
+            "paper_metadata": {
+                "title": "Cross-actor Public Paper, Corrected Title",
+                "doi": "https://doi.org/10.5555/cross-actor-public-paper",
+                "authors": ["Alex Kim"],
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+    second_paper = executor.run(
+        definition,
+        environment=second_environment,
+        data={
+            "paper_metadata": {
+                "title": "A Distinct Paper with a Namesake Author",
+                "doi": "10.5555/namesake-author-paper",
+                "authors": ["Alex Kim"],
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert first.completed is True, first.error
+    assert same_paper.completed is True, same_paper.error
+    assert second_paper.completed is True, second_paper.error
+    first_paper_id = first.data.get("paper_concept_id")
+    assert same_paper.data.get("paper_concept_id") == first_paper_id
+    assert second_paper.data.get("paper_concept_id") != first_paper_id
+
+    first_author_ids = set(
+        (concept_service.get_concept_by_concept_id(first_paper_id) or {})
+        .get("relationships", {})
+        .get("#V#authored_by", [])
+    )
+    second_author_ids = set(
+        (
+            concept_service.get_concept_by_concept_id(
+                second_paper.data.get("paper_concept_id")
+            )
+            or {}
+        )
+        .get("relationships", {})
+        .get("#V#authored_by", [])
+    )
+    assert len(first_author_ids) == 1
+    assert len(second_author_ids) == 1
+    assert first_author_ids.isdisjoint(second_author_ids)
+
+
+def test_metadata_workflow_rejects_global_representation_without_live_role(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace="#V#unauthorised_paper_actor",
+            user_concept_id="#V#unauthorised_paper_actor",
+            org_concept_id=None,
+        ),
+        data={
+            "paper_metadata": {
+                "title": "Unauthorised Global Paper Attempt",
+                "doi": "10.5555/unauthorised-global-paper",
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert result.completed is False
+    assert result.data.get("last_action_error") == (
+        "global_ontology_admin_authority_required"
+    )
+    predicted_paper_id = result.data.get("paper_external_identity_concept_id")
+    assert isinstance(predicted_paper_id, str)
+    with pytest.raises(concept_service.ConceptNotFoundError):
+        concept_service.get_concept_by_concept_id(predicted_paper_id)
+
+
+def test_metadata_workflow_keeps_local_file_copy_link_user_scoped(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+    file_copy_concept_id = "#V#private_local_copy_of_public_paper"
+    concept_service.create_concept(
+        name="Local copy of public paper",
+        concept_id=file_copy_concept_id,
+        parent_concept_ids=["#V#computer_file"],
+        create_as_instance=True,
+        created_by_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        organisation_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        visibility_scope_mode="user_only_default",
+        maintain_relationship_inverses=False,
+    )
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "file_copy_concept_id": file_copy_concept_id,
+            "paper_metadata": {
+                "title": "Public Paper with a Private Local Copy",
+                "doi": "10.5555/public-paper-private-copy",
+                "authors": ["Ada Lovelace"],
+            },
+            "require_representation_evidence_summary": False,
+        },
+    )
+
+    assert result.completed is True, json.dumps(
+        {
+            key: value
+            for key, value in result.data.items()
+            if key.startswith("last_") or "scope" in key or "file" in key
+        },
+        sort_keys=True,
+        default=str,
+    )
+    paper_concept_id = result.data.get("paper_concept_id")
+    assert isinstance(paper_concept_id, str)
+    paper_doc = concept_service.get_concept_by_concept_id(paper_concept_id) or {}
+    assert not (
+        (paper_doc.get("relationships") or {}).get(
+            "#V#propositional_information_thing_has_computer_file"
+        )
+        or []
+    )
+
+    from src.backend.db.mongo_client import (
+        get_scoped_knowledge_assertions_collection,
+    )
+
+    assertion = get_scoped_knowledge_assertions_collection().find_one(
+        {
+            "subject_concept_id": paper_concept_id,
+            "predicate": "#V#local_file_copy",
+            "object_concept_id": file_copy_concept_id,
+        }
+    )
+    assert assertion is not None
+    assert assertion.get("canonical_publication") is False
+    assert (assertion.get("scope") or {}).get("mode") == "user"
+    assert (assertion.get("scope") or {}).get("user_concept_id") == (
+        _LIVE_ARXIV_ACCEPTANCE_USER_ID
+    )
 
 
 def test_metadata_workflow_reuses_existing_article_on_identical_retry(
@@ -2899,7 +3250,7 @@ def test_metadata_workflow_rejects_title_only_reuse_before_mutation(
     "scope_mode",
     ["organisation_general", "global_general"],
 )
-def test_metadata_workflow_does_not_reuse_shared_article_by_title(
+def test_metadata_workflow_does_not_mutate_shared_article_by_title_alone(
     _reset_mock_db: Any,
     scope_mode: str,
 ) -> None:
@@ -2945,9 +3296,10 @@ def test_metadata_workflow_does_not_reuse_shared_article_by_title(
     )
 
     assert result.completed is False
-    assert result.data.get("article_resolution_status") == "not_found"
+    assert result.data.get("article_resolution_status") == "resolved"
+    assert result.data.get("paper_concept_id") == shared_concept_id
     assert result.data.get("last_action_error") == (
-        "ontology_create_concept_id_conflict"
+        "scholarly_paper_title_only_reuse_unverified"
     )
     descriptions = [
         row.get("text")
@@ -2964,7 +3316,7 @@ def test_metadata_workflow_does_not_reuse_shared_article_by_title(
     "scope_mode",
     ["organisation_general", "global_general"],
 )
-def test_metadata_workflow_rejects_supplied_shared_article_before_text_mutation(
+def test_metadata_workflow_validates_supplied_article_scope_before_text_mutation(
     _reset_mock_db: Any,
     scope_mode: str,
 ) -> None:
@@ -3010,11 +3362,25 @@ def test_metadata_workflow_rejects_supplied_shared_article_before_text_mutation(
         },
     )
 
-    assert result.completed is False
-    assert result.data.get("last_action_error") == (
-        "scholarly_paper_actor_private_target_required"
-    )
-    assert _snapshot_concept_text_relations(paper_concept_id) == before_text
+    if scope_mode == "organisation_general":
+        assert result.completed is False
+        assert result.data.get("last_action_error") == (
+            "scholarly_paper_global_target_required"
+        )
+        assert _snapshot_concept_text_relations(paper_concept_id) == before_text
+    else:
+        assert result.completed is True, result.error
+        assert result.data.get("paper_external_identity_resolution_status") == (
+            "supplied"
+        )
+        assert "Attempted Shared Article Rewrite" in {
+            row.get("text")
+            for row in get_texts_for_concept(
+                paper_concept_id,
+                predicate="hasName",
+                limit=10,
+            )
+        }
 
 
 def test_metadata_workflow_rejects_supplied_private_article_without_trusted_actor(
@@ -3063,12 +3429,12 @@ def test_metadata_workflow_rejects_supplied_private_article_without_trusted_acto
 
     assert result.completed is False
     assert result.data.get("last_action_error") == (
-        "scholarly_paper_actor_private_target_required"
+        "scholarly_paper_global_target_required"
     )
     assert _snapshot_concept_text_relations(paper_concept_id) == before_text
 
 
-def test_metadata_workflow_accepts_supplied_actor_private_article(
+def test_metadata_workflow_rejects_supplied_actor_private_article(
     _reset_mock_db: Any,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
@@ -3111,8 +3477,10 @@ def test_metadata_workflow_accepts_supplied_actor_private_article(
         },
     )
 
-    assert result.completed is True, result.error
-    assert result.data.get("paper_concept_id") == paper_concept_id
+    assert result.completed is False
+    assert result.data.get("last_action_error") == (
+        "scholarly_paper_global_target_required"
+    )
     descriptions = [
         row.get("text")
         for row in get_texts_for_concept(
@@ -3121,7 +3489,7 @@ def test_metadata_workflow_accepts_supplied_actor_private_article(
             limit=10,
         )
     ]
-    assert "The trusted actor may extend their private article." in descriptions
+    assert "The trusted actor may extend their private article." not in descriptions
 
 
 def test_metadata_workflow_represents_sparse_source_uri_without_title(
@@ -3348,15 +3716,13 @@ def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stal
     assert repair_publication.get("bundle_snapshot_issue_codes") == []
     assert repair_counts.get("workflows_published") == 0
     assert repair_counts.get("errors") == 1
-    authority_blockers = (
-        (repair_report.get("repo_seed_version_gate") or {}).get(
-            "authority_blockers_by_workflow"
-        )
-        or {}
+    authority_blockers = (repair_report.get("repo_seed_version_gate") or {}).get(
+        "authority_blockers_by_workflow"
+    ) or {}
+    assert (
+        authority_blockers[ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID]["error_code"]
+        == "live_authority_requires_explicit_migration"
     )
-    assert authority_blockers[ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID][
-        "error_code"
-    ] == "live_authority_requires_explicit_migration"
 
     repaired_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -3609,6 +3975,7 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
     assert export_report.get("asset_path") == str(tmp_asset_path.resolve())
     assert export_report.get("workflow_ids") == [
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID,
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,

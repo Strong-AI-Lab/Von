@@ -12,6 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..workflows.workflow_repo_seed_export_service import (
+    diff_repo_seed_workflow_bundle_from_authority,
+    write_repo_seed_workflow_bundle_from_authority,
+)
+from .publication_scope_profile_vontology_service import (
+    bootstrap_canonical_publication_scope_profiles,
+)
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
@@ -22,15 +29,16 @@ from .workflow_prompt_authority_service import (
 from .workflow_repo_seed_bootstrap import (
     bootstrap_repo_seed_workflow_bundle,
 )
-from ..workflows.workflow_repo_seed_export_service import (
-    diff_repo_seed_workflow_bundle_from_authority,
-    write_repo_seed_workflow_bundle_from_authority,
-)
 
 SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID = (
     "#V#scholarly_article_metadata_representation_workflow"
 )
-SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#scholarly_paper_representation_workflow"
+SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID = (
+    "#V#scholarly_public_author_representation_workflow"
+)
+SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = (
+    "#V#scholarly_paper_representation_workflow"
+)
 ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#arxiv_paper_representation_workflow"
 SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID = (
     "#V#source_neutral_paper_reference_ingestion_workflow"
@@ -168,6 +176,7 @@ def bootstrap_canonical_paper_representation_workflows(
 ) -> dict[str, Any]:
     """Publish or repair the canonical scholarly-paper workflow family at startup."""
 
+    publication_scope_profiles = bootstrap_canonical_publication_scope_profiles()
     prompt_support = _ensure_paper_workflow_prompt_support(
         force_prompt_seed=bool(force_republish)
     )
@@ -178,10 +187,13 @@ def bootstrap_canonical_paper_representation_workflows(
         )
     )
     publication_counts = dict((report.get("publication") or {}).get("counts") or {})
+    report["publication_scope_profiles"] = publication_scope_profiles
     report["prompt_support"] = prompt_support
-    report["success"] = bool(prompt_support.get("success")) and int(
-        publication_counts.get("errors") or 0
-    ) == 0
+    report["success"] = (
+        bool(publication_scope_profiles.get("success"))
+        and bool(prompt_support.get("success"))
+        and int(publication_counts.get("errors") or 0) == 0
+    )
     return report
 
 
@@ -211,6 +223,7 @@ __all__ = [
     "ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID",
     "SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID",
     "SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID",
+    "SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID",
     "SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID",
     "SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID",
     "bootstrap_canonical_paper_representation_workflows",

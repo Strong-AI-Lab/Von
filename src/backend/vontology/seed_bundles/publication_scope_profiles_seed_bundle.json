@@ -1,7 +1,7 @@
 {
   "schema_version": "publication_scope_profile_seed_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-2671",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2670",
   "managed_by": "publication_scope_profile_vontology_service",
   "concepts": [
     {"concept_id": "#V#thing", "name": "Thing", "parent_concept_ids": [], "create_as_instance": false},
@@ -37,6 +37,10 @@
 
     {"concept_id": "#V#authored_by", "name": "authored by", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
     {"concept_id": "#V#has_doi", "name": "has DOI", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_source_uri", "name": "has source URI", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_publication_date", "name": "has publication date", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_topic_labels", "name": "has topic labels", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#paper_on_arxiv", "name": "paper on arXiv", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
     {"concept_id": "#V#published_in", "name": "published in", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
     {"concept_id": "#V#public_affiliation", "name": "public affiliation", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
     {"concept_id": "#V#has_read", "name": "has read", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
@@ -135,8 +139,8 @@
     {
       "profile_concept_id": "#V#publication_profile_public_bibliographic_assertion_global",
       "name": "Public bibliographic assertion global profile",
-      "bound_subject_concept_ids": ["#V#authored_by", "#V#has_doi", "#V#published_in", "#V#public_affiliation"],
-      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "public_bibliographic_assertion_global", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "global_general", "applicability": {"source_kinds": ["public_record", "public_scholarly_metadata"]}, "source": "JVNAUTOSCI-2671"}
+      "bound_subject_concept_ids": ["#V#authored_by", "#V#has_doi", "#V#has_source_uri", "#V#has_publication_date", "#V#has_topic_labels", "#V#paper_on_arxiv", "#V#published_in", "#V#public_affiliation"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "public_bibliographic_assertion_global", "version": "2", "status": "active", "plane": "assertion", "recommended_scope_mode": "global_general", "applicability": {"source_kinds": ["public_record", "public_scholarly_metadata"]}, "source": "JVNAUTOSCI-2670"}
     },
     {
       "profile_concept_id": "#V#publication_profile_private_context_assertion_user",

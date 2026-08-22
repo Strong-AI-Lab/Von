@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from src.backend.services import concept_service
+from src.backend.services import concept_service, ontology_publication_authority_service
 from src.backend.services.paper_representation_workflow_vontology_service import (
     SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
     bootstrap_canonical_paper_representation_workflows,
@@ -55,11 +55,26 @@ def _reset_durable_paper_state(monkeypatch: pytest.MonkeyPatch) -> Any:
     workflow_concept_authority_service.clear_workflow_type_resolution_cache()
 
 
-def test_durable_submitted_metadata_workflow_uses_bound_private_actor_authority(
+def test_durable_submitted_metadata_workflow_uses_bound_live_global_authority(
     _reset_durable_paper_state: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prove the normal persisted workflow route, without an injected grant."""
+    """Prove the persisted actor-bound route uses the actor's live global role."""
+
+    global_role = ontology_publication_authority_service.AuthorityRoleEvidence(
+        role=(
+            ontology_publication_authority_service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE
+        ),
+        actor_concept_id=_ACTOR_ID,
+        organisation_concept_id=None,
+        relation_id="role-relation:durable-paper-global-admin",
+        revision="role-revision-1",
+    )
+    monkeypatch.setattr(
+        ontology_publication_authority_service,
+        "resolve_live_semantic_roles",
+        lambda actor_id: (global_role,) if actor_id == _ACTOR_ID else (),
+    )
 
     bootstrap = bootstrap_canonical_paper_representation_workflows()
     assert (bootstrap.get("publication") or {}).get("counts", {}).get("errors") == 0
@@ -79,10 +94,10 @@ def test_durable_submitted_metadata_workflow_uses_bound_private_actor_authority(
         namespace=_NAMESPACE,
         inputs={
             "paper_metadata": {
-                "title": "Durably Bound Private Workflow Authority",
+                "title": "Durably Bound Global Workflow Authority",
                 "abstract": (
-                    "The canonical durable route should complete this private "
-                    "additive representation without delegation ceremony."
+                    "The canonical durable route should complete this global "
+                    "paper representation through the actor's live role."
                 ),
             },
             "require_representation_evidence_summary": False,
@@ -144,8 +159,8 @@ def test_durable_submitted_metadata_workflow_uses_bound_private_actor_authority(
         )
     }
     assert (
-        "The canonical durable route should complete this private additive "
-        "representation without delegation ceremony."
+        "The canonical durable route should complete this global paper "
+        "representation through the actor's live role."
     ) in descriptions
     terminal = manager.get_instance(submission.instance_id)
     assert terminal is not None

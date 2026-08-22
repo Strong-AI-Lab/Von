@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+from ..workflows.definitions import WRITE_TOOL_POLICY_WORKFLOW_ID
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
 from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
-from ..workflows.definitions import WRITE_TOOL_POLICY_WORKFLOW_ID
 
 DEFAULT_MINIMAL_IMPOSITION_RUNTIME_PROFILE_PREDICATE = (
     "#V#has_minimal_imposition_runtime_profile_json"
@@ -128,6 +128,7 @@ _DEFAULT_TOOL_RISK_CLASSES: dict[str, str] = {
     "update_task_status": "mutative_non_destructive",
     "update_text_relation": "mutative_non_destructive",
     "upsert_renderer_profile": "additive_low_risk",
+    "upsert_scoped_assertion": "additive_low_risk",
     "upsert_singleton_text_relation": "additive_low_risk",
     "upsert_text_relation": "additive_low_risk",
     "workflow_bind_event": "additive_low_risk",
@@ -634,6 +635,6 @@ __all__ = [
     "canonical_minimal_imposition_runtime_tool_risk_classes",
     "ensure_canonical_minimal_imposition_runtime_profiles",
     "load_minimal_imposition_runtime_profile",
-    "resolve_runtime_profile_write_tool_risk_class",
     "resolve_minimal_imposition_runtime_profile_concept_id",
+    "resolve_runtime_profile_write_tool_risk_class",
 ]
