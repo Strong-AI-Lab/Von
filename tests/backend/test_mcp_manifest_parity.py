@@ -127,6 +127,18 @@ def test_predicate_relation_tools_explain_concept_id_anchor_contract() -> None:
     )
 
 
+def test_jira_link_issue_contract_states_blocks_direction() -> None:
+    canonical_payload = {
+        item["name"]: item for item in get_surface_tool_payloads(SURFACE_MANIFEST)
+    }
+
+    jira_link_issue = canonical_payload["jira_link_issue"]
+    assert "with Blocks, source blocks target" in jira_link_issue["description"]
+    assert "with link_type='Blocks', source blocks target" in (
+        jira_link_issue["inputSchema"]["description"]
+    )
+
+
 def test_create_concepts_contract_matches_the_governed_core_boundary() -> None:
     canonical_payload = {
         item["name"]: item for item in get_surface_tool_payloads(SURFACE_MANIFEST)
