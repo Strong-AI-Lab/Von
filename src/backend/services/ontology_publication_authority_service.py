@@ -249,16 +249,18 @@ def publication_context_from_mapping(value: Mapping[str, Any]) -> PublicationCon
     source = _clean_text(value.get("source")) or "resolved"
     if kind == PublicationContextKind.COMPOSITE:
         raw_components = value.get("components")
-        if not isinstance(raw_components, Sequence) or isinstance(
-            raw_components,
-            (str, bytes, bytearray),
-        ) or len(raw_components) != 2 or any(
-            not isinstance(item, Mapping) for item in raw_components
+        if (
+            not isinstance(raw_components, Sequence)
+            or isinstance(
+                raw_components,
+                (str, bytes, bytearray),
+            )
+            or len(raw_components) != 2
+            or any(not isinstance(item, Mapping) for item in raw_components)
         ):
             raise ValueError("Composite publication context requires components")
         components = tuple(
-            publication_context_from_mapping(item)
-            for item in raw_components
+            publication_context_from_mapping(item) for item in raw_components
         )
         context = PublicationContext(
             kind=kind,
@@ -861,27 +863,23 @@ def _actor_bound_workflow_direct_authority_eligible(
 
     The marker is bound by workflow support code only after the resolved MCP
     write has passed the workflow mutation ceiling.  This exception therefore
-    carries no authority of its own: it merely permits the existing exact live
-    authority decision for an effect whose complete publication boundary stays
-    inside the authenticated actor's private context.
+    carries no authority of its own: it permits the existing exact live
+    authority decision for this one actor-bound effect.  The ordinary authority
+    resolver still requires the actor's matching user, organisation, or global
+    semantic role and still rejects cross-actor and reserved-governance writes.
+    Minting and immediately consuming a delegation for the same trusted effect
+    would only relabel that live authority; delegation remains required when a
+    separately acting principal or an untrusted/sessionless boundary is used.
     """
 
     actor_id = _normalise_concept_id(actor_concept_id)
-    if (
+    return not (
         invocation is None
         or invocation.actor_bound_workflow_effect is not True
         or invocation.surface != "workflow"
         or invocation.audience != "workflow"
         or trust_source != "preexisting_authenticated_or_workflow_context"
         or actor_id is None
-    ):
-        return False
-
-    return all(
-        context.kind == PublicationContextKind.USER and context.concept_id == actor_id
-        for context in expand_publication_contexts(
-            (*intent.source_contexts, intent.publication_context)
-        )
     )
 
 
@@ -1707,9 +1705,7 @@ def ontology_authority_denial_payload(
     authority_kind = {
         "authenticated_actor_context_required": "trusted_actor_context",
         "explicit_scope_adoption_required": "explicit_publication_scope_adoption",
-        "global_ontology_admin_authority_required": (
-            "global_ontology_administrator"
-        ),
+        "global_ontology_admin_authority_required": ("global_ontology_administrator"),
         "organisation_ontology_admin_authority_required": (
             "organisation_ontology_administrator"
         ),
@@ -2069,9 +2065,7 @@ def reconcile_indeterminate_mutation_receipt(
         },
         return_document=ReturnDocument.AFTER,
     )
-    return (
-        _receipt_public_projection(updated) if isinstance(updated, Mapping) else None
-    )
+    return _receipt_public_projection(updated) if isinstance(updated, Mapping) else None
 
 
 def get_mutation_receipt_for_actor(

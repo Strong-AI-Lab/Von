@@ -7,7 +7,7 @@
 - **Authority scope:** Canonical Vontology publication, retraction, identity
   consolidation, and publication-scope change
 - **Owner:** Von maintainers
-- **Last reviewed:** 22 August 2026
+- **Last reviewed:** 23 August 2026
 - **Review trigger:** Merge, deployment, a role-lifecycle change, or a new
   canonical ontology mutation entry point
 - **Live authority or implementation evidence:** Initial activation completed
@@ -88,21 +88,16 @@ visibility merely from an opaque grant.
 
 An actor-bound workflow effect executed within the same trusted server does not
 become a separate authority handoff merely because an agent selected or
-composed it. After the resolved write passes the workflow mutation ceiling, an
-exact actor-private effect may retain the authenticated actor's direct
-authority. When an executing agent needs a separate capability, including for
-an ordinary-turn organisation or global creation, the server may issue one
-exact same-turn delegation only after resolving the final intent and checking
-the actor's corresponding live semantic role. This issuance is part of
-executing the authorised turn; it does not introduce an extra human
-confirmation or let the model enlarge its scope. The governed MCP path retains
-agent provenance, a durable effect receipt, and canonical read-back. Existing
-custom scholarly handlers do not yet share that receipt path; their bounded
-exception preflights every existing mutation target as the exact actor's
-private concept and requires global schema support to be preprovisioned.
-Historical/mixed, other-user, reserved-governance, sessionless, or separately
-delegated effects do not inherit this actor-bound path merely because the model
-requested them.
+composed it. After the resolved write passes the workflow mutation ceiling, the
+ordinary authority resolver evaluates the final exact user, organisation, or
+global intent against the authenticated actor's live authority. The workflow
+marker grants no authority of its own; a missing or mismatched semantic role,
+other-user target, historical or mixed context, or reserved governance
+predicate still fails closed. Minting and immediately consuming a delegation
+for that same trusted effect would only relabel the live authority decision.
+Use exact delegation when authority is handed to a separately acting principal
+or crosses an untrusted or sessionless boundary. The governed MCP path retains
+agent provenance, a durable effect receipt, and canonical read-back.
 
 ## 4. Governed effects and scope transition
 
@@ -171,6 +166,20 @@ scoped assertion carrier. Entity profiles may appear as context hints for an
 assertion decision, but they never select the assertion scope and there is no
 cross-plane "tightest wins" rule. Thus a person and paper may remain global
 while a particular `has_read` fact remains user-scoped.
+
+`JVNAUTOSCI-2670` applies this separation to scholarly representation. A
+scientific paper, its public bibliographic metadata, and an author occurrence
+derived from a public paper are globally published when the actor has live
+global semantic authority. DOI, source URI, publication date, topic-label, and
+authorship predicate profiles independently select the global canonical
+carrier. A file copy on one user's machine remains user-scoped through
+`#V#local_file_copy`; the workflow must not add a canonical file relationship
+to the public paper. A name-only author is a source-bounded occurrence for that
+paper rather than an identity merge across papers, while a supported public
+identifier such as ORCID may supply stable cross-paper identity. The
+publication-profile bundle is bootstrapped before the dependent paper workflow
+family, so a missing default cannot cause private paper creation followed by a
+backfill.
 
 The non-mutating `resolve_publication_scope_profile` tool is available to
 ordinary turns and durable workflows. Its evidence includes matched and
@@ -286,11 +295,11 @@ global authority; operational-admin non-equivalence; expiry, revocation,
 tampering, and cross-audience delegation denial; alternate entry-point
 enforcement; private-context non-leakage; retry/concurrency behaviour; and
 receipt-backed canonical read-back of successful and partial effects.
-Where a supported workflow route uses direct actor-private authority or
-same-turn exact delegation, the positive evidence must exercise its normal
-production actor and current-organisation binding, live role resolution,
-delegation issuance where applicable, and write ceiling rather than a manually
-injected delegation value. Creation evidence must cover private defaulting,
+Where a supported workflow route uses direct actor-bound authority or exact
+delegation, the positive evidence must exercise its normal production actor
+and current-organisation binding, live role resolution, delegation issuance
+where applicable, and write ceiling rather than a manually injected delegation
+value. Creation evidence must cover private defaulting,
 explicit organisation and global selection, spoofed-identity containment,
 authority denial without downgrade or mutation, and exact canonical read-back.
 Scope-edit evidence must cover every add/remove state transition across global,

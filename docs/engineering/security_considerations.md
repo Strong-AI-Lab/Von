@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 22 August 2026
+- **Last reviewed:** 23 August 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -238,9 +238,11 @@ aperture. The `JVNAUTOSCI-2632` candidate separates organisation/global
 semantic roles from Von operational administration and requires an exact,
 server-issued, short-lived, non-recursive delegation when authority for a
 covered ontology effect is handed to a separately acting agent. A workflow
-effect that stays inside one trusted authenticated actor's exact private scope
-may retain that actor's direct authority after the workflow write ceiling and
-the final intent are checked; that is not a semantic delegation. The current
+effect that stays inside one trusted authenticated actor-bound execution may
+evaluate the final exact intent against that actor's live user, organisation,
+or global semantic authority after the workflow write ceiling is checked; that
+is not a semantic delegation. The marker grants no authority and missing or
+mismatched roles still fail closed. The current
 design/implementation boundary is
 [Ontology publication authority](ontology_publication_authority.md). This is a
 candidate branch reference, not evidence that a deployment has represented
@@ -260,9 +262,10 @@ mutation instead of being silently ignored. Optional organisation context does
 not disable an otherwise actor-authorised user-scoped assertion capability:
 payload organisation claims are hidden and cleared, then any current
 organisation is recovered only from the already trusted ambient actor context.
-Where an executing agent needs a separate capability, the server issues an
-exact same-turn delegation only after resolving the effect and rechecking that
-live authority; no additional human confirmation is required.
+Where authority is handed to a separately acting principal or crosses an
+untrusted or sessionless boundary, the server issues an exact delegation only
+after resolving the effect and rechecking that live authority; no additional
+human confirmation is required.
 Post-creation publication-scope changes use the governed preview-and-execute
 path: user and organisation restrictions are independently added or removed,
 and an exact one-user-plus-one-organisation composite requires authority over

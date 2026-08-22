@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "26",
+  "seed_version": "27",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -32,7 +32,7 @@
       ]
     }
   },
-  "source_tag": "JVNAUTOSCI-2434",
+  "source_tag": "JVNAUTOSCI-2670",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.normalise_external_identity",
@@ -46,23 +46,21 @@
     "get_paper_metadata",
     "import_url_file_copy",
     "workflow_invoke_subworkflow",
-    "scholarly_paper.enrich_from_metadata",
-    "scholarly_paper.materialise_from_file_copy",
     "workflow_control.context_set",
     "workflow_control.context_template",
     "workflow_control.for_each",
     "paper_reference.normalise_reference_set",
     "paper_reference.fail_item",
     "resolve_concept_by_name",
+    "resolve_publication_scope_profile",
     "create_concepts",
+    "add_relationship",
+    "upsert_scoped_assertion",
     "upsert_text_relation",
     "fetch_concept_content",
     "get_text_relations_summary",
-    "scholarly_paper.ensure_paper_concept",
-    "scholarly_paper.link_file_copy",
-    "scholarly_paper.attach_metadata",
     "scholarly_paper.resolve_topics",
-    "scholarly_paper.assert_source_identity"
+    "llm.action"
   ],
   "workflows": [
     {
@@ -502,27 +500,49 @@
                 ]
               }
             ],
-            "next_state": "normalise_external_identity",
-            "conditional_transitions": [
+            "next_state": "resolve_paper_instance_scope"
+          },
+          {
+            "state_id": "resolve_paper_instance_scope",
+            "action_id": "resolve_publication_scope_profile",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
               {
-                "to_state": "attach_metadata",
-                "reason": "existing_article_concept_supplied",
-                "condition_spec": {
-                  "kind": "all",
-                  "conditions": [
-                    {
-                      "kind": "context_exists",
-                      "key": "paper_concept_id",
-                      "expected": true
-                    },
-                    {
-                      "kind": "context_is_null",
-                      "key": "paper_concept_id",
-                      "expected": false
-                    }
-                  ]
-                }
+                "key": "plane",
+                "value": "instance"
+              },
+              {
+                "key": "type_concept_ids",
+                "value": [
+                  "#V#scholarly_article"
+                ]
+              },
+              {
+                "key": "source_kind",
+                "value": "public_scholarly_metadata"
+              },
+              {
+                "key": "producer",
+                "value": "#V#scholarly_article_metadata_representation_workflow"
               }
+            ],
+            "next_state": "normalise_external_identity",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_paper_scope_selected_to_paper_instance_scope_mode",
+                "context_key": "paper_instance_scope_mode",
+                "tool_output_field": "selected_scope_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_paper_scope_evidence_to_paper_scope_decision_evidence",
+                "context_key": "paper_scope_decision_evidence",
+                "tool_output_field": "decision_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_instance_scope_mode",
+              "paper_scope_decision_evidence"
             ]
           },
           {
@@ -553,17 +573,38 @@
                 "context_key": "paper_metadata",
                 "required": false,
                 "tool_param": "paper_metadata"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_normalise_external_identity_paper_scope_to_paper_instance_scope_mode_parameter",
+                "context_key": "paper_instance_scope_mode",
+                "required": true,
+                "tool_param": "paper_instance_scope_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_normalise_external_identity_paper_concept_id_to_paper_concept_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": false,
+                "tool_param": "paper_concept_id"
               }
             ],
             "next_state": "resolve_existing_article",
             "conditional_transitions": [
               {
                 "to_state": "attach_metadata",
-                "reason": "actor_private_external_identity_resolved",
+                "reason": "global_external_identity_resolved",
                 "condition_spec": {
                   "kind": "context_value_equals",
                   "key": "paper_external_identity_resolution_status",
                   "value": "resolved"
+                }
+              },
+              {
+                "to_state": "attach_metadata",
+                "reason": "supplied_global_article_validated",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "paper_external_identity_resolution_status",
+                  "value": "supplied"
                 }
               },
               {
@@ -639,7 +680,7 @@
               },
               {
                 "key": "require_actor_private",
-                "value": true
+                "value": false
               },
               {
                 "key": "max_results",
@@ -725,7 +766,7 @@
               },
               {
                 "key": "error_message",
-                "value": "An actor-private scholarly article has the same title, but no stable identity or sufficient bibliographic fingerprint proves that it is the same paper. No mutation was attempted."
+                "value": "A visible scholarly article has the same title, but no stable identity or sufficient bibliographic fingerprint proves that it is the same paper. No mutation was attempted."
               }
             ],
             "on_failure_state": "failed"
@@ -771,7 +812,9 @@
               },
               {
                 "key": "scope_mode",
-                "value": "user_only_default"
+                "value": {
+                  "$context_key": "paper_instance_scope_mode"
+                }
               }
             ],
             "next_state": "capture_article_concept",
@@ -818,6 +861,12 @@
               {
                 "key": "allow_duplicate_instances",
                 "value": false
+              },
+              {
+                "key": "scope_mode",
+                "value": {
+                  "$context_key": "paper_instance_scope_mode"
+                }
               }
             ],
             "next_state": "capture_article_concept",
@@ -862,58 +911,202 @@
           },
           {
             "state_id": "attach_metadata",
-            "action_id": "scholarly_paper.attach_metadata",
+            "action_id": "workflow_control.context_set",
             "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "metadata_attach_gate",
+                    "value": "public_scholarly_metadata"
+                  }
+                ]
+              }
+            ],
+            "next_state": "decide_summary_metadata",
+            "conditional_transitions": [
+              {
+                "to_state": "attach_title_metadata",
+                "reason": "public_title_present",
+                "condition_spec": {
+                  "kind": "context_exists",
+                  "key": "title",
+                  "expected": true
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "attach_title_metadata",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "public_scholarly_metadata_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "hasName"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "name_type": "NL",
+                  "source": "public_scholarly_metadata"
+                }
+              }
+            ],
             "context_input_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_metadata_paper_concept_id_to_paper_concept_id_parameter",
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_title_paper_to_concept_id_parameter",
                 "context_key": "paper_concept_id",
                 "required": true,
-                "tool_param": "paper_concept_id"
+                "tool_param": "concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_metadata_paper_metadata_to_paper_metadata_parameter",
-                "context_key": "paper_metadata",
-                "required": false,
-                "tool_param": "paper_metadata"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_metadata_title_to_title_parameter",
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_title_text_to_text_parameter",
                 "context_key": "title",
-                "required": false,
-                "tool_param": "title"
+                "required": true,
+                "tool_param": "text"
+              }
+            ],
+            "next_state": "decide_summary_metadata",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "decide_summary_metadata",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "summary_attach_gate",
+                    "value": "optional"
+                  }
+                ]
+              }
+            ],
+            "next_state": "decide_publication_date_metadata",
+            "conditional_transitions": [
+              {
+                "to_state": "attach_summary_metadata",
+                "reason": "public_summary_present",
+                "condition_spec": {
+                  "kind": "context_exists",
+                  "key": "summary",
+                  "expected": true
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "attach_summary_metadata",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "public_scholarly_metadata_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "hasDescription"
               },
               {
-                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_metadata_summary_to_summary_parameter",
+                "key": "context",
+                "value": {
+                  "source": "public_scholarly_metadata"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_summary_paper_to_concept_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_summary_text_to_text_parameter",
                 "context_key": "summary",
-                "required": false,
-                "tool_param": "summary"
-              },
+                "required": true,
+                "tool_param": "text"
+              }
+            ],
+            "next_state": "decide_publication_date_metadata",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "decide_publication_date_metadata",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
               {
-                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_metadata_publication_date_to_publication_date_parameter",
-                "context_key": "publication_date",
-                "required": false,
-                "tool_param": "publication_date"
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "publication_date_attach_gate",
+                    "value": "optional"
+                  }
+                ]
               }
             ],
             "next_state": "resolve_authors",
-            "on_failure_state": "failed",
-            "tool_output_mapping_specs": [
+            "conditional_transitions": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_attach_metadata_paper_concept_id_to_paper_concept_id",
-                "context_key": "paper_concept_id",
-                "tool_output_field": "paper_concept_id"
+                "to_state": "attach_publication_date_metadata",
+                "reason": "public_publication_date_present",
+                "condition_spec": {
+                  "kind": "context_exists",
+                  "key": "publication_date",
+                  "expected": true
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "attach_publication_date_metadata",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "public_scholarly_metadata_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#has_publication_date"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_attach_metadata_metadata_attached_to_metadata_attached",
-                "context_key": "metadata_attached",
-                "tool_output_field": "metadata_attached"
+                "key": "context",
+                "value": {
+                  "source": "public_scholarly_metadata"
+                }
               }
             ],
-            "writes_context_keys": [
-              "paper_concept_id",
-              "metadata_attached"
-            ]
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_date_paper_to_concept_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_date_text_to_text_parameter",
+                "context_key": "publication_date",
+                "required": true,
+                "tool_param": "text"
+              }
+            ],
+            "next_state": "resolve_authors",
+            "on_failure_state": "failed"
           },
           {
             "state_id": "resolve_authors",
@@ -934,16 +1127,91 @@
               }
             ],
             "next_state": "resolve_topics",
+            "conditional_transitions": [
+              {
+                "to_state": "dispatch_public_authors",
+                "reason": "public_author_records_present",
+                "condition_spec": {
+                  "kind": "context_compare",
+                  "key": "public_author_count",
+                  "operator": "gt",
+                  "value": 0
+                }
+              }
+            ],
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_authors_author_concept_ids_to_author_concept_ids",
-                "context_key": "author_concept_ids",
-                "tool_output_field": "author_concept_ids"
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_authors_records_to_public_author_records",
+                "context_key": "public_author_records",
+                "tool_output_field": "public_author_records"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_authors_count_to_public_author_count",
+                "context_key": "public_author_count",
+                "tool_output_field": "public_author_count"
               }
             ],
             "writes_context_keys": [
-              "author_concept_ids"
+              "public_author_records",
+              "public_author_count"
+            ]
+          },
+          {
+            "state_id": "dispatch_public_authors",
+            "action_id": "workflow_control.for_each",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "workflow_id",
+                "#V#scholarly_public_author_representation_workflow"
+              ],
+              [
+                "items_context_key",
+                "public_author_records"
+              ],
+              [
+                "item_context_key",
+                "current_public_author"
+              ],
+              [
+                "index_context_key",
+                "public_author_index"
+              ],
+              [
+                "success_policy",
+                "all_must_succeed"
+              ],
+              [
+                "max_items",
+                200
+              ],
+              [
+                "max_concurrency",
+                1
+              ],
+              [
+                "max_transitions",
+                30
+              ]
+            ],
+            "next_state": "resolve_topics",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_dispatch_authors_results_to_public_author_iteration_results",
+                "context_key": "public_author_iteration_results",
+                "tool_output_field": "iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_dispatch_authors_success_count_to_public_author_success_count",
+                "context_key": "public_author_success_count",
+                "tool_output_field": "for_each_success_count"
+              }
+            ],
+            "writes_context_keys": [
+              "public_author_iteration_results",
+              "public_author_success_count"
             ]
           },
           {
@@ -965,16 +1233,81 @@
               }
             ],
             "next_state": "decide_arxiv_identity",
+            "conditional_transitions": [
+              {
+                "to_state": "attach_topic_labels",
+                "reason": "public_topic_labels_present",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "topic_labels_present",
+                  "expected": true
+                }
+              }
+            ],
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_topics_topic_concept_ids_to_topic_concept_ids",
-                "context_key": "topic_concept_ids",
-                "tool_output_field": "topic_concept_ids"
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_topics_labels_text_to_topic_labels_text",
+                "context_key": "topic_labels_text",
+                "tool_output_field": "topic_labels_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_topics_present_to_topic_labels_present",
+                "context_key": "topic_labels_present",
+                "tool_output_field": "topic_labels_present"
               }
             ],
             "writes_context_keys": [
-              "topic_concept_ids"
+              "topic_labels_text",
+              "topic_labels_present"
+            ]
+          },
+          {
+            "state_id": "attach_topic_labels",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "public_scholarly_metadata_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#has_topic_labels"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "source": "public_scholarly_metadata"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_topics_paper_to_concept_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_topics_text_to_text_parameter",
+                "context_key": "topic_labels_text",
+                "required": true,
+                "tool_param": "text"
+              }
+            ],
+            "next_state": "decide_arxiv_identity",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_attach_topics_result_to_topic_labels_write_result",
+                "context_key": "topic_labels_write_result",
+                "tool_output_field": "result"
+              }
+            ],
+            "writes_context_keys": [
+              "topic_labels_write_result"
             ]
           },
           {
@@ -1259,7 +1592,7 @@
             "next_state": "read_back_article",
             "conditional_transitions": [
               {
-                "to_state": "link_optional_file_copy",
+                "to_state": "resolve_file_link_scope",
                 "reason": "file_copy_present",
                 "condition_spec": {
                   "kind": "context_exists",
@@ -1270,34 +1603,117 @@
             ]
           },
           {
-            "state_id": "link_optional_file_copy",
-            "action_id": "scholarly_paper.link_file_copy",
+            "state_id": "resolve_file_link_scope",
+            "action_id": "resolve_publication_scope_profile",
             "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "plane",
+                "value": "assertion"
+              },
+              {
+                "key": "predicate_concept_id",
+                "value": "#V#local_file_copy"
+              },
+              {
+                "key": "subject_type_concept_ids",
+                "value": [
+                  "#V#scholarly_article"
+                ]
+              },
+              {
+                "key": "object_type_concept_ids",
+                "value": [
+                  "#V#computer_file_copy"
+                ]
+              },
+              {
+                "key": "source_kind",
+                "value": "private_email"
+              },
+              {
+                "key": "producer",
+                "value": "#V#scholarly_article_metadata_representation_workflow"
+              }
+            ],
+            "next_state": "link_optional_file_copy",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_file_scope_carrier_to_file_link_scope_mode",
+                "context_key": "file_link_scope_mode",
+                "tool_output_field": "carrier.scope_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_resolve_file_scope_evidence_to_file_link_scope_evidence",
+                "context_key": "file_link_scope_evidence",
+                "tool_output_field": "decision_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "file_link_scope_mode",
+              "file_link_scope_evidence"
+            ]
+          },
+          {
+            "state_id": "link_optional_file_copy",
+            "action_id": "upsert_scoped_assertion",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "private_file_link_scoped_assertion"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#local_file_copy"
+              },
+              {
+                "key": "evidence",
+                "value": {
+                  "source_kind": "private_email",
+                  "workflow_id": "#V#scholarly_article_metadata_representation_workflow"
+                }
+              }
+            ],
             "context_input_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_link_optional_file_copy_paper_concept_id_to_paper_concept_id_parameter",
                 "context_key": "paper_concept_id",
                 "required": true,
-                "tool_param": "paper_concept_id"
+                "tool_param": "subject_concept_id"
               },
               {
                 "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_link_optional_file_copy_file_copy_concept_id_to_file_copy_concept_id_parameter",
                 "context_key": "file_copy_concept_id",
                 "required": true,
-                "tool_param": "file_copy_concept_id"
+                "tool_param": "target_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_link_optional_file_copy_scope_to_scope_mode_parameter",
+                "context_key": "file_link_scope_mode",
+                "required": true,
+                "tool_param": "scope_mode"
               }
             ],
             "next_state": "read_back_article",
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_link_optional_file_copy_file_link_written_to_file_link_written",
-                "context_key": "file_link_written",
-                "tool_output_field": "file_link_written"
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_link_optional_file_copy_assertion_id_to_file_link_assertion_id",
+                "context_key": "file_link_assertion_id",
+                "tool_output_field": "assertion_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_link_optional_file_copy_readback_to_file_link_canonical_read_back",
+                "context_key": "file_link_canonical_read_back",
+                "tool_output_field": "canonical_read_back"
               }
             ],
             "writes_context_keys": [
-              "file_link_written"
+              "file_link_assertion_id",
+              "file_link_canonical_read_back"
             ]
           },
           {
@@ -1342,7 +1758,9 @@
                   "hasName",
                   "hasDescription",
                   "#V#has_doi",
-                  "#V#has_source_uri"
+                  "#V#has_source_uri",
+                  "#V#has_publication_date",
+                  "#V#has_topic_labels"
                 ]
               },
               {
@@ -1480,6 +1898,255 @@
               "observations",
               "metadata_verification",
               "verification_passed"
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#scholarly_public_author_representation_workflow",
+      "display_name": "Scholarly Public Author Representation Workflow",
+      "description": "Represent one public scholarly author through stable public identity evidence or a paper-source-bounded candidate, then add globally published authorship without name-only merging.",
+      "content": "Resolve the represented person instance scope, create or reuse the exact public author identity selected by the parent scholarly workflow, resolve the authored-by predicate scope, add the canonical public authorship relation, and preserve source-bounded candidate identity when no cross-paper identifier is available.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"phase\": \"published\", \"published\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "resolve_author_instance_scope",
+        "steps": [
+          {
+            "state_id": "resolve_author_instance_scope",
+            "action_id": "resolve_publication_scope_profile",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "plane",
+                "value": "instance"
+              },
+              {
+                "key": "type_concept_ids",
+                "value": [
+                  "#V#person"
+                ]
+              },
+              {
+                "key": "source_kind",
+                "value": "public_scholarly_metadata"
+              },
+              {
+                "key": "stable_identity_present",
+                "value": true
+              },
+              {
+                "key": "producer",
+                "value": "#V#scholarly_public_author_representation_workflow"
+              }
+            ],
+            "next_state": "create_public_author",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_public_author_representation_workflow_resolve_scope_selected_to_author_instance_scope_mode",
+                "context_key": "author_instance_scope_mode",
+                "tool_output_field": "selected_scope_mode"
+              }
+            ],
+            "writes_context_keys": [
+              "author_instance_scope_mode"
+            ]
+          },
+          {
+            "state_id": "create_public_author",
+            "action_id": "create_concepts",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "public_scholarly_author_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "parent_id",
+                "value": "#V#person"
+              },
+              {
+                "key": "concepts",
+                "value": [
+                  {
+                    "name": {
+                      "$context_key": "current_public_author.name"
+                    },
+                    "kind": "instance",
+                    "description": {
+                      "$context_key": "current_public_author.description"
+                    },
+                    "concept_id": {
+                      "$context_key": "current_public_author.concept_id"
+                    }
+                  }
+                ]
+              },
+              {
+                "key": "allow_duplicate_instances",
+                "value": false
+              },
+              {
+                "key": "duplicate_resolution_mode",
+                "value": "canonical_id_only"
+              },
+              {
+                "key": "scope_mode",
+                "value": {
+                  "$context_key": "author_instance_scope_mode"
+                }
+              }
+            ],
+            "next_state": "capture_public_author",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_public_author_representation_workflow_create_result_to_public_author_create_result",
+                "context_key": "public_author_create_result",
+                "tool_output_field": "result"
+              }
+            ],
+            "writes_context_keys": [
+              "public_author_create_result"
+            ]
+          },
+          {
+            "state_id": "capture_public_author",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "author_concept_id",
+                    "value_from_context": "public_author_create_result.results.0.concept_id"
+                  }
+                ]
+              }
+            ],
+            "next_state": "resolve_authorship_assertion_scope",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_public_author_representation_workflow_capture_author_id_to_author_concept_id",
+                "context_key": "author_concept_id",
+                "tool_output_field": "author_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "author_concept_id"
+            ]
+          },
+          {
+            "state_id": "resolve_authorship_assertion_scope",
+            "action_id": "resolve_publication_scope_profile",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "plane",
+                "value": "assertion"
+              },
+              {
+                "key": "predicate_concept_id",
+                "value": "#V#authored_by"
+              },
+              {
+                "key": "subject_type_concept_ids",
+                "value": [
+                  "#V#scholarly_article"
+                ]
+              },
+              {
+                "key": "object_type_concept_ids",
+                "value": [
+                  "#V#person"
+                ]
+              },
+              {
+                "key": "source_kind",
+                "value": "public_scholarly_metadata"
+              },
+              {
+                "key": "stable_identity_present",
+                "value": true
+              },
+              {
+                "key": "producer",
+                "value": "#V#scholarly_public_author_representation_workflow"
+              }
+            ],
+            "next_state": "add_public_authorship",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_public_author_representation_workflow_resolve_authorship_scope_selected_to_authorship_scope_mode",
+                "context_key": "authorship_scope_mode",
+                "tool_output_field": "selected_scope_mode"
+              }
+            ],
+            "writes_context_keys": [
+              "authorship_scope_mode"
+            ]
+          },
+          {
+            "state_id": "add_public_authorship",
+            "action_id": "add_relationship",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "public_scholarly_authorship_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#authored_by"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_public_author_representation_workflow_add_authorship_paper_to_source_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "tool_param": "source_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_public_author_representation_workflow_add_authorship_author_to_target_parameter",
+                "context_key": "author_concept_id",
+                "required": true,
+                "tool_param": "target"
+              }
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_public_author_representation_workflow_add_authorship_result_to_authorship_write_result",
+                "context_key": "authorship_write_result",
+                "tool_output_field": "result"
+              }
+            ],
+            "writes_context_keys": [
+              "authorship_write_result"
             ]
           },
           {
@@ -1738,16 +2405,6 @@
                 "tool_output_field": "result.paper_concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_paper_representation_workflow_delegate_to_metadata_workflow_result_author_concept_ids_to_author_concept_ids",
-                "context_key": "author_concept_ids",
-                "tool_output_field": "result.author_concept_ids"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_scholarly_paper_representation_workflow_delegate_to_metadata_workflow_result_topic_concept_ids_to_topic_concept_ids",
-                "context_key": "topic_concept_ids",
-                "tool_output_field": "result.topic_concept_ids"
-              },
-              {
                 "concept_id": "#V#workflow_mapping_tool_field_scholarly_paper_representation_workflow_delegate_to_metadata_workflow_result_article_readback_to_article_readback",
                 "context_key": "article_readback",
                 "tool_output_field": "result.article_readback"
@@ -1755,8 +2412,6 @@
             ],
             "writes_context_keys": [
               "paper_concept_id",
-              "author_concept_ids",
-              "topic_concept_ids",
               "article_readback"
             ]
           },
@@ -2821,16 +3476,6 @@
                 "tool_output_field": "result.paper_concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_result_author_concept_ids_to_author_concept_ids",
-                "context_key": "author_concept_ids",
-                "tool_output_field": "result.author_concept_ids"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_result_topic_concept_ids_to_topic_concept_ids",
-                "context_key": "topic_concept_ids",
-                "tool_output_field": "result.topic_concept_ids"
-              },
-              {
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_result_article_readback_to_article_readback",
                 "context_key": "article_readback",
                 "tool_output_field": "result.article_readback"
@@ -2838,8 +3483,6 @@
             ],
             "writes_context_keys": [
               "paper_concept_id",
-              "author_concept_ids",
-              "topic_concept_ids",
               "article_readback"
             ]
           },
@@ -3986,7 +4629,40 @@
         "#V#predicate"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Predicate for a source URI text relation that records the authoritative external source URL used to represent a scholarly work or other sourced artefact.",
+      "system_tags": [
+        "ontology",
+        "predicate",
+        "scholarly_metadata",
+        "workflow-support"
+      ]
+    },
+    {
+      "concept_id": "#V#has_publication_date",
+      "name": "Has publication date",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "preserve_existing_authority": true,
+      "description": "Predicate for the public scholarly publication date supplied by a bibliographic source.",
+      "system_tags": [
+        "ontology",
+        "predicate",
+        "scholarly_metadata",
+        "workflow-support"
+      ]
+    },
+    {
+      "concept_id": "#V#has_topic_labels",
+      "name": "Has topic labels",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "preserve_existing_authority": true,
+      "description": "Predicate for public source-supplied scholarly topic or category labels without minting topic identities from labels alone.",
       "system_tags": [
         "ontology",
         "predicate",

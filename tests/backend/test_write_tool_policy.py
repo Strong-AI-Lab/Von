@@ -32,6 +32,10 @@ def test_classify_write_tool_risk_covers_policy_classes():
 
     assert classify_write_tool_risk("add_relationship") == WRITE_RISK_ADDITIVE_LOW_RISK
     assert (
+        classify_write_tool_risk("upsert_scoped_assertion")
+        == WRITE_RISK_ADDITIVE_LOW_RISK
+    )
+    assert (
         classify_write_tool_risk("update_concept")
         == WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE
     )
@@ -319,9 +323,7 @@ def test_explicit_request_evidence_allows_workflow_execute_external_write():
         request_evidence=_request_evidence(
             "workflow_execute",
             request_state="explicit_request",
-            rationale=(
-                "represented expected-outcome contract requires this workflow"
-            ),
+            rationale=("represented expected-outcome contract requires this workflow"),
         ),
         recent_user_prompts=[],
     )
