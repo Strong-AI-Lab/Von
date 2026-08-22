@@ -123,6 +123,7 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
     monkeypatch.setenv("VON_INTERNAL_MCP_ENABLE", "0")
     monkeypatch.setenv("VON_PREWARM_DISABLE", "1")
     monkeypatch.setenv("VON_CONCEPT_SUMMARY_FIELD_BOOTSTRAP_ENABLE", "0")
+    monkeypatch.setenv("VON_PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_ENABLE", "0")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0")
 
@@ -311,6 +312,7 @@ def test_agent_test_startup_helpers_skip_remote_infrastructure(monkeypatch):
     utils_flask._ensure_db_monitor_started(app)
     utils_flask._maybe_start_startup_rag_requeue(app)
     utils_flask._bootstrap_concept_summary_fields_for_startup(app)
+    utils_flask._bootstrap_publication_scope_profiles_for_startup(app)
     utils_flask._log_prompt_concept_health(app)
     utils_flask._register_optional_prewarm(app)
 
@@ -319,3 +321,33 @@ def test_agent_test_startup_helpers_skip_remote_infrastructure(monkeypatch):
         "skipped": True,
         "reason": "agent_test_instance",
     }
+    assert app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] == {
+        "success": True,
+        "skipped": True,
+        "reason": "agent_test_instance",
+    }
+
+
+def test_publication_scope_profile_startup_records_bootstrap_report(
+    monkeypatch,
+) -> None:
+    import src.backend.server.utils_flask as utils_flask
+    from src.backend.services import publication_scope_profile_vontology_service
+
+    monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+    monkeypatch.setattr(utils_flask, "_is_agent_test_instance", lambda: False)
+    monkeypatch.setenv("VON_PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_ENABLE", "1")
+    expected = {"success": True, "seed_version": "test"}
+    monkeypatch.setattr(
+        publication_scope_profile_vontology_service,
+        "bootstrap_canonical_publication_scope_profiles",
+        lambda: expected,
+    )
+    app = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        config={},
+    )
+
+    utils_flask._bootstrap_publication_scope_profiles_for_startup(app)
+
+    assert app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] == expected

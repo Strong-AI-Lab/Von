@@ -1411,6 +1411,7 @@ def create_flask_app(
     _ensure_db_monitor_started(app)
     _maybe_start_startup_rag_requeue(app)
     _bootstrap_concept_summary_fields_for_startup(app)
+    _bootstrap_publication_scope_profiles_for_startup(app)
     _configure_durable_workflow_startup(app)
     _log_prompt_concept_health(app)
 
@@ -2575,6 +2576,46 @@ def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:
         }
         app.logger.warning(
             "[concept_summary_fields] bootstrap error: %s",
+            exc,
+        )
+
+
+def _bootstrap_publication_scope_profiles_for_startup(app: Flask) -> None:
+    """Best-effort materialisation of represented publication-scope profiles."""
+
+    if _is_running_under_pytest():
+        return
+    if _is_agent_test_instance():
+        app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] = {
+            "success": True,
+            "skipped": True,
+            "reason": "agent_test_instance",
+        }
+        app.logger.info(
+            "[publication_scope_profiles] AgentTest mode: skipping Vontology bootstrap."
+        )
+        return
+    if not _env_bool("VON_PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_ENABLE", True):
+        return
+    try:
+        from ..services.publication_scope_profile_vontology_service import (
+            bootstrap_canonical_publication_scope_profiles,
+        )
+
+        report = bootstrap_canonical_publication_scope_profiles()
+        app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] = report
+        if not bool(report.get("success", False)):
+            app.logger.warning(
+                "[publication_scope_profiles] bootstrap failed: %s",
+                report,
+            )
+    except Exception as exc:
+        app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] = {
+            "success": False,
+            "error": str(exc),
+        }
+        app.logger.warning(
+            "[publication_scope_profiles] bootstrap error: %s",
             exc,
         )
 

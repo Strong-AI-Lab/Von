@@ -343,6 +343,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "fetch_concept",
         "find_relations_with_argument",
         "read_file_copy",
+        "resolve_publication_scope_profile",
         "search_concepts",
         "task_list",
         "workflow_list_instances",

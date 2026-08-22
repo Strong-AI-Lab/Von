@@ -532,6 +532,47 @@ def _get_concept_publication_scope(**kwargs):
     return {"success": True, **snapshot}
 
 
+def _resolve_publication_scope_profile(**kwargs):
+    from ...services.publication_scope_profile_service import (
+        PUBLICATION_SCOPE_DECISION_SCHEMA_VERSION,
+        resolve_publication_scope_profile,
+    )
+
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="publication scope profile resolution",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return {
+            "schema_version": PUBLICATION_SCOPE_DECISION_SCHEMA_VERSION,
+            "status": "access_denied",
+            "mutation_performed": False,
+            **denial,
+        }
+    accepted_arguments = {
+        key: kwargs.get(key)
+        for key in (
+            "plane",
+            "type_concept_ids",
+            "predicate_concept_id",
+            "subject_type_concept_ids",
+            "object_type_concept_ids",
+            "source_context",
+            "source_kind",
+            "lifecycle_state",
+            "role_concept_ids",
+            "stable_identity_present",
+            "selected_scope_mode",
+            "selection_reason",
+            "producer",
+        )
+        if key in kwargs
+    }
+    with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+        return resolve_publication_scope_profile(**accepted_arguments)
+
+
 def _scope_change_request_id(kwargs: Mapping[str, Any]) -> str:
     supplied = kwargs.get("request_id")
     if isinstance(supplied, str) and supplied.strip():
@@ -11413,6 +11454,82 @@ def _get_concept_publication_scope_output_schema() -> Schema:
         description=(
             "Canonical publication-scope snapshot and fingerprint for optimistic "
             "preview or execution."
+        ),
+    )
+
+
+def _resolve_publication_scope_profile_input_schema() -> Schema:
+    return Schema(
+        required={"plane": str},
+        optional={
+            "type_concept_ids": (list, type(None)),
+            "predicate_concept_id": (str, type(None)),
+            "subject_type_concept_ids": (list, type(None)),
+            "object_type_concept_ids": (list, type(None)),
+            "source_context": (dict, type(None)),
+            "source_kind": (str, type(None)),
+            "lifecycle_state": (str, type(None)),
+            "role_concept_ids": (list, type(None)),
+            "stable_identity_present": (bool, type(None)),
+            "selected_scope_mode": (str, type(None)),
+            "selection_reason": (str, type(None)),
+            "producer": (str, type(None)),
+            # Accepted for compatibility and deliberately ignored. Actor scope
+            # comes only from the trusted Internal MCP context.
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        enum_values={
+            "plane": ("instance", "assertion"),
+            "selected_scope_mode": (
+                "global_general",
+                "organisation_general",
+                "user_only_default",
+                "restricted_context_required",
+                "external_secure_storage",
+                None,
+            ),
+        },
+        description=(
+            "Resolve fresh Vontology publication-profile advice for either an "
+            "instance (type_concept_ids) or an assertion (predicate_concept_id). "
+            "A reasoned selected_scope_mode can resolve absent or conflicting "
+            "ordinary profiles, but cannot turn protected-carrier advice into "
+            "ordinary storage or grant effect authority."
+        ),
+    )
+
+
+def _resolve_publication_scope_profile_output_schema() -> Schema:
+    return Schema(
+        required={
+            "schema_version": str,
+            "success": bool,
+            "status": str,
+            "mutation_performed": bool,
+        },
+        optional={
+            "plane": (str, type(None)),
+            "recommended_scope_mode": (str, type(None)),
+            "selected_scope_mode": (str, type(None)),
+            "selection_source": (str, type(None)),
+            "requires_model_judgement": (bool, type(None)),
+            "matched_profiles": (list, type(None)),
+            "decisive_profiles": (list, type(None)),
+            "conflicting_scope_modes": (list, type(None)),
+            "entity_context_hints": (list, type(None)),
+            "carrier": (dict, type(None)),
+            "required_authority": (dict, type(None)),
+            "decision_evidence": (dict, type(None)),
+            "error_code": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "A non-mutating represented recommendation with profile lineage, "
+            "applicability, conflict/override evidence, carrier requirements, "
+            "and the authority the eventual governed effect must independently "
+            "verify."
         ),
     )
 
@@ -37816,6 +37933,22 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "Read the exact actor-visible publication scope and optimistic "
                 "fingerprint for one concept before a dedicated scope preview or "
                 "execution. Payload identity claims cannot widen the read."
+            ),
+        ),
+        MethodDefinition(
+            name="resolve_publication_scope_profile",
+            handler=_resolve_publication_scope_profile,
+            input_schema=_resolve_publication_scope_profile_input_schema(),
+            output_schema=_resolve_publication_scope_profile_output_schema(),
+            category="read",
+            hard_timeout_enabled=False,
+            description=(
+                "Resolve live type- or predicate-level publication advice before "
+                "a KB effect. Profiles guide semantic placement; they are not "
+                "authority grants. Type profiles govern instance placement, "
+                "predicate profiles govern assertion placement independently, "
+                "and protected outcomes identify the carrier or authority Von "
+                "must request rather than silently falling back to private scope."
             ),
         ),
         MethodDefinition(

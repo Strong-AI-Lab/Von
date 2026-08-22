@@ -312,6 +312,14 @@ def test_unauthorised_global_create_does_not_mutate_or_downgrade(
     assert result["changed"] is False
     assert result["effect_status"] == "not_started"
     assert result["error_code"] == "global_ontology_admin_authority_required"
+    assert result["required_authority"]["authority_kind"] == (
+        "global_ontology_administrator"
+    )
+    assert result["authority_recovery"] == {
+        "action_type": "ask_for_exact_ontology_authority",
+        "required_authority": result["required_authority"],
+        "automatic_scope_change_allowed": False,
+    }
     assert "scope_selection" not in result
 
 

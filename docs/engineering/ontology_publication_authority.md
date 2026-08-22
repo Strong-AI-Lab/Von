@@ -140,6 +140,50 @@ creation. Scope selection is model judgement within that authority ceiling,
 not an automatic ladder, confirmation ritual, or hard-coded semantic
 classifier.
 
+### Represented publication-scope profiles
+
+`JVNAUTOSCI-2671` adds defeasible Vontology advice for that judgement. Types
+and predicates may link through `#V#has_publication_scope_profile` to profile
+concepts whose `#V#has_publication_scope_profile_json` value records the plane,
+recommended outcome, version, status, owner/source metadata, and optional
+source, lifecycle, role, identity, or argument-type applicability. The repo
+bundle is a labelled release seed: startup creates missing materialisation but
+does not overwrite an existing live profile payload. The resolver reads the
+accessible graph and profile text afresh, so a governed Vontology edit changes
+the next decision without a Python release or restart-time reversal.
+
+The resolver is deliberately policy-neutral support code. It performs bounded
+ancestry traversal, schema validation, applicability matching, partial-order
+precedence, conflict detection, and carrier projection; domain-to-scope
+preferences remain represented. A more-specific subtype or specialised
+predicate profile defeats its inherited general profile. Applicable profiles
+on incomparable types must agree or be resolved by an explicit reasoned model
+choice. Profile absence leaves the decision to reasoned model judgement. A
+selected ordinary scope may override advice when the decision records its
+reason and producer, but `restricted_context_required` and
+`external_secure_storage` cannot be converted into ordinary storage by an
+override.
+
+Instance and assertion publication are separate planes. Type profiles advise
+where to create an entity. Predicate profiles independently advise whether an
+assertion belongs in the source-bound canonical graph or a user/organisation
+scoped assertion carrier. Entity profiles may appear as context hints for an
+assertion decision, but they never select the assertion scope and there is no
+cross-plane "tightest wins" rule. Thus a person and paper may remain global
+while a particular `has_read` fact remains user-scoped.
+
+The non-mutating `resolve_publication_scope_profile` tool is available to
+ordinary turns and durable workflows. Its evidence includes matched and
+decisive profile IDs and versions, ancestry, applicability, recommendation,
+selection/override reason, required carrier, and the exact authority the
+eventual governed effect must verify. A profile is never an authority grant.
+Organisation or global denial does not downgrade to private creation; it
+returns the required authority and a bounded action for asking for that exact
+authority. Existing callers that already provide a valid explicit
+`scope_mode` continue directly to the governed effect and do not acquire a
+mandatory profile-resolution ceremony. The scholarly/arXiv mutation adoption
+that consumes this decision is owned by `JVNAUTOSCI-2670`.
+
 Canonical relationships inherit the source concept's exact publication
 context; `add_relationship` does not take an independent scope choice. A
 caller-supplied `scope_mode` on that command is rejected rather than ignored.
