@@ -1537,10 +1537,6 @@ def ontology_authority_denial_payload(
         "error": decision.message,
         "authority_decision": decision.public_projection(),
         "publication_context": intent.publication_context.to_mapping(),
-        "recovery_affordances": [
-            {"action_type": "create_scoped_assertion"},
-            {"action_type": "request_ontology_administrator_delegation"},
-        ],
     }
 
 

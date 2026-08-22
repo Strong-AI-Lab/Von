@@ -211,15 +211,84 @@ def _compact_evidence_envelope(
     max_bytes: int,
     preview_max_chars: int = _MODEL_EVIDENCE_PREVIEW_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Keep an evidence handle useful while sharing a bounded preview budget."""
+    """Keep exact selected evidence useful within a bounded context share."""
 
     compact: dict[str, Any] = {}
-    # The opaque handle is the one indispensable field: everything else can
-    # be recovered through bounded hydration. Add metadata in usefulness order
-    # only while this envelope's share of the aggregate budget permits it.
+
+    # The opaque handle remains indispensable, but a hydrated slice already
+    # represents an explicit model request for exact evidence. Preserve that
+    # selected value, including falsey values, before secondary metadata. An
+    # authorised represented projection is similarly decision-bearing and was
+    # already eligible for the model before aggregate compaction.
+    def add_if_fits(key: str, value: Any) -> bool:
+        nonlocal compact
+        candidate = {**compact, key: value}
+        if key == "evidence_id" or len(_json_bytes(candidate)) <= max_bytes:
+            compact = candidate
+            return True
+        return False
+
+    for key in ("schema_version", "evidence_id"):
+        if key in envelope:
+            add_if_fits(key, envelope.get(key))
+
+    omitted_fields: list[str] = []
+    for key in ("content", "matches", "projected_payload"):
+        if key in envelope and not add_if_fits(key, envelope.get(key)):
+            omitted_fields.append(key)
+
+    if omitted_fields:
+        omission: dict[str, Any] = {
+            "schema_version": "adaptive_turn_evidence_field_omission.v1",
+            "fields": omitted_fields,
+            "reason": "model_context_budget",
+        }
+        evidence_id = envelope.get("evidence_id")
+        selector = envelope.get("selector")
+        if evidence_id:
+            recovery_arguments: dict[str, Any] = {"evidence_id": evidence_id}
+            if isinstance(selector, Mapping):
+                recovery_arguments.update(
+                    {
+                        key: selector.get(key)
+                        for key in ("json_pointer", "query", "offset", "max_chars")
+                        if key in selector
+                    }
+                )
+            omission["recovery_tool"] = _EVIDENCE_TOOL_NAME
+            omission["recovery_arguments"] = recovery_arguments
+
+        # Do not retain a reproduction selector without also declaring which
+        # selected values were omitted. The declaration and its executable
+        # recovery arguments are one atomic model-facing contract.
+        candidate = {**compact, "model_context_omission": omission}
+        if "selector" in envelope:
+            candidate["selector"] = selector
+        if len(_json_bytes(candidate)) <= max_bytes:
+            compact = candidate
+        else:
+            # The exact selector may be too large even though root hydration by
+            # evidence_id remains executable. In that case retain the omission
+            # and the smallest complete recovery call, never the selector alone.
+            if evidence_id:
+                minimal_omission = {
+                    "schema_version": (
+                        "adaptive_turn_evidence_field_omission.v1"
+                    ),
+                    "fields": omitted_fields,
+                    "reason": "model_context_budget",
+                    "recovery_tool": _EVIDENCE_TOOL_NAME,
+                    "recovery_arguments": {"evidence_id": evidence_id},
+                }
+                add_if_fits("model_context_omission", minimal_omission)
+    elif "selector" in envelope:
+        # When no selected value was omitted, the selector is ordinary metadata
+        # and may be retained independently.
+        add_if_fits("selector", envelope.get("selector"))
+
+    # Add remaining metadata in usefulness order only while this envelope's
+    # share of the aggregate budget permits it.
     for key in (
-        "schema_version",
-        "evidence_id",
         "source_diagnostics",
         "effect_status",
         "changed",
@@ -241,7 +310,6 @@ def _compact_evidence_envelope(
         "preview_format",
         "preview_truncated",
         "available_selectors",
-        "selector",
         "content_format",
         "selected_value_kind",
         "selected_value_shape",
@@ -255,11 +323,16 @@ def _compact_evidence_envelope(
     ):
         if key not in envelope:
             continue
-        candidate = {**compact, key: envelope.get(key)}
-        if key == "evidence_id" or len(_json_bytes(candidate)) <= max_bytes:
-            compact = candidate
-    preview = str(envelope.get("preview") or "")
+        add_if_fits(key, envelope.get(key))
+    if "preview" not in envelope:
+        return compact
+    raw_preview = envelope.get("preview")
+    if raw_preview is None:
+        add_if_fits("preview", None)
+        return compact
+    preview = str(raw_preview)
     if not preview:
+        add_if_fits("preview", preview)
         return compact
 
     remaining = max(0, int(max_bytes) - len(_json_bytes(compact)) - 32)
@@ -932,6 +1005,50 @@ def _model_tool_output_receipt(value: Any) -> dict[str, Any]:
     }
 
 
+def _essential_model_tool_output(value: Any) -> dict[str, Any]:
+    """Project fields whose silent loss would erase an explicit evidence read."""
+
+    if not isinstance(value, Mapping) or not value.get("evidence_id"):
+        return {}
+    return {
+        key: value.get(key)
+        for key in (
+            "schema_version",
+            "evidence_id",
+            "content",
+            "matches",
+            "projected_payload",
+            "selector",
+        )
+        if key in value
+    }
+
+
+def _preserves_essential_model_tool_output(source: Any, candidate: Any) -> bool:
+    if not isinstance(source, Mapping):
+        return True
+    if not isinstance(candidate, Mapping):
+        return not _essential_model_tool_output(source)
+    return all(
+        key in candidate and candidate.get(key) == value
+        for key, value in _essential_model_tool_output(source).items()
+    )
+
+
+def _serialisable_tool_result_batch(
+    results: Sequence[ToolResult],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "status": result.status,
+            "output": result.output,
+        }
+        for result in results
+    ]
+
+
 def _bound_tool_results_for_model(
     results: Sequence[ToolResult],
     *,
@@ -941,15 +1058,7 @@ def _bound_tool_results_for_model(
 
     if not results:
         return []
-    complete_batch = [
-        {
-            "call_id": result.call_id,
-            "tool_name": result.tool_name,
-            "status": result.status,
-            "output": result.output,
-        }
-        for result in results
-    ]
+    complete_batch = _serialisable_tool_result_batch(results)
     if len(_json_bytes(complete_batch)) <= max_bytes:
         return list(results)
     receipt_outputs = [_model_tool_output_receipt(result.output) for result in results]
@@ -965,6 +1074,69 @@ def _bound_tool_results_for_model(
     shell_bytes = len(_json_bytes(serialisable_shells))
     if shell_bytes > max_bytes:
         return None
+
+    # First reserve actual space for every explicit hydrated value and
+    # authorised projection. Unlike an equal per-result share, this does not
+    # strand bytes when many short results accompany one larger selected value.
+    essential_results: list[ToolResult] = []
+    for index, result in enumerate(results):
+        essential_output = {
+            **_essential_model_tool_output(result.output),
+            **receipt_outputs[index],
+        }
+        essential_results.append(
+            ToolResult(
+                call_id=result.call_id,
+                tool_name=result.tool_name,
+                status=result.status,
+                output=essential_output,
+            )
+        )
+    essential_batch_bytes = len(
+        _json_bytes(_serialisable_tool_result_batch(essential_results))
+    )
+    if essential_batch_bytes <= max_bytes:
+        bounded = essential_results
+        current_batch_bytes = essential_batch_bytes
+        # Spend the remainder on metadata and previews in stable order. Each
+        # item receives a fair share of the bytes still unused by prior items;
+        # cheap items therefore leave their unspent allocation to later ones.
+        for index, result in enumerate(results):
+            remaining_items = max(1, len(results) - index)
+            remaining_bytes = max(0, max_bytes - current_batch_bytes)
+            fair_extra = remaining_bytes // remaining_items
+            current_output_bytes = len(_json_bytes(bounded[index].output))
+            candidate_output = _bounded_model_tool_output(
+                result.output,
+                max_bytes=max(1, current_output_bytes + fair_extra),
+            )
+            if isinstance(candidate_output, Mapping):
+                candidate_output = {
+                    **dict(candidate_output),
+                    **receipt_outputs[index],
+                }
+            if not _preserves_essential_model_tool_output(
+                result.output,
+                candidate_output,
+            ):
+                continue
+            candidate_results = list(bounded)
+            candidate_results[index] = ToolResult(
+                call_id=result.call_id,
+                tool_name=result.tool_name,
+                status=result.status,
+                output=candidate_output,
+            )
+            candidate_batch_bytes = len(
+                _json_bytes(_serialisable_tool_result_batch(candidate_results))
+            )
+            if candidate_batch_bytes <= max_bytes:
+                bounded = candidate_results
+                current_batch_bytes = candidate_batch_bytes
+        return bounded
+
+    # The essential batch itself is too large. Preserve an explicit omission
+    # and executable hydration handle within a fair share of the hard limit.
     output_budget = max(0, max_bytes - shell_bytes)
     per_result_budget = max(1, output_budget // len(results))
     bounded: list[ToolResult] = []
@@ -986,22 +1158,7 @@ def _bound_tool_results_for_model(
                 output=bounded_output,
             )
         )
-    if (
-        len(
-            _json_bytes(
-                [
-                    {
-                        "call_id": result.call_id,
-                        "tool_name": result.tool_name,
-                        "status": result.status,
-                        "output": result.output,
-                    }
-                    for result in bounded
-                ]
-            )
-        )
-        <= max_bytes
-    ):
+    if len(_json_bytes(_serialisable_tool_result_batch(bounded))) <= max_bytes:
         return bounded
 
     # Correlation shells and exact finality receipts fit even when richer

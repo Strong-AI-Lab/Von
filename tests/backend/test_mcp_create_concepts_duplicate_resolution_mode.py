@@ -483,6 +483,87 @@ def test_create_person_blocks_comma_order_duplicate(
     assert create_calls == []
 
 
+def test_create_person_reuses_exact_name_match_typed_through_descendant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    person_id = "#V#person"
+    student_id = "#V#student"
+    existing_concept_id = "#V#neet_zkan_tan"
+    create_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.create_concepts_parent_resolution_service."
+        "resolve_parent_for_create_concepts",
+        lambda requested_parent_id: ParentResolutionResult(
+            requested_parent_id=requested_parent_id,
+            canonical_parent_id=person_id,
+            resolved_parent_id=person_id,
+            fallback_used=False,
+            fallback_candidates_checked=(),
+            fallback_selected_parent_id=None,
+            resolved_parent_kind="type",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service."
+        "resolve_event_actor_context",
+        lambda **_kwargs: (None, None),
+    )
+
+    def _find_one(
+        query: dict[str, Any],
+        _projection: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if query.get("concept_id") == existing_concept_id:
+            return {
+                "concept_id": existing_concept_id,
+                "relationships": {
+                    "is_a_type_of": [],
+                    "is_an_instance_of": [student_id],
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        _find_one,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **_kwargs: {
+            "success": True,
+            "status": "resolved",
+            "resolved_concept_id": existing_concept_id,
+            "match": {"stage": "exact", "score": 400},
+            "candidates": [],
+            "audit": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology."
+        "get_vontology_node_and_descendant_ids",
+        lambda identifier, include_descendants=True: (
+            [person_id, student_id] if identifier == person_id else [identifier]
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        lambda **kwargs: create_calls.append(kwargs),
+    )
+
+    result = _create_concepts(
+        parent_id=person_id,
+        concepts=[{"name": "Neset Tan", "kind": "instance"}],
+    )
+
+    item = result["results"][0]
+    assert result["already_existed"] == 1
+    assert item["error_code"] == "already_exists"
+    assert item["existing_concept_id"] == existing_concept_id
+    assert item["duplicate_match_source"] == "name_resolution"
+    assert create_calls == []
+
+
 def test_create_person_comma_order_ambiguity_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

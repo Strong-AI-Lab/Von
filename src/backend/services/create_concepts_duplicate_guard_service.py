@@ -161,6 +161,48 @@ def _existing_parent_ids(doc: dict[str, Any], requested_kind: str) -> tuple[str,
     return tuple(parent_ids)
 
 
+def _parent_is_compatible(
+    *,
+    existing_parent_ids: Sequence[str],
+    requested_parent_id: str | None,
+) -> bool:
+    """Accept direct or descendant typing without broadening identity matching.
+
+    The duplicate guard already requires a conservative exact-name/code match.
+    Once that stable identity evidence exists, an instance of a subtype of the
+    requested parent is compatible with the broader requested type.  Requiring
+    the parent edge to be direct would, for example, reject an existing Student
+    when a caller asks to create the same named Person.
+    """
+
+    if not requested_parent_id:
+        return True
+    canonical_existing = {
+        canonicalise_vontology_concept_id(parent_id) or parent_id
+        for parent_id in existing_parent_ids
+        if isinstance(parent_id, str) and parent_id
+    }
+    if requested_parent_id in canonical_existing:
+        return True
+    try:
+        from ..vontology.utils_vontology import (
+            get_vontology_node_and_descendant_ids,
+        )
+
+        descendants = {
+            canonicalise_vontology_concept_id(concept_id) or concept_id
+            for concept_id in get_vontology_node_and_descendant_ids(
+                requested_parent_id,
+                include_descendants=True,
+            )
+            if isinstance(concept_id, str) and concept_id
+        }
+    except Exception:
+        # Identity reuse is fail-closed when hierarchy read-back is unavailable.
+        return False
+    return bool(canonical_existing.intersection(descendants))
+
+
 def _identity_mismatch_details(
     *,
     doc: dict[str, Any],
@@ -178,7 +220,10 @@ def _identity_mismatch_details(
     if (
         scope in {"instance", "workflow_instance"}
         and requested_parent_id
-        and requested_parent_id not in set(existing_parent_ids)
+        and not _parent_is_compatible(
+            existing_parent_ids=existing_parent_ids,
+            requested_parent_id=requested_parent_id,
+        )
     ):
         mismatch_reasons.append("parent_mismatch")
     return (
@@ -255,7 +300,10 @@ def _matches_guard_scope(
     if scope == "workflow_instance":
         if existing_kind != "instance":
             return False
-        if requested_parent_id and requested_parent_id in set(existing_parent_ids):
+        if requested_parent_id and _parent_is_compatible(
+            existing_parent_ids=existing_parent_ids,
+            requested_parent_id=requested_parent_id,
+        ):
             return True
         return bool(set(existing_parent_ids).intersection(_workflow_type_ids()))
     return not mismatch_reasons

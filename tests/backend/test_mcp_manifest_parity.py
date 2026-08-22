@@ -160,6 +160,12 @@ def test_create_concepts_contract_matches_the_governed_core_boundary() -> None:
     assert "accepts an array of" not in published_text_lower
     assert "supports singleton arrays" not in published_text_lower
     assert "allow_duplicate_instances" not in input_schema["properties"]
+    assert "only the exact requested actor-visible concept" in published_text_lower
+    assert "never silently treated as person identity" in published_text_lower
+    assert "effective existing id" in published_text_lower
+    assert "actual publication context" in published_text_lower
+    assert "satisfied or unapplied" in published_text_lower
+    assert "name-resolved reuse" not in published_text_lower
 
 
 def test_add_relationship_contract_matches_governed_exact_predicate_boundary() -> None:

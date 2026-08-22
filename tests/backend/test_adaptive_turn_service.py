@@ -1023,6 +1023,32 @@ def _stub_same_turn_ontology_delegation(
     return issued
 
 
+def _stub_proven_scoped_assertion_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return the exact internal marker after command-layer preconditions."""
+
+    def issue(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["method_name"] == "add_relationship"
+        return {
+            "success": False,
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "changed": False,
+            "error_code": "global_ontology_admin_authority_required",
+            "error": "Global ontology publication authority is required.",
+            "recovery_affordances": [
+                {"action_type": "create_scoped_assertion"}
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.ontology_mutation_command_service."
+        "issue_same_turn_method_delegation",
+        issue,
+    )
+
+
 def _workflow_gateway(
     handler: Any,
     *,
@@ -4753,6 +4779,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     monkeypatch: pytest.MonkeyPatch,
     predicate_arguments: dict[str, Any],
 ) -> None:
+    _stub_proven_scoped_assertion_denial(monkeypatch)
     from src.backend.db import mongo_client
     from src.backend.services import relationship_write_service
 
@@ -4854,7 +4881,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     denial = result.tool_invocations[0]
     assert denial["effect_status"] == "not_started"
     preview = denial["evidence"]["preview"]
-    assert "ontology_mutation_target_not_accessible" in preview
+    assert "global_ontology_admin_authority_required" in preview
     assert "assert_in_actor_scope" in preview
     assert "#V#globally_visible_subject" in preview
     assert "#V#hasResearchInterest" in preview
@@ -4871,6 +4898,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
 def test_multi_person_recovery_preserves_successes_and_only_repairs_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_proven_scoped_assertion_denial(monkeypatch)
     from src.backend.db import mongo_client
     from src.backend.services import relationship_write_service
 
@@ -5088,6 +5116,7 @@ def test_canonical_literal_relationship_denial_recovers_in_chosen_scope(
     monkeypatch: pytest.MonkeyPatch,
     predicate_arguments: dict[str, Any],
 ) -> None:
+    _stub_proven_scoped_assertion_denial(monkeypatch)
     from src.backend.db import mongo_client
     from src.backend.services import relationship_write_service
 
@@ -5216,6 +5245,7 @@ def test_canonical_literal_relationship_recovery_requires_same_object(
     monkeypatch: pytest.MonkeyPatch,
     recovery_arguments: dict[str, Any],
 ) -> None:
+    _stub_proven_scoped_assertion_denial(monkeypatch)
     from src.backend.db import mongo_client
     from src.backend.services import relationship_write_service
 
@@ -7205,6 +7235,99 @@ def test_compact_evidence_envelope_keeps_source_diagnostics_before_preview() -> 
     assert len(compact.get("preview", "")) < 100_000
 
 
+@pytest.mark.parametrize("selected_value", [None, False, 0, "", []])
+def test_compact_evidence_envelope_preserves_explicit_falsey_content(
+    selected_value: Any,
+) -> None:
+    compact = _compact_evidence_envelope(
+        {
+            "schema_version": "turn_evidence_slice.v1",
+            "evidence_id": "ev-falsey-content",
+            "content": selected_value,
+            "projected_payload": {
+                "status": "not_found",
+                "resolved_concept_id": None,
+            },
+            "preview": "",
+        },
+        max_bytes=500,
+    )
+
+    assert len(_json_bytes(compact)) <= 500
+    assert "content" in compact
+    assert compact["content"] == selected_value
+    assert compact["projected_payload"] == {
+        "status": "not_found",
+        "resolved_concept_id": None,
+    }
+    assert "preview" in compact
+    assert compact["preview"] == ""
+
+
+def test_compact_evidence_envelope_exposes_executable_omission_recovery() -> None:
+    selector = {
+        "json_pointer": "/records/12/resolved_concept_id",
+        "offset": 0,
+        "max_chars": 4_000,
+    }
+    compact = _compact_evidence_envelope(
+        {
+            "schema_version": "turn_evidence_slice.v1",
+            "evidence_id": "ev-oversized-selected-content",
+            "selector": selector,
+            "content": "x" * 20_000,
+            "projected_payload": {"summary": "y" * 20_000},
+        },
+        max_bytes=700,
+    )
+
+    assert len(_json_bytes(compact)) <= 700
+    assert "content" not in compact
+    assert "projected_payload" not in compact
+    assert compact["selector"] == selector
+    assert compact["model_context_omission"] == {
+        "schema_version": "adaptive_turn_evidence_field_omission.v1",
+        "fields": ["content", "projected_payload"],
+        "reason": "model_context_budget",
+        "recovery_tool": "turn_read_evidence",
+        "recovery_arguments": {
+            "evidence_id": "ev-oversized-selected-content",
+            **selector,
+        },
+    }
+
+
+@pytest.mark.parametrize("max_bytes", [250, 400, 500])
+def test_evidence_selector_never_survives_without_its_omission_contract(
+    max_bytes: int,
+) -> None:
+    compact = _compact_evidence_envelope(
+        {
+            "schema_version": "turn_evidence_slice.v1",
+            "evidence_id": "ev-atomic-omission",
+            "selector": {
+                "json_pointer": "/records/12/resolved_concept_id",
+                "offset": 0,
+                "max_chars": 4_000,
+            },
+            "content": "x" * 20_000,
+            "projected_payload": {"summary": "y" * 20_000},
+        },
+        max_bytes=max_bytes,
+    )
+
+    assert len(_json_bytes(compact)) <= max_bytes
+    assert "content" not in compact
+    assert "projected_payload" not in compact
+    if "selector" in compact:
+        assert "model_context_omission" in compact
+    if omission := compact.get("model_context_omission"):
+        assert omission["recovery_tool"] == "turn_read_evidence"
+        assert omission["recovery_arguments"]["evidence_id"] == (
+            "ev-atomic-omission"
+        )
+
+
 def test_evidence_page_resumes_at_first_globally_omitted_handle() -> None:
     full_page = [
         {
@@ -7442,6 +7565,121 @@ def test_tool_result_batch_preserves_full_outputs_when_aggregate_fits() -> None:
         result.output for result in results
     ]
     assert bounded[0].output["planner_hint"] == "planner-0"
+
+
+def test_tool_result_batch_preserves_29_selected_values_and_projections() -> None:
+    larger_selected_value = "#V#" + ("resolved_long_identifier_" * 90)
+    selected_values: list[Any] = [
+        None,
+        False,
+        0,
+        "",
+        [],
+        "null",
+        "#V#neet_zkan_tan",
+        "#V#zhu_yonghua",
+        larger_selected_value,
+        *[f"#V#resolved_person_{index}" for index in range(20)],
+    ]
+    assert len(selected_values) == 29
+    results = [
+        ToolResult(
+            call_id=f"read-resolution-{index}",
+            tool_name="turn_read_evidence",
+            status="ok",
+            output={
+                "schema_version": "turn_evidence_slice.v1",
+                "success": True,
+                "evidence_id": f"ev-resolution-{index}",
+                "tool_name": "resolve_concept_by_name",
+                "call_id": f"resolve-person-{index}",
+                "turn_id": "turn-many-person-resolutions",
+                "status": "ok",
+                "trust_boundary": "untrusted_tool_output",
+                "source_sha256": f"{index:064x}",
+                "source_size_bytes": 20_000,
+                "provenance": {"source": "p" * 900},
+                "selector": {
+                    "json_pointer": "/resolved_concept_id",
+                    "offset": 0,
+                    "max_chars": 4_000,
+                },
+                "content": selected_value,
+                "content_format": "json",
+                "selected_value_kind": (
+                    "null" if selected_value is None else "value"
+                ),
+                "returned_chars": len(str(selected_value)),
+                "has_more": False,
+                "next_offset": None,
+                "projected_payload": {
+                    "status": (
+                        "not_found"
+                        if selected_value in (None, "null")
+                        else "resolved"
+                    ),
+                    "resolved_concept_id": selected_value,
+                },
+            },
+        )
+        for index, selected_value in enumerate(selected_values)
+    ]
+    complete_batch = [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "status": result.status,
+            "output": result.output,
+        }
+        for result in results
+    ]
+    assert len(_json_bytes(complete_batch)) > 24_000
+    receipt_shells = [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "status": result.status,
+            "output": {
+                "evidence_id": result.output["evidence_id"],
+                "status": result.output["status"],
+                "success": result.output["success"],
+            },
+        }
+        for result in results
+    ]
+    equal_output_share = (24_000 - len(_json_bytes(receipt_shells))) // len(results)
+    equally_compacted_large_result = _compact_evidence_envelope(
+        results[8].output,
+        max_bytes=equal_output_share,
+    )
+    assert "content" not in equally_compacted_large_result
+
+    bounded = _bound_tool_results_for_model(results)
+
+    assert bounded is not None
+    assert len(
+        _json_bytes(
+            [
+                {
+                    "call_id": result.call_id,
+                    "tool_name": result.tool_name,
+                    "status": result.status,
+                    "output": result.output,
+                }
+                for result in bounded
+            ]
+        )
+    ) <= 24_000
+    assert len(bounded) == 29
+    for index, result in enumerate(bounded):
+        assert "content" in result.output
+        assert result.output["content"] == selected_values[index]
+        assert result.output["projected_payload"] == {
+            "status": (
+                "not_found" if selected_values[index] in (None, "null") else "resolved"
+            ),
+            "resolved_concept_id": selected_values[index],
+        }
 
 
 def test_bounded_effect_result_preserves_exact_partial_receipt() -> None:

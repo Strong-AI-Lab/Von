@@ -149,6 +149,16 @@ _CREATE_CORE_CONCEPT_FIELDS = frozenset(
     }
 )
 
+_SCOPED_RECOVERY_AUTHORITY_DENIAL_CODES = frozenset(
+    {
+        "explicit_scope_adoption_required",
+        "global_ontology_admin_authority_required",
+        "ontology_publication_authority_required",
+        "organisation_ontology_admin_authority_required",
+        "private_scope_canonical_publication_not_delegated",
+    }
+)
+
 
 def is_ontology_mutation_method(method_name: str) -> bool:
     return str(method_name or "").strip() in _METHOD_OPERATION
@@ -282,6 +292,12 @@ def normalise_governed_ontology_arguments(
         # inverse side effect.
         normalised["maintain_relationship_inverses"] = False
         normalised["resolve_visibility_from_event_namespace"] = False
+    if method == "add_relationship":
+        # A governed relationship grant authorises the exact forward assertion
+        # on its source. Reverse traversal is supplied by the derived extent;
+        # referencing a visible target must not silently turn that target into
+        # a second canonical mutation subject.
+        normalised["maintain_inverse"] = False
     if method == "promote_uncertain_relationship_assertion":
         operator_id = (
             invocation.executing_agent_concept_id
@@ -1386,7 +1402,9 @@ def build_ontology_mutation_intent(
             _clean_text(arguments.get("collision_resolution_mode"))
             == ACTOR_SCOPED_REFERENT_COLLISION_MODE
         )
+        requested_concept_id = expected_concept_id
         visible_exact_reuse = False
+        reuse_match_source: str | None = None
         if _concept_exists_unfiltered(expected_concept_id):
             required_context = (
                 publication_context.to_mapping() if actor_scoped_referent else None
@@ -1408,15 +1426,17 @@ def build_ontology_mutation_intent(
                     arguments=arguments,
                     expected_concept_id=expected_concept_id,
                 )
+            reuse_match_source = "exact_concept_id"
         reference_ids = _create_reference_concept_ids(arguments)
         _visible_or_fail(reference_ids)
         targets = tuple(
-            dict.fromkeys((*_concepts_from_create_arguments(arguments), *reference_ids))
+            dict.fromkeys((expected_concept_id, *reference_ids))
         )
         delta = {
             "concept_count": len(arguments.get("concepts") or []),
             "concepts": _create_intent_concepts(arguments),
             "expected_concept_id": expected_concept_id,
+            "requested_concept_id": requested_concept_id,
             "parent_id": parent_id,
             "parent_concept_ids": list(arguments.get("parent_concept_ids") or []),
             "instance_of_type": instance_of_type,
@@ -1424,6 +1444,7 @@ def build_ontology_mutation_intent(
             "scope_mode": scope_projection["effective_scope_mode"],
             "stored_scope": scope_projection,
             "visible_exact_reuse": visible_exact_reuse,
+            "reuse_match_source": reuse_match_source,
             "actor_scoped_referent": actor_scoped_referent,
             # Parent inverses are deliberately not canonical side effects of
             # governed creation. The child's exact forward typing assertion is
@@ -1602,7 +1623,10 @@ def build_ontology_mutation_intent(
         inverse_predicate = get_structural_inverse_map().get(
             normalised_structural_predicate
         )
-        if target_id and inverse_predicate:
+        maintain_inverse = bool(
+            method != "add_relationship" and target_id and inverse_predicate
+        )
+        if maintain_inverse and target_id:
             source_contexts = (concept_publication_context(target_id),)
         targets = tuple(item for item in visible_targets if item)
         delta = {
@@ -1615,7 +1639,7 @@ def build_ontology_mutation_intent(
             "assertion_revision": (
                 assertion_snapshot.get("revision") if assertion_snapshot else None
             ),
-            "maintain_inverse": bool(target_id and inverse_predicate),
+            "maintain_inverse": maintain_inverse,
             "inverse_predicate": inverse_predicate,
         }
     elif method == "remove_relationships_bulk":
@@ -1907,20 +1931,44 @@ def _visible_concept_satisfies_requested_core(
     kind = _clean_text(concept_spec.get("kind")).lower()
     if kind == "individual":
         kind = "instance"
+    def satisfies_requested_type(
+        actual_direct_types: set[str],
+        requested_type: str | None,
+    ) -> bool:
+        if not requested_type:
+            return True
+        if requested_type in actual_direct_types:
+            return True
+        try:
+            from ..vontology.utils_vontology import (
+                get_vontology_node_and_descendant_ids,
+            )
+
+            compatible_types = {
+                _normalise_concept_id(item) or str(item).strip()
+                for item in get_vontology_node_and_descendant_ids(
+                    requested_type,
+                    include_descendants=True,
+                )
+                if isinstance(item, str) and item.strip()
+            }
+        except Exception:  # noqa: BLE001 - hierarchy backends fail closed for reuse
+            # Core reuse remains fail-closed when hierarchy read-back is not
+            # available; the caller may still create a genuinely missing ID.
+            return False
+        return bool(actual_direct_types.intersection(compatible_types))
+
     if instance_of_type:
-        if instance_of_type not in instance_types:
+        if not satisfies_requested_type(instance_types, instance_of_type):
             return False
-        if parent_id and parent_id not in type_parents:
+        if not satisfies_requested_type(type_parents, parent_id):
             return False
-    elif kind in {"instance", "predicate"}:
-        if parent_id and parent_id not in instance_types:
+    elif kind in {"instance", "predicate", "individual"}:
+        if not satisfies_requested_type(instance_types, parent_id):
             return False
-    elif parent_id and parent_id not in type_parents:
+    elif not satisfies_requested_type(type_parents, parent_id):
         return False
 
-    requested_path = concept_spec.get("vontology_path")
-    if requested_path is not None and actual.get("vontology_path") != requested_path:
-        return False
     texts = actual.get("text_relations")
     if not isinstance(texts, list):
         return False
@@ -1947,10 +1995,10 @@ def _visible_concept_satisfies_requested_core(
             for row in texts
         )
 
-    return (
-        has_requested_text("hasName", concept_spec.get("name"), name_type="NL")
-        and has_requested_text("hasDescription", concept_spec.get("description"))
-        and has_requested_text("hasNote", concept_spec.get("notes"))
+    return has_requested_text(
+        "hasName",
+        concept_spec.get("name"),
+        name_type="NL",
     )
 
 
@@ -2113,6 +2161,7 @@ def _relationship_read_back(
     source_id: str,
     predicate: str | None,
     target: Any,
+    inspect_inverse: bool = True,
 ) -> dict[str, Any]:
     source = ConceptsRepository.find_one({"concept_id": source_id})
     if not isinstance(source, Mapping):
@@ -2137,7 +2186,7 @@ def _relationship_read_back(
         normalise_structural_predicate(predicate_value)
     )
     inverse_present: bool | None = None
-    if inverse_predicate and target_value.startswith("#V#"):
+    if inspect_inverse and inverse_predicate and target_value.startswith("#V#"):
         target_document = ConceptsRepository.find_one({"concept_id": target_value})
         target_relationships = (
             target_document.get("relationships")
@@ -2392,6 +2441,11 @@ def canonical_read_back_for_method(
             predicate=_normalise_predicate(arguments.get("predicate"))
             or _normalise_predicate((result or {}).get("predicate")),
             target=arguments.get("target") or (result or {}).get("target"),
+            inspect_inverse=(
+                False
+                if method == "add_relationship"
+                else arguments.get("maintain_inverse") is not False
+            ),
         )
     if method == "remove_relationships_bulk":
         return _bulk_relationship_read_back(arguments)
@@ -2463,20 +2517,93 @@ def _safe_command_error(exc: OntologyMutationCommandError) -> dict[str, Any]:
     }
     if exc.error_details is not None:
         payload["error_details"] = dict(exc.error_details)
-    if exc.recovery_affordances is not None:
-        if exc.recovery_affordances:
-            payload["recovery_affordances"] = [
-                dict(affordance) for affordance in exc.recovery_affordances
-            ]
-    elif exc.reason_code not in {
-        "complex_create_requires_typed_effects",
-        "multi_create_requires_individual_effects",
-    }:
+    if exc.recovery_affordances is not None and exc.recovery_affordances:
         payload["recovery_affordances"] = [
-            {"action_type": "create_scoped_assertion"},
-            {"action_type": "request_ontology_administrator_delegation"},
+            dict(affordance) for affordance in exc.recovery_affordances
         ]
     return payload
+
+
+def _scoped_assertion_recovery_is_executable(
+    *,
+    method_name: str,
+    arguments: Mapping[str, Any],
+) -> bool:
+    """Prove the preconditions for adaptive turn's exact scoped alternative."""
+
+    if not get_effective_user_concept_id():
+        return False
+    method = _clean_text(method_name)
+    if method not in {"add_relationship", "upsert_text_relation"}:
+        return False
+    try:
+        resolved = resolve_governed_ontology_arguments(method, arguments)
+    except (OntologyMutationCommandError, TypeError, ValueError):
+        return False
+
+    if method == "upsert_text_relation":
+        source_id = _normalise_concept_id(
+            resolved.get("concept_id") or resolved.get("subject_concept_id")
+        )
+        return bool(
+            source_id
+            and can_access_concept(source_id)
+            and _clean_text(resolved.get("predicate"))
+            and _clean_text(resolved.get("text"))
+        )
+
+    source_id = _normalise_concept_id(resolved.get("source_id"))
+    predicate_id = _clean_text(resolved.get("predicate"))
+    target = resolved.get("target")
+    if (
+        not source_id
+        or not can_access_concept(source_id)
+        or not predicate_id.startswith("#V#")
+        or not can_access_concept(predicate_id)
+    ):
+        return False
+    try:
+        from .relationship_write_service import (
+            resolve_existing_predicate_value_kind,
+        )
+
+        target_kind = resolve_existing_predicate_value_kind(predicate_id)
+    except Exception:  # noqa: BLE001 - recovery eligibility must fail closed
+        return False
+    if target_kind == "text":
+        return bool(_clean_text(target))
+    if target_kind != "concept" or not isinstance(target, str):
+        return False
+    target_id = target.strip()
+    return bool(
+        target_id.startswith("#V#")
+        and not any(character.isspace() for character in target_id)
+        and can_access_concept(target_id)
+    )
+
+
+def _with_proven_scoped_recovery_marker(
+    payload: Mapping[str, Any],
+    *,
+    method_name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach only the internal marker whose exact action can be constructed."""
+
+    result = dict(payload)
+    result.pop("recovery_affordances", None)
+    if (
+        _clean_text(result.get("error_code"))
+        in _SCOPED_RECOVERY_AUTHORITY_DENIAL_CODES
+        and _scoped_assertion_recovery_is_executable(
+            method_name=method_name,
+            arguments=arguments,
+        )
+    ):
+        result["recovery_affordances"] = [
+            {"action_type": "create_scoped_assertion"}
+        ]
+    return result
 
 
 def _verify_method_postcondition(
@@ -2714,13 +2841,70 @@ def _postcondition_reconciliation_contract(
 def _visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[str, Any]:
     specs = intent.delta.get("concepts") or []
     spec = specs[0] if len(specs) == 1 and isinstance(specs[0], Mapping) else {}
-    concept_id = _normalise_concept_id(spec.get("concept_id"))
+    concept_id = _normalise_concept_id(intent.delta.get("expected_concept_id"))
+    requested_concept_id = _normalise_concept_id(
+        intent.delta.get("requested_concept_id") or spec.get("concept_id")
+    )
+    canonical = _concept_read_back(concept_id or "") if concept_id else {}
+    actual_context = canonical.get("publication_context")
+    requested_context = intent.publication_context.to_mapping()
+    scope_satisfied = bool(
+        isinstance(actual_context, Mapping)
+        and actual_context.get("kind") == requested_context.get("kind")
+        and actual_context.get("concept_id") == requested_context.get("concept_id")
+    )
+    text_rows = canonical.get("text_relations")
+    text_rows = text_rows if isinstance(text_rows, list) else []
+    satisfied_fields: list[str] = []
+    unapplied_fields: list[str] = []
+    for field_name, predicate in (
+        ("description", "hasDescription"),
+        ("notes", "hasNote"),
+    ):
+        requested_value = spec.get(field_name)
+        if not isinstance(requested_value, str) or not requested_value.strip():
+            continue
+        if any(
+            isinstance(row, Mapping)
+            and row.get("predicate") == predicate
+            and row.get("text") == requested_value.strip()
+            for row in text_rows
+        ):
+            satisfied_fields.append(field_name)
+        else:
+            unapplied_fields.append(field_name)
+    if spec.get("vontology_path") is not None:
+        if canonical.get("vontology_path") == spec.get("vontology_path"):
+            satisfied_fields.append("vontology_path")
+        else:
+            unapplied_fields.append("vontology_path")
+    if scope_satisfied:
+        satisfied_fields.append("scope_mode")
+    else:
+        unapplied_fields.append("scope_mode")
+
+    reuse_projection = {
+        "requested_concept_id": requested_concept_id,
+        "effective_concept_id": concept_id,
+        "reuse_match_source": (
+            intent.delta.get("reuse_match_source") or "exact_concept_id"
+        ),
+        "publication_context": actual_context,
+        "requested_publication_context": requested_context,
+        # Reuse is strictly read-only even when the requested and actual scopes
+        # happen to agree.
+        "requested_scope_applied": False,
+        "requested_scope_satisfied": scope_satisfied,
+        "satisfied_fields": satisfied_fields,
+        "unapplied_fields": unapplied_fields,
+    }
     result: dict[str, Any] = {
         "success": True,
         "effect_status": "succeeded",
         "mutation_outcome": "succeeded",
         "changed": False,
         "idempotent_reuse": True,
+        **reuse_projection,
         "created_concept_ids": [],
         "resolved_concept_ids": [concept_id] if concept_id else [],
         "results": [
@@ -2732,6 +2916,7 @@ def _visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[str, An
                 "concept_id": concept_id,
                 "requested_name": spec.get("name"),
                 "requested_kind": spec.get("kind"),
+                **reuse_projection,
             }
         ],
         "total": 1,
@@ -2743,6 +2928,62 @@ def _visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[str, An
         result["actor_scoped_referent"] = _actor_scoped_referent_result_metadata(
             concept_id
         )
+    return result
+
+
+def _create_intent_has_visible_reuse(intent: OntologyMutationIntent) -> bool:
+    return bool(intent.delta.get("visible_exact_reuse"))
+
+
+def _visible_create_reuse_precondition_holds(intent: OntologyMutationIntent) -> bool:
+    """Re-prove one selected read-only reuse while its concept lock is held."""
+
+    specs = intent.delta.get("concepts") or []
+    spec = specs[0] if len(specs) == 1 and isinstance(specs[0], Mapping) else None
+    concept_id = _normalise_concept_id(intent.delta.get("expected_concept_id"))
+    if (
+        spec is None
+        or concept_id is None
+        or not _concept_exists_unfiltered(concept_id)
+        or not can_access_concept(concept_id)
+    ):
+        return False
+
+    required_context = (
+        intent.publication_context.to_mapping()
+        if intent.delta.get("actor_scoped_referent")
+        else None
+    )
+    return _visible_concept_satisfies_requested_core(
+        concept_id=concept_id,
+        concept_spec=spec,
+        parent_id=_normalise_concept_id(intent.delta.get("parent_id")),
+        instance_of_type=_normalise_concept_id(
+            intent.delta.get("instance_of_type") or spec.get("instance_of_type")
+        ),
+        required_publication_context=required_context,
+    )
+
+
+def _locked_visible_create_reuse_result(intent: OntologyMutationIntent) -> dict[str, Any]:
+    """Return a canonically read-back reuse or a typed pre-effect race failure."""
+
+    if not _visible_create_reuse_precondition_holds(intent):
+        return _safe_command_error(
+            OntologyMutationCommandError(
+                "ontology_create_reuse_precondition_failed",
+                (
+                    "The compatible concept selected for reuse is no longer "
+                    "available. No concept was created."
+                ),
+                recovery_affordances=(),
+            )
+        )
+    result = _visible_create_reuse_result(intent)
+    concept_id = _normalise_concept_id(intent.delta.get("expected_concept_id"))
+    result["canonical_read_back"] = {
+        "concepts": [_concept_read_back(concept_id)] if concept_id else []
+    }
     return result
 
 
@@ -2969,6 +3210,25 @@ def execute_governed_ontology_method(
             "error_code": "exception",
             "error": "Ontology mutation preflight failed before any effect.",
         }
+    if method_name == "create_concepts" and _create_intent_has_visible_reuse(intent):
+        reuse_concept_id = _normalise_concept_id(
+            intent.delta.get("expected_concept_id")
+        )
+        try:
+            with ontology_mutation_resource_lock(
+                f"ontology-publication-scope:{reuse_concept_id}"
+            ):
+                return _locked_visible_create_reuse_result(intent)
+        except OntologyMutationResourceBusy:
+            return {
+                "success": False,
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+                "retryable": True,
+                "error_code": "ontology_mutation_resource_busy",
+                "error": "Another concept operation is already in progress.",
+            }
     result_holder: dict[str, Mapping[str, Any]] = {}
 
     def perform_locked(*, exact_create_reuse: bool = False) -> Mapping[str, Any]:
@@ -3330,6 +3590,14 @@ def execute_governed_ontology_method(
         ),
         preview=preview,
     )
+    if _clean_text(outcome.get("error_code")) in (
+        _SCOPED_RECOVERY_AUTHORITY_DENIAL_CODES
+    ):
+        outcome = _with_proven_scoped_recovery_marker(
+            outcome,
+            method_name=method_name,
+            arguments=arguments,
+        )
     if outcome.get("effect_status") == "indeterminate" or outcome.get(
         "mutation_outcome"
     ) in {"unknown", "partial"}:
@@ -3403,6 +3671,14 @@ def issue_same_turn_method_delegation(
                 "ontology_mutation_target_not_accessible",
                 "The requested ontology target is not accessible in this context.",
             )
+        if method_name == "create_concepts" and _create_intent_has_visible_reuse(intent):
+            reuse_concept_id = _normalise_concept_id(
+                intent.delta.get("expected_concept_id")
+            )
+            with ontology_mutation_resource_lock(
+                f"ontology-publication-scope:{reuse_concept_id}"
+            ):
+                return _locked_visible_create_reuse_result(intent)
         return issue_agent_delegation(
             intent=intent,
             grantor_actor_concept_id=actor_concept_id,
@@ -3416,18 +3692,21 @@ def issue_same_turn_method_delegation(
     except OntologyMutationCommandError as exc:
         return _safe_command_error(exc)
     except PermissionError as exc:
-        return {
+        payload: dict[str, Any] = {
             "success": False,
             "effect_status": "not_started",
             "mutation_outcome": "not_started",
             "changed": False,
             "error_code": str(exc),
             "error": "Semantic ontology authority is required for this effect.",
-            "recovery_affordances": [
-                {"action_type": "create_scoped_assertion"},
-                {"action_type": "request_ontology_administrator_delegation"},
-            ],
         }
+        # This internal marker is immediately replaced by adaptive turn's fully
+        # populated upsert_scoped_assertion call before model exposure.
+        return _with_proven_scoped_recovery_marker(
+            payload,
+            method_name=method_name,
+            arguments=arguments,
+        )
     except (RuntimeError, ValueError) as exc:
         return {
             "success": False,
