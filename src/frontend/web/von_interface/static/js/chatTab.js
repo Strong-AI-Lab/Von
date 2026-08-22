@@ -23935,7 +23935,7 @@ function _resolveCurrentChatSessionTitle(sessionId) {
     if (sid) {
         const sessionMeta = _getSessionMetaById(sid);
         if (sessionMeta) {
-            return getSessionDisplayName(sessionMeta);
+            return getSessionDisplayName(sessionMeta, { fallbackToId: false });
         }
     }
 
@@ -23943,7 +23943,7 @@ function _resolveCurrentChatSessionTitle(sessionId) {
         return activeName;
     }
 
-    return sid ? getShortSessionId(sid) : '';
+    return '';
 }
 
 function _appendChatSessionCurrentTitle(container, sessionId) {
@@ -25136,14 +25136,14 @@ function getShortSessionId(sessionId) {
     return sid.length > 10 ? `${sid.slice(0, 8)}.` : sid;
 }
 
-function getSessionDisplayName(session) {
+function getSessionDisplayName(session, { fallbackToId = true } = {}) {
     const rawName = (typeof session?.session_name === 'string' && session.session_name.trim())
         ? session.session_name.trim()
         : '';
     if (rawName) {
         return rawName;
     }
-    return getShortSessionId(session?.session_id);
+    return fallbackToId ? getShortSessionId(session?.session_id) : '';
 }
 
 function formatCompletedLabel(isoString) {
@@ -25874,18 +25874,25 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             ? `Pinned (${pinnedSessions.length})`
             : (isFirstRecentTab ? 'Recent' : '');
 
-        const displayName = getSessionDisplayName(session);
+        const displayName = getSessionDisplayName(session, { fallbackToId: false });
         const timestampSource = (typeof session?.last_message_at === 'string' && session.last_message_at.trim())
             ? session.last_message_at.trim()
             : (typeof session?.created_at === 'string' && session.created_at.trim())
                 ? session.created_at.trim()
                 : '';
         const timestampLabel = formatSessionTimestamp(timestampSource) || '-';
+        const absoluteTimestampLabel = formatAbsoluteTimestamp(timestampSource);
         const tab = document.createElement('button');
         tab.type = 'button';
         tab.className = 'chat-session-tab';
         tab.setAttribute('role', 'tab');
         tab.setAttribute('aria-selected', sid === activeSessionId ? 'true' : 'false');
+        if (!displayName) {
+            tab.setAttribute(
+                'aria-label',
+                `Unnamed conversation${absoluteTimestampLabel ? `, ${absoluteTimestampLabel}` : ''}`
+            );
+        }
         tab.dataset.sessionId = sid;
         if (typeof session?.session_name === 'string') {
             tab.dataset.sessionName = session.session_name;
@@ -25948,10 +25955,14 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         if (session?.is_completed === true) {
             tab.classList.add('is-completed');
             const completedLabel = formatCompletedLabel(session?.completed_at);
-            tab.title = `${displayName} • ${timestampLabel} (${completedLabel})`;
+            tab.title = displayName
+                ? `${displayName} • ${timestampLabel} (${completedLabel})`
+                : `Unnamed conversation • ${timestampLabel} (${completedLabel})`;
         } else {
             tab.classList.add('is-open');
-            tab.title = `${displayName} • ${timestampLabel}`;
+            tab.title = displayName
+                ? `${displayName} • ${timestampLabel}`
+                : `Unnamed conversation • ${timestampLabel}`;
         }
 
         if (isPinned) {

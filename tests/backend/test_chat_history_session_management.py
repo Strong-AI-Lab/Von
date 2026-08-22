@@ -5,7 +5,9 @@ import types
 import pytest
 
 
-def test_create_chat_session_sets_name_and_namespace(monkeypatch):
+def test_create_chat_session_preserves_explicit_name_and_leaves_unnamed_session_unset(
+    monkeypatch,
+):
     from src.backend.services import chat_history_service
 
     stored = {}
@@ -54,6 +56,63 @@ def test_create_chat_session_sets_name_and_namespace(monkeypatch):
     assert doc["namespace"] == "#V#user@org"
     assert doc["history"] == []
     assert result["is_agent_created"] is False
+
+    unnamed_result = chat_history_service.create_chat_session(
+        user_id="#V#user",
+        session_id="s-2",
+        session_name="   ",
+    )
+
+    assert unnamed_result["session_name"] is None
+    unnamed_doc = stored[("#V#user", "s-2")]
+    assert "session_name" not in unnamed_doc
+    assert unnamed_doc["history"] == []
+
+    existing_result = chat_history_service.create_chat_session(
+        user_id="#V#user",
+        session_id="s-2",
+        session_name="Not persisted on an existing session",
+    )
+
+    assert existing_result["session_name"] is None
+    assert "session_name" not in unnamed_doc
+
+
+def test_implicit_session_creation_does_not_derive_name_from_first_user_message(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    writes = []
+
+    class _FakeColl:
+        def update_one(self, query, update, upsert=False):
+            writes.append((query, update, upsert))
+            return types.SimpleNamespace(modified_count=1, matched_count=0)
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_session_context",
+        lambda: {"namespace": "#V#user@org"},
+    )
+
+    chat_history_service.add_message_to_history(
+        user_id="#V#user",
+        session_id="s-implicit",
+        message={"role": "user", "content": "Do not turn this into a title"},
+        broadcast_to_shared=False,
+        skip_rag_indexing=True,
+    )
+
+    assert len(writes) == 1
+    _, update, upsert = writes[0]
+    assert upsert is True
+    assert "session_name" not in update["$setOnInsert"]
 
 
 def test_create_chat_session_stores_agent_created_provenance(monkeypatch):

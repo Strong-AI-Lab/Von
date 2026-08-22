@@ -9659,6 +9659,79 @@ describe('chat session composer state', () => {
         expect(activeTab.classList.contains('is-active')).toBe(true);
     });
 
+    test('an unnamed conversation renders its date without an id label and remains selectable', async () => {
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: 'session-named',
+                        sessions: [
+                            {
+                                session_id: 'session-named',
+                                session_name: 'Named conversation',
+                                message_count: 2,
+                                last_message_at: '2026-08-21T18:35:00Z'
+                            },
+                            {
+                                session_id: 'session-unnamed-12345678',
+                                session_name: null,
+                                message_count: 0,
+                                created_at: '2026-08-21T18:30:00Z'
+                            }
+                        ]
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/set_chat_session')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_id: body.session_id, session_name: null })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 1,
+                        total_segments: 0,
+                        total_messages: 0
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+
+        const unnamedTab = document.querySelector(
+            '.chat-session-tab[data-session-id="session-unnamed-12345678"]'
+        );
+        expect(unnamedTab).not.toBeNull();
+        expect(unnamedTab.querySelector('.chat-session-tab-label')?.textContent).toBe('');
+        expect(unnamedTab.querySelector('.chat-session-tab-meta')?.textContent?.trim())
+            .not.toBe('');
+        expect(unnamedTab.getAttribute('aria-label')).toMatch(/^Unnamed conversation,/);
+        expect(unnamedTab.getAttribute('aria-label')).toContain('2026');
+        expect(unnamedTab.textContent).not.toContain('session-');
+
+        unnamedTab.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await Promise.resolve();
+
+        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
+            .toBe('session-unnamed-12345678');
+    });
+
     test('new chat creates immediately without a native dialog and preserves the composer draft', async () => {
         const promptInput = document.getElementById('promptInput');
         initializePromptCartoucheOverlay(promptInput);
@@ -9693,7 +9766,7 @@ describe('chat session composer state', () => {
                 if (created) {
                     sessions.unshift({
                         session_id: 'session-new',
-                        session_name: 'Chat 2026-04-13 18:30',
+                        session_name: null,
                         message_count: 0,
                         last_message_at: '2026-04-13T18:30:00Z'
                     });
@@ -9742,7 +9815,7 @@ describe('chat session composer state', () => {
             ok: true,
             json: async () => ({
                 session_id: 'session-new',
-                session_name: 'Chat 2026-04-13 18:30',
+                session_name: null,
                 history: []
             })
         });
@@ -9767,8 +9840,13 @@ describe('chat session composer state', () => {
 
         expect(promptInput.value).toBe('Move this draft into a new conversation');
         expect(document.activeElement).toBe(promptInput);
-        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
-            .toBe('session-new');
+        const activeNewTab = document.querySelector('.chat-session-tab.is-active');
+        expect(activeNewTab?.dataset.sessionId).toBe('session-new');
+        expect(activeNewTab?.querySelector('.chat-session-tab-label')?.textContent).toBe('');
+        expect(activeNewTab?.querySelector('.chat-session-tab-meta')?.textContent?.trim())
+            .not.toBe('');
+        expect(activeNewTab?.getAttribute('aria-label')).toMatch(/^Unnamed conversation,/);
+        expect(activeNewTab?.textContent).not.toContain('session-');
     });
 
     test('new chat reports creation failure without blocking the page', async () => {
@@ -9846,7 +9924,7 @@ describe('chat session composer state', () => {
                     ok: true,
                     json: async () => ({
                         session_id: 'session-created-first-send',
-                        session_name: 'Chat 2026-04-13 18:30',
+                        session_name: null,
                         history: []
                     })
                 });
@@ -9886,7 +9964,7 @@ describe('chat session composer state', () => {
                         response: 'Created session response',
                         session_id: 'session-created-first-send',
                         conversation_session_id: 'session-created-first-send',
-                        conversation_session_name: 'Chat 2026-04-13 18:30',
+                        conversation_session_name: null,
                         llm_debug: { model: 'gpt-5.2' }
                     })
                 });

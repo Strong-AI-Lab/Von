@@ -754,20 +754,6 @@ def _add_chat_session_provenance_projection(
     return projection
 
 
-def _default_session_name(now: Optional[datetime] = None) -> str:
-    timestamp = now or datetime.now(timezone.utc)
-    if timestamp.tzinfo is not None:
-        timestamp = timestamp.astimezone()
-    return timestamp.strftime("Chat %Y-%m-%d %H:%M")
-
-
-def _session_name_from_message(content: Any) -> Optional[str]:
-    if not isinstance(content, str):
-        return None
-    first_line = content.splitlines()[0].strip()
-    return _normalise_session_name(first_line)
-
-
 def _derive_rag_namespace(
     *, session_context: Dict[str, Any], user_id: str
 ) -> Optional[str]:
@@ -3215,15 +3201,9 @@ def add_message_to_history(
         # overwrite the owner's namespace and cause the conversation to
         # disappear from the owner's session list. (JVNAUTOSCI-1004)
 
-        session_name = None
-        if message.get("role") == "user":
-            session_name = _session_name_from_message(message.get("content"))
-
         set_on_insert: Dict[str, Any] = {"created_at": datetime.now(timezone.utc)}
         if isinstance(ns, str) and ns.strip():
             set_on_insert["namespace"] = ns.strip()
-        if session_name:
-            set_on_insert["session_name"] = session_name
         if isinstance(org_concept_id, str) and org_concept_id.strip():
             set_on_insert["organisation_concept_id"] = org_concept_id.strip()
         role_value = effective_session_context.get("role_in_org")
@@ -4482,14 +4462,15 @@ def create_chat_session(
         ns = _derive_rag_namespace(
             session_context={"organisation_concept_id": effective_org}, user_id=user_id
         )
-    name = _normalise_session_name(session_name) or _default_session_name(now)
+    name = _normalise_session_name(session_name)
 
     set_on_insert: Dict[str, Any] = {
         "created_at": now,
         "updated_at": now,
-        "session_name": name,
         "history": [],
     }
+    if name:
+        set_on_insert["session_name"] = name
     if isinstance(ns, str) and ns.strip():
         set_on_insert["namespace"] = ns.strip()
     if isinstance(effective_org, str) and effective_org.strip():
@@ -4526,9 +4507,7 @@ def create_chat_session(
         stored_provenance = _session_provenance_from_doc(doc or {})
         return {
             "session_id": session_id,
-            "session_name": _normalise_session_name(
-                (doc or {}).get("session_name") or name
-            ),
+            "session_name": _normalise_session_name((doc or {}).get("session_name")),
             "namespace": (doc or {}).get("namespace") or ns,
             **stored_provenance,
         }

@@ -698,7 +698,7 @@ describe('chat attachment workflow input binding', () => {
                     ok: true,
                     json: async () => ({
                         session_id: 'upload-created-session',
-                        session_name: 'Upload conversation',
+                        session_name: null,
                         history: []
                     })
                 });
@@ -760,7 +760,7 @@ describe('chat attachment workflow input binding', () => {
 
         __testOnly_setActiveChatSession(
             'upload-created-session',
-            'Upload conversation'
+            null
         );
         promptInput.value = 'Represent the uploaded spreadsheet.';
         await sendMessage();
