@@ -16,6 +16,11 @@ import { activateTab } from './tabNavigation.js';
 import { createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
 import { copyJsonTextWithButtonFeedback, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 import { mountJsonInspector } from './utils/jsonInspector.js';
+import {
+    describePublicationContext,
+    executeGovernedScopeControlChange,
+    publicationScopeFlags
+} from './utils/governedPublicationScope.js';
 import { showToast } from './utils/toast.js';
 import {
     armRetryableLoadState,
@@ -24,8 +29,7 @@ import {
 } from './utils/retryableLoadState.js';
 import {
     buildNamespaceScopedStorageKey,
-    getSessionScopedNamespace,
-    getSessionScopedOrgId
+    getSessionScopedNamespace
 } from './utils/sessionScopedStorage.js';
 import { initialiseResizableViewport } from './utils/resizableViewport.js';
 import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge } from './vontology.js';
@@ -7600,7 +7604,7 @@ export function deriveFileCopyActionState(nodePayload = null) {
     };
 }
 
-function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = null) {
+export function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = null) {
     try {
         if (!headerDiv || !conceptId) return;
 
@@ -7629,8 +7633,8 @@ function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = null) {
         // 2. Organization Relation Button
         const orgBtn = document.createElement('button');
         orgBtn.className = 'org-relation-button';
-        orgBtn.title = 'Toggle organization relation';
-        orgBtn.setAttribute('aria-label', 'Toggle specific_to_organisation relationship');
+        orgBtn.title = 'Move publication scope to the current organisation';
+        orgBtn.setAttribute('aria-label', 'Change publication scope to the current organisation');
         orgBtn.setAttribute('data-keep-title', 'true');
         orgBtn.innerHTML = '🏢'; // Building emoji
         orgBtn.style.padding = '2px 6px';
@@ -7644,8 +7648,8 @@ function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = null) {
         // 3. User Relation Button
         const userBtn = document.createElement('button');
         userBtn.className = 'user-relation-button';
-        userBtn.title = 'Toggle user relation';
-        userBtn.setAttribute('aria-label', 'Toggle specific_to_user relationship');
+        userBtn.title = 'Move publication scope to your user context';
+        userBtn.setAttribute('aria-label', 'Change publication scope to your user context');
         userBtn.setAttribute('data-keep-title', 'true');
         userBtn.innerHTML = '👤'; // Person emoji
         userBtn.style.padding = '2px 6px';
@@ -7656,13 +7660,28 @@ function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = null) {
         userBtn.style.cursor = 'pointer';
         userBtn.style.fontSize = '0.9rem';
 
-        // Load initial states
-        loadButtonStates(conceptId, flagBtn, orgBtn, userBtn);
+        // The raw document is display state, not a prerequisite for the
+        // governed control. Ignore a late initial scope snapshot once either
+        // control has started its authoritative GET/preview/execute path.
+        let scopeInteractionStarted = false;
+        void loadButtonStates(
+            conceptId,
+            flagBtn,
+            orgBtn,
+            userBtn,
+            () => !scopeInteractionStarted
+        );
 
         // Event listeners
         flagBtn.addEventListener('click', () => toggleConceptFlag(conceptId, flagBtn));
-        orgBtn.addEventListener('click', () => toggleOrganizationRelation(conceptId, orgBtn));
-        userBtn.addEventListener('click', () => toggleUserRelation(conceptId, userBtn));
+        orgBtn.addEventListener('click', () => {
+            scopeInteractionStarted = true;
+            void toggleOrganizationRelation(conceptId, orgBtn, userBtn);
+        });
+        userBtn.addEventListener('click', () => {
+            scopeInteractionStarted = true;
+            void toggleUserRelation(conceptId, userBtn, orgBtn);
+        });
 
         // Add buttons to group
         buttonGroup.appendChild(flagBtn);
@@ -7802,7 +7821,7 @@ if (typeof window !== 'undefined') {
 }
 
 // Load initial button states from concept data
-async function loadButtonStates(conceptId, flagBtn, orgBtn, userBtn) {
+async function loadButtonStates(conceptId, flagBtn, orgBtn, userBtn, shouldApplyScope = null) {
     try {
         const encoded = encodeURIComponent(conceptId);
         const response = await fetch(`/vontology/api/vontology/node_content?identifier=${encoded}`);
@@ -7810,6 +7829,7 @@ async function loadButtonStates(conceptId, flagBtn, orgBtn, userBtn) {
 
         const data = await response.json();
         const concept = data.raw_doc || data;
+        const applyScopeState = typeof shouldApplyScope !== 'function' || shouldApplyScope();
 
         // Update flag button state
         if (flagBtn) {
@@ -7818,7 +7838,7 @@ async function loadButtonStates(conceptId, flagBtn, orgBtn, userBtn) {
         }
 
         // Update organization button state
-        if (orgBtn) {
+        if (orgBtn && applyScopeState) {
             const orgRelations = getCanonicalRelationshipTargets(
                 concept.relationships,
                 '#V#specific_to_organisation'
@@ -7828,7 +7848,7 @@ async function loadButtonStates(conceptId, flagBtn, orgBtn, userBtn) {
         }
 
         // Update user button state
-        if (userBtn) {
+        if (userBtn && applyScopeState) {
             const userRelations = getCanonicalRelationshipTargets(
                 concept.relationships,
                 '#V#specific_to_user'
@@ -7867,93 +7887,49 @@ async function toggleConceptFlag(conceptId, flagBtn) {
     }
 }
 
-// Toggle organization relation
-async function toggleOrganizationRelation(conceptId, orgBtn) {
-    try {
-        const hasRelation = orgBtn.dataset.hasRelation === 'true';
-        const action = hasRelation ? 'remove' : 'add';
-        orgBtn.disabled = true;
-        // JVNAUTOSCI-1011: Use central helper for session-scoped org context
-        const orgId = getSessionScopedOrgId();
-        if (action === 'add' && !orgId) {
-            showToast('Organisation context unavailable', 'error');
-            return;
-        }
-        const response = await fetch('/vontology/api/vontology/concept/organization-relation', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            // Use NZ spelling primary key; backend tolerates multiple synonyms.
-            body: JSON.stringify({ concept_id: conceptId, action, organisation_concept_id: orgId })
-        });
-
-        const result = await response.json();
-        if (!result.success && !result.changed) {
-            showToast(result.error || 'No change applied', 'error');
-            // Force removal still available for cleanup scenarios, but no context mismatch logic needed
-        } else if (result.success) {
-            const newHasRelation = Array.isArray(result.specific_to_organisation) && result.specific_to_organisation.length > 0;
-            updateOrgButtonState(orgBtn, newHasRelation);
-            showToast(`Organization relation ${action === 'add' ? 'added' : 'removed'}`);
-        } else if (result.changed === false) {
-            showToast('No organization relation updated', 'error');
-        }
-        // Context mismatch no longer relevant - client localStorage is sole authority
-        // Refresh authoritative state from server doc
-        await loadButtonStates(conceptId, null, orgBtn, null);
-    } catch (e) {
-        console.error('Failed to toggle organization relation:', e);
-        showToast('Failed to toggle organization relation', 'error');
-    } finally { orgBtn.disabled = false; }
+export function applyPublicationScopeReadBack(scopeReadBack, orgBtn, userBtn) {
+    const flags = publicationScopeFlags(scopeReadBack);
+    if (orgBtn) updateOrgButtonState(orgBtn, flags.hasOrganisationScope);
+    if (userBtn) updateUserButtonState(userBtn, flags.hasUserScope);
+    return flags;
 }
 
-// Toggle user relation
-async function toggleUserRelation(conceptId, userBtn) {
+async function togglePublicationScopeControl(conceptId, controlKind, orgBtn, userBtn) {
+    const buttons = [orgBtn, userBtn].filter(Boolean);
+    buttons.forEach((button) => { button.disabled = true; });
     try {
-        const hasRelation = userBtn.dataset.hasRelation === 'true';
-        const action = hasRelation ? 'remove' : 'add';
-        userBtn.disabled = true;
-        // Get current user concept id from localStorage (client authoritative identity)
-        let userId = (
-            window.localStorage.getItem('von_current_user') ||
-            window.localStorage.getItem('vonCurrentUser') ||
-            null
-        );
-        // Extract concept_id if localStorage contains JSON object
-        if (userId && typeof userId === 'string' && userId.startsWith('{')) {
-            try {
-                const userObj = JSON.parse(userId);
-                userId = userObj.concept_id || userId;
-            } catch (e) {
-                // Keep original string if JSON parse fails
-            }
+        const result = await executeGovernedScopeControlChange({ conceptId, controlKind });
+        applyPublicationScopeReadBack(result.canonical_read_back, orgBtn, userBtn);
+        if (result.cancelled) {
+            showToast('Publication scope change cancelled');
+            return result;
         }
-        if (action === 'add' && !userId) {
-            showToast('User context unavailable', 'error');
-            return;
-        }
-        const response = await fetch('/vontology/api/vontology/concept/user-relation', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ concept_id: conceptId, action, user_concept_id: userId })
+        showToast(`Publication scope changed to ${describePublicationContext(result.preview?.to)}`);
+        dispatchConceptUpdated([conceptId], {
+            reason: 'publication_scope_changed',
+            source: 'concept_scope_controls'
         });
-
-        const result = await response.json();
-        if (!result.success && !result.changed) {
-            showToast(result.error || 'No change applied', 'error');
-            // Force removal still available for cleanup scenarios, but no context mismatch logic needed
-        } else if (result.success) {
-            const newHasRelation = Array.isArray(result.specific_to_user) && result.specific_to_user.length > 0;
-            updateUserButtonState(userBtn, newHasRelation);
-            showToast(`User relation ${action === 'add' ? 'added' : 'removed'}`);
-        } else if (result.changed === false) {
-            showToast('No user relation updated', 'error');
+        return result;
+    } catch (error) {
+        console.error('Failed to change publication scope:', error);
+        if (error?.canonicalReadBack) {
+            applyPublicationScopeReadBack(error.canonicalReadBack, orgBtn, userBtn);
         }
-        // Context mismatch no longer relevant - client localStorage is sole authority
-        await loadButtonStates(conceptId, null, null, userBtn);
-    } catch (e) {
-        console.error('Failed to toggle user relation:', e);
-        showToast('Failed to toggle user relation', 'error');
-    } finally { userBtn.disabled = false; }
+        showToast(`Publication scope change failed: ${error.message}`, 'error');
+        return { success: false, error };
+    } finally {
+        buttons.forEach((button) => { button.disabled = false; });
+    }
+}
+
+// The existing icon controls now request governed whole-scope transitions;
+// they no longer toggle raw visibility relations or send browser identity.
+export async function toggleOrganizationRelation(conceptId, orgBtn, userBtn = null) {
+    return togglePublicationScopeControl(conceptId, 'organisation', orgBtn, userBtn);
+}
+
+export async function toggleUserRelation(conceptId, userBtn, orgBtn = null) {
+    return togglePublicationScopeControl(conceptId, 'user', orgBtn, userBtn);
 }
 
 // Update button states visually
@@ -7976,11 +7952,13 @@ function updateOrgButtonState(orgBtn, hasRelation) {
     if (hasRelation) {
         orgBtn.style.background = '#dbeafe'; // Blue background when related
         orgBtn.style.borderColor = '#3b82f6';
-        orgBtn.title = 'Remove organization relation';
+        orgBtn.title = 'Change publication scope away from this organisation';
+        orgBtn.setAttribute('aria-label', 'Change publication scope away from this organisation');
     } else {
         orgBtn.style.background = '#f9fafb';
         orgBtn.style.borderColor = '#d1d5db';
-        orgBtn.title = 'Add organization relation';
+        orgBtn.title = 'Move publication scope to the current organisation';
+        orgBtn.setAttribute('aria-label', 'Change publication scope to the current organisation');
     }
 }
 
@@ -7990,43 +7968,15 @@ function updateUserButtonState(userBtn, hasRelation) {
     if (hasRelation) {
         userBtn.style.background = '#dcfce7'; // Green background when related
         userBtn.style.borderColor = '#10b981';
-        userBtn.title = 'Remove user relation';
+        userBtn.title = 'Change publication scope away from this user context';
+        userBtn.setAttribute('aria-label', 'Change publication scope away from this user context');
     } else {
         userBtn.style.background = '#f9fafb';
         userBtn.style.borderColor = '#d1d5db';
-        userBtn.title = 'Add user relation';
+        userBtn.title = 'Move publication scope to your user context';
+        userBtn.setAttribute('aria-label', 'Change publication scope to your user context');
     }
 }
-
-// Helper functions to get current user/org info
-async function getCurrentUserOrganization() {
-    try {
-        const response = await fetch('/api/settings/user/current');
-        if (!response.ok) throw new Error('Failed to get user info');
-        const user = await response.json();
-        if (!user.organization_id) throw new Error('Missing organization context');
-        return user.organization_id;
-    } catch (e) {
-        console.warn('Could not get current user organization');
-        showToast('Organisation context unavailable', 'error');
-        return null;
-    }
-}
-
-async function getCurrentUserId() {
-    try {
-        const response = await fetch('/api/settings/user/current');
-        if (!response.ok) throw new Error('Failed to get user info');
-        const user = await response.json();
-        if (!user.user_id) throw new Error('Missing user context');
-        return user.user_id;
-    } catch (e) {
-        console.warn('Could not get current user ID');
-        showToast('User context unavailable', 'error');
-        return null;
-    }
-}
-
 
 // Explicit exports for tests / external modules that need to force relabeling
 export { initializeRelationshipsUI, relabelAllDynamicConceptTabs, reloadConceptTab, updateTabLabelWithShortestName, getCanonicalRelationshipTargets };

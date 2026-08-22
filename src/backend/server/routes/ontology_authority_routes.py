@@ -43,6 +43,8 @@ from ...services.ontology_publication_authority_service import (
     revoke_agent_delegation,
 )
 from ...services.ontology_scope_change_service import (
+    EXECUTE_SCOPE_CHANGE_TOOL_NAME,
+    PREVIEW_SCOPE_CHANGE_TOOL_NAME,
     change_concept_publication_scope,
 )
 from ...services.von_operational_administrator_service import (
@@ -427,22 +429,58 @@ def concept_scope(concept_id: str):
 
 @ontology_authority_bp.route("/concepts/<path:concept_id>/scope", methods=["POST"])
 def change_concept_scope(concept_id: str):
-    if not _authenticated_actor():
+    actor_id = _authenticated_actor()
+    if not actor_id:
         return _actor_required_response()
     payload = _payload()
+    destination_kind = _clean(payload.get("destination_kind"))
+    destination_kind_normalised = destination_kind.lower().replace("-", "_")
+    destination_concept_id = _clean(payload.get("destination_concept_id")) or None
+
+    # The Concept-tab self/organisation controls name the destination kind but
+    # deliberately do not send browser-held identity. Resolve those defaults
+    # from the authenticated request context. An explicit destination remains
+    # supported for administrator-selected transitions and is still checked by
+    # the shared source-and-destination authority service.
+    if not destination_concept_id and destination_kind_normalised in {
+        "user",
+        "private_user",
+    }:
+        destination_concept_id = actor_id
+    if not destination_concept_id and destination_kind_normalised in {
+        "organisation",
+        "organization",
+        "org",
+    }:
+        destination_concept_id = get_effective_organisation_concept_id()
+        if not destination_concept_id:
+            return jsonify(
+                {
+                    "error": "organisation_context_required",
+                    "message": (
+                        "Choose an organisation context before changing the "
+                        "concept publication scope."
+                    ),
+                }
+            ), 400
+    preview = bool(payload.get("preview", True))
+    invocation_tool_name = (
+        PREVIEW_SCOPE_CHANGE_TOOL_NAME
+        if preview
+        else EXECUTE_SCOPE_CHANGE_TOOL_NAME
+    )
     try:
         result = change_concept_publication_scope(
             concept_id=concept_id,
-            destination_kind=_clean(payload.get("destination_kind")),
-            destination_concept_id=(
-                _clean(payload.get("destination_concept_id")) or None
-            ),
+            destination_kind=destination_kind,
+            destination_concept_id=destination_concept_id,
             expected_scope_fingerprint=_clean(
                 payload.get("expected_scope_fingerprint")
             ),
             request_id=_clean(payload.get("request_id")),
-            preview=bool(payload.get("preview", True)),
+            preview=preview,
             reason=_clean(payload.get("reason")) or None,
+            invocation_tool_name=invocation_tool_name,
         )
     except ValueError as exc:
         return jsonify(

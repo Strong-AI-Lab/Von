@@ -5359,7 +5359,7 @@ def toggle_organization_relation():
                     "scope-change API with an explicit preview fingerprint."
                 ),
                 "recovery_affordances": [
-                    {"action_type": "preview_concept_publication_scope"},
+                    {"action_type": "preview_concept_publication_scope_change"},
                     {"action_type": "change_concept_publication_scope"},
                 ],
             }
@@ -5487,7 +5487,7 @@ def toggle_user_relation():
                     "scope-change API with an explicit preview fingerprint."
                 ),
                 "recovery_affordances": [
-                    {"action_type": "preview_concept_publication_scope"},
+                    {"action_type": "preview_concept_publication_scope_change"},
                     {"action_type": "change_concept_publication_scope"},
                 ],
             }

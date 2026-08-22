@@ -29,6 +29,10 @@ def test_legacy_scope_route_fails_closed_even_with_forged_force_and_org():
     payload = response.get_json()
     assert payload["error_code"] == "governed_scope_change_required"
     assert payload["effect_status"] == "not_started"
+    assert payload["recovery_affordances"] == [
+        {"action_type": "preview_concept_publication_scope_change"},
+        {"action_type": "change_concept_publication_scope"},
+    ]
 
 
 def test_legacy_user_scope_route_fails_closed_even_with_forged_user_and_force():
@@ -43,7 +47,11 @@ def test_legacy_user_scope_route_fails_closed_even_with_forged_user_and_force():
     )
 
     assert response.status_code == 410
-    assert response.get_json()["error_code"] == "governed_scope_change_required"
+    payload = response.get_json()
+    assert payload["error_code"] == "governed_scope_change_required"
+    assert payload["recovery_affordances"][0] == {
+        "action_type": "preview_concept_publication_scope_change"
+    }
 
 
 def test_relationship_route_does_not_forward_client_identity_or_override(monkeypatch):
