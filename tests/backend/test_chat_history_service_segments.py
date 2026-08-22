@@ -526,6 +526,9 @@ def test_get_chat_history_segments_can_return_carried_state_with_empty_history_i
                     {
                         "history": [],
                         "history_length": 0,
+                        "session_name": "Durable workflow follow-up",
+                        "created_at": datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc),
+                        "updated_at": datetime(2026, 7, 29, 9, 5, tzinfo=timezone.utc),
                         "conversation_situation": situation,
                         "conversation_observations": observations,
                         "conversation_observation_total": 3,
@@ -556,6 +559,9 @@ def test_get_chat_history_segments_can_return_carried_state_with_empty_history_i
     assert segments == []
     assert meta["conversation_situation"]["text"] == situation["text"]
     assert meta["conversation_situation"]["revision"] == 2
+    assert meta["session_name"] == "Durable workflow follow-up"
+    assert meta["last_message_at"] == "2026-07-29T08:00:00+00:00"
+    assert meta["created_at"] == "2026-07-29T08:00:00+00:00"
     assert meta["conversation_observations"] == observations
     assert meta["conversation_observation_state"] == {
         "schema_version": "conversation_observation_state.v1",
@@ -566,9 +572,59 @@ def test_get_chat_history_segments_can_return_carried_state_with_empty_history_i
     }
     projected = collection.pipeline[-1]["$project"]
     assert projected["conversation_situation"] == 1
+    assert projected["session_name"] == 1
+    assert projected["created_at"] == 1
+    assert projected["updated_at"] == 1
     assert projected["conversation_observations"] == 1
     assert projected["conversation_observation_total"] == 1
     assert collection.aggregate_calls == 1
+
+
+def test_get_chat_history_segments_projects_name_and_message_date_from_same_tail_read(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    docs = [
+        {
+            "_id": "1",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "session_name": "Mars project planning",
+            "created_at": datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
+            "history": [
+                {
+                    "role": "user",
+                    "content": "Earlier",
+                    "timestamp": datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc),
+                },
+                {
+                    "role": "assistant",
+                    "content": "Latest",
+                    "timestamp": datetime(2026, 8, 21, 10, 30, tzinfo=timezone.utc),
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: _FakeCollection(docs),
+    )
+
+    segments, meta = chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        history_tail_limit=1,
+        return_meta=True,
+        include_conversation_state=True,
+    )
+
+    assert segments[0][0]["content"] == "Latest"
+    assert meta["session_name"] == "Mars project planning"
+    assert meta["last_message_at"] == "2026-08-21T10:30:00+00:00"
+    assert meta["created_at"] == "2026-08-20T08:00:00+00:00"
 
 
 def test_get_chat_history_segments_keeps_debug_blob_refs_compact_by_default(

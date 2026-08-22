@@ -1851,6 +1851,7 @@ const THINKING_SEMANTIC_OBSERVATION_DETAIL_SPECS = new Map([
     ['authorised_email', { label: 'Mailbox', valueKind: 'email' }],
     ['sender', { label: 'Sender', valueKind: 'text' }],
     ['date', { label: 'Date', valueKind: 'text' }],
+    ['last_message_at', { label: 'Date', valueKind: 'datetime' }],
     ['token_status', { label: 'Authorisation', valueKind: 'status' }]
 ]);
 const THINKING_SEMANTIC_OBSERVATION_IDENTIFIER_KINDS = new Set(['predicate', 'message']);
@@ -6277,6 +6278,10 @@ export function __testOnly_bindThinkingCardControls(cardRoot = null, options = {
     bindThinkingCardControls(cardRoot, options);
 }
 
+export function __testOnly_bindThinkingDiagnosticToggles(container, request = null) {
+    bindThinkingDiagnosticToggles(container, request || getThinkingCardDisplayRequest());
+}
+
 export function __testOnly_updateThinkingCardMeta(request, progress) {
     updateThinkingCardMeta(request, progress);
 }
@@ -8744,7 +8749,7 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
 
     const renderMode = normaliseThinkingCardMode(mode);
     const items = [];
-    for (const entry of toolHistory) {
+    for (const [entryIndex, entry] of toolHistory.entries()) {
         const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
         const workflowTask = entry && typeof entry.workflowTask === 'string' ? entry.workflowTask : '';
         if (!tool && !workflowTask) {
@@ -8753,6 +8758,12 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
         const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
         const capabilityDescriptor = getThinkingCapabilityDescriptor(entry);
         const semanticOperation = capabilityDescriptor?.semanticOperation || null;
+        const invocationIdentity = normaliseThinkingActivityString(
+            entry?.callId
+            || entry?.call_id
+            || semanticOperation?.operationId
+            || semanticOperation?.operation_id
+        );
         const resultSummary = replaceOpaqueThinkingCapabilityLabel(
             entry && typeof entry.resultSummary === 'string' ? entry.resultSummary : '',
             capabilityDescriptor
@@ -8797,7 +8808,12 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
             detail: toolDetail,
             detailHtml: '',
             state: statusClass,
-            diagnosticKey: buildThinkingDiagnosticKey('tool', tool || workflowTask, batchSize || ''),
+            diagnosticKey: buildThinkingDiagnosticKey(
+                'tool',
+                tool || workflowTask,
+                invocationIdentity || `legacy-${entryIndex}`,
+                batchSize ?? ''
+            ),
             diagnosticHtml: renderMode === THINKING_CARD_MODE_DEFAULT
                 ? ''
                 : buildToolHistoryDiagnosticsHTML(entry, renderMode)

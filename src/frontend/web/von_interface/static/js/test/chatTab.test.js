@@ -70,6 +70,7 @@ import {
     __testOnly_getThinkingCardMode,
     __testOnly_bindConceptSelectionClicks,
     __testOnly_bindThinkingCardControls,
+    __testOnly_bindThinkingDiagnosticToggles,
     __testOnly_updateThinkingCardMeta,
     __testOnly_persistThinkingCardBodyHeightFromDom,
     __testOnly_syncThinkingCanonicalHistoriesFromProgress,
@@ -3507,6 +3508,61 @@ describe('thinking activity history normalisation', () => {
         });
         expect(fallbackHtml).toContain('fetch_concept');
         expect(fallbackHtml).toContain('Fetched');
+    });
+
+    test('keeps repeated tool disclosures independent across rerenders', () => {
+        const request = {
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                status: 'completed',
+                stage: 'completed',
+                tool_history: [
+                    {
+                        tool: 'conversation_get',
+                        callId: 'call_conversation_1',
+                        resultSummary: 'Finished first conversation get.',
+                        success: true
+                    },
+                    {
+                        tool: 'conversation_get',
+                        callId: 'call_conversation_2',
+                        resultSummary: 'Finished second conversation get.',
+                        success: true
+                    }
+                ]
+            }
+        };
+        const container = document.createElement('div');
+        const renderAndBind = () => {
+            container.innerHTML = __testOnly_renderThinkingCardBodyHTML(
+                request,
+                { mode: 'expert' }
+            );
+            __testOnly_bindThinkingDiagnosticToggles(container, request);
+            return [...container.querySelectorAll('details[data-thinking-diagnostic-key]')];
+        };
+
+        let rows = renderAndBind();
+        expect(rows).toHaveLength(2);
+        expect(rows.map((row) => row.dataset.thinkingDiagnosticKey)).toEqual([
+            'tool::conversation_get::call_conversation_1',
+            'tool::conversation_get::call_conversation_2'
+        ]);
+
+        rows[0].open = true;
+        rows[0].dispatchEvent(new Event('toggle'));
+        expect(request.expandedThinkingDiagnosticKeys).toEqual(
+            new Set(['tool::conversation_get::call_conversation_1'])
+        );
+        expect(rows[1].open).toBe(false);
+
+        rows = renderAndBind();
+        expect(rows[0].open).toBe(true);
+        expect(rows[1].open).toBe(false);
+
+        rows[0].open = false;
+        rows[0].dispatchEvent(new Event('toggle'));
+        expect(request.expandedThinkingDiagnosticKeys).toEqual(new Set());
     });
 
     test('renders a semantic relation summary in Default thinking without raw receipts', () => {

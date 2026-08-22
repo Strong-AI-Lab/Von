@@ -1969,6 +1969,25 @@ def _conversation_state_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _conversation_read_metadata_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Return bounded identity and dates from the same actor-scoped history read."""
+
+    created_at = _infer_created_timestamp(doc)
+    last_message_at = _infer_last_message_timestamp(
+        {
+            "history": doc.get("history"),
+            "created_at": created_at,
+        }
+    )
+    return {
+        "session_name": _normalise_session_name(doc.get("session_name")),
+        "last_message_at": (
+            last_message_at.isoformat() if last_message_at is not None else None
+        ),
+        "created_at": created_at.isoformat() if created_at is not None else None,
+    }
+
+
 def append_chat_history_conversation_observation(
     *,
     user_id: str,
@@ -2566,6 +2585,9 @@ def get_chat_history_segments(
         projection = (
             {
                 "history": 1,
+                "session_name": 1,
+                "created_at": 1,
+                "updated_at": 1,
                 "conversation_situation": 1,
                 "conversation_observations": 1,
                 "conversation_observation_total": 1,
@@ -2594,6 +2616,9 @@ def get_chat_history_segments(
                     if include_conversation_state:
                         tail_projection.update(
                             {
+                                "session_name": 1,
+                                "created_at": 1,
+                                "updated_at": 1,
                                 "conversation_situation": 1,
                                 "conversation_observations": 1,
                                 "conversation_observation_total": 1,
@@ -2643,6 +2668,7 @@ def get_chat_history_segments(
             empty_meta = {"history_truncated": False}
             if include_conversation_state:
                 empty_meta.update(_conversation_state_from_doc({}))
+                empty_meta.update(_conversation_read_metadata_from_doc({}))
             return ([], empty_meta) if return_meta else []
 
         history = _normalise_chat_history_entries(
@@ -2654,6 +2680,7 @@ def get_chat_history_segments(
             empty_history_meta = {"history_truncated": False}
             if include_conversation_state:
                 empty_history_meta.update(_conversation_state_from_doc(doc))
+                empty_history_meta.update(_conversation_read_metadata_from_doc(doc))
             return ([], empty_history_meta) if return_meta else []
         if history_length is None:
             history_length_raw = doc.get("history_length")
@@ -2701,6 +2728,7 @@ def get_chat_history_segments(
             result_meta = {"history_truncated": history_truncated}
             if include_conversation_state:
                 result_meta.update(_conversation_state_from_doc(doc))
+                result_meta.update(_conversation_read_metadata_from_doc(doc))
             return result, result_meta
         return result
     except PyMongoError as e:

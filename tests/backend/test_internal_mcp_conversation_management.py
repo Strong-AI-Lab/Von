@@ -127,6 +127,9 @@ def test_conversation_get_pages_oversized_carrier_without_debug_payload(monkeypa
         lambda **kwargs: {
             "success": True,
             "session_id": kwargs["session_id"],
+            "session_name": "Large research conversation",
+            "last_message_at": "2026-08-21T10:30:00+00:00",
+            "created_at": "2026-08-20T08:00:00+00:00",
             "segments": [[{"role": "user", "content": "x" * 90_000}]],
             "history_coverage": {"history_truncated": False},
         },
@@ -143,6 +146,77 @@ def test_conversation_get_pages_oversized_carrier_without_debug_payload(monkeypa
     assert payload["bounded_read"]["has_more"] is True
     assert payload["bounded_read"]["next_offset"] is not None
     assert payload["bounded_read"]["total_chars"] > 90_000
+    assert payload["session_name"] == "Large research conversation"
+    assert payload["last_message_at"] == "2026-08-21T10:30:00+00:00"
+    assert payload["created_at"] == "2026-08-20T08:00:00+00:00"
+
+
+def test_conversation_get_applies_actor_visible_name_to_shared_history(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.services import (
+        chat_history_service,
+        conversation_management_service,
+    )
+
+    monkeypatch.setattr(
+        catalogue,
+        "_authorise_internal_mcp_telemetry_read",
+        lambda payload, **_kwargs: {
+            "success": True,
+            "payload": dict(payload),
+            "delegated": False,
+            "read_delegation": None,
+        },
+    )
+    monkeypatch.setattr(
+        catalogue,
+        "_resolve_chat_history_read_target",
+        lambda _payload: {
+            "success": True,
+            "session_id": "shared-session",
+            "chat_session_id": "shared-session",
+            "read_user_id": "#V#owner",
+            "requested_user_id": "#V#alice",
+            "read_namespace": "#V#owner@org",
+            "access_mode": "invitee",
+            "identifier_binding": {"mode": "raw_parameters"},
+        },
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_segments",
+        lambda *args, **kwargs: (
+            [[{"role": "assistant", "content": "Shared result"}]],
+            {
+                "history_truncated": False,
+                "session_name": "Owner label",
+                "last_message_at": "2026-08-21T10:30:00+00:00",
+                "created_at": "2026-08-20T08:00:00+00:00",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        conversation_management_service,
+        "apply_conversation_preferences",
+        lambda *, actor_user_id, conversations: [
+            {
+                **conversations[0],
+                "session_name": "Alice's research label",
+                "session_name_source": "actor_preference",
+            }
+        ],
+    )
+
+    payload = catalogue._conversation_get(
+        session_id="shared-session",
+        user_concept_id="#V#alice",
+    )
+
+    assert payload["session_name"] == "Alice's research label"
+    assert payload["session_name_source"] == "actor_preference"
+    assert payload["last_message_at"] == "2026-08-21T10:30:00+00:00"
+    assert payload["created_at"] == "2026-08-20T08:00:00+00:00"
+    _assert_success_schema("conversation_get", payload)
 
 
 def test_conversation_manage_rename_returns_canonical_read_back(monkeypatch):

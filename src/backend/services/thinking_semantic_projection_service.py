@@ -96,6 +96,7 @@ _OBSERVATION_DETAIL_SPECS = {
     "authorised_email": ("Mailbox", "email"),
     "sender": ("Sender", "text"),
     "date": ("Date", "text"),
+    "last_message_at": ("Date", "datetime"),
     "token_status": ("Authorisation", "status"),
 }
 _OBSERVATION_IDENTIFIER_KINDS = frozenset({"predicate", "message"})
@@ -280,6 +281,7 @@ def _observation_item(value: Any) -> dict[str, str] | None:
                     "title",
                     "display_name",
                     "subject",
+                    "session_name",
                     "authorised_email",
                 )
             )
