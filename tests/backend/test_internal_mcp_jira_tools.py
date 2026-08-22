@@ -325,17 +325,21 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults(monkeypatch):
     assert ok_link.get("source_issue_key") == "JVNAUTOSCI-1"
     assert ok_link.get("target_issue_key") == "JVNAUTOSCI-2"
 
+    blocker_issue_key = "JVNAUTOSCI-10"
+    blocked_issue_key = "JVNAUTOSCI-11"
     ok_link_semantic = _jira_link_issue(
-        source_issue_key="JVNAUTOSCI-10",
-        target_issue_key="JVNAUTOSCI-11",
+        source_issue_key=blocker_issue_key,
+        target_issue_key=blocked_issue_key,
         link_type="Blocks",
     )
     assert ok_link_semantic.get("success") is True
     assert ok_link_semantic.get("dry_run") is True
     assert ok_link_semantic.get("executed") is False
     proposed = ok_link_semantic.get("proposed_payload", {})
-    assert proposed.get("inwardIssue", {}).get("key") == "JVNAUTOSCI-10"
-    assert proposed.get("outwardIssue", {}).get("key") == "JVNAUTOSCI-11"
+    # Jira renders the inward/source issue with the outward phrase, so this
+    # payload means "JVNAUTOSCI-10 blocks JVNAUTOSCI-11".
+    assert proposed.get("inwardIssue", {}).get("key") == blocker_issue_key
+    assert proposed.get("outwardIssue", {}).get("key") == blocked_issue_key
 
     err_conflicting_pair = _jira_link_issue(
         source_issue_key="JVNAUTOSCI-10",

@@ -24204,7 +24204,8 @@ def _jira_link_issue_input_schema() -> Schema:
         },
         optional={
             # Preferred semantic aliases. source_issue_key maps to Jira inwardIssue,
-            # target_issue_key maps to Jira outwardIssue.
+            # target_issue_key maps to Jira outwardIssue. For a Blocks link, the
+            # source issue blocks the target issue.
             "source_issue_key": (str, type(None)),
             "target_issue_key": (str, type(None)),
             # Backward-compatible Jira-native fields.
@@ -24222,6 +24223,9 @@ def _jira_link_issue_input_schema() -> Schema:
             "jira_link_issue input: link_type (required; e.g. 'Relates'). "
             "Preferred issue fields: source_issue_key + target_issue_key "
             "(source maps to Jira inwardIssue; target maps to Jira outwardIssue). "
+            "For a directional link, source is the subject of the outward relation: "
+            "with link_type='Blocks', source blocks target; do not pass the blocked "
+            "issue as source. "
             "Backward-compatible fields: inward_issue_key + outward_issue_key. "
             "Optional comment. Guardrails: dry_run defaults to true (preview only); "
             "pass approved=true (or alias confirm=true) to execute. execute=true plus "
@@ -39978,7 +39982,10 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             category="write",
             timeout_sec=20.0,
             description=(
-                "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). "
+                "Create a Jira issue link (e.g. Relates or Blocks) with safety guardrails. "
+                "For a directional link, source_issue_key is the subject of the outward relation: "
+                "with Blocks, source blocks target; do not pass the blocked issue as source. "
+                "Default dry_run=true (no mutation). "
                 "Both issue projects must be allow-listed. "
                 "To execute, pass approved=true (or alias confirm=true). "
                 "execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
