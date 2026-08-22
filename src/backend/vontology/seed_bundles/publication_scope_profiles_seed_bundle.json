@@ -1,0 +1,178 @@
+{
+  "schema_version": "publication_scope_profile_seed_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "JVNAUTOSCI-2671",
+  "managed_by": "publication_scope_profile_vontology_service",
+  "concepts": [
+    {"concept_id": "#V#thing", "name": "Thing", "parent_concept_ids": [], "create_as_instance": false},
+    {"concept_id": "#V#predicate", "name": "Predicate", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#publication_scope_profile", "name": "Publication scope profile", "parent_concept_ids": ["#V#thing"], "create_as_instance": false, "description": "A represented, defeasible recommendation for instance publication or assertion placement. It is not an authority grant."},
+    {"concept_id": "#V#has_publication_scope_profile", "name": "has publication scope profile", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true, "description": "Links a type or predicate to a represented publication-scope profile."},
+    {"concept_id": "#V#has_publication_scope_profile_json", "name": "has publication scope profile JSON", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true, "description": "Stores a publication_scope_profile.v1 payload on a publication-profile concept."},
+
+    {"concept_id": "#V#scientific_paper", "name": "Scientific paper", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#scholarly_article", "name": "Scholarly article", "parent_concept_ids": ["#V#scientific_paper"], "create_as_instance": false},
+    {"concept_id": "#V#public_preprint", "name": "Public preprint", "parent_concept_ids": ["#V#scientific_paper"], "create_as_instance": false},
+    {"concept_id": "#V#paper_under_preparation", "name": "Paper under preparation", "parent_concept_ids": ["#V#scientific_paper"], "create_as_instance": false},
+    {"concept_id": "#V#public_dataset_release", "name": "Public dataset release", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#open_source_software_release", "name": "Open-source software release", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#publicly_registered_clinical_trial", "name": "Publicly registered clinical trial", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#public_standard", "name": "Public standard", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#grant", "name": "Grant", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#phd_candidature", "name": "PhD candidature", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#patent_under_preparation", "name": "Patent under preparation", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#unpublished_experiment_run", "name": "Unpublished experiment run", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#internal_model_evaluation", "name": "Internal model evaluation", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#personal_research_note", "name": "Personal research note", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#personal_hypothesis", "name": "Personal hypothesis", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#draft_recommendation_letter", "name": "Draft recommendation letter", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#person", "name": "Person", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#research_participant_record", "name": "Research participant record", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#confidential_peer_review", "name": "Confidential peer review", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#embargoed_vulnerability_detail", "name": "Embargoed vulnerability detail", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#secret_value", "name": "Secret value", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#credential", "name": "Credential", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#private_key", "name": "Private key", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+    {"concept_id": "#V#recovery_code", "name": "Recovery code", "parent_concept_ids": ["#V#thing"], "create_as_instance": false},
+
+    {"concept_id": "#V#authored_by", "name": "authored by", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_doi", "name": "has DOI", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#published_in", "name": "published in", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#public_affiliation", "name": "public affiliation", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_read", "name": "has read", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#is_interested_in", "name": "is interested in", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#was_mentioned_in_private_email", "name": "was mentioned in private email", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#local_file_copy", "name": "local file copy", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#private_processing_marker", "name": "private processing marker", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#organises", "name": "organises", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#is_candidate_for", "name": "is candidate for", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_internal_milestone", "name": "has internal milestone", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#internal_project_role", "name": "internal project role", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_salary", "name": "has salary", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_health_accommodation", "name": "has health accommodation", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#anonymous_reviewer_identity", "name": "anonymous reviewer identity", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#whistleblower_identity", "name": "whistleblower identity", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true},
+    {"concept_id": "#V#has_secret_value", "name": "has secret value", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true}
+  ],
+  "relationships": [
+    {"subject_concept_id": "#V#scholarly_article", "predicate": "is_a_type_of", "object_concept_ids": ["#V#scientific_paper"]},
+    {"subject_concept_id": "#V#paper_under_preparation", "predicate": "is_a_type_of", "object_concept_ids": ["#V#scientific_paper"]}
+  ],
+  "profiles": [
+    {
+      "profile_concept_id": "#V#publication_profile_scientific_paper_global",
+      "name": "Scientific paper global publication profile",
+      "bound_subject_concept_id": "#V#scientific_paper",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "scientific_paper_global", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "global_general", "owner_concept_id": "#V#scientific_paper", "source": "JVNAUTOSCI-2671", "description": "Published scientific papers normally have a global canonical identity."}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_paper_under_preparation_organisation",
+      "name": "Paper under preparation organisation publication profile",
+      "bound_subject_concept_id": "#V#paper_under_preparation",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "paper_under_preparation_organisation", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "organisation_general", "owner_concept_id": "#V#paper_under_preparation", "source": "JVNAUTOSCI-2671", "description": "A paper under preparation normally belongs to an organisation or project publication context."}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_phd_candidature_organisation",
+      "name": "PhD candidature organisation publication profile",
+      "bound_subject_concept_id": "#V#phd_candidature",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "phd_candidature_organisation", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "organisation_general", "owner_concept_id": "#V#phd_candidature", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_personal_research_note_user",
+      "name": "Personal research note user publication profile",
+      "bound_subject_concept_id": "#V#personal_research_note",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "personal_research_note_user", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "user_only_default", "owner_concept_id": "#V#personal_research_note", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_public_person_global",
+      "name": "Public person global publication profile",
+      "bound_subject_concept_id": "#V#person",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "public_person_global", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "global_general", "applicability": {"source_kinds": ["public_record", "public_scholarly_metadata"], "stable_identity_required": true}, "owner_concept_id": "#V#person", "source": "JVNAUTOSCI-2671", "description": "A person identity established from a suitable public record and stable identity normally has global identity; private facts about that person remain independently scoped."}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_public_release_global",
+      "name": "Public release global publication profile",
+      "bound_subject_concept_ids": ["#V#public_dataset_release", "#V#open_source_software_release", "#V#publicly_registered_clinical_trial", "#V#public_standard"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "public_release_global", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "global_general", "source": "JVNAUTOSCI-2671", "description": "Public releases, registrations and standards normally have a global canonical identity."}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_grant_awarded_global",
+      "name": "Awarded grant global publication profile",
+      "bound_subject_concept_id": "#V#grant",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "grant_awarded_global", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "global_general", "applicability": {"lifecycle_states": ["awarded", "public_award"]}, "source": "JVNAUTOSCI-2671", "description": "A public grant award normally has a global identity."}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_grant_draft_organisation",
+      "name": "Draft grant organisation publication profile",
+      "bound_subject_concept_id": "#V#grant",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "grant_draft_organisation", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "organisation_general", "applicability": {"lifecycle_states": ["draft", "under_preparation"]}, "source": "JVNAUTOSCI-2671", "description": "A grant proposal under preparation normally remains in its organisation context."}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_internal_research_artefact_organisation",
+      "name": "Internal research artefact organisation publication profile",
+      "bound_subject_concept_ids": ["#V#patent_under_preparation", "#V#unpublished_experiment_run", "#V#internal_model_evaluation"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "internal_research_artefact_organisation", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "organisation_general", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_personal_artefact_user",
+      "name": "Personal artefact user publication profile",
+      "bound_subject_concept_ids": ["#V#personal_hypothesis", "#V#draft_recommendation_letter"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "personal_artefact_user", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "user_only_default", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_research_participant_restricted",
+      "name": "Research participant restricted-context profile",
+      "bound_subject_concept_ids": ["#V#research_participant_record", "#V#confidential_peer_review", "#V#embargoed_vulnerability_detail"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "research_participant_restricted", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "restricted_context_required", "owner_concept_id": "#V#research_participant_record", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_secret_value_external_storage",
+      "name": "Secret value external-storage profile",
+      "bound_subject_concept_ids": ["#V#secret_value", "#V#credential", "#V#private_key", "#V#recovery_code"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "secret_value_external_storage", "version": "1", "status": "active", "plane": "instance", "recommended_scope_mode": "external_secure_storage", "owner_concept_id": "#V#secret_value", "source": "JVNAUTOSCI-2671"}
+    },
+
+    {
+      "profile_concept_id": "#V#publication_profile_public_bibliographic_assertion_global",
+      "name": "Public bibliographic assertion global profile",
+      "bound_subject_concept_ids": ["#V#authored_by", "#V#has_doi", "#V#published_in", "#V#public_affiliation"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "public_bibliographic_assertion_global", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "global_general", "applicability": {"source_kinds": ["public_record", "public_scholarly_metadata"]}, "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_private_context_assertion_user",
+      "name": "Private contextual assertion user profile",
+      "bound_subject_concept_ids": ["#V#has_read", "#V#is_interested_in", "#V#was_mentioned_in_private_email", "#V#local_file_copy", "#V#private_processing_marker"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "private_context_assertion_user", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "user_only_default", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_internal_assertion_organisation",
+      "name": "Internal assertion organisation profile",
+      "bound_subject_concept_ids": ["#V#is_candidate_for", "#V#has_internal_milestone", "#V#internal_project_role"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "internal_assertion_organisation", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "organisation_general", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_organises_public_global",
+      "name": "Public organiser assertion global profile",
+      "bound_subject_concept_id": "#V#organises",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "organises_public_global", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "global_general", "applicability": {"source_kinds": ["public_event_record"]}, "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_organises_internal_organisation",
+      "name": "Internal organiser assertion organisation profile",
+      "bound_subject_concept_id": "#V#organises",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "organises_internal_organisation", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "organisation_general", "applicability": {"source_kinds": ["internal_organisation_record"]}, "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_restricted_assertion",
+      "name": "Restricted assertion context profile",
+      "bound_subject_concept_ids": ["#V#has_salary", "#V#has_health_accommodation", "#V#anonymous_reviewer_identity", "#V#whistleblower_identity"],
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "restricted_assertion", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "restricted_context_required", "source": "JVNAUTOSCI-2671"}
+    },
+    {
+      "profile_concept_id": "#V#publication_profile_secret_assertion_external_storage",
+      "name": "Secret assertion external-storage profile",
+      "bound_subject_concept_id": "#V#has_secret_value",
+      "payload": {"schema_version": "publication_scope_profile.v1", "profile_id": "secret_assertion_external_storage", "version": "1", "status": "active", "plane": "assertion", "recommended_scope_mode": "external_secure_storage", "source": "JVNAUTOSCI-2671"}
+    }
+  ]
+}
