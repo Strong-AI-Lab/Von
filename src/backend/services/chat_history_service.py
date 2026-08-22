@@ -4858,6 +4858,85 @@ def list_chat_sessions_for_focal_concept(
         ) from exc
 
 
+def get_chat_history_session_summaries_for_owner_sessions(
+    owner_session_pairs: Iterable[tuple[Any, Any]], *, limit: int = 50
+) -> Dict[tuple[str, str], Dict[str, Any]]:
+    """Read accepted-shared session metadata in one bounded exact query.
+
+    Invite acceptance supplies the `(owner, session)` candidate set.  This is
+    intentionally a source-store helper rather than a discovery API: it never
+    scans by session ID alone and returns no transcript content.
+    """
+
+    safe_limit = min(max(int(limit or 50), 1), 50)
+    pairs: list[tuple[str, str]] = []
+    for raw_owner_id, raw_session_id in owner_session_pairs:
+        if not isinstance(raw_owner_id, str) or not isinstance(raw_session_id, str):
+            continue
+        owner_id = raw_owner_id.strip()
+        session_id = raw_session_id.strip()
+        if not owner_id or not session_id or (owner_id, session_id) in pairs:
+            continue
+        pairs.append((owner_id, session_id))
+        if len(pairs) == safe_limit:
+            break
+    if not pairs:
+        return {}
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    _guard_chat_history_read("get_chat_history_session_summaries_for_owner_sessions")
+    projection = _add_chat_session_provenance_projection(
+        {
+            "_id": 0,
+            "user_id": 1,
+            "session_id": 1,
+            "session_name": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
+        }
+    )
+    try:
+        cursor = _read_find(
+            chat_history_coll,
+            {
+                "$or": [
+                    {"user_id": owner_id, "session_id": session_id}
+                    for owner_id, session_id in pairs
+                ]
+            },
+            projection,
+            operation="get_chat_history_session_summaries_for_owner_sessions.find",
+        )
+        result: Dict[tuple[str, str], Dict[str, Any]] = {}
+        wanted = set(pairs)
+        for document in cursor:
+            if not isinstance(document, dict):
+                continue
+            owner_id = document.get("user_id")
+            session_id = document.get("session_id")
+            if not isinstance(owner_id, str) or not isinstance(session_id, str):
+                continue
+            key = (owner_id, session_id)
+            if key not in wanted:
+                continue
+            summary = _build_session_summary_from_metadata(document)
+            if summary is not None:
+                result[key] = summary
+        _record_chat_history_read_success()
+        return result
+    except PyMongoError as exc:
+        _record_chat_history_read_failure(
+            "get_chat_history_session_summaries_for_owner_sessions", exc
+        )
+        raise ChatHistoryServiceError(
+            f"Could not list accepted shared chat sessions: {exc}"
+        ) from exc
+
+
 def _assistant_opening_result_from_doc(
     doc: Mapping[str, Any] | None,
 ) -> Dict[str, Any] | None:

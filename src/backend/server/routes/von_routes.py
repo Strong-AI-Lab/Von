@@ -17110,80 +17110,15 @@ def _authorised_focal_concepts(
 ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
     """Resolve ordered focal IDs through the actor-filtered concept repository."""
 
-    raw_values = [raw_ids] if isinstance(raw_ids, str) else raw_ids
-    if raw_values is None:
-        return [], [], []
-    if not isinstance(raw_values, list):
-        return [], [], ["invalid_focal_concept_ids"]
-    requested: list[str] = []
-    invalid: list[str] = []
-    for value in raw_values:
-        if not isinstance(value, str) or not value.strip():
-            invalid.append(str(value))
-            continue
-        concept_id = value.strip()
-        if (
-            not concept_id.startswith("#V#")
-            or len(concept_id) > 512
-            or any(character.isspace() for character in concept_id)
-        ):
-            invalid.append(concept_id)
-            continue
-        if concept_id not in requested:
-            requested.append(concept_id)
-    if len(requested) > maximum:
-        invalid.extend(requested[maximum:])
-        requested = requested[:maximum]
-    if invalid and not allow_partial:
-        return [], [], invalid
-    if not requested:
-        return [], [], []
-    from ...db.repositories.concepts_repository import ConceptsRepository
-    from ...vontology.utils_vontology import (
-        get_concept_display_name_with_names_fallback,
+    from ...services.conversation_projection_service import (
+        authorise_focal_concepts,
     )
 
-    visible_docs = list(
-        ConceptsRepository.find(
-            {"concept_id": {"$in": requested}},
-            {"concept_id": 1, "name": 1, "names": 1, "relationships": 1},
-            limit=maximum,
-        )
+    return authorise_focal_concepts(
+        raw_ids,
+        maximum=maximum,
+        allow_partial=allow_partial,
     )
-    by_id = {
-        doc.get("concept_id"): doc
-        for doc in visible_docs
-        if isinstance(doc, Mapping) and isinstance(doc.get("concept_id"), str)
-    }
-    missing = [concept_id for concept_id in requested if concept_id not in by_id]
-    if missing and not allow_partial:
-        return [], [], missing
-    visible_ids = [concept_id for concept_id in requested if concept_id in by_id]
-    projection: list[dict[str, Any]] = []
-    for concept_id in visible_ids:
-        doc = dict(by_id[concept_id])
-        relationships = doc.get("relationships")
-        raw_type_ids = (
-            relationships.get("is_an_instance_of")
-            if isinstance(relationships, Mapping)
-            else None
-        )
-        if isinstance(raw_type_ids, str):
-            type_ids = [raw_type_ids]
-        elif isinstance(raw_type_ids, list):
-            type_ids = raw_type_ids
-        else:
-            type_ids = []
-        projection.append(
-            {
-                "concept_id": concept_id,
-                "name": get_concept_display_name_with_names_fallback(doc)
-                or doc.get("name")
-                or concept_id,
-                "type_ids": [item for item in type_ids if isinstance(item, str)],
-            }
-        )
-    return visible_ids, projection, [*invalid, *missing]
 
 
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])
@@ -17769,16 +17704,21 @@ def chat_session_links():
 
 @von_bp.route("/api/session/chat_session_focus", methods=["GET", "POST"])
 def chat_session_focus():
-    """Read or change source-owned focal objects for an authorised conversation."""
+    """Read source-backed focus cards or owner-update a conversation's focus."""
 
     try:
         from ...security.access_control import (
             LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
             get_effective_user_concept_id_with_source,
         )
+        from ...services.conversation_projection_service import (
+            ConversationProjectionAccessChangedError,
+            ConversationProjectionNotFoundError,
+            get_conversation_projection_for_session,
+            list_focal_conversation_backlinks,
+        )
         from ...services.shared_conversation_service import (
             get_accepted_invite_for_user_session,
-            list_accepted_invites_for_user,
         )
 
         user_concept_id, actor_identity_source = (
@@ -17808,159 +17748,43 @@ def chat_session_focus():
             "namespace"
         ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
 
-        if (
-            request.method == "GET"
-            and isinstance(focal_concept_id, str)
-            and focal_concept_id.strip()
-        ):
-            focal_id = focal_concept_id.strip()
-            _, _, invalid = _authorised_focal_concepts([focal_id])
-            if invalid:
-                return jsonify({"error": "focal_concept_not_authorised"}), 404
-            results = chat_history_service.list_chat_sessions_for_focal_concept(
-                user_id=user_concept_id,
-                focal_concept_id=focal_id,
-                namespace=actor_namespace,
-            )
-            authorised_owner_results: list[dict[str, Any]] = []
-            for result in results:
-                owner_focal_ids, _, _ = _authorised_focal_concepts(
-                    result.get("focal_concept_ids"),
-                    allow_partial=True,
-                )
-                if focal_id not in owner_focal_ids:
-                    continue
-                authorised_owner_results.append(
-                    {**result, "focal_concept_ids": owner_focal_ids}
-                )
-            results = authorised_owner_results
-            # Accepted shared conversations are actor-visible catalogue rows,
-            # but their owner-scoped focus and every focal object still require
-            # a fresh check for the current actor.
+        if request.method == "GET":
             try:
-                accepted_invites = list_accepted_invites_for_user(
-                    user_concept_id=user_concept_id,
-                    limit=50,
-                )
-            except Exception as exc:
-                current_app.logger.warning(
-                    "Focused-conversation shared catalogue unavailable: %s", exc
-                )
-                accepted_invites = []
-            for invite in accepted_invites:
-                shared_session_id = invite.get("session_id")
-                owner_id = (
-                    invite.get("conversation_owner_user_id")
-                    or invite.get("inviter_user_id")
-                )
-                if not isinstance(shared_session_id, str) or not isinstance(
-                    owner_id, str
-                ):
-                    continue
-                try:
-                    focus = chat_history_service.get_chat_session_focus(
-                        user_id=owner_id,
-                        session_id=shared_session_id,
-                        namespace=None,
+                if isinstance(focal_concept_id, str) and focal_concept_id.strip():
+                    result = list_focal_conversation_backlinks(
+                        actor_user_id=user_concept_id,
+                        focal_concept_id=focal_concept_id.strip(),
+                        actor_namespace=actor_namespace,
                     )
-                except Exception:
-                    continue
-                shared_focal_ids = focus.get("focal_concept_ids", [])
-                if focal_id not in shared_focal_ids:
-                    continue
-                visible_shared_focal_ids, _, _ = _authorised_focal_concepts(
-                    shared_focal_ids,
-                    allow_partial=True,
-                )
-                if focal_id not in visible_shared_focal_ids:
-                    continue
-                try:
-                    summary = chat_history_service.get_chat_history_session_summary(
-                        user_id=owner_id,
-                        session_id=shared_session_id,
-                        namespace=None,
-                        summary_mode="light",
+                else:
+                    if not isinstance(session_id, str) or not session_id.strip():
+                        return jsonify({"error": "session_id required"}), 400
+                    result = get_conversation_projection_for_session(
+                        actor_user_id=user_concept_id,
+                        session_id=session_id.strip(),
+                        actor_namespace=actor_namespace,
+                        organisation_concept_id=effective.get("organisation_id"),
                     )
-                except Exception:
-                    continue
-                if not isinstance(summary, Mapping):
-                    continue
-                results.append(
-                    {
-                        **summary,
-                        **focus,
-                        "focal_concept_ids": visible_shared_focal_ids,
-                        "access_mode": "shared",
-                        "shared_owner_user_id": owner_id,
-                    }
-                )
-                if len(results) >= 50:
-                    break
-            results.sort(
-                key=lambda row: str(
-                    row.get("updated_at") or row.get("created_at") or ""
-                ),
-                reverse=True,
-            )
-            return (
-                jsonify(
-                    {
-                        "status": "ok",
-                        "focal_concept_id": focal_id,
-                        "sessions": results[:25],
-                        "access_scope": "actor",
-                    }
-                ),
-                200,
-            )
+                return jsonify({"status": "ok", **result}), 200
+            except ConversationProjectionAccessChangedError:
+                return jsonify({"error": "focused_conversation_access_changed"}), 403
+            except ConversationProjectionNotFoundError as exc:
+                return jsonify({"error": str(exc)}), 404
 
         if not isinstance(session_id, str) or not session_id.strip():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
-        invite = get_accepted_invite_for_user_session(
+        if get_accepted_invite_for_user_session(
             user_concept_id=user_concept_id, session_id=session_id
-        )
-        owner_id = (
-            (invite.get("conversation_owner_user_id") or invite.get("inviter_user_id"))
-            if isinstance(invite, Mapping)
-            else user_concept_id
-        )
-        if not isinstance(owner_id, str) or not owner_id.strip():
-            return jsonify({"error": "Session not found"}), 404
-        if invite is None and not chat_history_service.has_chat_history_session(
-            user_concept_id, session_id, namespace=actor_namespace
-        ):
-            return jsonify({"error": "Session not found"}), 404
-
-        if request.method == "GET":
-            focus = chat_history_service.get_chat_session_focus(
-                user_id=owner_id,
-                session_id=session_id,
-                namespace=None if invite else actor_namespace,
-            )
-            visible_ids, focal_concepts, unavailable = _authorised_focal_concepts(
-                focus.get("focal_concept_ids")
-            )
-            if invite is not None and unavailable:
-                return jsonify({"error": "focused_conversation_access_changed"}), 403
-            return (
-                jsonify(
-                    {
-                        "status": "ok",
-                        "session_id": session_id,
-                        "focal_concept_ids": visible_ids,
-                        "focal_concepts": focal_concepts,
-                        "access_mode": "shared" if invite else "owner",
-                    }
-                ),
-                200,
-            )
-
-        if invite is not None:
+        ) is not None:
             return (
                 jsonify({"error": "Only the conversation owner may change focus"}),
                 403,
             )
+        if not chat_history_service.has_chat_history_session(
+            user_concept_id, session_id, namespace=actor_namespace
+        ):
+            return jsonify({"error": "Session not found"}), 404
         focal_ids, focal_concepts, invalid = _authorised_focal_concepts(
             payload.get("focal_concept_ids")
         )

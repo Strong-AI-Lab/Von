@@ -145,6 +145,9 @@ def test_authorised_focal_projection_preserves_string_type_id(monkeypatch):
 
 def test_recent_focus_lookup_is_explicitly_owner_scoped(app_client, monkeypatch):
     _, client = app_client
+    from src.backend.services.conversation_concept_service import (
+        _generate_conversation_concept_id,
+    )
 
     with client.session_transaction() as sess:
         sess["user_concept_id"] = "#V#test_user"
@@ -157,15 +160,28 @@ def test_recent_focus_lookup_is_explicitly_owner_scoped(app_client, monkeypatch)
         "src.backend.server.routes.von_routes.get_effective_context",
         lambda *_args, **_kwargs: {"namespace": "#V#test_user@org"},
     )
-    monkeypatch.setattr(
-        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
-        lambda *_args, **_kwargs: [
+    materialised_id = _generate_conversation_concept_id("focused-session")
+
+    def _visible_concepts(query, *_args, **_kwargs):  # noqa: ANN001
+        requested = query.get("concept_id", {}).get("$in", [])
+        if materialised_id in requested:
+            return [
+                {
+                    "concept_id": materialised_id,
+                    "relationships": {"is_an_instance_of": ["#V#conversation"]},
+                }
+            ]
+        return [
             {
                 "concept_id": "#V#task",
                 "name": "Task",
                 "relationships": {"is_an_instance_of": ["#V#task_type"]},
             }
-        ],
+        ]
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+        _visible_concepts,
     )
     lookup = MagicMock(
         return_value=[
@@ -181,7 +197,9 @@ def test_recent_focus_lookup_is_explicitly_owner_scoped(app_client, monkeypatch)
     )
     monkeypatch.setattr(
         "src.backend.services.shared_conversation_service.list_accepted_invites_for_user",
-        lambda **_kwargs: [],
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("sharing catalogue unavailable")
+        ),
     )
 
     response = client.get(
@@ -196,6 +214,9 @@ def test_recent_focus_lookup_is_explicitly_owner_scoped(app_client, monkeypatch)
         "focal_concept_id": "#V#task",
         "namespace": "#V#test_user@org",
     }
+    card = response.get_json()["conversation_backlinks"]["items"][0]
+    assert card["conversation_concept_id"] == materialised_id
+    assert card["projection_status"] == "materialised"
 
 
 def test_recent_focus_lookup_omits_inaccessible_secondary_owner_focus(
@@ -253,7 +274,8 @@ def test_recent_focus_lookup_omits_inaccessible_secondary_owner_focus(
     assert response.get_json()["sessions"] == [
         {
             "session_id": "focused-session",
-            "focal_concept_ids": ["#V#task"],
+            "session_name": None,
+            "last_activity_at": None,
         }
     ]
     assert "#V#private_secondary" not in response.get_data(as_text=True)
@@ -362,17 +384,14 @@ def test_recent_focus_lookup_includes_authorised_accepted_shared_session(
         ],
     )
     monkeypatch.setattr(
-        "src.backend.services.chat_history_service.get_chat_session_focus",
-        lambda **_kwargs: {
-            "focal_concept_ids": ["#V#task", "#V#private_secondary"]
-        },
-    )
-    monkeypatch.setattr(
-        "src.backend.services.chat_history_service.get_chat_history_session_summary",
-        lambda **_kwargs: {
-            "session_id": "shared-focused",
-            "session_name": "Shared task discussion",
-            "updated_at": "2026-08-22T10:00:00+00:00",
+        "src.backend.services.chat_history_service.get_chat_history_session_summaries_for_owner_sessions",
+        lambda *_args, **_kwargs: {
+            ("#V#owner", "shared-focused"): {
+                "session_id": "shared-focused",
+                "session_name": "Shared task discussion",
+                "last_message_at": "2026-08-22T10:00:00+00:00",
+                "focal_concept_ids": ["#V#task", "#V#private_secondary"],
+            }
         },
     )
 
@@ -384,15 +403,379 @@ def test_recent_focus_lookup_includes_authorised_accepted_shared_session(
     rows = response.get_json()["sessions"]
     assert rows == [
         {
-            "access_mode": "shared",
-            "focal_concept_ids": ["#V#task"],
             "session_id": "shared-focused",
             "session_name": "Shared task discussion",
-            "shared_owner_user_id": "#V#owner",
-            "updated_at": "2026-08-22T10:00:00+00:00",
+            "last_activity_at": "2026-08-22T10:00:00+00:00",
         }
     ]
     assert "#V#private_secondary" not in response.get_data(as_text=True)
+    assert "#V#owner" not in response.get_data(as_text=True)
+    backlinks = response.get_json()["conversation_backlinks"]
+    assert backlinks["schema_version"] == "conversation_backlinks.v1"
+    assert backlinks["source_concept_id"] == "#V#task"
+    assert backlinks["items"][0]["access_mode"] == "shared"
+    assert backlinks["items"][0]["conversation_concept_id"] is None
+    assert backlinks["items"][0]["open_action"] == {
+        "kind": "open_conversation",
+        "session_id": "shared-focused",
+    }
+
+
+def test_owner_focus_point_returns_materialised_source_card(app_client, monkeypatch):
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#owner"
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#owner", "session"),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {
+            "namespace": "#V#owner@org",
+            "organisation_id": "#V#org",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_session_focus",
+        lambda **_kwargs: {"focal_concept_ids": ["#V#task"]},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_session_summary",
+        lambda **_kwargs: {
+            "session_id": "owner-session",
+            "session_name": "Talk about task",
+            "updated_at": "2026-08-22T12:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": "#V#task",
+                "name": "Task",
+                "relationships": {"is_an_instance_of": ["#V#task"]},
+            }
+        ],
+    )
+    expected_id = "#V#conversation_owner_session"
+    materialise = MagicMock(return_value=expected_id)
+    monkeypatch.setattr(
+        "src.backend.services.conversation_concept_service.get_or_create_conversation_concept",
+        materialise,
+    )
+
+    response = client.get(
+        "/von/api/session/chat_session_focus?session_id=owner-session"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    card = response.get_json()["conversation_projection"]
+    assert card == {
+        "schema_version": "conversation_projection.v1",
+        "conversation_concept_id": expected_id,
+        "title": "Talk about task",
+        "last_activity_at": "2026-08-22T12:00:00+00:00",
+        "access_mode": "owner",
+        "focal_concepts": [
+            {
+                "concept_id": "#V#task",
+                "display_name": "Task",
+                "type_ids": ["#V#task"],
+            }
+        ],
+        "projection_status": "materialised",
+        "open_action": {"kind": "open_conversation", "session_id": "owner-session"},
+    }
+    assert materialise.call_args.kwargs["owner_concept_id"] == "#V#owner"
+    assert "owner_concept_id" not in card
+    assert "history" not in card
+
+
+def test_shared_focus_point_is_source_backed_without_widening_owner_concept(
+    app_client, monkeypatch
+):
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#invitee"
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#invitee", "session"),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#invitee@org"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+        lambda **_kwargs: {
+            "conversation_owner_user_id": "#V#owner",
+            "organisation_concept_id": "#V#org",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_session_focus",
+        lambda **_kwargs: {"focal_concept_ids": ["#V#task"]},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_session_summary",
+        lambda **_kwargs: {"session_name": "Owner discussion"},
+    )
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": "#V#task",
+                "name": "Task",
+                "relationships": {"is_an_instance_of": ["#V#task"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.conversation_concept_service.get_or_create_conversation_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("shared viewer must not materialise owner's concept")
+        ),
+    )
+
+    response = client.get(
+        "/von/api/session/chat_session_focus?session_id=shared-session"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    card = response.get_json()["conversation_projection"]
+    assert card["access_mode"] == "shared"
+    assert card["conversation_concept_id"] is None
+    assert card["projection_status"] == "source_backed"
+    assert card["open_action"] == {
+        "kind": "open_conversation",
+        "session_id": "shared-session",
+    }
+    assert "#V#owner" not in response.get_data(as_text=True)
+
+
+def test_unrelated_actor_cannot_discover_owner_session_or_focus(app_client, monkeypatch):
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#unrelated"
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#unrelated", "session"),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#unrelated@org"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: False,
+    )
+
+    response = client.get(
+        "/von/api/session/chat_session_focus?session_id=owner-secret-session"
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Session not found"}
+    assert "owner-secret-session" not in response.get_data(as_text=True)
+
+
+def test_revoked_shared_invite_has_no_point_or_catalogue_projection(
+    app_client, monkeypatch
+):
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#former_invitee"
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#former_invitee", "session"),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#former_invitee@org"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: False,
+    )
+
+    point = client.get(
+        "/von/api/session/chat_session_focus?session_id=formerly-shared"
+    )
+
+    assert point.status_code == 404
+    assert point.get_json() == {"error": "Session not found"}
+    assert "formerly-shared" not in point.get_data(as_text=True)
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": "#V#task",
+                "name": "Task",
+                "relationships": {"is_an_instance_of": ["#V#task"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.list_chat_sessions_for_focal_concept",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.list_accepted_invites_for_user",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_session_summaries_for_owner_sessions",
+        lambda *_args, **_kwargs: {},
+    )
+
+    catalogue = client.get(
+        "/von/api/session/chat_session_focus?focal_concept_id=%23V%23task"
+    )
+
+    assert catalogue.status_code == 200
+    assert catalogue.get_json()["sessions"] == []
+    assert catalogue.get_json()["conversation_backlinks"]["items"] == []
+    serialised_catalogue = catalogue.get_data(as_text=True)
+    for hidden_value in (
+        "formerly-shared",
+        "#V#owner",
+        "#V#owner@org",
+        "#V#private_task",
+    ):
+        assert hidden_value not in serialised_catalogue
+
+
+def test_shared_focus_access_loss_does_not_reveal_stale_focal_id(
+    app_client, monkeypatch
+):
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#invitee"
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#invitee", "session"),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#invitee@org"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+        lambda **_kwargs: {"conversation_owner_user_id": "#V#owner"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_session_focus",
+        lambda **_kwargs: {"focal_concept_ids": ["#V#private_task"]},
+    )
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+        lambda *_args, **_kwargs: [],
+    )
+
+    response = client.get(
+        "/von/api/session/chat_session_focus?session_id=shared-session"
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "focused_conversation_access_changed"}
+    assert "#V#private_task" not in response.get_data(as_text=True)
+
+
+def test_catalogue_uses_one_batched_focal_read_and_one_shared_history_read(
+    monkeypatch,
+):
+    from src.backend.services import conversation_projection_service as service
+
+    concept_queries = []
+
+    def _find(query, *_args, **_kwargs):  # noqa: ANN001
+        concept_queries.append(query)
+        requested = query["concept_id"]["$in"]
+        return [
+            {
+                "concept_id": concept_id,
+                "name": concept_id,
+                "relationships": {"is_an_instance_of": ["#V#thing"]},
+            }
+            for concept_id in requested
+            if concept_id.startswith("#V#task")
+        ]
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+        _find,
+    )
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "list_chat_sessions_for_focal_concept",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        service.shared_conversation_service,
+        "list_accepted_invites_for_user",
+        lambda **_kwargs: [
+            {"session_id": f"shared-{index}", "conversation_owner_user_id": "#V#owner"}
+            for index in range(10)
+        ],
+    )
+    history_calls = []
+
+    def _batch(pairs, **_kwargs):  # noqa: ANN001
+        history_calls.append(list(pairs))
+        return {
+            ("#V#owner", f"shared-{index}"): {
+                "session_id": f"shared-{index}",
+                "session_name": f"Shared {index}",
+                "last_message_at": f"2026-08-22T12:{index:02d}:00+00:00",
+                "focal_concept_ids": ["#V#task", f"#V#task_{index}"],
+            }
+            for index in range(10)
+        }
+
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "get_chat_history_session_summaries_for_owner_sessions",
+        _batch,
+    )
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "get_chat_session_focus",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no per-invite focus read")),
+    )
+
+    result = service.list_focal_conversation_backlinks(
+        actor_user_id="#V#actor",
+        focal_concept_id="#V#task",
+        actor_namespace="#V#actor",
+    )
+
+    assert len(history_calls) == 1
+    assert len(history_calls[0]) == 10
+    focal_queries = [
+        query
+        for query in concept_queries
+        if any(concept_id.startswith("#V#task_") for concept_id in query["concept_id"]["$in"])
+    ]
+    assert len(focal_queries) == 1
+    assert len(result["conversation_backlinks"]["items"]) == 10
 
 
 def test_focused_session_creation_returns_receipt_when_projection_is_pending(
