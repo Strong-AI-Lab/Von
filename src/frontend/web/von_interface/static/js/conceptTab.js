@@ -1561,7 +1561,7 @@ function resetInteractionUiToStep1(statusMessage, suffix = '') {
     submitBtn.disabled = true;
   }
 
-  const msg = statusMessage || 'Interaction session expired. Please start a new interaction.';
+  const msg = statusMessage || 'Concept Q&A session expired. Start a new Q&A to improve the concept.';
   if (step1Status) {
     step1Status.textContent = msg;
     step1Status.style.color = 'orange';
@@ -1672,14 +1672,14 @@ function ensureInteractionSaveButtonState() {
   }
 }
 
-// Handle start interaction button click
+// Handle specialised concept-improvement Q&A button click.
 export async function handleStartInteraction() {
   const currentlySelectedconceptId = getCurrentlySelectedConceptId();
   console.log("handleStartInteraction called. Currently selected concept ID:", currentlySelectedconceptId);
   const displayNames = getConceptTypeDisplayNames(getCurrentConceptType());
 
   if (!currentlySelectedconceptId) {
-    alert(`Please select a ${displayNames.singular.toLowerCase()} to start an interaction.`);
+    alert(`Please select a ${displayNames.singular.toLowerCase()} to improve by Q&A.`);
     return;
   }
 
@@ -1694,11 +1694,11 @@ export async function handleStartInteraction() {
 
   if (missingCritical.length) {
     console.error(`[handleStartInteraction] Missing critical DOM elements: ${missingCritical.join(', ')}`);
-    alert("Error: UI elements for interaction are missing. Cannot proceed.");
+    alert("Error: UI elements for concept Q&A are missing. Cannot proceed.");
     return;
   }
 
-  elements.conceptStep1Status.textContent = "Starting interaction...";
+  elements.conceptStep1Status.textContent = "Starting concept Q&A...";
   elements.conceptStep1Status.style.color = "blue";
 
   // Immediately update UI for responsiveness
@@ -1752,7 +1752,7 @@ export async function handleStartInteraction() {
     }
   }
   if (elements.updatedNotesTitle) {
-    elements.updatedNotesTitle.textContent = 'concept Notes'; // Reset title
+    elements.updatedNotesTitle.textContent = 'Concept notes'; // Reset title
   }
 
   // Hide any previously displayed Q&A exchange
@@ -1787,7 +1787,7 @@ export async function handleStartInteraction() {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: "Failed to start interaction. Server returned an error." }));
+      const errorData = await response.json().catch(() => ({ error: "Failed to start concept Q&A. Server returned an error." }));
       throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
     }
 
@@ -1892,7 +1892,7 @@ async function handleCancelInteraction() {
       conceptStep3Content.innerHTML = '';
     }
     if (conceptStep1Status) {
-      conceptStep1Status.textContent = 'Interaction cancelled';
+      conceptStep1Status.textContent = 'Concept Q&A cancelled';
       conceptStep1Status.style.color = 'orange';
     }
 
@@ -1948,7 +1948,7 @@ async function handleEndInteraction() {
 
     // Clear any interaction UI elements
     if (conceptStep1Status) {
-      conceptStep1Status.textContent = 'Interaction ended';
+      conceptStep1Status.textContent = 'Concept Q&A ended';
       conceptStep1Status.style.color = 'blue';
     }
 
@@ -1985,7 +1985,7 @@ async function handleSubmitAnswer() {
   const currentQuestion = elements.followUpQuestionP ? elements.followUpQuestionP.textContent : "";
 
   if (!currentInteractionId) {
-    resetInteractionUiToStep1('No active interaction session. Please start a new interaction.', getActiveConceptTabSuffix());
+    resetInteractionUiToStep1('No active concept Q&A session. Start a new Q&A to improve the concept.', getActiveConceptTabSuffix());
     return;
   }
   if (!answer) {
@@ -1997,7 +1997,7 @@ async function handleSubmitAnswer() {
   if (!elements.conceptStep2Status || !elements.conceptStep3Div || !elements.finalResultP ||
     !elements.resetConceptTabButton || !elements.conceptStep2Div || !elements.conceptAnswerInput) {
     console.error("handleSubmitAnswer: One or more required DOM elements for concept tab interaction are missing.");
-    alert("Error: UI elements for interaction are missing. Cannot proceed.");
+    alert("Error: UI elements for concept Q&A are missing. Cannot proceed.");
     return;
   }
 
@@ -2019,10 +2019,10 @@ async function handleSubmitAnswer() {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: "Failed to submit answer. Server returned an error." }));
+      const errorData = await response.json().catch(() => ({ error: "Failed to submit concept Q&A answer. Server returned an error." }));
       const msg = errorData.error || `HTTP error! status: ${response.status}`;
       if (isMissingInteractionSessionMessage(msg)) {
-        resetInteractionUiToStep1('Interaction session expired. Please start a new interaction.', getActiveConceptTabSuffix());
+        resetInteractionUiToStep1('Concept Q&A session expired. Start a new Q&A to improve the concept.', getActiveConceptTabSuffix());
         return;
       }
       throw new Error(msg);
@@ -2083,7 +2083,7 @@ async function handleSubmitAnswer() {
       // Show completion message
       if (elements.conceptStep2Div) elements.conceptStep2Div.style.display = 'none';
       if (elements.conceptStep3Div) elements.conceptStep3Div.style.display = 'block';
-      if (elements.finalResultP) elements.finalResultP.textContent = data.message || "Interaction completed.";
+      if (elements.finalResultP) elements.finalResultP.textContent = data.message || "Concept Q&A completed.";
 
       // Set up the reset button to return to concept view
       if (elements.resetConceptTabButton) {
@@ -2127,7 +2127,7 @@ async function handleSubmitAnswer() {
   } catch (error) {
     console.error("Error in handleSubmitAnswer:", error);
     if (isMissingInteractionSessionMessage(error?.message)) {
-      resetInteractionUiToStep1('Interaction session expired. Please start a new interaction.', getActiveConceptTabSuffix());
+      resetInteractionUiToStep1('Concept Q&A session expired. Start a new Q&A to improve the concept.', getActiveConceptTabSuffix());
       return;
     }
     elements.conceptStep2Status.textContent = `Error: ${error.message}`;
@@ -2144,7 +2144,7 @@ function returnToconceptView() {
     elements.conceptStep1Div.style.backgroundColor = '';
   }
   if (elements.resetConceptTabButton) {
-    elements.resetConceptTabButton.textContent = "Start New Interaction";
+    elements.resetConceptTabButton.textContent = "Improve concept by Q&A again";
     elements.resetConceptTabButton.onclick = null;
   }
 

@@ -3,7 +3,7 @@
 /**
  * Regression test for JVNAUTOSCI-895
  * When the backend reports a missing/expired interaction session, the UI should
- * reset to Step 1 and prompt the user to start a new interaction.
+ * reset to Step 1 and prompt the user to restart the specialised concept Q&A.
  */
 
 import {
@@ -92,8 +92,8 @@ describe("Concept interaction session recovery", () => {
         await new Promise((r) => setTimeout(r, 0));
 
         const status = document.getElementById("conceptStep1Status_s1").textContent;
-        expect(status.toLowerCase()).toContain("interaction session");
-        expect(status.toLowerCase()).toContain("start");
+        expect(status.toLowerCase()).toContain("concept q&a session");
+        expect(status.toLowerCase()).toContain("improve the concept");
 
         expect(step1.style.display).toBe("block");
         expect(step2.style.display).toBe("none");

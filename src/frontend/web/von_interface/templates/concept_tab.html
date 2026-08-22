@@ -22,12 +22,14 @@
   </div>
   <div id="conceptSummaryRendererMount" class="concept-summary-renderer-mount"></div>
   <!-- Legacy single-note notes UI removed; multi-note relations UI injected dynamically -->
-  <!-- Ordinary discussion is distinct from the legacy Q&A interaction below. -->
+  <!-- Ordinary discussion is distinct from the specialised concept-improvement Q&A below. -->
   <button id="discussConceptButton" class="concept-discuss-button"
     title="Discuss this concept with Von">Discuss</button>
-  <!-- Keep Start Interaction Button -->
   <button id="startInteractionButton"
-    title="Begin an interactive Q&A session to gather information about this concept">Start Interaction</button>
+    title="Answer guided questions to improve this concept; your answers may update its notes">Improve concept by Q&amp;A</button>
+  <p id="conceptInteractionDisclosure" class="concept-interaction-disclosure">
+    Guided Q&amp;A may update this concept's notes.
+  </p>
   <!-- Add Save Notes Button (initially hidden/disabled) -->
   <button id="saveNotesButton" class="concept-save-button" title="Save changes to concept notes">Save</button>
   <button id="suggestInfoButton" class="concept-save-button"
@@ -35,7 +37,7 @@
   <p id="conceptStep1Status" class="concept-status"></p>
 </div>
 
-<!-- Step 2: Follow-up Question and Answer -->
+<!-- Step 2: Guided concept-improvement Q&A -->
 <div id="conceptStep2" class="concept-step">
   <!-- Display of concept notes for editing during interaction -->
   <div id="updatedNotesDisplay" class="concept-notes-display">
@@ -54,12 +56,12 @@
   <div class="concept-answer-container">
     <input type="text" id="conceptAnswer" name="conceptAnswer" class="concept-answer-input"
       title="Enter your answer to the follow-up question">
-    <button id="submitAnswerButton" title="Submit your answer and continue the interaction">Submit Answer</button>
+    <button id="submitAnswerButton" title="Submit your answer and continue the concept Q&amp;A">Submit Answer</button>
   </div>
   <button id="cancelInteractionButton" class="concept-cancel-button"
-    title="Cancel the current interaction session">Cancel Interaction</button>
+    title="Cancel the current concept-improvement Q&amp;A">Cancel Q&amp;A</button>
   <button id="endInteractionButton" class="concept-end-button"
-    title="End the interaction and finalize the information gathered">End Interaction</button>
+    title="Finish the concept Q&amp;A and apply the gathered information">Finish Q&amp;A</button>
 
   <!-- Display of the last Q&A exchange -->
   <div id="lastQADisplay" class="concept-last-qa-display">
@@ -79,7 +81,7 @@
 <!-- Step 3: Final Result -->
 <div id="conceptStep3" class="concept-step">
   <p id="finalResult" class="concept-final-result"></p>
-  <button id="resetConceptTabButton" title="Reset the tab to start a new interaction">Start New Interaction</button>
+  <button id="resetConceptTabButton" title="Reset the tab to start another guided concept-improvement Q&A">Improve concept by Q&amp;A again</button>
 </div>
 
 <!-- Concept list display area moved under Instances section -->
