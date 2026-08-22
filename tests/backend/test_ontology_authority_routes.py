@@ -377,10 +377,114 @@ def test_scope_preview_and_execute_are_distinct_effects(monkeypatch) -> None:
     assert execute.status_code == 200
     assert [call["request_id"] for call in calls] == ["scope-preview", "scope-execute"]
     assert [call["preview"] for call in calls] == [True, False]
+    assert [call["invocation_tool_name"] for call in calls] == [
+        routes.PREVIEW_SCOPE_CHANGE_TOOL_NAME,
+        routes.EXECUTE_SCOPE_CHANGE_TOOL_NAME,
+    ]
     assert (
         preview.get_json()["authority_receipt"]
         != execute.get_json()["authority_receipt"]
     )
+
+
+def test_scope_route_defaults_user_destination_to_authenticated_actor(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def change(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "to": {"kind": "user", "concept_id": "#V#member"}}
+
+    monkeypatch.setattr(routes, "change_concept_publication_scope", change)
+    response = _authenticated_client("#V#member").post(
+        "/api/ontology-authority/concepts/%23V%23private-note/scope",
+        json={
+            "destination_kind": "user",
+            "expected_scope_fingerprint": "before",
+            "request_id": "scope-user-preview",
+            "preview": True,
+            "user_concept_id": "#V#forged-browser-user",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "concept_id": "#V#private-note",
+        "destination_kind": "user",
+        "destination_concept_id": "#V#member",
+        "expected_scope_fingerprint": "before",
+        "request_id": "scope-user-preview",
+        "preview": True,
+        "reason": None,
+        "invocation_tool_name": routes.PREVIEW_SCOPE_CHANGE_TOOL_NAME,
+    }
+
+
+def test_scope_route_defaults_organisation_destination_to_trusted_context(
+    monkeypatch,
+) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "get_effective_organisation_concept_id",
+        lambda: "#V#trusted_organisation",
+    )
+
+    def change(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "to": {
+                "kind": "organisation",
+                "concept_id": "#V#trusted_organisation",
+            },
+        }
+
+    monkeypatch.setattr(routes, "change_concept_publication_scope", change)
+    response = _authenticated_client("#V#member").post(
+        "/api/ontology-authority/concepts/%23V%23global-note/scope",
+        json={
+            "destination_kind": "organisation",
+            "expected_scope_fingerprint": "before",
+            "request_id": "scope-organisation-preview",
+            "preview": True,
+            "organisation_concept_id": "#V#forged-browser-organisation",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["destination_concept_id"] == "#V#trusted_organisation"
+    assert captured["destination_kind"] == "organisation"
+
+
+def test_scope_route_requires_trusted_organisation_context_for_default(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        routes, "get_effective_organisation_concept_id", lambda: None
+    )
+    monkeypatch.setattr(
+        routes,
+        "change_concept_publication_scope",
+        lambda **kwargs: calls.append(kwargs) or {"success": True},
+    )
+
+    response = _authenticated_client("#V#member").post(
+        "/api/ontology-authority/concepts/%23V%23global-note/scope",
+        json={
+            "destination_kind": "organisation",
+            "expected_scope_fingerprint": "before",
+            "request_id": "scope-no-organisation",
+            "preview": True,
+            "organisation_concept_id": "#V#forged-browser-organisation",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "organisation_context_required"
+    assert calls == []
 
 
 @pytest.mark.parametrize("preview", [True, False])
@@ -457,6 +561,7 @@ def test_scope_route_drops_forged_legacy_authority_payload(monkeypatch) -> None:
         "request_id": "forged-legacy-scope",
         "preview": False,
         "reason": None,
+        "invocation_tool_name": routes.EXECUTE_SCOPE_CHANGE_TOOL_NAME,
     }
 
 
