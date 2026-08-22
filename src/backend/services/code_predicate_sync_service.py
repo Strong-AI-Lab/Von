@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from typing import Iterable, List, Dict, Any
 
 from ..services import concept_service
-from ..vontology.code_concepts_registry import list_code_predicate_ids
+from ..vontology.code_concepts_registry import (
+    get_code_predicate_instance_type_ids,
+    list_code_predicate_ids,
+)
 from ..vontology.utils_vontology import is_predicate
 
 
@@ -37,14 +40,22 @@ def _unique(values: Iterable[str]) -> List[str]:
     return ordered
 
 
-def _resolve_parent_ids() -> List[str]:
+def _resolve_parent_ids(
+    predicate_id: str, availability_cache: Dict[str, bool]
+) -> List[str]:
     parents: List[str] = []
-    for candidate in (PREDICATE_TYPE_ID, MENTIONED_IN_CODE_ID):
-        try:
-            exists = concept_service.get_concept_by_concept_id(candidate)
-        except Exception:
-            exists = None
-        if exists:
+    expected_ids = get_code_predicate_instance_type_ids(predicate_id) or [
+        PREDICATE_TYPE_ID,
+        MENTIONED_IN_CODE_ID,
+    ]
+    for candidate in expected_ids:
+        if candidate not in availability_cache:
+            try:
+                exists = concept_service.get_concept_by_concept_id(candidate)
+            except Exception:
+                exists = None
+            availability_cache[candidate] = bool(exists)
+        if availability_cache[candidate]:
             parents.append(candidate)
     return parents or [PREDICATE_TYPE_ID]
 
@@ -81,10 +92,11 @@ def sync_code_predicate_concepts(
     skipped: List[str] = []
     warnings: List[str] = []
 
-    parent_ids = _resolve_parent_ids()
     predicate_ids = _unique(list_code_predicate_ids())
+    parent_availability: Dict[str, bool] = {}
 
     for predicate_id in predicate_ids:
+        parent_ids = _resolve_parent_ids(predicate_id, parent_availability)
         name = predicate_id.replace("#V#", "")
         concept = None
         try:

@@ -17,6 +17,7 @@ from ..models.text_value_models import RelationPredicate
 MENTIONED_IN_VON_CODE_ID = "#V#mentioned_in_von_code"
 MENTIONED_IN_VON_TEST_ID = "#V#mentioned_in_von_test"
 PREDICATE_TYPE_ID = "#V#predicate"
+BINARY_TEXT_PREDICATE_TYPE_ID = "#V#binary_text_predicate"
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ _TEXT_PREDICATE_IDS = [
     f"#V#{RelationPredicate.HAS_NOTE}",
     f"#V#{RelationPredicate.HAS_INTERACTION}",
     "#V#hasDefinition",
+    "#V#has_renderer_profile_json",
 ]
 
 _FILE_METADATA_PREDICATE_IDS = [
@@ -390,6 +392,17 @@ def list_code_predicate_ids() -> list[str]:
     return list(_CODE_PREDICATE_IDS)
 
 
+def get_code_predicate_instance_type_ids(concept_id: str) -> list[str]:
+    """Return the represented types expected for a built-in predicate."""
+
+    if concept_id not in _CODE_PREDICATE_CONCEPTS:
+        return []
+    instance_type_ids = [PREDICATE_TYPE_ID, MENTIONED_IN_VON_CODE_ID]
+    if concept_id in _TEXT_PREDICATE_IDS:
+        instance_type_ids.append(BINARY_TEXT_PREDICATE_TYPE_ID)
+    return instance_type_ids
+
+
 def is_code_concept_id(concept_id: str) -> bool:
     return concept_id in _CODE_CONCEPTS
 
@@ -424,7 +437,7 @@ def build_code_concept_doc(concept_id: str) -> Optional[dict]:
         return None
 
     if cc.kind == "predicate":
-        instance_of = [PREDICATE_TYPE_ID, MENTIONED_IN_VON_CODE_ID]
+        instance_of = get_code_predicate_instance_type_ids(cc.concept_id)
         type_of = []
     else:
         instance_of = [MENTIONED_IN_VON_CODE_ID]

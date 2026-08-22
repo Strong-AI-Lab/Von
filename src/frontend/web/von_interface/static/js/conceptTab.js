@@ -59,12 +59,24 @@ export function discussCurrentlySelectedConcept(suffix = '') {
   }
   const containerId = suffix ? `conceptTab_${suffix}` : 'conceptTab';
   const container = document.getElementById(containerId);
-  const conceptName = String(
-    container?.dataset?.conceptName
-    || (suffix ? document.getElementById(`conceptFormTitleText_${suffix}`)?.textContent : elements?.conceptFormTitleText?.textContent)
-    || elements?.conceptTypeDisplayNamePluralElement?.textContent
-    || conceptId
-  ).trim();
+  const tabButton = Array.from(document.querySelectorAll('.tab-button[data-concept-id]'))
+    .find((button) => button.dataset.conceptId === conceptId);
+  const visibleTabName = tabButton?.querySelector('.tab-button-label')?.textContent;
+  const formTitle = suffix
+    ? document.getElementById(`conceptFormTitleText_${suffix}`)?.textContent
+    : elements?.conceptFormTitleText?.textContent;
+  const placeholderNames = new Set(['select or create concept', 'concept details']);
+  const conceptName = [
+    container?.dataset?.conceptName,
+    visibleTabName,
+    tabButton?.title,
+    tabButton?.dataset?.conceptName,
+    formTitle,
+    elements?.conceptTypeDisplayNamePluralElement?.textContent,
+    conceptId,
+  ]
+    .map((value) => String(value || '').trim())
+    .find((value) => value && !placeholderNames.has(value.toLowerCase())) || conceptId;
   document.dispatchEvent(new CustomEvent('von:discussConcept', {
     detail: {
       conceptId,

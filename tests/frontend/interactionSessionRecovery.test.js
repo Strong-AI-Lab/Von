@@ -147,4 +147,31 @@ describe("Concept interaction session recovery", () => {
         }]);
         document.removeEventListener("von:discussConcept", handler);
     });
+
+    it("uses the dynamic tab label while the concept form is still hydrating", () => {
+        document.body.innerHTML = `
+          <div class="tab-button" data-concept-id="#V#concept_loading" data-concept-name="Concept_loading">
+            <span class="tab-button-label">Loading concept</span>
+          </div>
+          <div class="tab-content active" id="conceptTab_loading" data-concept-id="#V#concept_loading">
+            <span id="conceptFormTitleText_loading">Select or Create Concept</span>
+            <button id="discussConceptButton_loading"></button>
+          </div>
+        `;
+        setCurrentlySelectedConceptId("#V#another_concept");
+        setupConceptTabEventListenersWithSuffix("loading");
+
+        const seen = [];
+        const handler = (event) => seen.push(event.detail);
+        document.addEventListener("von:discussConcept", handler);
+
+        document.getElementById("discussConceptButton_loading").click();
+
+        expect(seen).toEqual([{
+            conceptId: "#V#concept_loading",
+            conceptName: "Loading concept",
+            source: "concept",
+        }]);
+        document.removeEventListener("von:discussConcept", handler);
+    });
 });

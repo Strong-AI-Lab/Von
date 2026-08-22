@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from src.backend.vontology.code_concepts_registry import (
-    PREDICATE_TYPE_ID,
+    BINARY_TEXT_PREDICATE_TYPE_ID,
     MENTIONED_IN_VON_CODE_ID,
+    PREDICATE_TYPE_ID,
     build_virtual_concept_doc,
     list_code_predicate_ids,
 )
@@ -49,6 +50,20 @@ def test_background_launch_policy_virtual_doc_is_predicate_instance():
         else []
     )
     assert PREDICATE_TYPE_ID in inst_of
+    assert MENTIONED_IN_VON_CODE_ID in inst_of
+
+
+def test_renderer_profile_predicate_is_registered_as_binary_text():
+    ids = set(list_code_predicate_ids())
+
+    assert "#V#has_renderer_profile_json" in ids
+
+    doc = build_virtual_concept_doc("#V#has_renderer_profile_json")
+
+    assert doc is not None
+    inst_of = doc.get("relationships", {}).get("is_an_instance_of", [])
+    assert PREDICATE_TYPE_ID in inst_of
+    assert BINARY_TEXT_PREDICATE_TYPE_ID in inst_of
     assert MENTIONED_IN_VON_CODE_ID in inst_of
 
 
