@@ -1826,11 +1826,13 @@ start_server() {
 stop_server() {
     local pid=""
     local graceful=0
+    local exact_pid_stop=0
     # Match run.ps1: stop supports extra args like: stop <pid> | stop force | stop force-any
     if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
         local arg="${EXTRA_ARGS[0]}"
         if printf '%s' "$arg" | grep -qE '^[0-9]+$'; then
             pid="$arg"
+            exact_pid_stop=1
             log "Stopping specific PID=$pid (direct)"
         elif [ "$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')" = "force" ]; then
             pid="$(get_listening_pid_by_port "$PORT" || true)"
@@ -1942,6 +1944,14 @@ stop_server() {
     remove_pidfile
     if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
         log "Agent test mode: preserving other Von server processes and shared RAG/concept-index workers."
+    elif [ "$exact_pid_stop" -eq 1 ]; then
+        # A deploy handoff names and verifies the one predecessor that owns the
+        # target port.  Do not let that exact stop sweep another Von server
+        # (notably the isolated AgentTest instance) merely because it runs the
+        # same script from this checkout.
+        log "Exact PID stop: preserving other Von server processes."
+        stop_rag_worker || true
+        stop_concept_index_worker || true
     else
         stop_python_processes_by_script "src/workflows/von/main.py" "Von Server" "$pid"
         stop_rag_worker || true

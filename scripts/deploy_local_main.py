@@ -10,10 +10,13 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
+
+import psutil
 
 
 class DeploymentError(RuntimeError):
@@ -169,6 +172,109 @@ def _read_health(url: str) -> dict[str, Any]:
     return payload
 
 
+def _matching_von_process_root(
+    *,
+    pid: int,
+    expected_port: int,
+    allowed_roots: Sequence[Path],
+) -> Path:
+    """Return the allowed checkout that owns one exact Von listener process."""
+
+    try:
+        process = psutil.Process(pid)
+        command = [str(part) for part in process.cmdline()]
+        process_cwd = Path(process.cwd()).resolve()
+    except (psutil.Error, OSError) as exc:
+        raise DeploymentError(
+            f"Cannot inspect existing health PID {pid}: {exc}"
+        ) from exc
+
+    port_matches = any(
+        part == "--port"
+        and index + 1 < len(command)
+        and command[index + 1] == str(expected_port)
+        for index, part in enumerate(command)
+    )
+    if not port_matches:
+        raise DeploymentError(
+            f"Refusing to stop health PID {pid}: command does not select "
+            f"port {expected_port}"
+        )
+
+    candidates: list[Path] = []
+    for part in command:
+        normalised = part.replace("\\", "/")
+        if not normalised.endswith("src/workflows/von/main.py"):
+            continue
+        path = Path(part)
+        candidates.append(
+            (path if path.is_absolute() else process_cwd / path).resolve()
+        )
+
+    for root in allowed_roots:
+        resolved_root = root.resolve()
+        expected_script = (
+            resolved_root / "src" / "workflows" / "von" / "main.py"
+        ).resolve()
+        if expected_script in candidates:
+            return resolved_root
+
+    rendered = " ".join(command) or "<empty>"
+    raise DeploymentError(
+        f"Refusing to stop health PID {pid}: it is not the Von server from an "
+        f"allowed deployment checkout ({rendered})"
+    )
+
+
+def _stop_verified_predecessor(
+    *,
+    primary_root: Path,
+    runtime_root: Path,
+    current_launcher: Path,
+    health_url: str,
+) -> int | None:
+    """Stop only a verified Von process already serving the deployment port."""
+
+    try:
+        health = _read_health(health_url)
+    except DeploymentError:
+        return None
+
+    pid = health.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        raise DeploymentError(
+            f"Existing health response has invalid server PID: {pid!r}"
+        )
+    parsed_url = urllib.parse.urlparse(health_url)
+    try:
+        expected_port = parsed_url.port
+    except ValueError as exc:
+        raise DeploymentError(f"Invalid health URL port: {health_url}") from exc
+    if expected_port is None:
+        expected_port = 443 if parsed_url.scheme == "https" else 80
+
+    predecessor_root = _matching_von_process_root(
+        pid=pid,
+        expected_port=expected_port,
+        allowed_roots=(primary_root, runtime_root),
+    )
+    stop_environment = os.environ.copy()
+    stop_environment["VON_LAUNCHER_ROOT"] = str(predecessor_root)
+    _run(
+        ["bash", current_launcher, "stop", str(pid), "-NoBrowser"],
+        cwd=predecessor_root,
+        capture_output=False,
+        env=stop_environment,
+    )
+    try:
+        psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return pid
+    raise DeploymentError(
+        f"Verified predecessor PID {pid} remained alive after exact stop"
+    )
+
+
 def _health_error(payload: dict[str, Any], target_commit: str) -> str | None:
     if payload.get("status") != "healthy":
         return f"status={payload.get('status')!r}"
@@ -276,6 +382,12 @@ def deploy(
 
     # Validate before stopping, then change code only while the server is down.
     _validate_runtime(primary_root, runtime_root)
+    _stop_verified_predecessor(
+        primary_root=primary_root,
+        runtime_root=runtime_root,
+        current_launcher=current_launcher,
+        health_url=health_url,
+    )
     stop_environment = os.environ.copy()
     stop_environment["VON_LAUNCHER_ROOT"] = str(runtime_root)
     _run(

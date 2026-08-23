@@ -1052,6 +1052,47 @@ PY
     assert "browser opened" not in payload["logs"]
 
 
+def test_run_sh_exact_pid_stop_preserves_other_von_servers() -> None:
+    payload = _run_bash_probe(
+        r"""
+logs=()
+stopped_workers=()
+process_exists_calls=0
+log() { logs+=("$*"); }
+process_exists() {
+    process_exists_calls=$((process_exists_calls + 1))
+    [ "$process_exists_calls" -eq 1 ]
+}
+is_von_main_process() { return 0; }
+remove_pidfile() { :; }
+stop_python_processes_by_script() { logs+=("broad sweep:$*"); }
+stop_rag_worker() { stopped_workers+=("rag"); }
+stop_concept_index_worker() { stopped_workers+=("concept"); }
+
+TOKEN_FILE="/definitely/not/a/token/file"
+EXTRA_ARGS=("4242")
+stop_server
+
+LOGS="$(printf '%s\n' "${logs[@]}")" \
+STOPPED_WORKERS="$(printf '%s\n' "${stopped_workers[@]}")" \
+python3 - <<PY
+import json
+import os
+print(json.dumps({
+    "logs": [line for line in os.environ.get("LOGS", "").splitlines() if line],
+    "stopped_workers": [
+        line for line in os.environ.get("STOPPED_WORKERS", "").splitlines() if line
+    ],
+}))
+PY
+"""
+    )
+
+    assert "Exact PID stop: preserving other Von server processes." in payload["logs"]
+    assert not any(line.startswith("broad sweep:") for line in payload["logs"])
+    assert payload["stopped_workers"] == ["rag", "concept"]
+
+
 def test_stale_server_cleanup_does_not_match_deploy_local_main_by_basename(
     tmp_path: Path,
 ) -> None:

@@ -10,8 +10,10 @@ import pytest
 from scripts.deploy_local_main import (
     DeploymentError,
     _health_error,
+    _matching_von_process_root,
     _prepare_primary,
     _prepare_runtime,
+    _stop_verified_predecessor,
 )
 
 
@@ -118,6 +120,128 @@ def test_health_verification_requires_exact_clean_durable_build() -> None:
     assert _health_error(no_scheduler, commit) == (
         "durable workflow readiness false: scheduler_running"
     )
+
+
+def test_matching_von_process_root_accepts_only_exact_checkout_and_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = (tmp_path / "Von").resolve()
+    runtime = (tmp_path / "Von-runtime-main").resolve()
+
+    class _Process:
+        def __init__(self, _pid: int) -> None:
+            pass
+
+        def cmdline(self) -> list[str]:
+            return [
+                "/usr/bin/python3",
+                "-u",
+                str(primary / "src/workflows/von/main.py"),
+                "--port",
+                "5001",
+            ]
+
+        def cwd(self) -> str:
+            return str(primary)
+
+    monkeypatch.setattr("scripts.deploy_local_main.psutil.Process", _Process)
+
+    assert _matching_von_process_root(
+        pid=4242,
+        expected_port=5001,
+        allowed_roots=(primary, runtime),
+    ) == primary
+
+    with pytest.raises(DeploymentError, match="does not select port 5010"):
+        _matching_von_process_root(
+            pid=4242,
+            expected_port=5010,
+            allowed_roots=(primary, runtime),
+        )
+
+
+def test_matching_von_process_root_rejects_foreign_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = (tmp_path / "Von").resolve()
+    runtime = (tmp_path / "Von-runtime-main").resolve()
+    foreign = (tmp_path / "Foreign-Von").resolve()
+
+    class _Process:
+        def __init__(self, _pid: int) -> None:
+            pass
+
+        def cmdline(self) -> list[str]:
+            return [
+                "/usr/bin/python3",
+                str(foreign / "src/workflows/von/main.py"),
+                "--port",
+                "5001",
+            ]
+
+        def cwd(self) -> str:
+            return str(foreign)
+
+    monkeypatch.setattr("scripts.deploy_local_main.psutil.Process", _Process)
+
+    with pytest.raises(DeploymentError, match="allowed deployment checkout"):
+        _matching_von_process_root(
+            pid=4343,
+            expected_port=5001,
+            allowed_roots=(primary, runtime),
+        )
+
+
+def test_stop_verified_predecessor_uses_exact_matching_root_and_pid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = (tmp_path / "Von").resolve()
+    runtime = (tmp_path / "Von-runtime-main").resolve()
+    launcher = primary / "run.sh"
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._read_health",
+        lambda _url: {"status": "healthy", "pid": 4444},
+    )
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._matching_von_process_root",
+        lambda **_kwargs: primary,
+    )
+
+    def _record_run(args, **kwargs):
+        calls.append({"args": list(args), **kwargs})
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("scripts.deploy_local_main._run", _record_run)
+
+    def _missing_process(pid: int):
+        raise __import__("psutil").NoSuchProcess(pid)
+
+    monkeypatch.setattr(
+        "scripts.deploy_local_main.psutil.Process",
+        _missing_process,
+    )
+
+    assert _stop_verified_predecessor(
+        primary_root=primary,
+        runtime_root=runtime,
+        current_launcher=launcher,
+        health_url="http://127.0.0.1:5001/health",
+    ) == 4444
+    assert calls[0]["args"] == [
+        "bash",
+        launcher,
+        "stop",
+        "4444",
+        "-NoBrowser",
+    ]
+    assert calls[0]["cwd"] == primary
+    assert calls[0]["capture_output"] is False
+    assert calls[0]["env"]["VON_LAUNCHER_ROOT"] == str(primary)
 
 
 def test_run_sh_detached_worker_helper_starts_a_new_session(tmp_path: Path) -> None:
