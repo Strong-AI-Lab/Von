@@ -226,6 +226,7 @@ def _build_durable_workflow_bootstrap_summary(
         "multilingual_concept_enrichment_workflow_bootstrap",
         "conversation_turn_workflow_bootstrap",
         "paper_workflow_bootstrap",
+        "email_source_convergence_workflow_bootstrap",
         "episode_evaluation_workflow_bootstrap",
         "paper_recommendation_workflow_bootstrap",
         "talk_workflow_bootstrap",
@@ -564,9 +565,52 @@ def _start_durable_workflow_system(
                 )
                 return report
 
-        # Start the queue-draining worker before slower canonical bootstrap and
-        # schedule maintenance. User-facing workflow submissions should not sit
-        # pending just because startup maintenance is still catching up.
+        # Paper extraction policy, its publication-scope profiles, and the
+        # email workflows that consume it form one execution authority slice.
+        # Materialise and read back that slice before a worker can claim queued
+        # email-paper work. Starting the worker first can run a new workflow
+        # graph with an old extraction hint and create wrongly scoped concepts
+        # that then need backfilling.
+        paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="paper workflow",
+            bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
+        )
+        paper_policy_ready = bool(
+            paper_workflow_bootstrap_report.get("success", False)
+        )
+        if paper_policy_ready:
+            email_source_convergence_workflow_bootstrap_report = (
+                _run_workflow_family_bootstrap(
+                    label="email-source representation convergence workflow",
+                    bootstrap_fn=lambda: (
+                        bootstrap_canonical_email_source_representation_convergence_workflows(
+                            paper_workflow_dependency_report=(
+                                paper_workflow_bootstrap_report
+                            )
+                        )
+                    ),
+                )
+            )
+        else:
+            email_source_convergence_workflow_bootstrap_report = {
+                "success": False,
+                "blocked_by": "paper_workflow_bootstrap",
+                "error": "paper_workflow_bootstrap_not_ready",
+            }
+
+        email_policy_ready = bool(
+            email_source_convergence_workflow_bootstrap_report.get("success", False)
+        )
+        if not paper_policy_ready or not email_policy_ready:
+            raise RuntimeError(
+                "critical_email_paper_execution_policy_bootstrap_failed: "
+                f"paper_success={paper_policy_ready} "
+                f"email_success={email_policy_ready}"
+            )
+
+        # Remaining canonical maintenance may continue after the queue is
+        # available. The execution-critical email-paper slice above is the
+        # deliberate blocker; unrelated families do not inherit that gate.
         if _durable_workflow_registry is None:
             _durable_workflow_registry = _build_durable_workflow_registry()
         if _durable_action_registry is None:
@@ -605,10 +649,14 @@ def _start_durable_workflow_system(
             ),
         )
         result["startup_queue_ready"] = {
-            "stage": "before_canonical_bootstraps",
+            "stage": "after_critical_email_paper_policy_bootstraps",
             "recovered_orphaned_instances": recovered,
             "released_ineligible_worker_claims": released_ineligible_claims,
         }
+        result["paper_workflow_bootstrap"] = paper_workflow_bootstrap_report
+        result["email_source_convergence_workflow_bootstrap"] = (
+            email_source_convergence_workflow_bootstrap_report
+        )
         if queue_ready_callback is not None:
             try:
                 queue_ready_callback(dict(result))
@@ -655,17 +703,6 @@ def _start_durable_workflow_system(
         conversation_turn_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="explicit chat-support workflows",
             bootstrap_fn=bootstrap_canonical_conversation_turn_workflows,
-        )
-        # Email-paper convergence delegates to the source-neutral paper and
-        # public-title-resolution workflows, so its represented authority must
-        # be materialised only after the paper family is current.
-        paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
-            label="paper workflow",
-            bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
-        )
-        email_source_convergence_workflow_bootstrap_report = _run_workflow_family_bootstrap(
-            label="email-source representation convergence workflow",
-            bootstrap_fn=bootstrap_canonical_email_source_representation_convergence_workflows,
         )
         episode_evaluation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="episode evaluation workflow",

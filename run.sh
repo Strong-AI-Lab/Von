@@ -45,7 +45,7 @@ FOLLOW=0
 LOG_RETENTION=20
 ADMIN_TOKEN=""
 SKIP_HEALTH=0
-HEALTH_TIMEOUT_SEC=180
+HEALTH_TIMEOUT_SEC=960
 HEALTH_GRACE_SEC=45
 BACKUP_DRY_RUN=0
 BACKUP_TAG="manual"
@@ -3648,7 +3648,7 @@ Von Launcher Help
         -LogRetention <n>
         -AdminToken <token>
         -SkipHealth
-        -HealthTimeoutSec <n>  Initial health wait in seconds (default 180)
+        -HealthTimeoutSec <n>  Initial health wait in seconds (default 960)
         -HealthGraceSec <n>
         -ReadyLogPatterns <p>
         -DisableLogReady
@@ -3683,7 +3683,7 @@ Von Launcher Help
     Examples:
         ./run.sh start
         ./run.sh restart -ForceBrowser
-        ./run.sh restart -AgentTest -HealthTimeoutSec 180
+        ./run.sh restart -AgentTest -HealthTimeoutSec 960
         ./run.sh deploy-main
         ./run.sh logs -Tail 200 -Follow
         ./run.sh backup -BackupDryRun

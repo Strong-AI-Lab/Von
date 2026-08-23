@@ -56,6 +56,13 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
                     ],
                 },
             },
+            "email_source_convergence_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "drift_detected": False,
+                },
+            },
             "talk_workflow_bootstrap": {
                 "success": True,
                 "publication": {
@@ -108,6 +115,11 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
             "drift_workflow_ids": [
                 "#V#arxiv_paper_representation_workflow",
             ],
+        },
+        "email_source_convergence_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
         },
         "talk_workflow_bootstrap": {
             "success": True,
@@ -379,8 +391,13 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             "publication": {"skipped": True},
         },
     )
-    def _bootstrap_email_source_convergence():
+
+    def _bootstrap_email_source_convergence(
+        *, paper_workflow_dependency_report=None
+    ):
         startup_events.append("email_source_bootstrap")
+        assert paper_workflow_dependency_report is not None
+        assert paper_workflow_dependency_report.get("success") is True
         return {
             "success": True,
             "workflow_ids": [
@@ -560,17 +577,26 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert isinstance(result, dict)
     assert len(queue_ready_components) == 1
     assert queue_ready_components[0].get("startup_queue_ready") == {
-        "stage": "before_canonical_bootstraps",
+        "stage": "after_critical_email_paper_policy_bootstraps",
         "recovered_orphaned_instances": 0,
         "released_ineligible_worker_claims": 0,
     }
-    assert "entity_workflow_bootstrap" not in queue_ready_components[0]
-    assert startup_events[:2] == ["worker_started", "entity_bootstrap"]
-    assert startup_events.index("paper_bootstrap") < startup_events.index(
-        "email_source_bootstrap"
+    assert queue_ready_components[0]["paper_workflow_bootstrap"]["success"] is True
+    assert (
+        queue_ready_components[0]["email_source_convergence_workflow_bootstrap"][
+            "success"
+        ]
+        is True
     )
+    assert "entity_workflow_bootstrap" not in queue_ready_components[0]
+    assert startup_events[:4] == [
+        "paper_bootstrap",
+        "email_source_bootstrap",
+        "worker_started",
+        "entity_bootstrap",
+    ]
     assert result.get("startup_queue_ready") == {
-        "stage": "before_canonical_bootstraps",
+        "stage": "after_critical_email_paper_policy_bootstraps",
         "recovered_orphaned_instances": 0,
         "released_ineligible_worker_claims": 0,
     }

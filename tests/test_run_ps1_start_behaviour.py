@@ -491,7 +491,9 @@ $helpText = (& {{ . {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate
 $result = [ordered]@{{
     has_agent_test = $helpText.Contains('-AgentTest')
     has_default_port = $helpText.Contains('5010')
-    has_example = $helpText.Contains('.\\run.ps1 restart -AgentTest -HealthTimeoutSec 180')
+    has_example = $helpText.Contains(
+        '.\\run.ps1 restart -AgentTest -HealthTimeoutSec 960'
+    )
 }}
 """.strip()
 

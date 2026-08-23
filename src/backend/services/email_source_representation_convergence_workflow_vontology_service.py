@@ -9,6 +9,7 @@ the canonical seed when startup detects drift.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -127,10 +128,15 @@ def ensure_email_source_gmail_paper_signal_extraction_hint() -> dict[str, Any]:
 def bootstrap_canonical_email_source_representation_convergence_workflows(
     *,
     force_republish: bool = False,
+    paper_workflow_dependency_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish or repair the canonical email-source convergence workflow family."""
 
-    paper_workflow_dependency = bootstrap_canonical_paper_representation_workflows()
+    paper_workflow_dependency = (
+        dict(paper_workflow_dependency_report)
+        if paper_workflow_dependency_report is not None
+        else bootstrap_canonical_paper_representation_workflows()
+    )
     completion_hint = ensure_email_source_gmail_completion_hint()
     paper_signal_extraction_hint = (
         ensure_email_source_gmail_paper_signal_extraction_hint()
