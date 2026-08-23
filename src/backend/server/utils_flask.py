@@ -443,7 +443,8 @@ def _start_durable_workflow_system(
 ) -> dict | None:
     """Start the durable workflow worker and scheduler.
 
-    Returns the system components dict or None if disabled/failed.
+    Returns the system components dict, returns ``None`` when disabled, and
+    raises when an attempted startup fails so lifecycle status remains truthful.
     """
     global _durable_workflow_registry, _durable_action_registry
 
@@ -548,9 +549,22 @@ def _start_durable_workflow_system(
             *,
             label: str,
             bootstrap_fn: Callable[[], dict[str, Any]],
+            retry_transient_mongo: bool = False,
         ) -> dict[str, Any]:
             try:
-                report = dict(bootstrap_fn())
+                if retry_transient_mongo:
+                    bootstrap_result = run_with_transient_mongo_retry(
+                        bootstrap_fn,
+                        operation_name=(
+                            "durable_startup_"
+                            + label.replace("-", "_").replace(" ", "_")
+                            + "_bootstrap"
+                        ),
+                        logger_obj=app_logger,
+                    )
+                else:
+                    bootstrap_result = bootstrap_fn()
+                report = dict(bootstrap_result)
                 report.setdefault("success", True)
                 return report
             except Exception as bootstrap_exc:
@@ -574,6 +588,7 @@ def _start_durable_workflow_system(
         paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper workflow",
             bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
+            retry_transient_mongo=True,
         )
         paper_policy_ready = bool(
             paper_workflow_bootstrap_report.get("success", False)
@@ -589,6 +604,7 @@ def _start_durable_workflow_system(
                             )
                         )
                     ),
+                    retry_transient_mongo=True,
                 )
             )
         else:
@@ -1251,7 +1267,10 @@ def _start_durable_workflow_system(
             app_logger.warning("[durable_workflows] Failed to start: %s", exc)
         except Exception:
             pass
-        return None
+        # Disabled startup returns ``None`` above.  An attempted startup that
+        # fails must remain distinguishable so the outer lifecycle publishes a
+        # truthful failed state instead of the misleading ``not_started``.
+        raise
 
 
 def _stop_durable_workflow_system():

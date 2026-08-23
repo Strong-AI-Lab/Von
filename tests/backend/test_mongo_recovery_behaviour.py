@@ -298,6 +298,38 @@ def test_non_transport_pymongo_retry_does_not_rotate_route(monkeypatch) -> None:
     assert calls[0]["route_degraded"] is False
 
 
+def test_temporarily_unavailable_collection_retries_without_rotating_route(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+    attempts = 0
+
+    def _operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("text_values collection not available")
+        return "ok"
+
+    monkeypatch.setattr(
+        transient_errors,
+        "attempt_reconnect",
+        lambda **kwargs: calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(transient_errors.time, "sleep", lambda _delay: None)
+
+    assert (
+        transient_errors.run_with_transient_mongo_retry(
+            _operation,
+            operation_name="email-policy-bootstrap",
+            max_attempts=2,
+        )
+        == "ok"
+    )
+    assert attempts == 2
+    assert calls[0]["route_degraded"] is False
+
+
 def test_replica_election_retry_does_not_rotate_route(monkeypatch) -> None:
     calls: list[dict] = []
     attempts = 0

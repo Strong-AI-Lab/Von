@@ -234,6 +234,44 @@ def test_durable_workflow_startup_keeps_core_ready_when_maintenance_fails(
     }
 
 
+def test_durable_workflow_startup_reports_failure_before_queue_ready(
+    monkeypatch,
+):
+    from flask import Flask
+
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0")
+    monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+    monkeypatch.setattr(utils_flask, "_is_agent_test_instance", lambda: False)
+
+    def _critical_failure(_app_logger, *, queue_ready_callback=None):
+        assert queue_ready_callback is not None
+        raise RuntimeError("critical_email_paper_policy_not_ready")
+
+    monkeypatch.setattr(
+        utils_flask,
+        "_start_durable_workflow_system",
+        _critical_failure,
+    )
+
+    app = Flask(__name__)
+    utils_flask._configure_durable_workflow_startup(app)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS") or {}
+        if status.get("state") == "failed":
+            break
+        time.sleep(0.01)
+
+    status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS") or {}
+    assert status.get("state") == "failed"
+    assert status.get("ready") is False
+    assert status.get("error") == "critical_email_paper_policy_not_ready"
+    assert app.config.get("DURABLE_WORKFLOW_COMPONENTS") is None
+
+
 def test_build_durable_workflow_registry_uses_shared_deferred_read_only_builder(
     monkeypatch,
 ):
