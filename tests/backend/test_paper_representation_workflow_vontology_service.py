@@ -15,6 +15,7 @@ from src.backend.services.arxiv_ingestion_testing_service import (
 )
 from src.backend.services.paper_representation_workflow_vontology_service import (
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+    PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID,
     PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
@@ -452,7 +453,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 7, json.dumps(
+    assert counts.get("workflows_published") == 8, json.dumps(
         report, sort_keys=True, default=str
     )
     assert counts.get("errors") == 0
@@ -468,6 +469,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert "#V#person" in created_support_ids
     assert "#V#research_topic" in created_support_ids
     assert "#V#paper_on_arxiv" in created_support_ids
+    assert "#V#paper_under_preparation" in created_support_ids
     assert "#V#authored_by" in created_support_ids
     assert "#V#about" in created_support_ids
     assert "#V#has_doi" in created_support_ids
@@ -517,6 +519,10 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert arxiv_definition is not None
+    under_preparation_definition = load_workflow_definition_from_vontology(
+        PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID
+    )
+    assert under_preparation_definition is not None
     source_neutral_definition = load_workflow_definition_from_vontology(
         SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
     )
@@ -612,6 +618,12 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             state_id="ingest_metadata_reference",
         )
     )
+    assert item_prepare_transitions["paper_under_preparation_reference"].to_state == (
+        authority_service._step_concept_id(
+            workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+            state_id="ingest_under_preparation_reference",
+        )
+    )
     assert item_prepare_transitions["file_copy_reference"].to_state == (
         authority_service._step_concept_id(
             workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
@@ -626,6 +638,44 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert ingest_arxiv_state.actions[0].action_id == "workflow_invoke_subworkflow"
     assert ingest_arxiv_state.metadata["subworkflow_contract"]["workflow_id"] == (
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    ingest_under_preparation_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+        state_id="ingest_under_preparation_reference",
+    )
+    assert (
+        item_definition.states[ingest_under_preparation_state_id].metadata[
+            "subworkflow_contract"
+        ]["workflow_id"]
+        == PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID
+    )
+    under_preparation_scope_state_id = authority_service._step_concept_id(
+        workflow_id=PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID,
+        state_id="resolve_under_preparation_scope",
+    )
+    under_preparation_scope_action = under_preparation_definition.states[
+        under_preparation_scope_state_id
+    ].actions[0]
+    assert under_preparation_scope_action.action_id == (
+        "resolve_publication_scope_profile"
+    )
+    assert under_preparation_scope_action.inputs["plane"] == "instance"
+    assert under_preparation_scope_action.inputs["type_concept_ids"] == [
+        "#V#paper_under_preparation"
+    ]
+    under_preparation_create_state_id = authority_service._step_concept_id(
+        workflow_id=PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID,
+        state_id="create_under_preparation_concept",
+    )
+    under_preparation_create_action = under_preparation_definition.states[
+        under_preparation_create_state_id
+    ].actions[0]
+    assert under_preparation_create_action.action_id == "create_concepts"
+    assert under_preparation_create_action.inputs["parent_id"] == (
+        "#V#paper_under_preparation"
+    )
+    assert under_preparation_create_action.inputs["scope_mode"]["$context_key"] == (
+        "paper_instance_scope_mode"
     )
     ingest_metadata_state_id = authority_service._step_concept_id(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
@@ -1654,6 +1704,12 @@ def _build_source_neutral_execution_registry(
             workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
             action_id="stub.represent_arxiv_paper",
         ),
+        PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID: (
+            _build_stub_representation_definition(
+                workflow_id=PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID,
+                action_id="stub.represent_under_preparation_paper",
+            )
+        ),
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID: (
             _build_stub_representation_definition(
                 workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
@@ -1742,6 +1798,12 @@ def _build_source_neutral_execution_registry(
         ActionSpec(
             action_id="stub.represent_metadata_paper",
             handler=_stub_handler("metadata"),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="stub.represent_under_preparation_paper",
+            handler=_stub_handler("under_preparation"),
         )
     )
     registry.register(
@@ -1905,6 +1967,54 @@ def test_source_neutral_paper_reference_workflow_fails_when_no_item_succeeds(
     assert calls == []
 
 
+def test_source_neutral_workflow_routes_explicit_submission_to_org_workflow_but_public_id_wins(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    parent_definition, item_definition = _load_source_neutral_test_definitions()
+    registry, calls = _build_source_neutral_execution_registry(
+        parent_definition=parent_definition,
+        item_definition=item_definition,
+        monkeypatch=monkeypatch,
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        parent_definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_references": [
+                {
+                    "reference_kind": "metadata",
+                    "title": "A Private Conference Submission",
+                    "paper_type_concept_id": "#V#paper_under_preparation",
+                    "paper_lifecycle_state": "under_review",
+                    "submission_identifier": "17045",
+                    "submission_venue": "NeurIPS 2026",
+                },
+                {
+                    "reference_kind": "arxiv",
+                    "arxiv_id": "2608.12345",
+                    "title": "A Public Preprint",
+                    "paper_type_concept_id": "#V#paper_under_preparation",
+                    "paper_lifecycle_state": "submitted",
+                },
+            ]
+        },
+    )
+
+    assert result.completed is True
+    assert [call["label"] for call in calls] == ["under_preparation", "arxiv"]
+    assert calls[0]["data"]["submission_identifier"] == "17045"
+    assert calls[0]["data"]["paper_lifecycle_state"] == "under_review"
+    assert calls[1]["data"]["arxiv_id"] == "2608.12345"
+
+
 def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
     _reset_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -2061,7 +2171,7 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
 ) -> None:
     first_report = bootstrap_canonical_paper_representation_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 7
+    assert first_counts.get("workflows_published") == 8
 
     second_report = bootstrap_canonical_paper_representation_workflows()
     second_authority = second_report.get("authority_contract") or {}
@@ -2218,7 +2328,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "30" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "31" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -4072,10 +4182,11 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
         SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID,
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
-            SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
-            SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
-            PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
-        ]
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID,
+        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+        PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+    ]
 
     payload = json.loads(tmp_asset_path.read_text(encoding="utf-8"))
     workflows = payload.get("workflows") or []
