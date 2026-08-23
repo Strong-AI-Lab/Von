@@ -513,6 +513,7 @@ def _run_isolated_pdf_worker(
     return {
         "status": "worker_failure",
         "error": "pdf_parser_worker_protocol_failed",
+        "return_code": return_code,
     }
 
 

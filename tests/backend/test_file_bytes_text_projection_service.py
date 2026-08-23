@@ -134,6 +134,12 @@ def test_pdf_page_projection_stops_at_local_page_boundary(monkeypatch):
     document.close()
     monkeypatch.setattr(service, "MAX_PDF_PAGES", 2)
 
+    worker_result = service._run_isolated_pdf_worker(
+        source,
+        stop_after_chars=service.MAX_TEXT_CHARS,
+    )
+    assert worker_result["status"] == "ok", worker_result
+
     result = _project(
         source,
         content_type="application/pdf",
