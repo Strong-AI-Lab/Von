@@ -2291,6 +2291,22 @@ def _build_prepare_public_title_search_handler():
             or metadata.get("authors")
         )
 
+        # A source-neutral reference commonly carries its stable public identity
+        # at the workflow top level rather than inside ``paper_metadata``.  Keep
+        # one complete metadata projection so the downstream represented
+        # workflow does not silently lose the DOI/source identity that admitted
+        # the public-paper path.
+        if doi_candidates:
+            metadata["doi"] = doi_candidates[0]
+        if stable_source_uri:
+            metadata["source_uri"] = stable_source_uri
+        if title:
+            metadata["title"] = title
+        if publication_date:
+            metadata["publication_date"] = publication_date
+        if author_names:
+            metadata["authors"] = author_names
+
         bibliographic_fallback_basis: str | None = None
         if doi_candidates:
             bibliographic_fallback_basis = "doi"
@@ -2303,7 +2319,9 @@ def _build_prepare_public_title_search_handler():
             return WorkflowActionResult(
                 status="success",
                 outputs={
-                    "paper_metadata": metadata or None,
+                    "paper_metadata": metadata,
+                    "doi": doi_candidates[0] if doi_candidates else None,
+                    "source_uri": stable_source_uri or None,
                     "public_paper_title": title,
                     "public_paper_title_query": title,
                     "public_paper_title_search_required": False,
@@ -2316,6 +2334,8 @@ def _build_prepare_public_title_search_handler():
                 status="failed",
                 outputs={
                     "paper_metadata": metadata or None,
+                    "doi": None,
+                    "source_uri": None,
                     "public_paper_title_search_required": False,
                     "bibliographic_fallback_sufficient": False,
                     "bibliographic_fallback_basis": "insufficient",
@@ -2328,6 +2348,8 @@ def _build_prepare_public_title_search_handler():
                 "public_paper_title": title,
                 "public_paper_title_query": title,
                 "paper_metadata": metadata or {"title": title},
+                "doi": None,
+                "source_uri": None,
                 "public_paper_title_search_required": True,
                 "bibliographic_fallback_sufficient": bool(bibliographic_fallback_basis),
                 "bibliographic_fallback_basis": (
