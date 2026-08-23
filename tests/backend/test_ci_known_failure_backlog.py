@@ -17,10 +17,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KNOWN_FAILURES = REPO_ROOT / "ci" / "known_test_failures.txt"
 
-# Measured on 20 August 2026. The gate runs without a database, where 208 of
-# 3776 cost_normal tests fail, plus one order-dependent test that only fails
-# under sharding. This number is a ceiling, never a target to refresh.
-BASELINE_COUNT = 209
+# Reconciled from the 22 August 2026 nightly at ef56c6ed. Of the 209 recorded
+# failures, 103 passed and were removed. This number is a ceiling, never a
+# target to refresh.
+BASELINE_COUNT = 106
 
 
 def _entries() -> list[str]:
@@ -43,12 +43,13 @@ def test_the_backlog_never_grows():
     )
 
 
-def test_the_baseline_matches_the_list_when_nothing_has_been_fixed():
-    """Keeps the constant honest once entries start being removed."""
+def test_the_baseline_matches_the_list():
+    """Keeps the ratchet constant aligned with the visible backlog."""
     entries = _entries()
 
-    assert len(entries) == BASELINE_COUNT or len(entries) < BASELINE_COUNT, (
-        "BASELINE_COUNT should be lowered to match the list as failures are fixed"
+    assert len(entries) == BASELINE_COUNT, (
+        f"BASELINE_COUNT is {BASELINE_COUNT}, but the backlog has {len(entries)} "
+        "entries. Lower the baseline whenever recorded failures are removed."
     )
 
 

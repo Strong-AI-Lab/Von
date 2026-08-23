@@ -298,14 +298,7 @@ def main() -> int:
     print(f"new failures     : {len(new_failures)}")
     print(f"now passing      : {len(now_passing)}")
 
-    if now_passing and paths != [TEST_PATH]:
-        # Running a slice leaves every uncovered entry looking fixed. Only the
-        # full run can distinguish "now passes" from "was not run".
-        print(
-            f"\n{len(now_passing)} recorded entries were not covered by this "
-            "slice. Run the full suite before concluding anything about them."
-        )
-    elif now_passing:
+    if now_passing:
         print(
             f"\n{len(now_passing)} recorded entries now pass. Remove them from "
             f"{KNOWN_FAILURES.relative_to(REPO_ROOT)} and lower BASELINE_COUNT:"
@@ -347,9 +340,7 @@ def main() -> int:
             "that list may only shrink."
         )
         _print_new_failure_diagnostics(new_failures, diagnostics)
-        _write_summary(
-            observed, new_failures, now_passing, full_run=full_run
-        )
+        _write_summary(observed, new_failures, now_passing, full_run=full_run)
         return 1
 
     _write_summary(observed, new_failures, now_passing, full_run=full_run)
