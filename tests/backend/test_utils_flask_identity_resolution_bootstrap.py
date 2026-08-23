@@ -135,6 +135,7 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
 
 def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
+    from src.backend.db import transient_errors
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
         ai_chat_session_source_profile_vontology_service as ai_chat_session_source_profile_bootstrap,
@@ -174,6 +175,13 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
 
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
     startup_events: list[str] = []
+    reconnect_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        transient_errors,
+        "attempt_reconnect",
+        lambda **kwargs: reconnect_calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(transient_errors.time, "sleep", lambda _delay: None)
 
     # Reset globals to force fresh startup path.
     monkeypatch.setattr(utils_flask, "_durable_workflow_registry", None)
@@ -392,12 +400,18 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
 
+    email_bootstrap_attempts = 0
+
     def _bootstrap_email_source_convergence(
         *, paper_workflow_dependency_report=None
     ):
+        nonlocal email_bootstrap_attempts
+        email_bootstrap_attempts += 1
         startup_events.append("email_source_bootstrap")
         assert paper_workflow_dependency_report is not None
         assert paper_workflow_dependency_report.get("success") is True
+        if email_bootstrap_attempts == 1:
+            raise RuntimeError("text_values collection not available")
         return {
             "success": True,
             "workflow_ids": [
@@ -589,12 +603,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         is True
     )
     assert "entity_workflow_bootstrap" not in queue_ready_components[0]
-    assert startup_events[:4] == [
+    assert startup_events[:5] == [
         "paper_bootstrap",
+        "email_source_bootstrap",
         "email_source_bootstrap",
         "worker_started",
         "entity_bootstrap",
     ]
+    assert len(reconnect_calls) == 1
+    assert reconnect_calls[0]["route_degraded"] is False
     assert result.get("startup_queue_ready") == {
         "stage": "after_critical_email_paper_policy_bootstraps",
         "recovered_orphaned_instances": 0,
