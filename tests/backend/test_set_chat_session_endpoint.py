@@ -334,6 +334,10 @@ def test_set_chat_session_returns_retryable_on_transient_mongo_failure(
         "find_chat_history_document_for_read",
         lambda coll, query, projection=None: coll.find_one(query, projection),
     )
+    # Bind the route's service reference explicitly as well as patching the
+    # imported module, so the injected collection failure is the path under
+    # test even when a long process has different module bindings.
+    monkeypatch.setattr(von_routes, "chat_history_service", chat_history_service)
     monkeypatch.setattr(
         von_routes,
         "_resolve_shared_conversation_owner",
@@ -352,7 +356,7 @@ def test_set_chat_session_returns_retryable_on_transient_mongo_failure(
 
     assert resp.status_code == 503
     payload = resp.get_json()
-    assert payload["retryable"] is True
+    assert payload.get("retryable") is True, payload
     assert payload["degraded"] is True
 
 
