@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from scripts.repair_jvnautosci_2272_zhan_gmail_arxiv_ingestion_workflow import (
     ALLOW_PARTIAL_SUCCESS_POLICY,
     CHILD_EXTRACT_RESOURCES_STEP_ID,
@@ -232,11 +234,18 @@ def test_launch_contracts_are_valid_and_mapping_backed() -> None:
 
 
 def test_legacy_repair_entry_point_delegates_to_current_canonical_seed() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as service,
+    )
+
     report = publish_jvnautosci_2272_repair(dry_run=True)
+    canonical_payload = json.loads(
+        service._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8")
+    )
 
     assert report["success"] is True
     assert report["deprecated_entry_point"] is True
-    assert report["seed_version"] == "13"
+    assert report["seed_version"] == canonical_payload["seed_version"]
     assert report["delegates_to"] == (
         "bootstrap_canonical_email_source_representation_convergence_workflows"
     )

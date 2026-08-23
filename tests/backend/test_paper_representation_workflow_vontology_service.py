@@ -647,6 +647,66 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ]
         == SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
     )
+    public_title_prepare_state_id = authority_service._step_concept_id(
+        workflow_id=PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+        state_id="prepare_title_search",
+    )
+    public_title_decide_fallback_state_id = authority_service._step_concept_id(
+        workflow_id=PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+        state_id="decide_metadata_fallback",
+    )
+    public_title_reject_fallback_state_id = authority_service._step_concept_id(
+        workflow_id=PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+        state_id="reject_insufficient_bibliographic_identity",
+    )
+    public_title_ingest_fallback_state_id = authority_service._step_concept_id(
+        workflow_id=PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+        state_id="ingest_metadata_fallback",
+    )
+    public_title_prepare_state = public_title_definition.states[
+        public_title_prepare_state_id
+    ]
+    assert {
+        mapping.get("context_key")
+        for mapping in public_title_prepare_state.metadata.get(
+            "tool_output_context_mappings", []
+        )
+    }.issuperset(
+        {
+            "public_paper_title_search_required",
+            "bibliographic_fallback_sufficient",
+            "bibliographic_fallback_basis",
+        }
+    )
+    assert any(
+        transition.to_state == public_title_decide_fallback_state_id
+        and transition.reason == "stable_bibliographic_identity_already_available"
+        for transition in public_title_prepare_state.transitions
+    )
+    public_title_decide_state = public_title_definition.states[
+        public_title_decide_fallback_state_id
+    ]
+    assert any(
+        transition.to_state == public_title_ingest_fallback_state_id
+        and transition.reason == "sufficient_bibliographic_identity_available"
+        and transition.condition_spec
+        == {
+            "kind": "context_flag",
+            "key": "bibliographic_fallback_sufficient",
+            "expected": True,
+        }
+        for transition in public_title_decide_state.transitions
+    )
+    assert any(
+        transition.to_state == public_title_reject_fallback_state_id
+        for transition in public_title_decide_state.transitions
+    )
+    assert (
+        public_title_definition.states[public_title_reject_fallback_state_id]
+        .actions[0]
+        .action_id
+        == "paper_reference.fail_item"
+    )
     route_arxiv_targets_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="route_arxiv_targets",
@@ -2158,7 +2218,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "29" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "30" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID

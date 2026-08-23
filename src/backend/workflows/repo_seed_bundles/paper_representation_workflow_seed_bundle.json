@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "29",
+  "seed_version": "30",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -4531,7 +4531,18 @@
             "action_id": "paper_reference.prepare_public_title_search",
             "execution_mode": "deterministic",
             "next_state": "search_public_arxiv",
-            "on_failure_state": "ingest_metadata_fallback",
+            "on_failure_state": "decide_metadata_fallback",
+            "conditional_transitions": [
+              {
+                "to_state": "decide_metadata_fallback",
+                "reason": "stable_bibliographic_identity_already_available",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "public_paper_title_search_required",
+                  "expected": false
+                }
+              }
+            ],
             "tool_output_mapping_specs": [
               {
                 "context_key": "public_paper_title",
@@ -4547,12 +4558,30 @@
                 "context_key": "paper_metadata",
                 "tool_output_field": "paper_metadata",
                 "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_paper_metadata_to_paper_metadata"
+              },
+              {
+                "context_key": "public_paper_title_search_required",
+                "tool_output_field": "public_paper_title_search_required",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_public_paper_title_search_required_to_public_paper_title_search_required"
+              },
+              {
+                "context_key": "bibliographic_fallback_sufficient",
+                "tool_output_field": "bibliographic_fallback_sufficient",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_bibliographic_fallback_sufficient_to_bibliographic_fallback_sufficient"
+              },
+              {
+                "context_key": "bibliographic_fallback_basis",
+                "tool_output_field": "bibliographic_fallback_basis",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_bibliographic_fallback_basis_to_bibliographic_fallback_basis"
               }
             ],
             "writes_context_keys": [
               "public_paper_title",
               "public_paper_title_query",
-              "paper_metadata"
+              "paper_metadata",
+              "public_paper_title_search_required",
+              "bibliographic_fallback_sufficient",
+              "bibliographic_fallback_basis"
             ]
           },
           {
@@ -4560,7 +4589,7 @@
             "action_id": "workflow_mcp.invoke_tool",
             "execution_mode": "deterministic",
             "next_state": "select_exact_title_match",
-            "on_failure_state": "ingest_metadata_fallback",
+            "on_failure_state": "decide_metadata_fallback",
             "static_input_bindings": [
               [
                 "tool_arguments",
@@ -4593,7 +4622,7 @@
             "action_id": "paper_reference.select_arxiv_title_match",
             "execution_mode": "deterministic",
             "next_state": "ingest_resolved_arxiv",
-            "on_failure_state": "ingest_metadata_fallback",
+            "on_failure_state": "decide_metadata_fallback",
             "context_input_mapping_specs": [
               {
                 "tool_param": "search_payload",
@@ -4707,6 +4736,78 @@
               "paper_concept_id",
               "file_copy_concept_id",
               "article_readback"
+            ]
+          },
+          {
+            "state_id": "decide_metadata_fallback",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "reject_insufficient_bibliographic_identity",
+            "conditional_transitions": [
+              {
+                "to_state": "ingest_metadata_fallback",
+                "reason": "sufficient_bibliographic_identity_available",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "bibliographic_fallback_sufficient",
+                  "expected": true
+                }
+              }
+            ],
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "public_paper_fallback_decision",
+                    "value": "stable_bibliographic_identity_gate"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "public_paper_fallback_decision"
+            ]
+          },
+          {
+            "state_id": "reject_insufficient_bibliographic_identity",
+            "action_id": "paper_reference.fail_item",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "error_code",
+                "public_paper_stable_identity_not_resolved"
+              ],
+              [
+                "error_message",
+                "Public lookup did not resolve one stable paper identity, and the supplied metadata lacks DOI, source URI, or title plus publication date and authors."
+              ],
+              [
+                "reference_kind",
+                "metadata"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_reference_item_status",
+                "tool_output_field": "paper_reference_item_status",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_reject_insufficient_bibliographic_identity_paper_reference_item_status_to_paper_reference_item_status"
+              },
+              {
+                "context_key": "paper_reference_error_code",
+                "tool_output_field": "paper_reference_error_code",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_reject_insufficient_bibliographic_identity_paper_reference_error_code_to_paper_reference_error_code"
+              },
+              {
+                "context_key": "paper_reference_error_message",
+                "tool_output_field": "paper_reference_error_message",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_reject_insufficient_bibliographic_identity_paper_reference_error_message_to_paper_reference_error_message"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_reference_item_status",
+              "paper_reference_error_code",
+              "paper_reference_error_message"
             ]
           },
           {
