@@ -31,16 +31,23 @@ from src.backend.services.tool_evidence_projection_service import (
 def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
 
-    from src.backend.db.mongo_client import get_db
+    from src.backend.db.mongo_client import close_connection, get_db
+    from src.backend.security.access_control import invalidate_current_access_evaluator
+    from src.backend.services.concept_predicate_metadata_service import (
+        invalidate_cache,
+    )
 
-    db = get_db()
-    if db is not None:
-        for collection_name in ("concepts", "text_relations", "text_values"):
-            try:
-                db.drop_collection(collection_name)
-            except Exception:
-                pass
-    yield
+    close_connection()
+    invalidate_cache()
+    invalidate_current_access_evaluator()
+    try:
+        db = get_db()
+        assert db is not None
+        yield
+    finally:
+        close_connection()
+        invalidate_cache()
+        invalidate_current_access_evaluator()
 
 
 def _create_concept(
@@ -1000,7 +1007,9 @@ def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(
     # intended authority context explicitly around materialisation and read.
     with override_current_actor(None, None):
         bootstrap_report = bootstrap_gmail_tool_evidence_contract()
-        assert bootstrap_report.get("success") is True, bootstrap_report
+        assert bootstrap_report.get("success") is True, json.dumps(
+            bootstrap_report, sort_keys=True, default=str
+        )
         contract = resolve_tool_projection_contract("gmail_list_messages")
         assert contract is not None, bootstrap_report
         projected = project_tool_payload_for_llm(

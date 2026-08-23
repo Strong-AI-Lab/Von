@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -18,16 +19,31 @@ from src.backend.services.text_value_service import upsert_singleton_text_relati
 
 
 @pytest.fixture
-def publication_profile_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def publication_profile_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
-    from src.backend.db.mongo_client import get_db
+    from src.backend.db.mongo_client import close_connection, get_db
+    from src.backend.security.access_control import invalidate_current_access_evaluator
+    from src.backend.services.concept_predicate_metadata_service import (
+        invalidate_cache,
+    )
 
-    db = get_db()
-    assert db is not None
-    for collection_name in ("concepts", "text_relations", "text_values"):
-        db.drop_collection(collection_name)
-    report = bootstrap_canonical_publication_scope_profiles()
-    assert report["success"] is True, report
+    close_connection()
+    invalidate_cache()
+    invalidate_current_access_evaluator()
+    try:
+        db = get_db()
+        assert db is not None
+        report = bootstrap_canonical_publication_scope_profiles()
+        assert report["success"] is True, json.dumps(
+            report, sort_keys=True, default=str
+        )
+        yield
+    finally:
+        close_connection()
+        invalidate_cache()
+        invalidate_current_access_evaluator()
 
 
 def _write_profile(
