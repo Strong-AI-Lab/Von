@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
+from ..workflows.durable.models import ScheduleType, WorkflowSchedule
+from ..workflows.durable.startup import get_instance_manager
 from .email_source_representation_convergence_workflow_vontology_service import (
     ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID,
 )
 from .namespace_service import coerce_namespace, derive_namespace_for_actor
-from ..workflows.durable.models import ScheduleType, WorkflowSchedule
-from ..workflows.durable.startup import get_instance_manager
 
 EMAIL_ARXIV_REPRESENTATION_CONVERGENCE_SCHEDULE_MANAGED_KEY = (
-    "email_arxiv_representation_convergence_v2"
+    "email_paper_representation_convergence_v3"
 )
-_LEGACY_MANAGED_KEYS = frozenset({"email_arxiv_representation_convergence_v1"})
+_LEGACY_MANAGED_KEYS = frozenset(
+    {
+        "email_arxiv_representation_convergence_v1",
+        "email_arxiv_representation_convergence_v2",
+    }
+)
 
 _bootstrap_lock = threading.Lock()
 _bootstrap_completed = False
@@ -88,7 +93,7 @@ def _desired_schedule_config() -> dict[str, Any]:
     )
     base_gmail_query = _clean_env(
         "VON_EMAIL_ARXIV_CONVERGENCE_BASE_QUERY",
-        "arxiv.org",
+        "{arxiv.org doi.org paper preprint manuscript}",
     )
     return {
         **identity,
@@ -100,10 +105,11 @@ def _desired_schedule_config() -> dict[str, Any]:
             ),
             "trigger_source": "email_arxiv_representation_convergence_schedule",
             "prompt": (
-                "Process the newest Inbox messages containing arXiv paper "
-                "references that do not have VON/PAPER/REPRESENTED. Represent "
-                "each paper, verify current processing evidence, then apply the "
-                "represented label and remove INBOX."
+                "Process the newest Inbox messages mentioning scientific papers "
+                "that do not have VON/PAPER/REPRESENTED. Treat a bare identifiable "
+                "paper mention as representation intent, represent every paper, "
+                "verify current processing evidence, then apply the represented "
+                "label and remove INBOX."
             ),
             "gmail_profile": gmail_profile,
             "base_gmail_query": base_gmail_query,
@@ -152,7 +158,7 @@ def ensure_email_arxiv_representation_convergence_schedule(
     *,
     activate: bool | None = None,
 ) -> dict[str, Any]:
-    """Ensure a managed interval schedule exists for recurring arXiv email runs."""
+    """Ensure a managed interval schedule exists for recurring paper-email runs."""
 
     global _bootstrap_completed
 

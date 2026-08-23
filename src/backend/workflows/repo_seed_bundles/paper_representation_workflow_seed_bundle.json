@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "27",
+  "seed_version": "29",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -32,7 +32,7 @@
       ]
     }
   },
-  "source_tag": "JVNAUTOSCI-2670",
+  "source_tag": "JVNAUTOSCI-2244",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.normalise_external_identity",
@@ -51,6 +51,8 @@
     "workflow_control.for_each",
     "paper_reference.normalise_reference_set",
     "paper_reference.fail_item",
+    "paper_reference.prepare_public_title_search",
+    "paper_reference.select_arxiv_title_match",
     "resolve_concept_by_name",
     "resolve_publication_scope_profile",
     "create_concepts",
@@ -2499,7 +2501,7 @@
     {
       "workflow_id": "#V#arxiv_paper_representation_workflow",
       "display_name": "Arxiv Paper Representation Workflow",
-      "description": "Canonical arXiv wrapper workflow that normalises an arXiv source, fetches authoritative arXiv metadata, acquires or finalises the paper artefact when available, delegates to the scholarly-paper workflow, and fails closed on incomplete metadata representation.",
+      "description": "Canonical arXiv child workflow for a supplied arXiv URL or identifier: normalise the source, fetch authoritative metadata, acquire or finalise the artefact, delegate representation, and fail closed on incomplete metadata. Select it directly only when the paper reference is already supplied independently of mail discovery. If the task asks to search, inspect, or read Gmail/email/messages and represent papers found there, choose the email-convergence parent so source provenance, all-message extraction, markers, and Gmail finality are preserved.",
       "content": "Represent an arXiv paper by extracting a canonical arXiv identifier, fetching authoritative arXiv metadata, deciding whether acquisition is required, invoking download_paper when needed, trying a direct PDF URL import as optional enrichment when primary acquisition is unavailable or fails, then delegating to the general scholarly-paper workflow with arXiv verification even when the PDF remains unavailable.",
       "text_relations": [
         {
@@ -2524,7 +2526,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\n  \"schema_version\": \"workflow_routing_profile.v1\",\n  \"role\": \"execution\",\n  \"authoring_intent_required\": false,\n  \"prefer_existing_capability\": false\n}",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false,\"selection_guidance\":\"Select directly for an arXiv URL or identifier supplied independently of source discovery. Do not select as the top-level workflow when papers must first be found in Gmail, email, mail, inbox, or messages; use the email-source convergence parent, which invokes this as a child.\"}",
           "lang": "en-NZ"
         },
         {
@@ -3579,7 +3581,7 @@
     {
       "workflow_id": "#V#source_neutral_paper_reference_ingestion_workflow",
       "display_name": "Source Neutral Paper Reference Ingestion Workflow",
-      "description": "Canonical source-neutral entry workflow for ingesting scholarly paper references supplied as arXiv identifiers or URLs, DOI/source URLs, uploaded/file-copy concepts, pasted metadata, or mixed reference sets without assuming a mail source, sender profile, or English prompt wording.",
+      "description": "Canonical source-neutral entry workflow for scholarly references already supplied as arXiv IDs/URLs, DOI/source URLs, file-copy concepts, pasted metadata, or mixed sets. Select directly only when references are available independently of source discovery. If the task asks to search, inspect, or read Gmail/email/messages and represent papers found there, choose the email-convergence parent; it owns discovery, completeness, provenance, markers, and message finality and invokes this workflow as a child.",
       "content": "Normalise caller-supplied scholarly paper references into paper_reference_set.v1, preserve source/provenance context, optionally preview the list without mutation, then fan out each item to the represented item-ingestion workflow. A non-preview run completes only when at least one item succeeds; mixed results preserve item-level failures. Source-specific representation remains delegated to existing arXiv, scholarly metadata, and file-copy paper workflows.",
       "text_relations": [
         {
@@ -3604,7 +3606,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true,\"selection_guidance\":\"Use this workflow when the user or an upstream workflow supplies one or more scholarly paper references from any source and wants paper representation, ingestion, preview, or read-back. Do not restrict selection to Gmail, any sender, or English wording; source discovery should happen in composing workflows before this source-neutral entry.\"}",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true,\"selection_guidance\":\"Use this workflow when the user or an upstream workflow already supplies one or more scholarly paper references and wants paper representation, ingestion, preview, or read-back. It supports any reference source and any user language, but source discovery must happen in a composing workflow first. Do not select it as the top-level route when a request asks to find papers in Gmail, email, mail, inbox, or messages; choose the email-source convergence parent, which invokes this workflow after complete message extraction.\"}",
           "lang": "en-NZ"
         },
         {
@@ -3887,8 +3889,8 @@
     {
       "workflow_id": "#V#source_neutral_paper_reference_item_ingestion_workflow",
       "display_name": "Source Neutral Paper Reference Item Ingestion Workflow",
-      "description": "Canonical per-item workflow that delegates a normalised paper_reference_set.v1 item to the represented arXiv, scholarly metadata, or file-copy paper workflow, or returns a preview/typed failure without source-specific Python routing policy.",
-      "content": "Route one normalised paper reference item by its represented reference_kind. arXiv items invoke #V#arxiv_paper_representation_workflow; DOI, source_uri, and metadata items invoke #V#scholarly_article_metadata_representation_workflow; file_copy items invoke #V#scholarly_paper_representation_workflow; preview items return a non-mutating item summary; unsupported items fail closed with a typed paper_reference_error_code.",
+      "description": "Canonical per-item workflow that delegates a normalised paper_reference_set.v1 item to the represented arXiv, public-title resolution, scholarly metadata, or file-copy paper workflow, or returns a preview/typed failure without source-specific Python routing policy.",
+      "content": "Route one normalised paper reference item by its represented reference_kind. arXiv items invoke #V#arxiv_paper_representation_workflow; DOI and source_uri items invoke #V#scholarly_article_metadata_representation_workflow; metadata items invoke #V#public_paper_title_resolution_workflow, which resolves an exact public arXiv title before falling back to sufficient bibliographic identity; file_copy items invoke #V#scholarly_paper_representation_workflow; preview items return a non-mutating item summary; unsupported items fail closed with a typed paper_reference_error_code.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -4206,7 +4208,7 @@
             "state_id": "ingest_metadata_reference",
             "action_id": "workflow_invoke_subworkflow",
             "execution_mode": "deterministic",
-            "invoked_workflow_id": "#V#scholarly_article_metadata_representation_workflow",
+            "invoked_workflow_id": "#V#public_paper_title_resolution_workflow",
             "next_state": "capture_success",
             "static_input_bindings": [
               [
@@ -4484,6 +4486,314 @@
                 "tool_output_field": "paper_reference_kind",
                 "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_unsupported_reference_item_paper_reference_kind_to_paper_reference_kind"
               }
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      },
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ]
+    },
+    {
+      "workflow_id": "#V#public_paper_title_resolution_workflow",
+      "display_name": "Public Paper Title Resolution Workflow",
+      "description": "Resolves an otherwise unidentified scholarly-paper title against public arXiv records, accepts only one exact normalised title match, and delegates the verified public identity to the canonical arXiv representation workflow. If public lookup cannot establish one identity, it falls back to the metadata workflow, which succeeds only when the supplied bibliographic evidence is independently sufficient.",
+      "content": "Prepare a public-title query, search arXiv, accept exactly one normalised title match (using supplied year or authors only to disambiguate exact-title duplicates), and represent the resolved public paper. Never invent an identifier or choose a merely similar title. Failed or ambiguous public resolution may use the bibliographic metadata fallback, but title alone is not sufficient for that fallback.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"phase\":\"published\",\"published\":true,\"schema_version\":\"workflow_publication_lifecycle.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"subworkflow\",\"routing_eligible\":false,\"authoring_intent_required\":false,\"selection_guidance\":\"Invoke from a represented paper-reference workflow when a title or metadata reference lacks a stable public identity.\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"require_completed_true\":true,\"require_final_state\":true,\"require_terminal_status\":true,\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\",\"paper_concept_id\",\"article_readback\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "prepare_title_search",
+        "steps": [
+          {
+            "state_id": "prepare_title_search",
+            "action_id": "paper_reference.prepare_public_title_search",
+            "execution_mode": "deterministic",
+            "next_state": "search_public_arxiv",
+            "on_failure_state": "ingest_metadata_fallback",
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "public_paper_title",
+                "tool_output_field": "public_paper_title",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_public_paper_title_to_public_paper_title"
+              },
+              {
+                "context_key": "public_paper_title_query",
+                "tool_output_field": "public_paper_title_query",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_public_paper_title_query_to_public_paper_title_query"
+              },
+              {
+                "context_key": "paper_metadata",
+                "tool_output_field": "paper_metadata",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_prepare_title_search_paper_metadata_to_paper_metadata"
+              }
+            ],
+            "writes_context_keys": [
+              "public_paper_title",
+              "public_paper_title_query",
+              "paper_metadata"
+            ]
+          },
+          {
+            "state_id": "search_public_arxiv",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "next_state": "select_exact_title_match",
+            "on_failure_state": "ingest_metadata_fallback",
+            "static_input_bindings": [
+              [
+                "tool_arguments",
+                {
+                  "query": {
+                    "$context_key": "public_paper_title_query"
+                  },
+                  "max_results": 5,
+                  "sort_by": "relevance"
+                }
+              ],
+              [
+                "tool_name",
+                "search_arxiv"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "public_paper_search_payload",
+                "tool_output_field": "result",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_search_public_arxiv_result_to_public_paper_search_payload"
+              }
+            ],
+            "writes_context_keys": [
+              "public_paper_search_payload"
+            ]
+          },
+          {
+            "state_id": "select_exact_title_match",
+            "action_id": "paper_reference.select_arxiv_title_match",
+            "execution_mode": "deterministic",
+            "next_state": "ingest_resolved_arxiv",
+            "on_failure_state": "ingest_metadata_fallback",
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "search_payload",
+                "context_key": "public_paper_search_payload",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_select_exact_title_match_public_paper_search_payload_to_search_payload_parameter"
+              },
+              {
+                "tool_param": "title",
+                "context_key": "public_paper_title",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_select_exact_title_match_public_paper_title_to_title_parameter"
+              },
+              {
+                "tool_param": "paper_metadata",
+                "context_key": "paper_metadata",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_select_exact_title_match_paper_metadata_to_paper_metadata_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "arxiv_id",
+                "tool_output_field": "arxiv_id",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_select_exact_title_match_arxiv_id_to_arxiv_id"
+              },
+              {
+                "context_key": "source_uri",
+                "tool_output_field": "source_uri",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_select_exact_title_match_source_uri_to_source_uri"
+              },
+              {
+                "context_key": "paper_metadata",
+                "tool_output_field": "paper_metadata",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_select_exact_title_match_paper_metadata_to_paper_metadata"
+              },
+              {
+                "context_key": "public_paper_resolution_status",
+                "tool_output_field": "public_paper_resolution_status",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_select_exact_title_match_public_paper_resolution_status_to_public_paper_resolution_status"
+              }
+            ],
+            "writes_context_keys": [
+              "arxiv_id",
+              "source_uri",
+              "paper_metadata",
+              "public_paper_resolution_status"
+            ]
+          },
+          {
+            "state_id": "ingest_resolved_arxiv",
+            "action_id": "workflow_invoke_subworkflow",
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "next_state": "capture_success",
+            "on_failure_state": "failed",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "propagate_as_action_failure"
+              ],
+              [
+                "max_transitions",
+                100
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "arxiv_id",
+                "context_key": "arxiv_id",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_resolved_arxiv_arxiv_id_to_arxiv_id_parameter"
+              },
+              {
+                "tool_param": "source_uri",
+                "context_key": "source_uri",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_resolved_arxiv_source_uri_to_source_uri_parameter"
+              },
+              {
+                "tool_param": "paper_metadata",
+                "context_key": "paper_metadata",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_resolved_arxiv_paper_metadata_to_paper_metadata_parameter"
+              },
+              {
+                "tool_param": "file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_resolved_arxiv_file_copy_concept_id_to_file_copy_concept_id_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_concept_id",
+                "tool_output_field": "result.paper_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_ingest_resolved_arxiv_result_paper_concept_id_to_paper_concept_id"
+              },
+              {
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "result.file_copy_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_ingest_resolved_arxiv_result_file_copy_concept_id_to_file_copy_concept_id"
+              },
+              {
+                "context_key": "article_readback",
+                "tool_output_field": "result.article_readback",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_ingest_resolved_arxiv_result_article_readback_to_article_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_concept_id",
+              "file_copy_concept_id",
+              "article_readback"
+            ]
+          },
+          {
+            "state_id": "ingest_metadata_fallback",
+            "action_id": "workflow_invoke_subworkflow",
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#scholarly_article_metadata_representation_workflow",
+            "next_state": "capture_success",
+            "on_failure_state": "failed",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "propagate_as_action_failure"
+              ],
+              [
+                "max_transitions",
+                80
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "paper_metadata",
+                "context_key": "paper_metadata",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_metadata_fallback_paper_metadata_to_paper_metadata_parameter"
+              },
+              {
+                "tool_param": "title",
+                "context_key": "public_paper_title",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_metadata_fallback_public_paper_title_to_title_parameter"
+              },
+              {
+                "tool_param": "publication_date",
+                "context_key": "publication_date",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_metadata_fallback_publication_date_to_publication_date_parameter"
+              },
+              {
+                "tool_param": "author_names",
+                "context_key": "author_names",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_metadata_fallback_author_names_to_author_names_parameter"
+              },
+              {
+                "tool_param": "file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_ingest_metadata_fallback_file_copy_concept_id_to_file_copy_concept_id_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_concept_id",
+                "tool_output_field": "result.paper_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_ingest_metadata_fallback_result_paper_concept_id_to_paper_concept_id"
+              },
+              {
+                "context_key": "article_readback",
+                "tool_output_field": "result.article_readback",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_ingest_metadata_fallback_result_article_readback_to_article_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_concept_id",
+              "article_readback"
+            ]
+          },
+          {
+            "state_id": "capture_success",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "paper_reference_item_status",
+                    "value": "represented"
+                  },
+                  {
+                    "key": "paper_reference_kind",
+                    "value": "metadata"
+                  }
+                ]
+              ]
             ]
           },
           {

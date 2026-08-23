@@ -519,6 +519,55 @@ def record_source_processing_marker(
             "missing": missing,
         }
 
+    extracted_ids, extracted_file_copy_ids = _extract_concept_ids_from_outputs(
+        represented_outputs
+    )
+    extracted_arxiv_ids = _extract_arxiv_ids(represented_outputs)
+    represented_ids = _ordered_unique(
+        _as_sequence(represented_artifact_concept_ids)
+        + _as_sequence(represented_artefact_concept_ids)
+        + _as_sequence(paper_concept_ids)
+        + extracted_ids
+    )
+    file_copy_ids = _ordered_unique(
+        _as_sequence(file_copy_concept_ids) + extracted_file_copy_ids
+    )
+    arxiv_id_values = _ordered_unique(_as_sequence(arxiv_ids) + extracted_arxiv_ids)
+
+    # A completion marker is evidence about already-durable effects.  When the
+    # caller explicitly requires represented artefacts, reject absent or stale
+    # outputs before creating either the marker concept or its evidence text.
+    if require_represented_artifacts:
+        if not represented_ids:
+            return {
+                "success": False,
+                "error_code": "represented_artifacts_required",
+                "error": (
+                    "A source-processing completion marker requires at least one "
+                    "represented artefact identifier."
+                ),
+                "represented_artifact_concept_ids": [],
+            }
+        existing_represented_ids = _find_existing_concept_ids(represented_ids)
+        missing_represented_ids = [
+            concept_id
+            for concept_id in represented_ids
+            if concept_id not in existing_represented_ids
+        ]
+        if missing_represented_ids:
+            return {
+                "success": False,
+                "error_code": "represented_artifacts_not_found",
+                "error": (
+                    "A source-processing completion marker cannot precede "
+                    "canonical represented-artefact read-back."
+                ),
+                "represented_artifact_concept_ids": represented_ids,
+                "missing_represented_artifact_concept_ids": (
+                    missing_represented_ids
+                ),
+            }
+
     marker_concept_id = source_processing_marker_concept_id(
         source_system=source_system_clean,
         source_profile=source_profile_clean,
@@ -552,20 +601,6 @@ def record_source_processing_marker(
             )
         marker_created = True
 
-    extracted_ids, extracted_file_copy_ids = _extract_concept_ids_from_outputs(
-        represented_outputs
-    )
-    extracted_arxiv_ids = _extract_arxiv_ids(represented_outputs)
-    represented_ids = _ordered_unique(
-        _as_sequence(represented_artifact_concept_ids)
-        + _as_sequence(represented_artefact_concept_ids)
-        + _as_sequence(paper_concept_ids)
-        + extracted_ids
-    )
-    file_copy_ids = _ordered_unique(
-        _as_sequence(file_copy_concept_ids) + extracted_file_copy_ids
-    )
-    arxiv_id_values = _ordered_unique(_as_sequence(arxiv_ids) + extracted_arxiv_ids)
     status = _clean_text(processing_status) or "processed"
     fingerprint = _clean_text(source_fingerprint)
     previous_fingerprint = _clean_text(

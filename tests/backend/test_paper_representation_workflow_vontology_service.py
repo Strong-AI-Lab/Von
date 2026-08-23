@@ -15,6 +15,7 @@ from src.backend.services.arxiv_ingestion_testing_service import (
 )
 from src.backend.services.paper_representation_workflow_vontology_service import (
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+    PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID,
@@ -451,7 +452,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 6, json.dumps(
+    assert counts.get("workflows_published") == 7, json.dumps(
         report, sort_keys=True, default=str
     )
     assert counts.get("errors") == 0
@@ -524,6 +525,10 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID
     )
     assert item_definition is not None
+    public_title_definition = load_workflow_definition_from_vontology(
+        PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID
+    )
+    assert public_title_definition is not None
     source_initial_state_id = authority_service._step_concept_id(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
         state_id="normalise_reference_set",
@@ -630,8 +635,8 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         item_definition.states[ingest_metadata_state_id].metadata[
             "subworkflow_contract"
         ]["workflow_id"]
-        == SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
-    )
+            == PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID
+        )
     ingest_file_state_id = authority_service._step_concept_id(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
         state_id="ingest_file_copy_reference",
@@ -1595,6 +1600,12 @@ def _build_source_neutral_execution_registry(
                 action_id="stub.represent_metadata_paper",
             )
         ),
+        PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID: (
+            _build_stub_representation_definition(
+                workflow_id=PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+                action_id="stub.represent_metadata_paper",
+            )
+        ),
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID: _build_stub_representation_definition(
             workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
             action_id="stub.represent_file_copy_paper",
@@ -1958,8 +1969,31 @@ def test_source_neutral_paper_reference_launch_contract_and_exemplars_are_source
     )
     assert routing_profile_rows
     routing_profile_text = routing_profile_rows[0].get("text") or ""
-    assert "Do not restrict selection to Gmail" in routing_profile_text
-    assert "English wording" in routing_profile_text
+    assert "any user language" in routing_profile_text
+    assert "Do not select it as the top-level route" in routing_profile_text
+    assert "email-source convergence parent" in routing_profile_text
+
+
+def test_direct_paper_workflows_defer_mail_discovery_to_email_parent() -> None:
+    seed_payload = json.loads(
+        _PAPER_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8")
+    )
+    workflows = {
+        item["workflow_id"]: item
+        for item in seed_payload.get("workflows") or []
+        if isinstance(item, dict)
+    }
+
+    arxiv_workflow = workflows[ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID]
+    source_neutral_workflow = workflows[
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
+    ]
+
+    assert "supplied independently of mail discovery" in arxiv_workflow["description"]
+    assert "choose the email-convergence parent" in arxiv_workflow["description"]
+    assert "choose the email-convergence parent" in source_neutral_workflow[
+        "description"
+    ]
 
 
 def test_bootstrap_skips_republication_when_workflow_family_is_current(
@@ -1967,7 +2001,7 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
 ) -> None:
     first_report = bootstrap_canonical_paper_representation_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 6
+    assert first_counts.get("workflows_published") == 7
 
     second_report = bootstrap_canonical_paper_representation_workflows()
     second_authority = second_report.get("authority_contract") or {}
@@ -2124,7 +2158,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "27" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "29" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -3978,9 +4012,10 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
         SCHOLARLY_PUBLIC_AUTHOR_REPRESENTATION_WORKFLOW_ID,
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
-        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
-        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
-    ]
+            SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+            SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+            PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+        ]
 
     payload = json.loads(tmp_asset_path.read_text(encoding="utf-8"))
     workflows = payload.get("workflows") or []

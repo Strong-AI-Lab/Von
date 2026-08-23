@@ -379,10 +379,9 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             "publication": {"skipped": True},
         },
     )
-    monkeypatch.setattr(
-        email_source_convergence_workflow_bootstrap,
-        "bootstrap_canonical_email_source_representation_convergence_workflows",
-        lambda: {
+    def _bootstrap_email_source_convergence():
+        startup_events.append("email_source_bootstrap")
+        return {
             "success": True,
             "workflow_ids": [
                 "#V#zhan_gmail_arxiv_ingestion_workflow",
@@ -390,19 +389,29 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             ],
             "publication": {"skipped": True},
             "gmail_completion_hint": {"success": True, "entry_count": 1},
-        },
-    )
+        }
+
     monkeypatch.setattr(
-        paper_workflow_bootstrap,
-        "bootstrap_canonical_paper_representation_workflows",
-        lambda: {
+        email_source_convergence_workflow_bootstrap,
+        "bootstrap_canonical_email_source_representation_convergence_workflows",
+        _bootstrap_email_source_convergence,
+    )
+
+    def _bootstrap_paper_workflows():
+        startup_events.append("paper_bootstrap")
+        return {
             "success": True,
             "workflow_ids": [
                 "#V#scholarly_paper_representation_workflow",
                 "#V#arxiv_paper_representation_workflow",
             ],
             "publication": {"skipped": True},
-        },
+        }
+
+    monkeypatch.setattr(
+        paper_workflow_bootstrap,
+        "bootstrap_canonical_paper_representation_workflows",
+        _bootstrap_paper_workflows,
     )
     monkeypatch.setattr(
         episode_evaluation_workflow_bootstrap,
@@ -557,6 +566,9 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     }
     assert "entity_workflow_bootstrap" not in queue_ready_components[0]
     assert startup_events[:2] == ["worker_started", "entity_bootstrap"]
+    assert startup_events.index("paper_bootstrap") < startup_events.index(
+        "email_source_bootstrap"
+    )
     assert result.get("startup_queue_ready") == {
         "stage": "before_canonical_bootstraps",
         "recovered_orphaned_instances": 0,

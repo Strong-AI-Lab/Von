@@ -2,8 +2,8 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "17",
-  "source_tag": "JVNAUTOSCI-2635",
+  "seed_version": "19",
+  "source_tag": "JVNAUTOSCI-2244",
   "supported_action_ids": [
     "arxiv.inspect_existing_state",
     "extract_signals_from_tool_result",
@@ -19,11 +19,11 @@
     {
       "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
       "display_name": "Zhan Gmail Arxiv Ingestion Workflow",
-      "description": "Explicit batch workflow for recurring Gmail-to-arXiv paper representation convergence. It selects newest Inbox messages that are neither represented nor dispositioned, represents each supported arXiv reference, records current source-processing evidence, then atomically applies the represented label and removes INBOX with canonical Gmail read-back. Messages with no supported reference instead receive one actor-scoped review task and VON/PAPER/NEEDS_REVIEW while remaining in Inbox. The parent instance preserves one complete result row for every message discovered in its bounded page and completes with retryable failure details when some independently useful items fail.",
+      "description": "Preferred top-level workflow whenever a user asks to search, inspect, or read Gmail/email messages and represent papers found there. It owns bounded mail discovery, full-message paper extraction including bare title mentions, all-paper iteration, source provenance, represented markers, and Gmail label/finality read-back. Choose this parent instead of directly listing Gmail and launching arXiv or source-neutral paper workflows; those are child capabilities after email discovery. Messages with no identifiable paper receive one actor-scoped review task and remain in Inbox. The parent preserves a result row for every discovered message and retryable details for independently failed items.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Keep scanning Gmail for arXiv paper links, represent every returned unrepresented paper, label each verified source message VON/PAPER/REPRESENTED, and remove it from Inbox.\", \"Represent recent papers from email messages and report every paper or failure discovered in the bounded batch.\", \"Run the recurring email-to-representation convergence workflow for arXiv paper notifications.\"], \"keywords\": [\"batch email messages about arxiv papers\", \"represent recent papers from email messages\", \"represent arxiv papers from email\", \"gmail arxiv paper representation\", \"source email to paper representation convergence\", \"represented source processing marker\", \"recurring arxiv gmail ingestion workflow\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\", \"messages\", \"mailbox\", \"inbox\", \"sender\", \"label\"], \"excluded_query_cues\": [\"which gmail profile\", \"what gmail profile\", \"profile did you use\", \"which mail profile\", \"what mail profile\", \"account did you use\"], \"routing_notes\": [\"This is the reusable batch convergence workflow for broad email-paper representation requests: every Gmail message returned up to gmail_max_results, and every supported arXiv reference in each message, may produce representation and message-level Gmail label effects.\", \"Use one parent instance rather than independently launching the exact-message child for each discovered message; the parent result is the durable locator for later list and count questions.\", \"One item failure does not invalidate independently verified successes: preserve the failed row and retry evidence and complete the parent with retryable failures.\", \"Do not route a singular newest or best request here; discover and select the exact source item read-only, then invoke its matching representation capability.\", \"Do not choose this workflow for a question about which Gmail profile or account was used by a prior mail operation.\", \"Do not choose this workflow for source-neutral paper references or conversation-context paper lookups unless an email/Gmail/mail source cue is present.\", \"Only label and archive a source message after current represented-marker and artefact read-back succeeds.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"examples\": [\"Look in the last 20 email messages for arXiv papers and represent any papers you find in Vontology.\", \"Find every paper mentioned in my recent Gmail messages, including bare titles, and fully represent each one.\", \"Keep scanning Gmail for paper links or titles, represent every returned unrepresented paper, and converge each verified source message.\", \"Represent recent papers from email messages and report every paper or failure discovered in the bounded batch.\"], \"keywords\": [\"look in email for papers and represent them\", \"find papers mentioned in gmail\", \"last email messages arxiv papers\", \"bare paper title in email\", \"batch email messages about scientific papers\", \"represent recent papers from email messages\", \"represent arxiv papers from email\", \"gmail paper representation\", \"source email to paper representation convergence\", \"represented source processing marker\", \"recurring gmail paper ingestion workflow\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\", \"messages\", \"mailbox\", \"inbox\", \"sender\", \"label\"], \"excluded_query_cues\": [\"which gmail profile\", \"what gmail profile\", \"profile did you use\", \"which mail profile\", \"what mail profile\", \"account did you use\"], \"routing_notes\": [\"This is the preferred top-level capability whenever the task starts from Gmail/email/mail discovery and asks to identify, ingest, represent, or persist papers. A bare identifiable paper mention is sufficient representation intent.\", \"Select this parent before any direct gmail_list_messages plus arXiv or source-neutral paper workflow plan: the parent owns full-message extraction, every-paper iteration, source provenance, processing markers, and Gmail finality.\", \"Every Gmail message returned up to gmail_max_results, and every supported scientific-paper reference or bare title in each message, may produce representation and message-level Gmail label effects.\", \"Use one parent instance rather than independently launching paper workflows for references discovered ad hoc; those paper workflows are children after source discovery. The parent result is the durable locator for later list and count questions.\", \"One item failure does not invalidate independently verified successes: preserve the failed row and retry evidence and complete the parent with retryable failures.\", \"Do not route a singular newest or best request here; discover and select the exact source item read-only, then invoke its matching representation capability.\", \"Do not choose this workflow for a question about which Gmail profile or account was used by a prior mail operation.\", \"Do not choose this workflow for source-neutral paper references or conversation-context paper lookups unless an email/Gmail/mail source cue is present.\", \"Only label and archive a source message after current represented-marker and artefact read-back succeeds.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -33,7 +33,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\", \"selection_guidance\": \"Choose for any request whose source is Gmail, email, mail, inbox, or messages and whose intended outcome is identifying and representing papers found there. Keep direct Gmail reads and paper representation workflows inside this parent so source provenance, completeness, markers, and message finality are preserved.\"}",
           "lang": "en-NZ"
         },
         {
@@ -161,7 +161,7 @@
                   {
                     "key": "base_gmail_query",
                     "preserve_existing": true,
-                    "value": "arxiv.org"
+                    "value": "{arxiv.org doi.org paper preprint manuscript}"
                   },
                   {
                     "key": "gmail_max_results",
@@ -685,11 +685,11 @@
     {
       "workflow_id": "#V#email_arxiv_ingestion_from_message_workflow",
       "display_name": "Email Arxiv Ingestion From Message Workflow",
-      "description": "Processes one exact Gmail message selected by the caller: establish versioned source and processing-authority identity, reuse or upgrade current represented source-processing evidence when possible, ingest each arXiv reference when needed, canonically verify represented artefacts, then atomically apply VON/PAPER/REPRESENTED and remove INBOX with independent Gmail read-back. If no supported arXiv reference is found, create or reuse one actor-scoped review task, apply VON/PAPER/NEEDS_REVIEW, and preserve INBOX.",
+      "description": "Processes one exact Gmail message selected by the caller: establish versioned source and processing-authority identity, reuse or upgrade current represented source-processing evidence when possible, identify every scientific paper including a bare title mention, ingest each reference through the source-neutral paper workflow, canonically verify every represented artefact, then atomically apply VON/PAPER/REPRESENTED and remove INBOX with independent Gmail read-back. If no supported paper reference is found, create or reuse one actor-scoped review task, apply VON/PAPER/NEEDS_REVIEW, and preserve INBOX.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Represent the arXiv paper linked from this exact Gmail message, verify its current represented processing marker, label it VON/PAPER/REPRESENTED, and remove it from Inbox.\", \"Converge this selected Gmail message through the durable arXiv representation and mailbox-cleanup path.\"], \"keywords\": [\"exact gmail message arxiv representation\", \"selected email arxiv paper ingestion\", \"represent paper from this message\", \"gmail message processing marker\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\"], \"routing_notes\": [\"Use only after read-only discovery or explicit user context identifies one exact Gmail source message.\", \"Pass include_body explicitly on every gmail_get_message discovery read. When a Gmail search result matched the paper query but its subject or snippet does not expose the arXiv reference, use include_body=true and inspect the bounded message body before rejecting it or moving to an older message.\", \"The caller must supply the exact Gmail profile and current_message object; this workflow does not choose a message or scan a mailbox.\", \"Prefer this durable unit over a paper-only representation workflow when the user outcome also requires source-message and Gmail convergence evidence.\", \"Do not apply VON/PAPER/REPRESENTED or remove INBOX for messages with no supported resource or without current marker and represented-artefact read-back; no-resource messages instead require a review task and VON/PAPER/NEEDS_REVIEW.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"examples\":[\"Represent every scientific paper mentioned in this exact Gmail message, including a bare title or link, then verify its processing marker and converge the mailbox state.\",\"The selected email merely lists these papers; fully represent all of them without asking whether the sender issued an imperative.\"],\"keywords\":[\"exact gmail message paper representation\",\"papers mentioned in email\",\"bare paper mention\",\"selected email paper ingestion\",\"gmail message processing marker\"],\"required_query_cues\":[\"gmail\",\"email\",\"mail\",\"message\"],\"routing_notes\":[\"Use only after read-only discovery or explicit user context identifies one exact Gmail source message.\",\"A bare identifiable scientific-paper mention is sufficient representation intent when this workflow is explicitly selected; do not require imperative wording, a sender request, or confirmation.\",\"Pass include_body=true on every gmail_get_message discovery read; inspect the bounded message body before rejecting it or moving to an older message.\",\"The caller must supply the exact Gmail profile and current_message object; this workflow does not choose a message or scan a mailbox.\",\"Do not apply VON/PAPER/REPRESENTED or remove INBOX until every identified paper has a canonically read-back represented artefact and the current source marker is verified; failures remain unmarked for retry.\"],\"schema_version\":\"workflow_discovery_exemplars.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -1172,12 +1172,12 @@
             "conditional_transitions": [
               {
                 "condition_spec": {
-                  "key": "arxiv_resource_references",
+                  "key": "resource_references",
                   "kind": "context_cardinality",
                   "operator": "gt",
                   "value": 0
                 },
-                "reason": "arxiv_resources_present",
+                "reason": "paper_resources_present",
                 "to_state": "ingest_arxiv_resources"
               }
             ],
@@ -1218,7 +1218,7 @@
                   },
                   {
                     "key": "review_task_description",
-                    "template": "Von found no supported arXiv paper reference in Gmail message {message_id} from profile {profile}. Review the source message and decide whether its paper reference needs representation or the message should be skipped.",
+                    "template": "Von found no identifiable scientific paper reference in Gmail message {message_id} from profile {profile}. Review the source message and decide whether its paper reference needs representation or the message should be skipped.",
                     "variables": {
                       "message_id": {
                         "value_from_context": "message_id"
@@ -1580,11 +1580,11 @@
             "static_input_bindings": [
               [
                 "item_context_key",
-                "current_resource_reference"
+                "paper_reference"
               ],
               [
                 "items_context_key",
-                "arxiv_resource_references"
+                "resource_references"
               ],
               [
                 "include_tool_invocations_in_iteration_results",
@@ -1592,7 +1592,7 @@
               ],
               [
                 "max_items",
-                5
+                50
               ],
               [
                 "max_transitions",
@@ -1604,7 +1604,7 @@
               ],
               [
                 "workflow_id",
-                "#V#arxiv_resource_ingestion_from_email_reference_workflow"
+                "#V#source_neutral_paper_reference_ingestion_workflow"
               ]
             ],
             "tool_output_mapping_specs": [
@@ -2310,7 +2310,7 @@
     {
       "workflow_id": "#V#email_resource_link_extraction",
       "display_name": "Email Resource Link Extraction",
-      "description": "Fetches one Gmail message through the generic workflow MCP bridge and uses the Vontology-authored output_item_signal_extraction_hint on #V#gmail_get_message_tool to produce structured resource references, including arXiv references.",
+      "description": "Fetches one Gmail message through the generic workflow MCP bridge and uses the Vontology-authored output_item_signal_extraction_hint on #V#gmail_get_message_tool to identify every distinct scientific paper, including a bare title mention, as source-neutral structured paper references.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowLifecycleJson",

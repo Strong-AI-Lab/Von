@@ -56,11 +56,11 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
         email_source_representation_convergence_workflow_vontology_service as mod,
     )
 
-    captured_hint: dict[str, object] = {}
+    captured_hints: list[dict[str, object]] = []
     captured_bundle: dict[str, object] = {}
 
     def fake_upsert(**kwargs):
-        captured_hint.update(kwargs)
+        captured_hints.append(dict(kwargs))
         return {"updated": True}
 
     def fake_bootstrap(**kwargs):
@@ -72,14 +72,23 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
 
     monkeypatch.setattr(mod, "upsert_singleton_text_relation", fake_upsert)
     monkeypatch.setattr(mod, "bootstrap_repo_seed_workflow_bundle", fake_bootstrap)
+    monkeypatch.setattr(
+        mod,
+        "bootstrap_canonical_paper_representation_workflows",
+        lambda: {"success": True, "publication": {"skipped": True}},
+    )
 
     report = mod.bootstrap_canonical_email_source_representation_convergence_workflows()
 
     assert report["success"] is True
+    assert report["paper_workflow_dependency"]["success"] is True
     assert captured_bundle["asset_path"] == mod._REPO_SEED_ASSET_PATH
-    assert captured_hint["subject_concept_id"] == mod.GMAIL_GET_MESSAGE_TOOL_ID
-    assert captured_hint["predicate"] == mod.GMAIL_OUTPUT_FOLLOWUP_HINT_PREDICATE
-    payload = json.loads(str(captured_hint["text"]))
+    hints_by_predicate = {
+        str(item["predicate"]): item for item in captured_hints
+    }
+    completion_hint = hints_by_predicate[mod.GMAIL_OUTPUT_FOLLOWUP_HINT_PREDICATE]
+    assert completion_hint["subject_concept_id"] == mod.GMAIL_GET_MESSAGE_TOOL_ID
+    payload = json.loads(str(completion_hint["text"]))
     entry = payload["entries"][0]
     assert entry["action_kind"] == "terminal_completion"
     assert entry["action"]["tool_name"] == "gmail_modify_labels"
@@ -94,6 +103,13 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
     assert entry["represented_effects"][0]["effect_kind"] == (
         "verified_gmail_label_convergence"
     )
+    signal_hint = hints_by_predicate[
+        mod.GMAIL_PAPER_SIGNAL_EXTRACTION_HINT_PREDICATE
+    ]
+    assert signal_hint["subject_concept_id"] == mod.GMAIL_GET_MESSAGE_TOOL_ID
+    assert "bare paper mention is sufficient" in str(signal_hint["text"])
+    assert "Do not guess an arXiv ID" in str(signal_hint["text"])
+    assert report["gmail_paper_signal_extraction_hint"]["success"] is True
 
 
 def test_email_source_seed_keeps_claim_enrichment_out_of_source_completion() -> None:
@@ -302,15 +318,28 @@ def test_email_source_seed_keeps_batch_effects_out_of_singular_routing() -> None
     relations = {
         item["predicate"]: json.loads(item["text"])
         for item in workflow.get("text_relations") or []
-        if item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
+        if item.get("predicate")
+        in {
+            "#V#hasWorkflowDiscoveryExemplarsJson",
+            "#V#hasWorkflowRoutingProfileJson",
+        }
     }
-    routing_notes = relations["#V#hasWorkflowDiscoveryExemplarsJson"][
-        "routing_notes"
-    ]
-    assert "batch workflow" in workflow["description"]
-    assert any("every Gmail message" in note for note in routing_notes)
-    assert any("every supported arXiv reference" in note for note in routing_notes)
+    discovery = relations["#V#hasWorkflowDiscoveryExemplarsJson"]
+    routing_notes = discovery["routing_notes"]
+    routing_profile = relations["#V#hasWorkflowRoutingProfileJson"]
+    assert "Preferred top-level workflow" in workflow["description"]
+    assert any(
+        example
+        == "Look in the last 20 email messages for arXiv papers and represent any papers you find in Vontology."
+        for example in discovery["examples"]
+    )
+    assert any("Every Gmail message" in note for note in routing_notes)
+    assert any("every supported scientific-paper reference" in note for note in routing_notes)
+    assert any("direct gmail_list_messages" in note for note in routing_notes)
     assert any("Do not route a singular" in note for note in routing_notes)
+    assert "Gmail, email, mail, inbox, or messages" in routing_profile[
+        "selection_guidance"
+    ]
 
 
 def test_email_source_seed_requires_current_markers_before_verified_gmail_writes() -> None:
@@ -413,6 +442,17 @@ def test_email_source_seed_dispositions_non_converging_mail_for_human_review() -
     }
 
     assert steps["decide_arxiv_resources"]["next_state"] == "build_review_task"
+    decision = steps["decide_arxiv_resources"]["conditional_transitions"][0]
+    assert decision["condition_spec"]["key"] == "resource_references"
+    ingestion_bindings = dict(
+        steps["ingest_arxiv_resources"]["static_input_bindings"]
+    )
+    assert ingestion_bindings["item_context_key"] == "paper_reference"
+    assert ingestion_bindings["items_context_key"] == "resource_references"
+    assert ingestion_bindings["max_items"] == 50
+    assert ingestion_bindings["workflow_id"] == (
+        "#V#source_neutral_paper_reference_ingestion_workflow"
+    )
     create_review = steps["create_review_task"]
     assert create_review["mutation_authority"]["maximum_level"] == (
         "additive_vontology"
@@ -525,7 +565,7 @@ def test_non_converging_message_creates_one_review_task_and_preserves_inbox() ->
         definition,
         environment=WorkflowEnvironment(llm_client=None),
         data={
-            "arxiv_resource_references": [],
+            "resource_references": [],
             "message_id": "gmail-message-1",
             "gmail_profile": "vonwitbrock-gmail",
             "user_concept_id": "#V#michael_witbrock",
@@ -1365,12 +1405,165 @@ def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() ->
     result = WorkflowExecutor(registry=registry, max_transitions=8).run(
         definition,
         environment=WorkflowEnvironment(llm_client=None),
-        data={"arxiv_resource_references": [{"identifier": "2606.12345"}]},
+        data={"resource_references": [{"arxiv_id": "2606.12345"}]},
     )
 
     assert result.completed is False
     assert result.final_state == "failed_unmarked"
     assert calls == ["workflow_control.for_each"]
+
+
+def test_seeded_email_paper_soak_dispatches_all_20_before_completion_marker() -> None:
+    calls: list[str] = []
+    paper_references = [
+        {
+            "reference_kind": "metadata",
+            "title": f"Barely Mentioned Public Paper {index + 1}",
+        }
+        for index in range(20)
+    ]
+    paper_ids = [f"#V#global_public_paper_{index + 1}" for index in range(20)]
+    file_ids = [f"#V#user_file_copy_{index + 1}" for index in range(20)]
+    iteration_results = [
+        {
+            "index": index,
+            "item": paper_references[index],
+            "completed": True,
+            "final_state": "completed",
+            "result": {
+                "paper_concept_id": paper_ids[index],
+                "file_copy_concept_id": file_ids[index],
+                "article_readback": {"concept_id": paper_ids[index]},
+            },
+        }
+        for index in range(20)
+    ]
+
+    def for_each(request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls.append("dispatch_all_papers")
+        assert request.inputs["workflow_id"] == (
+            "#V#source_neutral_paper_reference_ingestion_workflow"
+        )
+        assert request.inputs["items_context_key"] == "resource_references"
+        assert request.inputs["item_context_key"] == "paper_reference"
+        assert request.inputs["max_items"] == 50
+        assert request.data["resource_references"] == paper_references
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "for_each_error_count": 0,
+                "for_each_item_count": 20,
+                "for_each_partial_success": False,
+                "for_each_success_count": 20,
+                "iteration_results": iteration_results,
+                "iteration_errors": [],
+            },
+        )
+
+    def invoke_tool(request: WorkflowActionRequest) -> WorkflowActionResult:
+        tool_name = str(request.inputs.get("tool_name") or "")
+        arguments = dict(request.inputs.get("tool_arguments") or {})
+        calls.append(tool_name)
+        if tool_name == "record_source_processing_marker":
+            assert calls == ["dispatch_all_papers", "record_source_processing_marker"]
+            assert arguments["represented_outputs"] == iteration_results
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "message_processing_marker": "#V#marker_soak_20",
+                        "processed_message_id": "gmail-soak-20",
+                        "paper_concept_id": paper_ids[0],
+                        "paper_concept_ids": paper_ids,
+                        "file_copy_concept_id": file_ids[0],
+                        "file_copy_concept_ids": file_ids,
+                        "arxiv_id": None,
+                        "arxiv_ids": [],
+                    }
+                },
+            )
+        if tool_name == "get_source_processing_marker":
+            assert calls[-2:] == [
+                "record_source_processing_marker",
+                "get_source_processing_marker",
+            ]
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "source_processing_marker_exists": True,
+                        "message_processing_marker": "#V#marker_soak_20",
+                        "processed_message_id": "gmail-soak-20",
+                        "paper_concept_id": paper_ids[0],
+                        "paper_concept_ids": paper_ids,
+                        "file_copy_concept_id": file_ids[0],
+                        "file_copy_concept_ids": file_ids,
+                        "arxiv_id": None,
+                        "arxiv_ids": [],
+                        "source_processing_current": True,
+                        "represented_artifacts_exist": True,
+                    }
+                },
+            )
+        assert tool_name == "gmail_modify_labels"
+        assert calls[-2:] == ["get_source_processing_marker", "gmail_modify_labels"]
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "gmail_label_state_verified": True,
+                    "readback_label_ids": ["Label_REPRESENTED"],
+                    "modify_reconciled_after_error": False,
+                }
+            },
+        )
+
+    definition = _exact_message_definition(
+        "ingest_arxiv_resources",
+        "mark_done",
+        "verify_done_marker",
+        "converge_gmail_labels",
+        "project_done_result",
+        "project_unmarked_result",
+        "project_gmail_unverified_result",
+        "done",
+        "failed_unmarked",
+        "failed_gmail_state",
+        "failed",
+        initial_state="ingest_arxiv_resources",
+    )
+    registry = ActionRegistry()
+    registry.register(ActionSpec(action_id="workflow_control.for_each", handler=for_each))
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=invoke_tool)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "resource_references": paper_references,
+            "message_id": "gmail-soak-20",
+            "message_subject": "Twenty papers",
+            "gmail_profile": "vonwitbrock-gmail",
+            "represented_label_id": "Label_REPRESENTED",
+            "source_fingerprint": "gmail-message-id:v1:soak-20",
+            "processing_authority_fingerprint": "email-paper-ingestion:v3",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert result.data["arxiv_success_count"] == 20
+    assert result.data["paper_concept_ids"] == paper_ids
+    assert result.data["source_processing_current"] is True
+    assert result.data["gmail_label_state_verified"] is True
+    assert calls == [
+        "dispatch_all_papers",
+        "record_source_processing_marker",
+        "get_source_processing_marker",
+        "gmail_modify_labels",
+    ]
 
 
 def test_zhan_seed_launch_contract_can_narrow_from_prior_arxiv_evidence() -> None:
@@ -1431,9 +1624,13 @@ def test_email_arxiv_schedule_bootstrap_creates_managed_interval_schedule(
     assert schedule.default_inputs["gmail_profile"] == (
         "#V#gmail_profile_vonwitbrock_gmail"
     )
-    assert schedule.default_inputs["base_gmail_query"] == "arxiv.org"
+    assert schedule.default_inputs["base_gmail_query"] == (
+        "{arxiv.org doi.org paper preprint manuscript}"
+    )
     assert schedule.default_inputs["gmail_max_results"] == 2
-    assert "arxiv" in schedule.default_inputs["prompt"].lower()
+    assert "bare identifiable paper mention" in schedule.default_inputs[
+        "prompt"
+    ].lower()
     assert schedule.enabled is False
     assert report["schedule_enabled"] is False
 

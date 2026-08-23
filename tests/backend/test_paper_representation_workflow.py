@@ -5,7 +5,19 @@ import pytest
 from src.backend.services.ontology_publication_authority_service import (
     PublicationContext,
 )
-from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
+from src.backend.services.paper_representation_workflow_vontology_service import (
+    _REPO_SEED_ASSET_PATH,
+    PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
+)
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionResult,
+    WorkflowEnvironment,
+)
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
 from src.backend.workflows.durable.paper_representation_workflow import (
     ARXIV_ACQUISITION_MODE_DOWNLOAD_FROM_SOURCE,
     ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY,
@@ -13,6 +25,8 @@ from src.backend.workflows.durable.paper_representation_workflow import (
     ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE,
     ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
     ARXIV_NORMALISE_SOURCE_ACTION_ID,
+    PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+    PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
     SCHOLARLY_PAPER_ENRICH_ACTION_ID,
     SCHOLARLY_PAPER_ENSURE_PAPER_CONCEPT_ACTION_ID,
     SCHOLARLY_PAPER_LINK_FILE_COPY_ACTION_ID,
@@ -21,6 +35,10 @@ from src.backend.workflows.durable.paper_representation_workflow import (
     SCHOLARLY_PAPER_RESOLVE_AUTHORS_ACTION_ID,
     SCHOLARLY_PAPER_VERIFY_ACTION_ID,
     register_paper_representation_actions,
+)
+from src.backend.workflows.engine import WorkflowExecutor
+from src.backend.workflows.workflow_concept_authority_service import (
+    build_repo_seed_workflow_definitions,
 )
 
 _ACTOR_CONCEPT_ID = "#V#paper_workflow_actor"
@@ -39,6 +57,8 @@ def test_register_paper_representation_actions_registers_expected_ids() -> None:
     assert {
         ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
         ARXIV_NORMALISE_SOURCE_ACTION_ID,
+        PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+        PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
         SCHOLARLY_PAPER_ENRICH_ACTION_ID,
         SCHOLARLY_PAPER_MATERIALISE_ACTION_ID,
         SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID,
@@ -48,6 +68,209 @@ def test_register_paper_representation_actions_registers_expected_ids() -> None:
     verify_spec = registry.get(SCHOLARLY_PAPER_VERIFY_ACTION_ID)
     assert verify_spec is not None
     assert verify_spec.required_tool_operation_class == "verification_read"
+
+
+def test_public_title_resolution_selects_one_exact_arxiv_match() -> None:
+    registry = _paper_registry()
+    environment = WorkflowEnvironment(llm_client=None)
+
+    prepared = registry.execute(
+        PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+        inputs={
+            "paper_metadata": {
+                "title": "Attention Is All You Need",
+                "authors": ["Ashish Vaswani"],
+            }
+        },
+        context={},
+        env=environment,
+    )
+    assert prepared.status == "success"
+    assert prepared.outputs["public_paper_title_query"] == (
+        "Attention Is All You Need"
+    )
+
+    selected = registry.execute(
+        PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
+        inputs={
+            "title": "Attention Is All You Need",
+            "author_names": ["Ashish Vaswani"],
+            "search_payload": {
+                "results": [
+                    {
+                        "id": "http://arxiv.org/abs/1706.03762v7",
+                        "title": "Attention Is All You Need",
+                        "authors": ["Ashish Vaswani", "Noam Shazeer"],
+                        "summary": "A sequence transduction architecture.",
+                        "published": "2017-06-12T00:00:00Z",
+                        "categories": ["cs.CL", "cs.LG"],
+                    },
+                    {
+                        "id": "http://arxiv.org/abs/9999.00001",
+                        "title": "Attention is almost all you need",
+                    },
+                ]
+            },
+        },
+        context={},
+        env=environment,
+    )
+
+    assert selected.status == "success"
+    assert selected.outputs["arxiv_id"] == "1706.03762"
+    assert selected.outputs["source_uri"] == (
+        "https://arxiv.org/abs/1706.03762"
+    )
+    assert selected.outputs["paper_metadata"]["authors"] == [
+        "Ashish Vaswani",
+        "Noam Shazeer",
+    ]
+    assert selected.outputs["public_paper_resolution_status"] == (
+        "exact_public_title_match"
+    )
+
+
+def test_public_title_resolution_fails_closed_on_ambiguous_exact_matches() -> None:
+    selected = _paper_registry().execute(
+        PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
+        inputs={
+            "title": "A Shared Title",
+            "search_payload": {
+                "results": [
+                    {"id": "2601.00001", "title": "A Shared Title"},
+                    {"id": "2602.00002", "title": "A Shared Title"},
+                ]
+            },
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert selected.status == "failed"
+    assert selected.error == "public_paper_title_match_ambiguous"
+    assert selected.outputs["public_paper_exact_match_count"] == 2
+
+
+def test_public_title_resolution_workflow_searches_then_represents_exact_match() -> (
+    None
+):
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
+    )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
+    calls: list[str] = []
+
+    def invoke_tool(request):
+        calls.append(str(request.inputs["tool_name"]))
+        assert request.inputs["tool_arguments"]["query"] == (
+            "Attention Is All You Need"
+        )
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "results": [
+                        {
+                            "id": "http://arxiv.org/abs/1706.03762",
+                            "title": "Attention Is All You Need",
+                            "authors": ["Ashish Vaswani"],
+                            "published": "2017-06-12",
+                        }
+                    ]
+                }
+            },
+        )
+
+    def invoke_subworkflow(request):
+        calls.append(str(request.workflow_state_id))
+        assert request.inputs["arxiv_id"] == "1706.03762"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_concept_id": "#V#public_arxiv_1706_03762",
+                    "file_copy_concept_id": "#V#local_arxiv_1706_03762",
+                    "article_readback": {
+                        "concept_id": "#V#public_arxiv_1706_03762",
+                    },
+                }
+            },
+        )
+
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=invoke_tool)
+    )
+    registry.register(
+        ActionSpec(action_id="workflow_invoke_subworkflow", handler=invoke_subworkflow)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"paper_metadata": {"title": "Attention Is All You Need"}},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "completed"
+    assert calls == ["search_arxiv", "ingest_resolved_arxiv"]
+    assert result.data["paper_concept_id"] == "#V#public_arxiv_1706_03762"
+    assert result.data["public_paper_resolution_status"] == (
+        "exact_public_title_match"
+    )
+
+
+def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> None:
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
+    )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(
+            action_id="workflow_mcp.invoke_tool",
+            handler=lambda _request: pytest.fail(
+                "stable DOI reference must not be replaced by a title search"
+            ),
+        )
+    )
+
+    def invoke_metadata(request):
+        assert request.workflow_state_id == "ingest_metadata_fallback"
+        assert request.inputs["paper_metadata"]["doi"] == "10.1000/example"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_concept_id": "#V#public_doi_10_1000_example",
+                    "article_readback": {
+                        "concept_id": "#V#public_doi_10_1000_example"
+                    },
+                }
+            },
+        )
+
+    registry.register(
+        ActionSpec(
+            action_id="workflow_invoke_subworkflow",
+            handler=invoke_metadata,
+        )
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "doi": "10.1000/example",
+            "paper_metadata": {
+                "title": "A Paper With A DOI",
+                "doi": "10.1000/example",
+            },
+        },
+    )
+
+    assert result.completed is True
+    assert result.data["paper_concept_id"] == "#V#public_doi_10_1000_example"
 
 
 @pytest.mark.parametrize(
