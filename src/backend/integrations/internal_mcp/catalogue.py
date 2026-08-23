@@ -2264,6 +2264,9 @@ def _create_concepts(**kwargs):
 
             duplicate_match = find_existing_concept_for_create_concepts(
                 concept_name=str(name),
+                requested_concept_id=(
+                    canonical_concept_id_override or concept_data.get("concept_id")
+                ),
                 kind=kind,
                 parent_id_for_concept=parent_id_for_concept,
                 preferred_language="en-NZ",

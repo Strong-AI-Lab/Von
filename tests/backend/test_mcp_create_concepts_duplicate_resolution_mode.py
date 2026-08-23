@@ -140,6 +140,64 @@ def test_canonical_id_only_skips_semantic_resolution_after_exact_miss(
     assert exact_queries == [{"concept_id": "#V#stable_represented_identity"}]
 
 
+def test_canonical_id_only_honours_explicit_identity_before_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common_preflights(monkeypatch)
+    exact_queries: list[dict[str, Any]] = []
+    create_calls: list[dict[str, Any]] = []
+    explicit_id = "#V#paper_under_preparation_deterministic_identity"
+    display_name_id = "#V#existing_public_paper_title"
+
+    def _find_one(
+        query: dict[str, Any],
+        _projection: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        exact_queries.append(query)
+        if query.get("concept_id") == display_name_id:
+            return {
+                "concept_id": display_name_id,
+                "relationships": {"is_an_instance_of": ["#V#scholarly_article"]},
+            }
+        return None
+
+    def _create(**kwargs: Any) -> dict[str, Any]:
+        create_calls.append(kwargs)
+        return {
+            "success": True,
+            "message": "created",
+            "concept": {"concept_id": explicit_id},
+            "canonical_concept_id": explicit_id,
+            "input_name": kwargs["new_concept_name"],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        _find_one,
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        _create,
+    )
+
+    result = _create_concepts(
+        parent_id=_PARENT_ID,
+        concepts=[
+            {
+                "name": "Existing public paper title",
+                "concept_id": explicit_id,
+                "kind": "instance",
+            }
+        ],
+        duplicate_resolution_mode="canonical_id_only",
+    )
+
+    assert result["successful"] == 1
+    assert {"concept_id": explicit_id} in exact_queries
+    assert {"concept_id": display_name_id} not in exact_queries
+    assert create_calls[0]["canonical_concept_id_override"] == explicit_id
+
+
 def test_default_mode_retains_semantic_duplicate_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
