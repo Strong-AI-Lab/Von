@@ -2,8 +2,13 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "20",
+  "seed_version": "21",
   "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#email_resource_link_extraction": {
+      "20": [
+        "9706da2f51399e67008283cd74af82f8e58bcb3d1779c76c535f903ed439d6c3"
+      ]
+    },
     "#V#zhan_gmail_arxiv_ingestion_workflow": {
       "19": [
         "fd6a3142054690216ed961920ae2984657951d3f7921db3a1379fc59d318e6ce"
@@ -2339,6 +2344,7 @@
                 {
                   "format": "full",
                   "include_body": true,
+                  "max_body_chars": 65536,
                   "message_id": {
                     "$context_key": "message_id"
                   },
@@ -2381,6 +2387,10 @@
               [
                 "source_tool_concept",
                 "#V#gmail_get_message_tool"
+              ],
+              [
+                "payload_max_chars",
+                100000
               ]
             ],
             "tool_output_mapping_specs": [

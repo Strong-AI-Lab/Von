@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
+from src.backend.services import tool_result_hints as svc
 from src.backend.services.output_hint_contracts import (
     OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
 )
-from src.backend.services import tool_result_hints as svc
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     WorkflowActionRequest,
@@ -144,6 +144,60 @@ def test_happy_path_returns_signals(
     assert isinstance(signals, dict)
     assert signals["items"][0]["url"] == "https://example.com"
     assert "Extract things." in fake_llm.calls[0]["prompt"]
+    assert result.outputs["payload_max_chars"] == 12_000
+    assert result.outputs["payload_truncated"] is False
+
+
+def test_action_applies_authored_payload_bound(
+    registry: ActionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        svc,
+        "resolve_hint_body",
+        lambda concept_id, predicate_id, lang="en-NZ": "Extract things.",
+    )
+    fake_llm = _FakeLLM('{"items": []}')
+    tail_marker = "https://arxiv.org/abs/2608.12345"
+    spec = registry.get(EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        _make_request(
+            inputs={
+                "source_tool_concept": "#V#some_tool",
+                "tool_payload": {
+                    "body": ("earlier context " * 1_000) + tail_marker
+                },
+                "payload_max_chars": 100_000,
+            },
+            llm_client=fake_llm,
+        )
+    )
+
+    assert result.status == "success", result.error
+    assert tail_marker in fake_llm.calls[0]["prompt"]
+    assert result.outputs["payload_max_chars"] == 100_000
+    assert result.outputs["payload_truncated"] is False
+
+
+def test_action_rejects_invalid_payload_bound(registry: ActionRegistry) -> None:
+    spec = registry.get(EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        _make_request(
+            inputs={
+                "source_tool_concept": "#V#some_tool",
+                "tool_payload": {"body": "paper"},
+                "payload_max_chars": 500,
+            },
+            llm_client=_FakeLLM('{"items": []}'),
+        )
+    )
+
+    assert result.status == "failed"
+    assert "payload_max_chars" in (result.error or "")
 
 
 def test_payload_falls_back_to_data(

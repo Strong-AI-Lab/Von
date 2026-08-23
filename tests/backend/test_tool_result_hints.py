@@ -114,6 +114,58 @@ def test_extract_signals_parses_plain_json(monkeypatch: pytest.MonkeyPatch) -> N
     assert '"items"' in prompt  # payload was JSON-serialised into the prompt
 
 
+def test_extract_signals_respects_larger_authored_payload_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tool_result_hints,
+        "get_texts_for_concept",
+        lambda **_: [{"text": "Extract every reference."}],
+    )
+    llm = _FakeLLM(response='{"items": []}')
+    tail_marker = "https://arxiv.org/abs/2608.12345"
+    payload = {"body": ("earlier context " * 1_000) + tail_marker}
+
+    result = extract_signals_from_tool_result(
+        "#V#tool_x",
+        payload,
+        None,
+        llm_client=llm,
+        payload_max_chars=30_000,
+    )
+
+    assert tail_marker in llm.calls[0]["prompt"]
+    assert result.payload_max_chars == 30_000
+    assert result.payload_serialised_chars > 12_000
+    assert result.payload_included_chars == result.payload_serialised_chars
+    assert result.payload_truncated is False
+
+
+def test_extract_signals_reports_default_payload_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tool_result_hints,
+        "get_texts_for_concept",
+        lambda **_: [{"text": "Extract every reference."}],
+    )
+    llm = _FakeLLM(response='{"items": []}')
+    tail_marker = "https://arxiv.org/abs/2608.12345"
+
+    result = extract_signals_from_tool_result(
+        "#V#tool_x",
+        {"body": ("earlier context " * 1_000) + tail_marker},
+        None,
+        llm_client=llm,
+    )
+
+    assert tail_marker not in llm.calls[0]["prompt"]
+    assert result.payload_max_chars == 12_000
+    assert result.payload_included_chars == 12_000
+    assert result.payload_serialised_chars > result.payload_included_chars
+    assert result.payload_truncated is True
+
+
 def test_extract_signals_strips_code_fence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         tool_result_hints,
