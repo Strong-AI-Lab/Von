@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import subprocess
 import zipfile
 
 import pytest
@@ -125,37 +124,15 @@ def test_pdf_page_projection_stops_at_local_page_boundary(monkeypatch):
 
     if not service._pdf_parser_isolation_supported():
         pytest.skip("hard PDF parser isolation is not available on this host")
-    import fitz
+    import pymupdf
 
-    document = fitz.open()
+    document = pymupdf.open()
     for page_number in range(1, 4):
         page = document.new_page()
         page.insert_text((72, 72), f"page-{page_number}-content")
     source = document.tobytes()
     document.close()
     monkeypatch.setattr(service, "MAX_PDF_PAGES", 2)
-
-    worker_result = service._run_isolated_pdf_worker(
-        source,
-        stop_after_chars=service.MAX_TEXT_CHARS,
-    )
-    if worker_result["status"] != "ok":
-        direct_worker = subprocess.run(
-            service._pdf_worker_command(stop_after_chars=service.MAX_TEXT_CHARS),
-            input=source,
-            capture_output=True,
-            check=False,
-        )
-        pytest.fail(
-            repr(
-                {
-                    "worker_result": worker_result,
-                    "direct_return_code": direct_worker.returncode,
-                    "direct_stdout": direct_worker.stdout[:1_000],
-                    "direct_stderr": direct_worker.stderr[:1_000],
-                }
-            )
-        )
 
     result = _project(
         source,

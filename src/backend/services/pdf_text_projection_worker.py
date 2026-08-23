@@ -101,12 +101,12 @@ def _extract_pdf(
     max_pages: int,
     stop_after_chars: int,
 ) -> dict[str, Any]:
-    import fitz  # type: ignore[import-not-found]
+    import pymupdf  # type: ignore[import-not-found]
 
     parts: list[str] = []
     length = 0
     resource_truncated = False
-    with fitz.open(stream=data, filetype="pdf") as document:
+    with pymupdf.open(stream=data, filetype="pdf") as document:
         page_count = int(document.page_count)
         for page_number in range(min(page_count, max_pages)):
             page = document.load_page(page_number)
@@ -134,9 +134,7 @@ def _extract_pdf(
             "status": "ok",
             "text": text,
             "method": "pymupdf",
-            "error": (
-                "pdf_projection_limit_reached" if resource_truncated else None
-            ),
+            "error": ("pdf_projection_limit_reached" if resource_truncated else None),
             "resource_truncated": resource_truncated,
         }
     if page_count > max_pages:
