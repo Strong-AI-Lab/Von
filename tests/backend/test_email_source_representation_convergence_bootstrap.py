@@ -112,6 +112,10 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
     assert signal_hint["subject_concept_id"] == mod.GMAIL_GET_MESSAGE_TOOL_ID
     assert "bare paper mention is sufficient" in str(signal_hint["text"])
     assert "Do not guess an arXiv ID" in str(signal_hint["text"])
+    assert "#V#paper_under_preparation" in str(signal_hint["text"])
+    assert "paper_lifecycle_state" in str(signal_hint["text"])
+    assert "Never infer #V#paper_under_preparation" in str(signal_hint["text"])
+    assert "reviewer identities" in str(signal_hint["text"])
     assert report["gmail_paper_signal_extraction_hint"]["success"] is True
 
 

@@ -7,6 +7,7 @@ from src.backend.services.ontology_publication_authority_service import (
 )
 from src.backend.services.paper_representation_workflow_vontology_service import (
     _REPO_SEED_ASSET_PATH,
+    PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID,
     PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID,
 )
 from src.backend.workflows.action_registry import (
@@ -25,8 +26,11 @@ from src.backend.workflows.durable.paper_representation_workflow import (
     ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE,
     ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
     ARXIV_NORMALISE_SOURCE_ACTION_ID,
+    PAPER_REFERENCE_NORMALISE_SET_ACTION_ID,
     PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+    PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
     PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
+    PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID,
     SCHOLARLY_PAPER_ENRICH_ACTION_ID,
     SCHOLARLY_PAPER_ENSURE_PAPER_CONCEPT_ACTION_ID,
     SCHOLARLY_PAPER_LINK_FILE_COPY_ACTION_ID,
@@ -57,8 +61,11 @@ def test_register_paper_representation_actions_registers_expected_ids() -> None:
     assert {
         ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
         ARXIV_NORMALISE_SOURCE_ACTION_ID,
+        PAPER_REFERENCE_NORMALISE_SET_ACTION_ID,
         PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+        PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
         PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
+        PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID,
         SCHOLARLY_PAPER_ENRICH_ACTION_ID,
         SCHOLARLY_PAPER_MATERIALISE_ACTION_ID,
         SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID,
@@ -68,6 +75,310 @@ def test_register_paper_representation_actions_registers_expected_ids() -> None:
     verify_spec = registry.get(SCHOLARLY_PAPER_VERIFY_ACTION_ID)
     assert verify_spec is not None
     assert verify_spec.required_tool_operation_class == "verification_read"
+
+
+def test_normalise_reference_set_preserves_explicit_under_preparation_evidence() -> (
+    None
+):
+    result = _paper_registry().execute(
+        PAPER_REFERENCE_NORMALISE_SET_ACTION_ID,
+        inputs={
+            "paper_references": [
+                {
+                    "reference_kind": "metadata",
+                    "title": "A Private Conference Submission",
+                    "paper_type_concept_id": "#V#paper_under_preparation",
+                    "paper_lifecycle_state": "under_review",
+                    "submission_identifier": "17045",
+                    "submission_venue": "NeurIPS 2026",
+                }
+            ],
+            "source_context": {"source_kind": "private_email"},
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    item = result.outputs["paper_reference_items"][0]
+    assert item["paper_type_concept_id"] == "#V#paper_under_preparation"
+    assert item["paper_lifecycle_state"] == "under_review"
+    assert item["submission_identifier"] == "17045"
+    assert item["submission_venue"] == "NeurIPS 2026"
+    assert item["paper_metadata"]["lifecycle_state"] == "under_review"
+
+
+def test_prepare_under_preparation_identity_is_org_scoped_and_idempotent() -> None:
+    registry = _paper_registry()
+    inputs = {
+        "paper_type_concept_id": "#V#paper_under_preparation",
+        "title": "A Private Conference Submission",
+        "paper_lifecycle_state": "under_review",
+        "submission_identifier": "17045",
+        "submission_venue": "NeurIPS 2026",
+    }
+    environment = WorkflowEnvironment(
+        llm_client=None,
+        org_concept_id="#V#test_research_org",
+    )
+
+    first = registry.execute(
+        PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
+        inputs=inputs,
+        context={},
+        env=environment,
+    )
+    second = registry.execute(
+        PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
+        inputs=inputs,
+        context={"message_id": "second_email_with_same_paper"},
+        env=environment,
+    )
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert first.outputs["paper_concept_id"] == second.outputs["paper_concept_id"]
+    assert first.outputs["paper_concept_id"].startswith("#V#paper_under_preparation_")
+    assert first.outputs["organisation_concept_id"] == "#V#test_research_org"
+    assert first.outputs["under_preparation_identity_basis"] == (
+        "organisation_submission_identifier"
+    )
+
+    title_only_inputs = {
+        "paper_type_concept_id": "#V#paper_under_preparation",
+        "title": "A Private Conference Submission",
+        "paper_lifecycle_state": "under_preparation",
+    }
+    first_title_mention = registry.execute(
+        PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
+        inputs=title_only_inputs,
+        context={"message_id": "first_email"},
+        env=environment,
+    )
+    second_title_mention = registry.execute(
+        PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
+        inputs=title_only_inputs,
+        context={"message_id": "another_email"},
+        env=environment,
+    )
+    assert first_title_mention.outputs["paper_concept_id"] == (
+        second_title_mention.outputs["paper_concept_id"]
+    )
+    assert first_title_mention.outputs["under_preparation_identity_basis"] == (
+        "organisation_title"
+    )
+
+    missing_org = registry.execute(
+        PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
+        inputs=inputs,
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+    assert missing_org.status == "failed"
+    assert missing_org.error == "paper_under_preparation_organisation_missing"
+
+
+def test_verify_under_preparation_requires_exact_org_type_and_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    concept_id = "#V#paper_under_preparation_test"
+    monkeypatch.setattr(
+        mod,
+        "_get_concept",
+        lambda _concept_id: {
+            "concept_id": concept_id,
+            "relationships": {"is_an_instance_of": ["#V#paper_under_preparation"]},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "concept_publication_context",
+        lambda _concept_id: PublicationContext.organisation("#V#test_research_org"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_texts_for_concept",
+        lambda *_args, **_kwargs: [{"text": "A Private Conference Submission"}],
+    )
+
+    result = _paper_registry().execute(
+        PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID,
+        inputs={
+            "paper_concept_id": concept_id,
+            "title": "A Private Conference Submission",
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            org_concept_id="#V#test_research_org",
+        ),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["paper_under_preparation_verified"] is True
+    assert result.outputs["paper_instance_scope_mode"] == "organisation_general"
+    assert result.outputs["paper_publication_context"]["kind"] == "organisation"
+
+    wrong_org = _paper_registry().execute(
+        PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID,
+        inputs={
+            "paper_concept_id": concept_id,
+            "title": "A Private Conference Submission",
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            org_concept_id="#V#another_research_org",
+        ),
+    )
+    assert wrong_org.status == "failed"
+    assert wrong_org.error == "paper_under_preparation_organisation_scope_missing"
+
+
+def test_under_preparation_workflow_uses_profiled_org_scope_and_canonical_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID],
+    )[PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID]
+    concept_id_holder: dict[str, str] = {}
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "_get_concept",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "relationships": {"is_an_instance_of": ["#V#paper_under_preparation"]},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "concept_publication_context",
+        lambda _concept_id: PublicationContext.organisation("#V#test_research_org"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_texts_for_concept",
+        lambda *_args, **_kwargs: [{"text": "A Private Conference Submission"}],
+    )
+
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+
+    def resolve_scope(request):
+        calls.append(("resolve_scope", dict(request.inputs)))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "selected_scope_mode": "organisation_general",
+                "decision_evidence": {"source": "represented_type_profile"},
+            },
+        )
+
+    def create_concepts(request):
+        calls.append(("create_concepts", dict(request.inputs)))
+        concept_id = str(request.inputs["concepts"][0]["concept_id"])
+        concept_id_holder["concept_id"] = concept_id
+        return WorkflowActionResult(
+            status="success",
+            outputs={"result": {"results": [{"concept_id": concept_id}]}},
+        )
+
+    registry.register(
+        ActionSpec(
+            action_id="resolve_publication_scope_profile",
+            handler=resolve_scope,
+        )
+    )
+    registry.register(ActionSpec(action_id="create_concepts", handler=create_concepts))
+    registry.register(
+        ActionSpec(
+            action_id="upsert_text_relation",
+            handler=lambda request: (
+                calls.append(("upsert_text_relation", dict(request.inputs)))
+                or WorkflowActionResult(status="success", outputs={"updated": True})
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=20).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            org_concept_id="#V#test_research_org",
+        ),
+        data={
+            "paper_type_concept_id": "#V#paper_under_preparation",
+            "title": "A Private Conference Submission",
+            "paper_lifecycle_state": "under_review",
+            "submission_identifier": "17045",
+            "submission_venue": "NeurIPS 2026",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "completed"
+    assert result.data["paper_concept_id"] == concept_id_holder["concept_id"]
+    assert result.data["paper_under_preparation_verified"] is True
+    assert result.data["paper_instance_scope_mode"] == "organisation_general"
+    assert [label for label, _inputs in calls] == [
+        "resolve_scope",
+        "create_concepts",
+        "upsert_text_relation",
+    ]
+    assert calls[0][1]["type_concept_ids"] == ["#V#paper_under_preparation"]
+    assert calls[1][1]["parent_id"] == "#V#paper_under_preparation"
+    assert calls[1][1]["scope_mode"] == "organisation_general"
+
+
+def test_under_preparation_workflow_does_not_mutate_when_profile_is_not_org() -> None:
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID],
+    )[PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID]
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(
+            action_id="resolve_publication_scope_profile",
+            handler=lambda _request: WorkflowActionResult(
+                status="success",
+                outputs={
+                    "selected_scope_mode": "global_general",
+                    "decision_evidence": {"source": "bad_test_profile"},
+                },
+            ),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="create_concepts",
+            handler=lambda _request: pytest.fail(
+                "an unsupported profile must fail before mutation"
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            org_concept_id="#V#test_research_org",
+        ),
+        data={
+            "paper_type_concept_id": "#V#paper_under_preparation",
+            "title": "A Private Conference Submission",
+        },
+    )
+
+    assert result.completed is False
+    assert result.error == "paper_under_preparation_organisation_scope_required"
 
 
 def test_public_title_resolution_selects_one_exact_arxiv_match() -> None:

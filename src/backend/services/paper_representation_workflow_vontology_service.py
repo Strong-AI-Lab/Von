@@ -46,8 +46,9 @@ SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID = (
 SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID = (
     "#V#source_neutral_paper_reference_item_ingestion_workflow"
 )
-PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID = (
-    "#V#public_paper_title_resolution_workflow"
+PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID = "#V#public_paper_title_resolution_workflow"
+PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID = (
+    "#V#paper_under_preparation_representation_workflow"
 )
 
 _REPO_SEED_ASSET_PATH = (
@@ -224,6 +225,7 @@ def diff_canonical_paper_representation_workflow_repo_seed_bundle(
 
 __all__ = [
     "ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID",
+    "PAPER_UNDER_PREPARATION_REPRESENTATION_WORKFLOW_ID",
     "PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID",
     "SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID",
     "SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID",

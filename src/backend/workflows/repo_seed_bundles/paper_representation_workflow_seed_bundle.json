@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "30",
+  "seed_version": "31",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -52,7 +52,9 @@
     "paper_reference.normalise_reference_set",
     "paper_reference.fail_item",
     "paper_reference.prepare_public_title_search",
+    "paper_reference.prepare_under_preparation",
     "paper_reference.select_arxiv_title_match",
+    "paper_reference.verify_under_preparation",
     "resolve_concept_by_name",
     "resolve_publication_scope_profile",
     "create_concepts",
@@ -3887,10 +3889,461 @@
       ]
     },
     {
+      "workflow_id": "#V#paper_under_preparation_representation_workflow",
+      "display_name": "Paper Under Preparation Representation Workflow",
+      "description": "Represents an email-identified paper explicitly under preparation, submission, or review as an organisation-scoped #V#paper_under_preparation, using the represented type publication profile and canonical read-back.",
+      "content": "Require explicit paper-under-preparation type evidence and a title, derive a deterministic organisation/source identity without treating email as authority, resolve the represented instance publication profile, require organisation scope, create or reuse the organisation-scoped paper, attach the supported title, and verify type, title, and exact organisation publication context. Do not create public author identities or publish submission/review details globally.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"phase\":\"published\",\"published\":true,\"schema_version\":\"workflow_publication_lifecycle.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"subworkflow\",\"routing_eligible\":false,\"authoring_intent_required\":false,\"selection_guidance\":\"Invoke from the source-neutral paper-reference workflow only when represented source evidence explicitly classifies the item as #V#paper_under_preparation.\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"require_completed_true\":true,\"require_final_state\":true,\"require_terminal_status\":true,\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\",\"paper_concept_id\",\"paper_type_concept_id\",\"paper_instance_scope_mode\",\"article_readback\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "paper_type_concept_id",
+          "title"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "paper_type_concept_id",
+            "source_expression": "inputs.paper_type_concept_id",
+            "extractor": "identity",
+            "required": true,
+            "description": "Explicit represented paper type; this workflow accepts only #V#paper_under_preparation."
+          },
+          {
+            "target_context_key": "title",
+            "source_expression": "inputs.title",
+            "extractor": "identity",
+            "required": true,
+            "description": "Exact supported paper title."
+          },
+          {
+            "target_context_key": "paper_metadata",
+            "source_expression": "inputs.paper_metadata",
+            "extractor": "identity",
+            "required": false,
+            "description": "Supported source metadata."
+          },
+          {
+            "target_context_key": "paper_lifecycle_state",
+            "source_expression": "inputs.paper_lifecycle_state",
+            "extractor": "identity",
+            "required": false,
+            "description": "Explicit source-supported lifecycle such as under_preparation, submitted, or under_review."
+          },
+          {
+            "target_context_key": "submission_identifier",
+            "source_expression": "inputs.submission_identifier",
+            "extractor": "identity",
+            "required": false,
+            "description": "Exact source-supported private submission identifier."
+          },
+          {
+            "target_context_key": "submission_venue",
+            "source_expression": "inputs.submission_venue",
+            "extractor": "identity",
+            "required": false,
+            "description": "Exact source-supported submission venue."
+          }
+        ]
+      },
+      "publication_spec": {
+        "initial_state": "prepare_under_preparation_identity",
+        "steps": [
+          {
+            "state_id": "prepare_under_preparation_identity",
+            "action_id": "paper_reference.prepare_under_preparation",
+            "execution_mode": "deterministic",
+            "next_state": "resolve_under_preparation_scope",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_concept_id",
+                "tool_output_field": "paper_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_paper_concept_id_to_paper_concept_id"
+              },
+              {
+                "context_key": "paper_type_concept_id",
+                "tool_output_field": "paper_type_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_paper_type_concept_id_to_paper_type_concept_id"
+              },
+              {
+                "context_key": "title",
+                "tool_output_field": "title",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_title_to_title"
+              },
+              {
+                "context_key": "paper_lifecycle_state",
+                "tool_output_field": "paper_lifecycle_state",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_lifecycle_to_paper_lifecycle_state"
+              },
+              {
+                "context_key": "submission_identifier",
+                "tool_output_field": "submission_identifier",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_submission_identifier_to_submission_identifier"
+              },
+              {
+                "context_key": "submission_venue",
+                "tool_output_field": "submission_venue",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_submission_venue_to_submission_venue"
+              },
+              {
+                "context_key": "under_preparation_description",
+                "tool_output_field": "under_preparation_description",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_description_to_under_preparation_description"
+              },
+              {
+                "context_key": "under_preparation_identity_basis",
+                "tool_output_field": "under_preparation_identity_basis",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_identity_basis_to_under_preparation_identity_basis"
+              },
+              {
+                "context_key": "organisation_concept_id",
+                "tool_output_field": "organisation_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_prepare_organisation_to_organisation_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_concept_id",
+              "paper_type_concept_id",
+              "title",
+              "paper_lifecycle_state",
+              "submission_identifier",
+              "submission_venue",
+              "under_preparation_description",
+              "under_preparation_identity_basis",
+              "organisation_concept_id"
+            ]
+          },
+          {
+            "state_id": "resolve_under_preparation_scope",
+            "action_id": "resolve_publication_scope_profile",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "plane",
+                "instance"
+              ],
+              [
+                "type_concept_ids",
+                [
+                  "#V#paper_under_preparation"
+                ]
+              ],
+              [
+                "source_kind",
+                "private_email"
+              ],
+              [
+                "producer",
+                "#V#paper_under_preparation_representation_workflow"
+              ]
+            ],
+            "next_state": "decide_under_preparation_scope",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_instance_scope_mode",
+                "tool_output_field": "selected_scope_mode",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_resolve_scope_selected_to_paper_instance_scope_mode"
+              },
+              {
+                "context_key": "paper_scope_decision_evidence",
+                "tool_output_field": "decision_evidence",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_resolve_scope_evidence_to_paper_scope_decision_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_instance_scope_mode",
+              "paper_scope_decision_evidence"
+            ]
+          },
+          {
+            "state_id": "decide_under_preparation_scope",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "reject_under_preparation_scope",
+            "conditional_transitions": [
+              {
+                "to_state": "create_under_preparation_concept",
+                "reason": "organisation_scope_profile_selected",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "paper_instance_scope_mode",
+                  "value": "organisation_general"
+                }
+              }
+            ],
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "under_preparation_scope_gate",
+                    "value": "represented_type_profile"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "under_preparation_scope_gate"
+            ]
+          },
+          {
+            "state_id": "reject_under_preparation_scope",
+            "action_id": "paper_reference.fail_item",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "error_code",
+                "paper_under_preparation_organisation_scope_required"
+              ],
+              [
+                "error_message",
+                "The represented paper-under-preparation profile did not select a supported organisation publication scope. No mutation was attempted."
+              ],
+              [
+                "reference_kind",
+                "metadata"
+              ]
+            ]
+          },
+          {
+            "state_id": "create_under_preparation_concept",
+            "action_id": "create_concepts",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "paper_under_preparation_organisation_additive_writes"
+            },
+            "static_input_bindings": [
+              [
+                "parent_id",
+                "#V#paper_under_preparation"
+              ],
+              [
+                "concepts",
+                [
+                  {
+                    "name": {
+                      "$context_key": "title"
+                    },
+                    "kind": "instance",
+                    "description": {
+                      "$context_key": "under_preparation_description"
+                    },
+                    "concept_id": {
+                      "$context_key": "paper_concept_id"
+                    }
+                  }
+                ]
+              ],
+              [
+                "allow_duplicate_instances",
+                false
+              ],
+              [
+                "duplicate_resolution_mode",
+                "canonical_id_only"
+              ],
+              [
+                "scope_mode",
+                {
+                  "$context_key": "paper_instance_scope_mode"
+                }
+              ]
+            ],
+            "next_state": "capture_under_preparation_concept",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "create_under_preparation_result",
+                "tool_output_field": "result",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_create_result_to_create_under_preparation_result"
+              }
+            ],
+            "writes_context_keys": [
+              "create_under_preparation_result"
+            ]
+          },
+          {
+            "state_id": "capture_under_preparation_concept",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "attach_under_preparation_title",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "paper_concept_id",
+                    "value_from_context": "create_under_preparation_result.results.0.concept_id"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "paper_concept_id"
+            ]
+          },
+          {
+            "state_id": "attach_under_preparation_title",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "paper_under_preparation_organisation_additive_writes"
+            },
+            "static_input_bindings": [
+              [
+                "predicate",
+                "hasName"
+              ],
+              [
+                "context",
+                {
+                  "name_type": "NL",
+                  "source": "private_email"
+                }
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "concept_id",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_paper_under_preparation_representation_workflow_attach_title_paper_concept_id_to_concept_id_parameter"
+              },
+              {
+                "tool_param": "text",
+                "context_key": "title",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_paper_under_preparation_representation_workflow_attach_title_title_to_text_parameter"
+              }
+            ],
+            "next_state": "verify_under_preparation_representation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "verify_under_preparation_representation",
+            "action_id": "paper_reference.verify_under_preparation",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "paper_concept_id",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_paper_under_preparation_representation_workflow_verify_paper_concept_id_to_paper_concept_id_parameter"
+              },
+              {
+                "tool_param": "title",
+                "context_key": "title",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_paper_under_preparation_representation_workflow_verify_title_to_title_parameter"
+              }
+            ],
+            "next_state": "capture_under_preparation_success",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_concept_id",
+                "tool_output_field": "paper_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_verify_paper_concept_id_to_paper_concept_id"
+              },
+              {
+                "context_key": "paper_under_preparation_verified",
+                "tool_output_field": "paper_under_preparation_verified",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_verify_verified_to_paper_under_preparation_verified"
+              },
+              {
+                "context_key": "paper_instance_scope_mode",
+                "tool_output_field": "paper_instance_scope_mode",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_verify_scope_to_paper_instance_scope_mode"
+              },
+              {
+                "context_key": "paper_publication_context",
+                "tool_output_field": "paper_publication_context",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_verify_context_to_paper_publication_context"
+              },
+              {
+                "context_key": "article_readback",
+                "tool_output_field": "article_readback",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_verify_article_readback_to_article_readback"
+              },
+              {
+                "context_key": "article_text_readback",
+                "tool_output_field": "article_text_readback",
+                "concept_id": "#V#workflow_mapping_tool_field_paper_under_preparation_representation_workflow_verify_article_text_readback_to_article_text_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_concept_id",
+              "paper_under_preparation_verified",
+              "paper_instance_scope_mode",
+              "paper_publication_context",
+              "article_readback",
+              "article_text_readback"
+            ]
+          },
+          {
+            "state_id": "capture_under_preparation_success",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "paper_reference_item_status",
+                    "value": "represented"
+                  },
+                  {
+                    "key": "paper_reference_kind",
+                    "value": "metadata"
+                  },
+                  {
+                    "key": "paper_type_concept_id",
+                    "value": "#V#paper_under_preparation"
+                  }
+                ]
+              ]
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      },
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ]
+    },
+    {
       "workflow_id": "#V#source_neutral_paper_reference_item_ingestion_workflow",
       "display_name": "Source Neutral Paper Reference Item Ingestion Workflow",
-      "description": "Canonical per-item workflow that delegates a normalised paper_reference_set.v1 item to the represented arXiv, public-title resolution, scholarly metadata, or file-copy paper workflow, or returns a preview/typed failure without source-specific Python routing policy.",
-      "content": "Route one normalised paper reference item by its represented reference_kind. arXiv items invoke #V#arxiv_paper_representation_workflow; DOI and source_uri items invoke #V#scholarly_article_metadata_representation_workflow; metadata items invoke #V#public_paper_title_resolution_workflow, which resolves an exact public arXiv title before falling back to sufficient bibliographic identity; file_copy items invoke #V#scholarly_paper_representation_workflow; preview items return a non-mutating item summary; unsupported items fail closed with a typed paper_reference_error_code.",
+      "description": "Canonical per-item workflow that delegates a normalised paper_reference_set.v1 item to the represented arXiv, public-title resolution, organisation-scoped paper-under-preparation, scholarly metadata, or file-copy paper workflow, or returns a preview/typed failure without source-specific Python routing policy.",
+      "content": "Route one normalised paper reference item by represented identity kind and paper type. arXiv items invoke #V#arxiv_paper_representation_workflow; DOI and source_uri items use public-title/metadata resolution; metadata explicitly typed #V#paper_under_preparation invokes #V#paper_under_preparation_representation_workflow; other metadata items invoke #V#public_paper_title_resolution_workflow, which resolves an exact public arXiv title before falling back to sufficient bibliographic identity; file_copy items invoke #V#scholarly_paper_representation_workflow; preview items return a non-mutating item summary; unsupported items fail closed with a typed paper_reference_error_code.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -3987,6 +4440,26 @@
                     "skip_if_unresolved": true
                   },
                   {
+                    "key": "paper_type_concept_id",
+                    "value_from_context": "current_paper_reference.paper_type_concept_id",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "paper_lifecycle_state",
+                    "value_from_context": "current_paper_reference.paper_lifecycle_state",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "submission_identifier",
+                    "value_from_context": "current_paper_reference.submission_identifier",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "submission_venue",
+                    "value_from_context": "current_paper_reference.submission_venue",
+                    "skip_if_unresolved": true
+                  },
+                  {
                     "key": "title",
                     "value_from_context": "current_paper_reference.title",
                     "skip_if_unresolved": true
@@ -4069,6 +4542,15 @@
                   "kind": "context_value_equals",
                   "key": "paper_reference_kind",
                   "value": "source_uri"
+                }
+              },
+              {
+                "to_state": "ingest_under_preparation_reference",
+                "reason": "paper_under_preparation_reference",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "paper_type_concept_id",
+                  "value": "#V#paper_under_preparation"
                 }
               },
               {
@@ -4201,6 +4683,93 @@
                 "context_key": "paper_reference_subworkflow_error",
                 "tool_output_field": "subworkflow_error",
                 "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_arxiv_reference_subworkflow_error_to_paper_reference_subworkflow_error"
+              }
+            ]
+          },
+          {
+            "state_id": "ingest_under_preparation_reference",
+            "action_id": "workflow_invoke_subworkflow",
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": "#V#paper_under_preparation_representation_workflow",
+            "next_state": "capture_success",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "propagate_as_action_failure"
+              ],
+              [
+                "max_transitions",
+                40
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "paper_metadata",
+                "context_key": "paper_metadata",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_paper_metadata_to_paper_metadata_parameter"
+              },
+              {
+                "tool_param": "paper_type_concept_id",
+                "context_key": "paper_type_concept_id",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_paper_type_concept_id_to_paper_type_concept_id_parameter"
+              },
+              {
+                "tool_param": "title",
+                "context_key": "title",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_title_to_title_parameter"
+              },
+              {
+                "tool_param": "paper_lifecycle_state",
+                "context_key": "paper_lifecycle_state",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_lifecycle_to_paper_lifecycle_state_parameter"
+              },
+              {
+                "tool_param": "submission_identifier",
+                "context_key": "submission_identifier",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_submission_identifier_to_submission_identifier_parameter"
+              },
+              {
+                "tool_param": "submission_venue",
+                "context_key": "submission_venue",
+                "required": false,
+                "concept_id": "#V#workflow_mapping_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_submission_venue_to_submission_venue_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_concept_id",
+                "tool_output_field": "result.paper_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_result_paper_concept_id_to_paper_concept_id"
+              },
+              {
+                "context_key": "article_readback",
+                "tool_output_field": "result.article_readback",
+                "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_result_article_readback_to_article_readback"
+              },
+              {
+                "context_key": "paper_instance_scope_mode",
+                "tool_output_field": "result.paper_instance_scope_mode",
+                "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_result_paper_instance_scope_mode_to_paper_instance_scope_mode"
+              },
+              {
+                "context_key": "paper_reference_selected_workflow_id",
+                "tool_output_field": "subworkflow_invocation.child_workflow_id",
+                "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_subworkflow_invocation_child_workflow_id_to_paper_reference_selected_workflow_id"
+              },
+              {
+                "context_key": "paper_reference_subworkflow_final_state",
+                "tool_output_field": "subworkflow_invocation.child_final_state",
+                "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_subworkflow_invocation_child_final_state_to_paper_reference_subworkflow_final_state"
+              },
+              {
+                "context_key": "paper_reference_subworkflow_error",
+                "tool_output_field": "subworkflow_error",
+                "concept_id": "#V#workflow_mapping_tool_field_source_neutral_paper_reference_item_ingestion_workflow_ingest_under_preparation_reference_subworkflow_error_to_paper_reference_subworkflow_error"
               }
             ]
           },

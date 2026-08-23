@@ -84,6 +84,12 @@ PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID = (
 PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID = (
     "paper_reference.select_arxiv_title_match"
 )
+PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID = (
+    "paper_reference.prepare_under_preparation"
+)
+PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID = (
+    "paper_reference.verify_under_preparation"
+)
 
 ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY = "existing_file_copy"
 ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF = "finalise_cached_pdf"
@@ -296,6 +302,11 @@ def _paper_reference_metadata_from_item(item: Mapping[str, Any]) -> dict[str, An
         ("doi", "doi"),
         ("source_uri", "source_uri"),
         ("source_url", "source_uri"),
+        ("paper_type_concept_id", "paper_type_concept_id"),
+        ("lifecycle_state", "lifecycle_state"),
+        ("paper_lifecycle_state", "lifecycle_state"),
+        ("submission_identifier", "submission_identifier"),
+        ("submission_venue", "submission_venue"),
     ):
         value = item.get(source_key)
         if value not in (None, "", [], {}):
@@ -377,6 +388,21 @@ def _normalise_paper_reference_item(
         ("title", _first_non_empty_text(item.get("title"), item.get("paper_title"))),
         ("summary", _first_non_empty_text(item.get("summary"), item.get("abstract"))),
         ("publication_date", _first_non_empty_text(item.get("publication_date"))),
+        (
+            "paper_type_concept_id",
+            _first_non_empty_text(item.get("paper_type_concept_id")),
+        ),
+        (
+            "paper_lifecycle_state",
+            _first_non_empty_text(
+                item.get("paper_lifecycle_state"), item.get("lifecycle_state")
+            ),
+        ),
+        (
+            "submission_identifier",
+            _first_non_empty_text(item.get("submission_identifier")),
+        ),
+        ("submission_venue", _first_non_empty_text(item.get("submission_venue"))),
         ("prompt", _first_non_empty_text(item.get("prompt"), item.get("text"))),
     ):
         if value not in (None, "", [], {}):
@@ -2313,6 +2339,201 @@ def _build_prepare_public_title_search_handler():
     return _handle
 
 
+def _build_prepare_under_preparation_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        metadata = _extract_metadata_from_context(request)
+        paper_type_concept_id = _first_non_empty_text(
+            request.inputs.get("paper_type_concept_id"),
+            request.data.get("paper_type_concept_id"),
+            metadata.get("paper_type_concept_id"),
+        )
+        if paper_type_concept_id != "#V#paper_under_preparation":
+            return WorkflowActionResult(
+                status="failed",
+                outputs={"paper_type_concept_id": paper_type_concept_id},
+                error="paper_under_preparation_type_required",
+            )
+
+        title = _first_non_empty_text(
+            request.inputs.get("title"),
+            request.data.get("title"),
+            metadata.get("title"),
+            metadata.get("paper_title"),
+        )
+        if not title:
+            return WorkflowActionResult(
+                status="failed",
+                error="paper_under_preparation_title_missing",
+            )
+
+        organisation_concept_id = _clean_text(
+            getattr(request.environment, "org_concept_id", None)
+        )
+        if not organisation_concept_id:
+            return WorkflowActionResult(
+                status="failed",
+                error="paper_under_preparation_organisation_missing",
+            )
+
+        lifecycle_state = _first_non_empty_text(
+            request.inputs.get("paper_lifecycle_state"),
+            request.inputs.get("lifecycle_state"),
+            request.data.get("paper_lifecycle_state"),
+            request.data.get("lifecycle_state"),
+            metadata.get("lifecycle_state"),
+        )
+        submission_identifier = _first_non_empty_text(
+            request.inputs.get("submission_identifier"),
+            request.data.get("submission_identifier"),
+            metadata.get("submission_identifier"),
+        )
+        submission_venue = _first_non_empty_text(
+            request.inputs.get("submission_venue"),
+            request.data.get("submission_venue"),
+            metadata.get("submission_venue"),
+        )
+        identity_material: dict[str, str] = {
+            "organisation_concept_id": organisation_concept_id,
+            "paper_type_concept_id": paper_type_concept_id,
+        }
+        if submission_identifier:
+            identity_material["submission_identifier"] = " ".join(
+                submission_identifier.split()
+            ).casefold()
+            if submission_venue:
+                identity_material["submission_venue"] = " ".join(
+                    submission_venue.split()
+                ).casefold()
+            identity_basis = "organisation_submission_identifier"
+        else:
+            identity_material["title"] = " ".join(title.split()).casefold()
+            identity_basis = "organisation_title"
+
+        identity_digest = hashlib.sha256(
+            json.dumps(
+                identity_material,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        paper_concept_id = f"#V#paper_under_preparation_{identity_digest[:32]}"
+
+        description_parts = ["Organisation-scoped paper under preparation."]
+        if lifecycle_state:
+            description_parts.append(f"Lifecycle: {lifecycle_state}.")
+        if submission_venue:
+            description_parts.append(f"Submission venue: {submission_venue}.")
+        if submission_identifier:
+            description_parts.append(f"Submission identifier: {submission_identifier}.")
+
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "paper_concept_id": paper_concept_id,
+                "paper_type_concept_id": paper_type_concept_id,
+                "title": title,
+                "paper_lifecycle_state": lifecycle_state,
+                "submission_identifier": submission_identifier,
+                "submission_venue": submission_venue,
+                "under_preparation_description": " ".join(description_parts),
+                "under_preparation_identity_basis": identity_basis,
+                "under_preparation_identity_digest": identity_digest,
+                "organisation_concept_id": organisation_concept_id,
+            },
+        )
+
+    return _handle
+
+
+def _build_verify_under_preparation_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        paper_concept_id = _first_non_empty_text(
+            request.inputs.get("paper_concept_id"),
+            request.data.get("paper_concept_id"),
+        )
+        title = _first_non_empty_text(
+            request.inputs.get("title"),
+            request.data.get("title"),
+        )
+        organisation_concept_id = _clean_text(
+            getattr(request.environment, "org_concept_id", None)
+        )
+        if not paper_concept_id or not title or not organisation_concept_id:
+            return WorkflowActionResult(
+                status="failed",
+                error="paper_under_preparation_verification_inputs_missing",
+            )
+
+        concept_doc = _get_concept(paper_concept_id)
+        publication_context = concept_publication_context(paper_concept_id)
+        type_verified = any(
+            _relation_contains_target(
+                concept_doc,
+                predicate,
+                "#V#paper_under_preparation",
+            )
+            for predicate in ("is_an_instance_of", "#V#is_an_instance_of")
+        )
+        title_rows = (
+            get_texts_for_concept(
+                paper_concept_id,
+                predicate="hasName",
+                limit=50,
+            )
+            if concept_doc is not None
+            else []
+        )
+        requested_title_key = _normalise_public_title(title)
+        title_verified = any(
+            _normalise_public_title(row.get("text")) == requested_title_key
+            for row in title_rows
+            if isinstance(row, Mapping)
+        )
+        scope_verified = (
+            publication_context.kind == PublicationContextKind.ORGANISATION
+            and publication_context.concept_id == organisation_concept_id
+        )
+        verification_failures = [
+            failure
+            for failure, satisfied in (
+                ("paper_under_preparation_concept_missing", concept_doc is not None),
+                ("paper_under_preparation_type_missing", type_verified),
+                ("paper_under_preparation_title_missing", title_verified),
+                ("paper_under_preparation_organisation_scope_missing", scope_verified),
+            )
+            if not satisfied
+        ]
+        if verification_failures:
+            return WorkflowActionResult(
+                status="failed",
+                outputs={
+                    "paper_concept_id": paper_concept_id,
+                    "paper_under_preparation_verified": False,
+                    "paper_under_preparation_verification_failures": (
+                        verification_failures
+                    ),
+                    "paper_publication_context": publication_context.to_mapping(),
+                },
+                error=verification_failures[0],
+            )
+
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "paper_concept_id": paper_concept_id,
+                "paper_under_preparation_verified": True,
+                "paper_under_preparation_verification_failures": [],
+                "paper_instance_scope_mode": "organisation_general",
+                "paper_publication_context": publication_context.to_mapping(),
+                "article_readback": concept_doc,
+                "article_text_readback": title_rows,
+            },
+        )
+
+    return _handle
+
+
 def _build_select_arxiv_title_match_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         metadata = _extract_metadata_from_context(request)
@@ -2938,6 +3159,30 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
     )
     registry.register_if_absent(
         ActionSpec(
+            action_id=PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID,
+            handler=_build_prepare_under_preparation_handler(),
+            description=(
+                "Prepare a deterministic organisation-scoped identity for a "
+                "paper explicitly identified as under preparation or submission."
+            ),
+            required_tool_operation_class="search_or_resolution_read",
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID,
+            handler=_build_verify_under_preparation_handler(),
+            description=(
+                "Read back and verify an organisation-scoped paper-under-"
+                "preparation representation."
+            ),
+            required_tool_operation_class="verification_read",
+            required_tool_target_argument_names=("paper_concept_id",),
+            required_tool_target_payload_field_names=("paper_concept_id",),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
             action_id=PAPER_REFERENCE_FAIL_ITEM_ACTION_ID,
             handler=_build_paper_reference_fail_item_handler(),
             description="Fail a source-neutral paper reference item with typed outputs.",
@@ -2950,6 +3195,8 @@ __all__ = [
     "ARXIV_NORMALISE_SOURCE_ACTION_ID",
     "PAPER_REFERENCE_FAIL_ITEM_ACTION_ID",
     "PAPER_REFERENCE_NORMALISE_SET_ACTION_ID",
+    "PAPER_REFERENCE_PREPARE_UNDER_PREPARATION_ACTION_ID",
+    "PAPER_REFERENCE_VERIFY_UNDER_PREPARATION_ACTION_ID",
     "SCHOLARLY_PAPER_ENRICH_ACTION_ID",
     "SCHOLARLY_PAPER_MATERIALISE_ACTION_ID",
     "SCHOLARLY_PAPER_NORMALISE_EXTERNAL_IDENTITY_ACTION_ID",
