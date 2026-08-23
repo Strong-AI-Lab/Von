@@ -322,6 +322,7 @@ def _find_concept(concept_id: str) -> dict[str, Any] | None:
 def find_existing_concept_for_create_concepts(
     *,
     concept_name: str,
+    requested_concept_id: str | None = None,
     kind: str | None,
     parent_id_for_concept: str | None,
     preferred_language: str | None = None,
@@ -336,6 +337,9 @@ def find_existing_concept_for_create_concepts(
 
     ``canonical_id_only`` retains the normal exact match and scope checks, but
     deliberately returns after an exact miss instead of searching text values.
+    When the create request supplies a stable concept ID, that ID is the exact
+    identity to check; the display-name-derived ID remains the compatibility
+    default only when no explicit ID was supplied.
     """
 
     from .concept_external_identity_service import (
@@ -499,7 +503,14 @@ def find_existing_concept_for_create_concepts(
             retryable=True,
         )
 
-    canonical_requested_id = canonicalise_vontology_concept_id(concept_name)
+    explicit_requested_id = (
+        requested_concept_id.strip()
+        if isinstance(requested_concept_id, str) and requested_concept_id.strip()
+        else None
+    )
+    canonical_requested_id = canonicalise_vontology_concept_id(
+        explicit_requested_id if explicit_requested_id is not None else concept_name
+    )
     if canonical_requested_id:
         doc = _find_concept(canonical_requested_id)
         if isinstance(doc, dict):
