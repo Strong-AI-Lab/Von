@@ -267,6 +267,47 @@ def test_source_processing_marker_write_rejects_missing_profile_before_write(
     }
 
 
+@pytest.mark.parametrize(
+    ("represented_outputs", "error_code"),
+    (
+        ([], "represented_artifacts_required"),
+        (
+            [{"paper_concept_id": "#V#paper_not_yet_durable"}],
+            "represented_artifacts_not_found",
+        ),
+    ),
+)
+def test_completion_marker_cannot_precede_represented_artefact_readback(
+    monkeypatch,
+    represented_outputs,
+    error_code,
+) -> None:
+    from src.backend.services import source_processing_marker_service as service
+
+    monkeypatch.setattr(service, "_find_existing_concept_ids", lambda _ids: set())
+    monkeypatch.setattr(
+        service.concept_service,
+        "create_concept",
+        lambda **_kwargs: pytest.fail("marker concept must not be created"),
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: pytest.fail("marker evidence must not be written"),
+    )
+
+    result = service.record_source_processing_marker(
+        source_system="gmail",
+        source_profile="vonwitbrock-gmail",
+        source_item_id="message-before-paper",
+        represented_outputs=represented_outputs,
+        require_represented_artifacts=True,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == error_code
+
+
 def test_source_processing_marker_compares_and_supersedes_fingerprints(
     monkeypatch,
 ) -> None:

@@ -656,13 +656,16 @@ def _start_durable_workflow_system(
             label="explicit chat-support workflows",
             bootstrap_fn=bootstrap_canonical_conversation_turn_workflows,
         )
-        email_source_convergence_workflow_bootstrap_report = _run_workflow_family_bootstrap(
-            label="email-source representation convergence workflow",
-            bootstrap_fn=bootstrap_canonical_email_source_representation_convergence_workflows,
-        )
+        # Email-paper convergence delegates to the source-neutral paper and
+        # public-title-resolution workflows, so its represented authority must
+        # be materialised only after the paper family is current.
         paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper workflow",
             bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
+        )
+        email_source_convergence_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="email-source representation convergence workflow",
+            bootstrap_fn=bootstrap_canonical_email_source_representation_convergence_workflows,
         )
         episode_evaluation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="episode evaluation workflow",
@@ -2651,6 +2654,37 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
             )
         except Exception:
             pass
+        # AgentTest deliberately has no durable worker or scheduler, but its
+        # real chat path still needs workflow discovery.  The capability-index
+        # service has an AgentTest-specific memory-only build that avoids RAG
+        # synchronisation and persisted-namespace mutation; start that bounded
+        # initialisation before returning so replay preflight can observe it.
+        try:
+            from ..services.workflow_capability_service import (
+                run_workflow_capability_index_startup_check,
+            )
+
+            capability_report = run_workflow_capability_index_startup_check(
+                timeout_seconds=0.0
+            )
+        except Exception as exc:
+            capability_report = {
+                "success": False,
+                "ready": False,
+                "status": "error",
+                "error": str(exc),
+            }
+            try:
+                app.logger.warning(
+                    "[workflow_capability_index] AgentTest memory-only "
+                    "initialisation failed: %s",
+                    exc,
+                )
+            except Exception:
+                pass
+        app.config["WORKFLOW_CAPABILITY_INDEX_STARTUP_REPORT"] = (
+            capability_report
+        )
         return
 
     blocking_durable_startup = os.getenv(

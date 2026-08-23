@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -77,6 +78,12 @@ ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID = "arxiv.decide_acquisition_mode"
 ARXIV_BUILD_COMPLETION_REPORT_ACTION_ID = "arxiv.build_completion_report"
 PAPER_REFERENCE_NORMALISE_SET_ACTION_ID = "paper_reference.normalise_reference_set"
 PAPER_REFERENCE_FAIL_ITEM_ACTION_ID = "paper_reference.fail_item"
+PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID = (
+    "paper_reference.prepare_public_title_search"
+)
+PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID = (
+    "paper_reference.select_arxiv_title_match"
+)
 
 ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY = "existing_file_copy"
 ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF = "finalise_cached_pdf"
@@ -154,6 +161,27 @@ def _clean_doi(value: Any) -> str:
     elif text.lower().startswith("http://doi.org/"):
         text = text[len("http://doi.org/") :]
     return text.strip().rstrip(".,;)]}")
+
+
+def _normalise_public_title(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _clean_text(value)).casefold()
+    return " ".join(
+        "".join(character if character.isalnum() else " " for character in text).split()
+    )
+
+
+def _public_search_result_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        rows = value.get("results")
+        if isinstance(rows, Sequence) and not isinstance(
+            rows, (str, bytes, bytearray)
+        ):
+            return [dict(row) for row in rows if isinstance(row, Mapping)]
+        for child in value.values():
+            nested = _public_search_result_rows(child)
+            if nested:
+                return nested
+    return []
 
 
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
@@ -2203,6 +2231,221 @@ def _build_arxiv_normalise_source_handler():
     return _handle
 
 
+def _build_prepare_public_title_search_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        metadata = _extract_metadata_from_context(request)
+        doi_candidates = _extract_doi_candidates(
+            (
+                request.inputs.get("doi"),
+                request.data.get("doi"),
+                metadata.get("doi"),
+            )
+        )
+        stable_source_uri = _first_non_empty_text(
+            request.inputs.get("source_uri"),
+            request.data.get("source_uri"),
+            metadata.get("source_uri"),
+            metadata.get("source_url"),
+        )
+        if doi_candidates or stable_source_uri:
+            return WorkflowActionResult(
+                status="failed",
+                outputs={"paper_metadata": metadata or None},
+                error="public_paper_title_resolution_not_required",
+            )
+        title = _first_non_empty_text(
+            request.inputs.get("title"),
+            request.data.get("title"),
+            metadata.get("title"),
+            metadata.get("paper_title"),
+        )
+        if not title:
+            return WorkflowActionResult(
+                status="failed",
+                error="public_paper_title_missing",
+            )
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "public_paper_title": title,
+                "public_paper_title_query": title,
+                "paper_metadata": metadata or {"title": title},
+            },
+        )
+
+    return _handle
+
+
+def _build_select_arxiv_title_match_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        metadata = _extract_metadata_from_context(request)
+        requested_title = _first_non_empty_text(
+            request.inputs.get("title"),
+            request.data.get("public_paper_title"),
+            request.data.get("title"),
+            metadata.get("title"),
+            metadata.get("paper_title"),
+        )
+        title_key = _normalise_public_title(requested_title)
+        if not title_key:
+            return WorkflowActionResult(
+                status="failed",
+                error="public_paper_title_missing",
+            )
+
+        payload = (
+            request.inputs.get("search_payload")
+            or request.inputs.get("public_paper_search_payload")
+            or request.data.get("public_paper_search_payload")
+            or request.data.get("search_payload")
+        )
+        rows = _public_search_result_rows(payload)
+        exact_rows = [
+            row
+            for row in rows
+            if _normalise_public_title(
+                _first_non_empty_text(row.get("title"), row.get("paper_title"))
+            )
+            == title_key
+        ]
+
+        requested_year = (
+            _first_non_empty_text(
+                request.inputs.get("publication_date"),
+                request.data.get("publication_date"),
+                metadata.get("publication_date"),
+                metadata.get("published"),
+            )
+            or ""
+        )[:4]
+        if len(exact_rows) > 1 and requested_year.isdigit():
+            year_rows = [
+                row
+                for row in exact_rows
+                if _first_non_empty_text(
+                    row.get("published"),
+                    row.get("publication_date"),
+                    row.get("updated"),
+                )[:4]
+                == requested_year
+            ]
+            if year_rows:
+                exact_rows = year_rows
+
+        requested_authors = {
+            _normalise_public_title(author)
+            for author in _coerce_string_list(
+                request.inputs.get("author_names")
+                or request.data.get("author_names")
+                or metadata.get("authors")
+            )
+            if _normalise_public_title(author)
+        }
+        if len(exact_rows) > 1 and requested_authors:
+            scored_rows = [
+                (
+                    len(
+                        requested_authors
+                        & {
+                            _normalise_public_title(author)
+                            for author in _coerce_string_list(row.get("authors"))
+                            if _normalise_public_title(author)
+                        }
+                    ),
+                    row,
+                )
+                for row in exact_rows
+            ]
+            best_score = max(score for score, _row in scored_rows)
+            if best_score > 0:
+                exact_rows = [
+                    row for score, row in scored_rows if score == best_score
+                ]
+
+        if len(exact_rows) != 1:
+            error_code = (
+                "public_paper_title_match_not_found"
+                if not exact_rows
+                else "public_paper_title_match_ambiguous"
+            )
+            return WorkflowActionResult(
+                status="failed",
+                outputs={
+                    "public_paper_resolution_status": error_code,
+                    "public_paper_search_result_count": len(rows),
+                    "public_paper_exact_match_count": len(exact_rows),
+                },
+                error=error_code,
+            )
+
+        matched = exact_rows[0]
+        identity_candidates = extract_arxiv_id_candidates(
+            [
+                matched.get("arxiv_id"),
+                matched.get("id"),
+                matched.get("paper_id"),
+                matched.get("entry_id"),
+                matched.get("url"),
+            ]
+        )
+        if not identity_candidates:
+            return WorkflowActionResult(
+                status="failed",
+                outputs={
+                    "public_paper_resolution_status": (
+                        "public_paper_exact_match_identity_missing"
+                    ),
+                    "public_paper_search_result_count": len(rows),
+                    "public_paper_exact_match_count": 1,
+                },
+                error="public_paper_exact_match_identity_missing",
+            )
+
+        arxiv_id = identity_candidates[0]
+        resolved_metadata = {
+            key: value
+            for key, value in {
+                **metadata,
+                "title": _first_non_empty_text(
+                    matched.get("title"), requested_title
+                ),
+                "authors": _coerce_string_list(matched.get("authors"))
+                or _coerce_string_list(metadata.get("authors")),
+                "abstract": _first_non_empty_text(
+                    matched.get("summary"),
+                    matched.get("abstract"),
+                    metadata.get("abstract"),
+                    metadata.get("summary"),
+                ),
+                "publication_date": _first_non_empty_text(
+                    matched.get("published"),
+                    matched.get("publication_date"),
+                    metadata.get("publication_date"),
+                ),
+                "categories": _coerce_string_list(
+                    matched.get("categories") or metadata.get("categories")
+                ),
+                "source_uri": f"https://arxiv.org/abs/{arxiv_id}",
+                "arxiv_id": arxiv_id,
+            }.items()
+            if value not in (None, "", [], {})
+        }
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "arxiv_id": arxiv_id,
+                "source_uri": f"https://arxiv.org/abs/{arxiv_id}",
+                "paper_metadata": resolved_metadata,
+                "public_paper_resolution_status": "exact_public_title_match",
+                "public_paper_search_result_count": len(rows),
+                "public_paper_exact_match_count": 1,
+                "public_paper_matched_result": matched,
+            },
+        )
+
+    return _handle
+
+
 def _build_paper_reference_normalise_set_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         source_context = _normalise_source_context(
@@ -2630,6 +2873,28 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
             description=(
                 "Normalise caller-supplied scholarly paper references into a "
                 "source-neutral reference-set schema for represented workflow fan-out."
+            ),
+            required_tool_operation_class="search_or_resolution_read",
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+            handler=_build_prepare_public_title_search_handler(),
+            description=(
+                "Prepare an exact public-title search for an otherwise "
+                "unidentified scholarly paper reference."
+            ),
+            required_tool_operation_class="search_or_resolution_read",
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
+            handler=_build_select_arxiv_title_match_handler(),
+            description=(
+                "Select one exact public arXiv title match, failing closed on "
+                "absence, ambiguity, or missing public identity."
             ),
             required_tool_operation_class="search_or_resolution_read",
         )

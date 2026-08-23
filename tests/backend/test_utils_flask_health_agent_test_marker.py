@@ -113,9 +113,25 @@ def test_health_response_reports_represented_agent_test_critic(monkeypatch) -> N
 
 def test_agent_test_instance_skips_durable_workflow_startup(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
+    from src.backend.services import workflow_capability_service
 
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
     monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+    startup_calls: list[float] = []
+
+    def _start_memory_only_capability_index(*, timeout_seconds: float) -> dict:
+        startup_calls.append(timeout_seconds)
+        return {
+            "success": False,
+            "ready": False,
+            "status": "building",
+        }
+
+    monkeypatch.setattr(
+        workflow_capability_service,
+        "run_workflow_capability_index_startup_check",
+        _start_memory_only_capability_index,
+    )
 
     app = Flask(__name__)
 
@@ -125,6 +141,12 @@ def test_agent_test_instance_skips_durable_workflow_startup(monkeypatch) -> None
     assert status["state"] == "skipped_agent_test"
     assert status["ready"] is False
     assert app.config["DURABLE_WORKFLOW_COMPONENTS"] is None
+    assert startup_calls == [0.0]
+    assert app.config["WORKFLOW_CAPABILITY_INDEX_STARTUP_REPORT"] == {
+        "success": False,
+        "ready": False,
+        "status": "building",
+    }
 
 
 def test_agent_test_diagnostics_reuse_skipped_durable_startup_status(
