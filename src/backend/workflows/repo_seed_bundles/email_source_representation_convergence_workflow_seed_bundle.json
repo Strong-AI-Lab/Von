@@ -2,7 +2,7 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "19",
+  "seed_version": "20",
   "source_tag": "JVNAUTOSCI-2244",
   "supported_action_ids": [
     "arxiv.inspect_existing_state",
@@ -556,75 +556,61 @@
               [
                 "field_sources",
                 {
-                  "schema_version": "gmail_arxiv_batch_result.v1",
-                  "source_system": "gmail",
-                  "source_profile": {
-                    "$context_key": "gmail_profile"
-                  },
-                  "effective_query": {
-                    "$context_key": "effective_gmail_query"
-                  },
-                  "requested_max_items": {
-                    "$context_key": "gmail_max_results"
-                  },
-                  "result_size_estimate": {
-                    "$context_key": "gmail_result_size_estimate"
-                  },
-                  "page_token_used": {
-                    "$context_key": "gmail_page_token"
-                  },
-                  "next_page_token": {
-                    "$context_key": "gmail_next_page_token"
-                  },
-                  "discovered_message_count": {
-                    "$context_key": "message_item_count"
-                  },
-                  "selected_message_count": {
-                    "$context_key": "message_selected_item_count"
-                  },
-                  "unattempted_message_count": {
-                    "$context_key": "message_unattempted_count"
-                  },
-                  "successful_message_count": {
-                    "$context_key": "message_success_count"
-                  },
-                  "failed_message_count": {
-                    "$context_key": "message_error_count"
-                  },
-                  "partial_success": {
-                    "$context_key": "message_partial_success"
-                  },
-                  "final_state_counts": {
-                    "$context_key": "message_final_state_counts"
-                  },
-                  "items": {
-                    "$context_key": "message_iteration_results"
-                  },
-                  "failures": {
-                    "$context_key": "message_iteration_errors"
+                  "batch_result": {
+                    "schema_version": "gmail_arxiv_batch_result.v1",
+                    "source_system": "gmail",
+                    "source_profile": {
+                      "$context_key": "gmail_profile"
+                    },
+                    "effective_query": {
+                      "$context_key": "effective_gmail_query"
+                    },
+                    "requested_max_items": {
+                      "$context_key": "gmail_max_results"
+                    },
+                    "result_size_estimate": {
+                      "$context_key": "gmail_result_size_estimate"
+                    },
+                    "page_token_used": {
+                      "$context_key": "gmail_page_token"
+                    },
+                    "next_page_token": {
+                      "$context_key": "gmail_next_page_token"
+                    },
+                    "discovered_message_count": {
+                      "$context_key": "message_item_count"
+                    },
+                    "selected_message_count": {
+                      "$context_key": "message_selected_item_count"
+                    },
+                    "unattempted_message_count": {
+                      "$context_key": "message_unattempted_count"
+                    },
+                    "successful_message_count": {
+                      "$context_key": "message_success_count"
+                    },
+                    "failed_message_count": {
+                      "$context_key": "message_error_count"
+                    },
+                    "partial_success": {
+                      "$context_key": "message_partial_success"
+                    },
+                    "final_state_counts": {
+                      "$context_key": "message_final_state_counts"
+                    },
+                    "items": {
+                      "$context_key": "message_iteration_results"
+                    },
+                    "failures": {
+                      "$context_key": "message_iteration_errors"
+                    }
                   }
                 }
               ],
               [
                 "required_fields",
                 [
-                  "schema_version",
-                  "source_system",
-                  "source_profile",
-                  "effective_query",
-                  "requested_max_items",
-                  "result_size_estimate",
-                  "page_token_used",
-                  "next_page_token",
-                  "discovered_message_count",
-                  "selected_message_count",
-                  "unattempted_message_count",
-                  "successful_message_count",
-                  "failed_message_count",
-                  "partial_success",
-                  "final_state_counts",
-                  "items",
-                  "failures"
+                  "batch_result"
                 ]
               ],
               [
@@ -641,10 +627,18 @@
               ],
               [
                 "target_key",
-                "batch_result"
+                "workflow_return_payload"
               ]
             ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_project_batch_result_workflow_return_payload_batch_result_to_batch_result",
+                "context_key": "batch_result",
+                "tool_output_field": "workflow_return_payload.batch_result"
+              }
+            ],
             "writes_context_keys": [
+              "workflow_return_payload",
               "batch_result"
             ]
           },

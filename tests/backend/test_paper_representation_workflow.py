@@ -130,6 +130,61 @@ def test_public_title_resolution_selects_one_exact_arxiv_match() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("paper_metadata", "expected_sufficient", "expected_basis"),
+    (
+        (
+            {"title": "A Bare Paper Title"},
+            False,
+            "insufficient",
+        ),
+        (
+            {
+                "title": "A Bibliographically Identified Paper",
+                "authors": ["Ada Lovelace"],
+                "publication_date": "1843",
+            },
+            True,
+            "title_publication_date_authors",
+        ),
+        (
+            {
+                "title": "A DOI Identified Paper",
+                "doi": "10.1000/example",
+            },
+            True,
+            "doi",
+        ),
+        (
+            {
+                "title": "A Source Identified Paper",
+                "source_url": "https://example.org/papers/identified",
+            },
+            True,
+            "source_uri",
+        ),
+    ),
+)
+def test_prepare_public_title_search_reports_bibliographic_fallback_evidence(
+    paper_metadata: dict[str, object],
+    expected_sufficient: bool,
+    expected_basis: str,
+) -> None:
+    prepared = _paper_registry().execute(
+        PAPER_REFERENCE_PREPARE_PUBLIC_TITLE_SEARCH_ACTION_ID,
+        inputs={"paper_metadata": paper_metadata},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert prepared.status == "success"
+    assert prepared.outputs["bibliographic_fallback_sufficient"] is expected_sufficient
+    assert prepared.outputs["bibliographic_fallback_basis"] == expected_basis
+    assert prepared.outputs["public_paper_title_search_required"] is (
+        expected_basis not in {"doi", "source_uri"}
+    )
+
+
 def test_public_title_resolution_fails_closed_on_ambiguous_exact_matches() -> None:
     selected = _paper_registry().execute(
         PAPER_REFERENCE_SELECT_ARXIV_TITLE_MATCH_ACTION_ID,
@@ -218,6 +273,109 @@ def test_public_title_resolution_workflow_searches_then_represents_exact_match()
     assert result.data["public_paper_resolution_status"] == (
         "exact_public_title_match"
     )
+
+
+def test_public_title_resolution_workflow_rejects_title_only_after_public_miss() -> (
+    None
+):
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
+    )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(
+            action_id="workflow_mcp.invoke_tool",
+            handler=lambda _request: WorkflowActionResult(
+                status="success",
+                outputs={"result": {"results": []}},
+            ),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="workflow_invoke_subworkflow",
+            handler=lambda _request: pytest.fail(
+                "title-only evidence must not reach a mutating fallback"
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"paper_metadata": {"title": "A Bare Paper Title"}},
+    )
+
+    assert result.completed is False
+    assert result.error == "public_paper_stable_identity_not_resolved"
+    assert result.data["last_action_outputs"]["paper_reference_item_status"] == (
+        "failed"
+    )
+    assert result.data["last_action_outputs"]["paper_reference_error_code"] == (
+        "public_paper_stable_identity_not_resolved"
+    )
+
+
+def test_public_title_resolution_workflow_uses_sufficient_bibliographic_fallback() -> (
+    None
+):
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
+    )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
+    calls: list[str] = []
+
+    def invoke_tool(_request):
+        calls.append("search_arxiv")
+        return WorkflowActionResult(
+            status="success",
+            outputs={"result": {"results": []}},
+        )
+
+    def invoke_metadata(request):
+        calls.append(str(request.workflow_state_id))
+        assert request.inputs["paper_metadata"]["authors"] == ["Ada Lovelace"]
+        assert request.inputs["paper_metadata"]["publication_date"] == "1843"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_concept_id": "#V#public_bibliographic_example",
+                    "article_readback": {
+                        "concept_id": "#V#public_bibliographic_example"
+                    },
+                }
+            },
+        )
+
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=invoke_tool)
+    )
+    registry.register(
+        ActionSpec(action_id="workflow_invoke_subworkflow", handler=invoke_metadata)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "paper_metadata": {
+                "title": "A Bibliographically Identified Paper",
+                "authors": ["Ada Lovelace"],
+                "publication_date": "1843",
+            }
+        },
+    )
+
+    assert result.completed is True
+    assert calls == ["search_arxiv", "ingest_metadata_fallback"]
+    assert result.data["bibliographic_fallback_basis"] == (
+        "title_publication_date_authors"
+    )
+    assert result.data["paper_concept_id"] == "#V#public_bibliographic_example"
 
 
 def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> None:

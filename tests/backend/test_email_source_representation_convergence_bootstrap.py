@@ -15,6 +15,9 @@ from src.backend.workflows.action_registry import (
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
+from src.backend.workflows.durable.failed_output_diagnostics import (
+    build_completed_workflow_outputs,
+)
 from src.backend.workflows.durable.models import WorkflowSchedule
 from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.workflow_launch_input_contracts import (
@@ -753,6 +756,25 @@ def test_parent_batch_preserves_all_22_item_results_and_one_retryable_failure() 
     assert batch_result["partial_success"] is True
     assert batch_result["items"] == iteration_results
     assert batch_result["failures"] == iteration_errors
+    assert result.data["workflow_return_payload"] == {"batch_result": batch_result}
+    terminal_outputs = build_completed_workflow_outputs(
+        result.data,
+        result_envelope=result.result_envelope,
+        final_state=result.final_state,
+    )
+    assert terminal_outputs["terminal_output_source"] == "declared_output_payload"
+    terminal_batch = terminal_outputs["batch_result"]
+    assert terminal_batch["schema_version"] == "gmail_arxiv_batch_result.v1"
+    assert terminal_batch["successful_message_count"] == 21
+    assert terminal_batch["failed_message_count"] == 1
+    assert terminal_batch["selected_message_count"] == 22
+    assert terminal_batch["page_token_used"] == "[redacted]"
+    assert terminal_batch["items"][-1] == {
+        "truncated": True,
+        "reason": "max_items",
+        "omitted_item_count": 14,
+    }
+    assert "result" not in terminal_outputs
     represented_ids = {
         arxiv_id
         for item in batch_result["items"]

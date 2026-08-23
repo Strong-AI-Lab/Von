@@ -2247,21 +2247,53 @@ def _build_prepare_public_title_search_handler():
             metadata.get("source_uri"),
             metadata.get("source_url"),
         )
-        if doi_candidates or stable_source_uri:
-            return WorkflowActionResult(
-                status="failed",
-                outputs={"paper_metadata": metadata or None},
-                error="public_paper_title_resolution_not_required",
-            )
         title = _first_non_empty_text(
             request.inputs.get("title"),
             request.data.get("title"),
             metadata.get("title"),
             metadata.get("paper_title"),
         )
+        publication_date = _first_non_empty_text(
+            request.inputs.get("publication_date"),
+            request.data.get("publication_date"),
+            metadata.get("publication_date"),
+            metadata.get("published"),
+        )
+        author_names = _coerce_string_list(
+            request.inputs.get("author_names")
+            or request.data.get("author_names")
+            or metadata.get("authors")
+        )
+
+        bibliographic_fallback_basis: str | None = None
+        if doi_candidates:
+            bibliographic_fallback_basis = "doi"
+        elif stable_source_uri:
+            bibliographic_fallback_basis = "source_uri"
+        elif title and publication_date and author_names:
+            bibliographic_fallback_basis = "title_publication_date_authors"
+
+        if doi_candidates or stable_source_uri:
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "paper_metadata": metadata or None,
+                    "public_paper_title": title,
+                    "public_paper_title_query": title,
+                    "public_paper_title_search_required": False,
+                    "bibliographic_fallback_sufficient": True,
+                    "bibliographic_fallback_basis": bibliographic_fallback_basis,
+                },
+            )
         if not title:
             return WorkflowActionResult(
                 status="failed",
+                outputs={
+                    "paper_metadata": metadata or None,
+                    "public_paper_title_search_required": False,
+                    "bibliographic_fallback_sufficient": False,
+                    "bibliographic_fallback_basis": "insufficient",
+                },
                 error="public_paper_title_missing",
             )
         return WorkflowActionResult(
@@ -2270,6 +2302,11 @@ def _build_prepare_public_title_search_handler():
                 "public_paper_title": title,
                 "public_paper_title_query": title,
                 "paper_metadata": metadata or {"title": title},
+                "public_paper_title_search_required": True,
+                "bibliographic_fallback_sufficient": bool(bibliographic_fallback_basis),
+                "bibliographic_fallback_basis": (
+                    bibliographic_fallback_basis or "insufficient"
+                ),
             },
         )
 
