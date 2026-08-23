@@ -140,7 +140,7 @@ def test_pdf_page_projection_stops_at_local_page_boundary(monkeypatch):
         filename="many-pages.pdf",
     )
 
-    assert result["text_extraction"] == "pymupdf"
+    assert result["text_extraction"] == "pymupdf", result
     assert "page-1-content" in result["text"]
     assert "page-2-content" in result["text"]
     assert "page-3-content" not in result["text"]
