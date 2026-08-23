@@ -441,6 +441,7 @@ def _run_isolated_pdf_worker(
     output_chunks: list[bytes] = []
     output_size = 0
     output_limit_reached = threading.Event()
+    output_read_error: str | None = None
 
     def _write_input() -> None:
         try:
@@ -450,7 +451,7 @@ def _run_isolated_pdf_worker(
             pass
 
     def _read_output() -> None:
-        nonlocal output_size
+        nonlocal output_read_error, output_size
         try:
             while chunk := output_stream.read(65_536):
                 remaining = PDF_PARSER_PROTOCOL_MAX_BYTES - output_size
@@ -464,8 +465,8 @@ def _run_isolated_pdf_worker(
                     except OSError:
                         pass
                     break
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            output_read_error = type(exc).__name__
 
     writer = threading.Thread(target=_write_input, daemon=True)
     reader = threading.Thread(target=_read_output, daemon=True)
@@ -514,6 +515,9 @@ def _run_isolated_pdf_worker(
         "status": "worker_failure",
         "error": "pdf_parser_worker_protocol_failed",
         "return_code": return_code,
+        "output_size": output_size,
+        "output_reader_alive": reader.is_alive(),
+        "output_read_error": output_read_error,
     }
 
 
