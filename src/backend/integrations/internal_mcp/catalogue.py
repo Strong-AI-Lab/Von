@@ -43,7 +43,7 @@ from src.backend.services.actor_scoped_referent_identity_service import (
 )
 from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
-from .dynamic_tool_loader import load_dynamic_method_definitions
+from . import crossref_metadata as crossref, dynamic_tool_loader
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
 from .spreadsheet_record_tools import build_spreadsheet_record_tool_definitions
@@ -43616,7 +43616,7 @@ def _register_dynamic_catalogue_methods(
         built_in_definitions = {
             definition.name: definition for definition in definitions
         }
-        dynamic_result = load_dynamic_method_definitions(
+        dynamic_result = dynamic_tool_loader.load_dynamic_method_definitions(
             base_definitions=built_in_definitions,
             protected_method_names=built_in_definitions.keys(),
         )
@@ -43633,7 +43633,7 @@ def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
     catalogue = MethodCatalogue()
-    definitions: List[MethodDefinition] = []
+    definitions = [crossref.build_crossref_metadata_tool_definition()]
     definitions.extend(_build_default_catalogue_core_definitions())
     definitions.extend(_build_operational_learning_release_definitions())
     definitions.extend(_build_default_catalogue_knowledge_io_definitions())

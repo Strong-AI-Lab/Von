@@ -696,18 +696,40 @@ def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> N
     )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
     registry = _paper_registry()
     register_control_flow_actions(registry)
-    registry.register(
-        ActionSpec(
-            action_id="workflow_mcp.invoke_tool",
-            handler=lambda _request: pytest.fail(
-                "stable DOI reference must not be replaced by a title search"
-            ),
+    def resolve_doi(request):
+        assert request.inputs["tool_name"] == "get_doi_metadata"
+        assert request.inputs["tool_arguments"]["doi"] == "10.1000/example"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "doi": "10.1000/example",
+                    "source_uri": "https://doi.org/10.1000/example",
+                    "title": "A Paper With A DOI",
+                    "author_names": ["Ada Lovelace"],
+                    "publication_date": "1843",
+                    "paper_metadata": {
+                        "title": "A Paper With A DOI",
+                        "doi": "10.1000/example",
+                        "source_uri": "https://doi.org/10.1000/example",
+                        "authors": ["Ada Lovelace"],
+                        "publication_date": "1843",
+                    },
+                }
+            },
         )
+
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=resolve_doi)
     )
 
     def invoke_metadata(request):
         assert request.workflow_state_id == "ingest_metadata_fallback"
         assert request.inputs["paper_metadata"]["doi"] == "10.1000/example"
+        assert request.inputs["doi"] == "10.1000/example"
+        assert request.inputs["source_uri"] == (
+            "https://doi.org/10.1000/example"
+        )
         return WorkflowActionResult(
             status="success",
             outputs={
@@ -740,6 +762,68 @@ def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> N
 
     assert result.completed is True
     assert result.data["paper_concept_id"] == "#V#public_doi_10_1000_example"
+
+
+def test_public_title_resolution_workflow_extracts_exact_public_source() -> None:
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
+    )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+
+    def extract_source(request):
+        assert request.inputs["tool_name"] == "extract_url"
+        assert request.inputs["tool_arguments"]["url"] == (
+            "https://example.org/public-paper.pdf"
+        )
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "content": "Public Paper Title\nAda Lovelace\nA public abstract.",
+                    "title": "public-paper.pdf",
+                    "url": "https://example.org/public-paper.pdf",
+                }
+            },
+        )
+
+    def invoke_metadata(request):
+        assert request.workflow_state_id == "ingest_metadata_fallback"
+        assert request.inputs["source_uri"] == (
+            "https://example.org/public-paper.pdf"
+        )
+        assert "Public Paper Title" in request.inputs["prompt"]
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_concept_id": "#V#public_paper_from_source",
+                    "article_readback": {
+                        "concept_id": "#V#public_paper_from_source"
+                    },
+                }
+            },
+        )
+
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=extract_source)
+    )
+    registry.register(
+        ActionSpec(
+            action_id="workflow_invoke_subworkflow",
+            handler=invoke_metadata,
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"source_uri": "https://example.org/public-paper.pdf"},
+    )
+
+    assert result.completed is True
+    assert result.data["paper_concept_id"] == "#V#public_paper_from_source"
 
 
 @pytest.mark.parametrize(

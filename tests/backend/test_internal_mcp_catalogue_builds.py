@@ -46,6 +46,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     methods = set(catalogue.list_methods())
 
     assert "add_relationship" in methods
+    assert "get_doi_metadata" in methods
     assert "add_text_assertion_concept_links" in methods
     assert "store_text_assertion" in methods
     assert "upsert_scoped_assertion" in methods
