@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import zipfile
 
 import pytest
@@ -138,7 +139,23 @@ def test_pdf_page_projection_stops_at_local_page_boundary(monkeypatch):
         source,
         stop_after_chars=service.MAX_TEXT_CHARS,
     )
-    assert worker_result["status"] == "ok", worker_result
+    if worker_result["status"] != "ok":
+        direct_worker = subprocess.run(
+            service._pdf_worker_command(stop_after_chars=service.MAX_TEXT_CHARS),
+            input=source,
+            capture_output=True,
+            check=False,
+        )
+        pytest.fail(
+            repr(
+                {
+                    "worker_result": worker_result,
+                    "direct_return_code": direct_worker.returncode,
+                    "direct_stdout": direct_worker.stdout[:1_000],
+                    "direct_stderr": direct_worker.stderr[:1_000],
+                }
+            )
+        )
 
     result = _project(
         source,
