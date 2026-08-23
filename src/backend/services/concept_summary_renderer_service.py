@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, cast
 
+from ..db.repositories.concepts_repository import ConceptsRepository
 from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
 from .chat_history_service import ChatHistoryServiceError
 from .concept_predicate_metadata_service import get_relationship_kinds_set
@@ -18,8 +19,10 @@ from .concept_service import (
     ConceptNotFoundError,
     enrich_concept_with_text_relations,
     get_concept_by_concept_id,
+    resolve_concept_display_names,
 )
 from .concept_summary_field_resolver import get_concept_summary_field_resolver
+from .concept_type_closure_service import load_type_closure
 from .conversation_projection_service import (
     ConversationProjectionAccessChangedError,
     ConversationProjectionNotFoundError,
@@ -160,26 +163,64 @@ def _concept_preview(concept_id: str, cache: dict[str, str]) -> str:
 
 
 def _collect_ancestor_type_ids(type_ids: list[str]) -> list[str]:
-    queue = list(type_ids)
-    visited: set[str] = set()
-    ordered: list[str] = []
-    while queue:
-        current = queue.pop(0)
-        if current in visited:
-            continue
-        visited.add(current)
-        try:
-            concept = get_concept_by_concept_id(current)
-        except Exception:
-            continue
-        if not isinstance(concept, Mapping):
-            continue
-        parents = _normalise_strings((concept.get("relationships") or {}).get("is_a_type_of"))
-        for parent_id in parents:
-            if parent_id not in visited and parent_id not in queue:
-                queue.append(parent_id)
-                ordered.append(parent_id)
-    return _dedupe_preserve_order(ordered)
+    return list(load_type_closure(type_ids).get("ancestor_type_ids") or [])
+
+
+def _apply_relation_backed_names(
+    concept: Mapping[str, Any],
+    text_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    projected = dict(concept)
+    relation_names = [
+        {
+            "name": str(row.get("text") or ""),
+            "language": str(row.get("lang") or "en-NZ"),
+            "type": str((row.get("context") or {}).get("name_type") or "NL"),
+        }
+        for row in text_rows
+        if row.get("predicate") == "hasName" and str(row.get("text") or "").strip()
+    ]
+    if relation_names:
+        projected["names"] = relation_names
+    return projected
+
+
+def _prime_preview_cache(
+    *,
+    concept: Mapping[str, Any],
+    resolved_type_ids: list[str],
+    type_documents: Mapping[str, Mapping[str, Any]],
+) -> dict[str, str]:
+    candidate_ids = list(resolved_type_ids)
+    relationships = concept.get("relationships")
+    if isinstance(relationships, Mapping):
+        for raw in relationships.values():
+            candidate_ids.extend(
+                value for value in _normalise_strings(raw) if value.startswith("#V#")
+            )
+    candidate_ids = _dedupe_preserve_order(candidate_ids)
+    docs_by_id: dict[str, dict[str, Any]] = {
+        concept_id: dict(doc)
+        for concept_id, doc in type_documents.items()
+        if isinstance(doc, Mapping)
+    }
+    missing_ids = [item for item in candidate_ids if item not in docs_by_id]
+    if missing_ids:
+        for doc in ConceptsRepository.find(
+            {"concept_id": {"$in": missing_ids}},
+            {"concept_id": 1, "name": 1, "names": 1},
+            limit=len(missing_ids),
+        ):
+            if not isinstance(doc, Mapping):
+                continue
+            doc_id = str(doc.get("concept_id") or "").strip()
+            if doc_id:
+                docs_by_id[doc_id] = dict(doc)
+    display_names = resolve_concept_display_names(docs_by_id.values())
+    return {
+        concept_id: display_names.get(concept_id) or _display_name(doc) or concept_id
+        for concept_id, doc in docs_by_id.items()
+    }
 
 
 def _collect_present_predicates(
@@ -835,15 +876,16 @@ def load_concept_summary_renderer(
     concept = get_concept_by_concept_id(concept_id)
     if not isinstance(concept, Mapping):
         raise ConceptNotFoundError(f"Concept not found: {concept_id}")
-    concept = enrich_concept_with_text_relations(dict(concept))
+    text_rows = get_texts_for_concept(subject_concept_id=concept_id, limit=250)
+    concept = _apply_relation_backed_names(concept, text_rows)
     relationships = concept.get("relationships")
     if not isinstance(relationships, Mapping):
         relationships = {}
-
-    text_rows = get_texts_for_concept(subject_concept_id=concept_id, limit=250)
     direct_type_ids = _normalise_strings(relationships.get("is_an_instance_of"))
-    ancestor_type_ids = _collect_ancestor_type_ids(direct_type_ids)
-    resolved_type_ids = _dedupe_preserve_order(direct_type_ids + ancestor_type_ids)
+    type_closure = load_type_closure(direct_type_ids)
+    resolved_type_ids = _dedupe_preserve_order(
+        list(type_closure.get("ordered_type_ids") or direct_type_ids)
+    )
     present_predicates = _collect_present_predicates(relationships, text_rows)
     field_resolver = get_concept_summary_field_resolver()
     summary_field_keys = frozenset(
@@ -867,7 +909,11 @@ def load_concept_summary_renderer(
     )
 
     selected = resolution.selected_renderers[0] if resolution.selected_renderers else None
-    preview_cache: dict[str, str] = {}
+    preview_cache = _prime_preview_cache(
+        concept=concept,
+        resolved_type_ids=resolved_type_ids,
+        type_documents=type_closure.get("documents_by_id") or {},
+    )
     indexed_text_rows = _index_text_rows(text_rows)
     selected_renderer_id = selected.renderer_id if selected else None
     is_conversation = _CONVERSATION_TYPE_ID in resolved_type_ids

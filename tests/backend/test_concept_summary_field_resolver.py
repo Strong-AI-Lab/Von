@@ -108,14 +108,19 @@ def test_summary_field_resolver_resolves_type_field_bindings(monkeypatch) -> Non
     }
 
     monkeypatch.setattr(
+        resolver_module.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: list(concept_docs.values()),
+    )
+    monkeypatch.setattr(
         resolver_module,
         "get_concept_by_concept_id",
         lambda concept_id: concept_docs[concept_id],
     )
     monkeypatch.setattr(
         resolver_module,
-        "get_texts_for_concept",
-        lambda subject_concept_id, predicate=None, limit=5: [],
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: {},
     )
 
     resolver = resolver_module.ConceptSummaryFieldResolver(cache_ttl_seconds=60.0)

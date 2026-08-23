@@ -57,6 +57,7 @@ from ...services.relationship_extent_index_service import (
     incoming_dynamic_extent_rows_page_for_target,
     incoming_dynamic_extent_rows_for_target,
     relationship_extent_index_ready,
+    relationship_extent_index_readiness_snapshot,
 )
 from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
@@ -3769,6 +3770,8 @@ def get_relationships_extent_route():
         str(request.args.get("include_uncertain") or "").strip().lower()
     )
     include_uncertain = include_uncertain_raw in {"1", "true", "yes", "on"}
+    bounded_only_raw = str(request.args.get("bounded_only") or "").strip().lower()
+    bounded_only = bounded_only_raw in {"1", "true", "yes", "on"}
     uncertainty_statuses: list[str] = []
     for raw in request.args.getlist("uncertainty_status"):
         token = str(raw or "").strip().lower()
@@ -3788,6 +3791,26 @@ def get_relationships_extent_route():
     incoming_index_ready = (
         wants_arg2 and wants_structured and relationship_extent_index_ready()
     )
+    if bounded_only and wants_arg2 and wants_structured and not incoming_index_ready:
+        readiness_snapshot = relationship_extent_index_readiness_snapshot()
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Relationship extent index is not ready.",
+                    "error_code": "relationship_extent_index_not_ready",
+                    "retryable": True,
+                    "extent_index": {
+                        "ready": False,
+                        "used_extent_index": False,
+                        "fallback_used": False,
+                        "reason": "relationship_extent_index_not_ready",
+                        "index_state": readiness_snapshot,
+                    },
+                }
+            ),
+            503,
+        )
     wants_uncertain_payload = wants_uncertain and (
         include_uncertain or bool(uncertainty_mode) or bool(uncertainty_statuses)
     )
@@ -3980,6 +4003,9 @@ def get_relationships_extent_route():
             has_more = True
             total = max(exact_total, offset + len(paged_rows) + 1)
         if incoming_extent_index_diagnostics:
+            incoming_extent_index_diagnostics["index_state"] = (
+                relationship_extent_index_readiness_snapshot()
+            )
             incoming_extent_index_diagnostics["rows_returned"] = len(paged_rows)
             current_app.logger.info(
                 "[relationship_extent] concept=%s role=%s source=%s "
@@ -3995,6 +4021,68 @@ def get_relationships_extent_route():
                 incoming_extent_index_diagnostics.get("complete"),
                 incoming_extent_index_diagnostics.get("bounded"),
             )
+
+        metadata_ids: list[str] = []
+        seen_metadata_ids: set[str] = set()
+        for row in paged_rows:
+            for raw_id in (
+                row.get("predicate_id"),
+                row.get("arg1_value"),
+                row.get("arg2_value"),
+            ):
+                candidate = str(raw_id or "").strip()
+                if not candidate.startswith("#V#") or candidate in seen_metadata_ids:
+                    continue
+                seen_metadata_ids.add(candidate)
+                metadata_ids.append(candidate)
+        metadata_docs = (
+            list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": metadata_ids}},
+                    {
+                        "concept_id": 1,
+                        "name": 1,
+                        "names": 1,
+                        "kind": 1,
+                        "metadata.concept_type": 1,
+                        "relationships.is_a_type_of": 1,
+                        "relationships.is_an_instance_of": 1,
+                    },
+                    limit=len(metadata_ids),
+                )
+            )
+            if metadata_ids
+            else []
+        )
+        metadata_names = resolve_concept_display_names(metadata_docs)
+        display_metadata: dict[str, dict[str, str]] = {}
+        for doc in metadata_docs:
+            metadata_concept_id = str(doc.get("concept_id") or "").strip()
+            if not metadata_concept_id:
+                continue
+            metadata = doc.get("metadata")
+            stored_kind = str(doc.get("kind") or "").strip().lower()
+            metadata_kind = (
+                str(metadata.get("concept_type") or "").strip().lower()
+                if isinstance(metadata, Mapping)
+                else ""
+            )
+            relationships = doc.get("relationships")
+            relation_payload = relationships if isinstance(relationships, Mapping) else {}
+            if stored_kind in {"type", "predicate", "individual"}:
+                display_kind = stored_kind
+            elif metadata_kind == "predicate":
+                display_kind = "predicate"
+            elif relation_payload.get("is_a_type_of"):
+                display_kind = "type"
+            else:
+                display_kind = "individual"
+            display_metadata[metadata_concept_id] = {
+                "name": metadata_names.get(metadata_concept_id)
+                or get_concept_display_name_with_names_fallback(doc)
+                or metadata_concept_id,
+                "kind": display_kind,
+            }
         return (
             jsonify(
                 {
@@ -4003,10 +4091,12 @@ def get_relationships_extent_route():
                     "total": total,
                     "total_is_complete": total_is_complete,
                     "has_more": has_more,
+                    "next_offset": offset + limit if has_more else None,
                     "limit": limit,
                     "offset": offset,
                     "rows": paged_rows,
                     "extent_index": incoming_extent_index_diagnostics,
+                    "display_metadata": display_metadata,
                 }
             ),
             200,

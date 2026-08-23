@@ -11225,6 +11225,178 @@ button.prompt-vontology-cartouche {
     margin: 0 0 14px;
 }
 
+.concept-effective-assertions-mount {
+    margin: 0 0 14px;
+}
+
+.concept-effective-assertions {
+    display: grid;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid #cbd5e1;
+    border-left: 4px solid #4f46e5;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.concept-effective-assertions-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.concept-effective-assertions-title {
+    margin: 0;
+    color: #0f172a;
+    font-size: 1rem;
+}
+
+.concept-effective-assertions-intro,
+.concept-effective-assertions-status {
+    margin: 3px 0 0;
+    color: #475569;
+    font-size: 0.84rem;
+    line-height: 1.4;
+}
+
+.concept-effective-assertions-status {
+    flex: 0 1 260px;
+    text-align: right;
+}
+
+.concept-effective-assertions-status.error {
+    color: #b91c1c;
+}
+
+.concept-effective-assertions-rows {
+    display: grid;
+    gap: 8px;
+}
+
+.concept-effective-assertion-group,
+.concept-effective-assertion-group-rows {
+    display: grid;
+    gap: 8px;
+}
+
+.concept-effective-assertion-group-title {
+    margin: 2px 0 0;
+    color: #334155;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.concept-effective-assertion-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #fff;
+}
+
+.concept-effective-assertion-statement {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+}
+
+.concept-effective-assertion-predicate {
+    color: #475569;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.concept-effective-assertion-value {
+    color: #0f172a;
+    overflow-wrap: anywhere;
+}
+
+.concept-effective-assertion-scope {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.concept-effective-assertion-scope-personal {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.concept-effective-assertion-scope-organisation {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.concept-effective-assertion-details {
+    grid-column: 1 / -1;
+    color: #475569;
+    font-size: 0.8rem;
+}
+
+.concept-effective-assertion-details summary {
+    cursor: pointer;
+    width: max-content;
+}
+
+.concept-effective-assertion-details dl {
+    display: grid;
+    grid-template-columns: minmax(100px, max-content) minmax(0, 1fr);
+    gap: 3px 10px;
+    margin: 8px 0 0;
+}
+
+.concept-effective-assertion-details dt {
+    font-weight: 700;
+}
+
+.concept-effective-assertion-details dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.concept-effective-assertions-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.concept-effective-assertions-load-more {
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    padding: 5px 12px;
+    background: #fff;
+    color: #1e293b;
+    cursor: pointer;
+}
+
+@media (max-width: 720px) {
+    .concept-effective-assertions-header,
+    .concept-effective-assertion-row {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+
+    .concept-effective-assertions-status {
+        text-align: left;
+    }
+
+    .concept-effective-assertion-statement {
+        grid-template-columns: 1fr;
+        gap: 3px;
+    }
+}
+
 .concept-summary-card {
     display: grid;
     gap: 10px;

@@ -83,6 +83,16 @@ def test_load_paper_recommendation_profile_returns_profile_and_derived_context(
         ]
 
     monkeypatch.setattr(service, "get_texts_for_concept", _fake_get_texts_for_concept)
+    monkeypatch.setattr(
+        service,
+        "load_type_closure",
+        lambda _type_ids: {
+            "ordered_type_ids": [
+                "#V#machine_learning_researcher",
+                service.RESEARCHER_TYPE_ID,
+            ]
+        },
+    )
 
     payload = service.load_paper_recommendation_profile(
         user_concept_id="#V#lu_yunli",
@@ -166,6 +176,16 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
         "persist_subject_paper_matching_profile",
         lambda **kwargs: mirrored.update(kwargs)
         or {"success": True, "subject_concept_id": kwargs["subject_concept_id"]},
+    )
+    monkeypatch.setattr(
+        service,
+        "load_type_closure",
+        lambda _type_ids: {
+            "ordered_type_ids": [
+                "#V#research_fellow",
+                service.RESEARCHER_TYPE_ID,
+            ]
+        },
     )
 
     result = service.upsert_paper_recommendation_profile(
@@ -295,6 +315,17 @@ def test_subject_relevant_for_profile_follows_researcher_type_ancestry(monkeypat
             },
         }.get(concept_id),
     )
+    monkeypatch.setattr(
+        service,
+        "load_type_closure",
+        lambda _type_ids: {
+            "ordered_type_ids": [
+                "#V#postdoctoral_researcher",
+                "#V#research_staff",
+                service.RESEARCHER_TYPE_ID,
+            ]
+        },
+    )
 
     assert (
         service.is_subject_relevant_for_paper_recommendation_profile(
@@ -335,6 +366,13 @@ def test_upsert_paper_recommendation_profile_rejects_ineligible_subject(monkeypa
                 "relationships": {},
             },
         }.get(concept_id),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_type_closure",
+        lambda _type_ids: {
+            "ordered_type_ids": ["#V#organisation", "#V#group"]
+        },
     )
 
     try:

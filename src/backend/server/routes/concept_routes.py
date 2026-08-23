@@ -38,6 +38,10 @@ from ...services.paper_recommendation_workflow_vontology_service import (
 from ...services.concept_summary_renderer_service import (
     load_concept_summary_renderer,
 )
+from ...services.concept_effective_assertion_service import (
+    DEFAULT_PAGE_LIMIT as DEFAULT_EFFECTIVE_ASSERTION_PAGE_LIMIT,
+    load_concept_effective_assertions,
+)
 from ...vontology.utils_vontology import (
     get_concept_notes,
 )  # Added getter import
@@ -332,6 +336,76 @@ def get_concept_summary_renderer(concept_id: str) -> ResponseReturnValue:
             exc_info=True,
         )
         return jsonify({"error": "Failed to load concept summary renderer"}), 500
+
+
+@concept_bp.route("/<string:concept_id>/effective_assertions", methods=["GET"])
+def get_concept_effective_assertions(concept_id: str) -> ResponseReturnValue:
+    """Return one bounded actor-effective assertion page for a concept.
+
+    The request cannot nominate a user, organisation, namespace, or scope. The
+    scoped-assertion service derives visibility only from trusted ambient
+    request context. Anonymous callers receive the base-only empty projection,
+    without learning whether private assertions exist.
+    """
+
+    current_user_id = _get_current_user_concept_id()
+    if not current_user_id:
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "concept_id": concept_id,
+                    "context_view": "base_publication",
+                    "items": [],
+                    "returned": 0,
+                    "offset": 0,
+                    "limit": DEFAULT_EFFECTIVE_ASSERTION_PAGE_LIMIT,
+                    "has_more": False,
+                    "next_offset": None,
+                    "truncated": False,
+                    "counts_are_lower_bounds": False,
+                }
+            ),
+            200,
+        )
+
+    try:
+        payload = load_concept_effective_assertions(
+            concept_id=concept_id,
+            limit=request.args.get(
+                "limit",
+                DEFAULT_EFFECTIVE_ASSERTION_PAGE_LIMIT,
+            ),
+            offset=request.args.get("offset", 0),
+        )
+        return jsonify(payload), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        current_app.logger.warning(
+            "Actor-effective assertions unavailable for %s: %s",
+            concept_id,
+            exc,
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "Actor-effective assertions are temporarily unavailable",
+                    "error_code": "actor_effective_assertions_unavailable",
+                    "retryable": True,
+                }
+            ),
+            503,
+        )
+    except Exception as exc:
+        current_app.logger.error(
+            "Failed to load actor-effective assertions for %s: %s",
+            concept_id,
+            exc,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to load actor-effective assertions"}), 500
 
 
 @concept_bp.route("/", methods=["GET"])

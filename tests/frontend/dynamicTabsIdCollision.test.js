@@ -382,6 +382,14 @@ describe('Relation Extent resize persistence', () => {
         const { initializeRelationshipsUI } = require(dynamicTabsModulePath);
         await initializeRelationshipsUI('#V#resize_test', 'resize_test', 'type');
 
+        const initialRelationshipRequest = global.fetch.mock.calls
+            .map(([url]) => String(url))
+            .find((url) => url.startsWith('/vontology/api/vontology/relationships/extent?'));
+        expect(initialRelationshipRequest).toContain('bounded_only=true');
+        expect(initialRelationshipRequest).toContain('limit=50');
+        expect(initialRelationshipRequest).toContain('offset=0');
+        expect(global.fetch.mock.calls.some(([url]) => String(url).startsWith('/api/concepts/'))).toBe(false);
+
         const content = document.getElementById('relationshipsContent_resize_test');
         const increaseButton = document.querySelector('[data-resize-action="increase"]');
         expect(content.classList.contains('von-resizable-viewport-active')).toBe(true);
@@ -856,6 +864,35 @@ describe('newly-created concept description hydration', () => {
         expect(urls).toHaveLength(1);
         expect(urls[0]).toContain('/texts?predicate=hasDescription');
         expect(document.getElementById(`typeDescriptionDisplay_${suffix}`).textContent).toContain('No description available.');
+    });
+
+    test('treats an empty bounded description read as authoritative for concept-page loading', async () => {
+        const { populateTypeDescription } = require(dynamicTabsModulePath);
+        const conceptId = '#V#bounded_description_concept';
+        const suffix = 'bounded_description';
+        mountDescriptionElements(suffix);
+        global.fetch.mockImplementation(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.includes('/texts?predicate=hasDescription')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ texts: [], count: 0 })
+                };
+            }
+            throw new Error(`Unexpected fetch: ${requestUrl}`);
+        });
+
+        await populateTypeDescription(conceptId, suffix, {
+            allowLegacyFallback: false,
+            fallbackDescription: 'Inline description from the direct concept read.'
+        });
+
+        const urls = global.fetch.mock.calls.map(([url]) => String(url));
+        expect(urls).toHaveLength(1);
+        expect(urls[0]).toContain('/texts?predicate=hasDescription');
+        expect(document.getElementById(`typeDescriptionDisplay_${suffix}`).dataset.rawText)
+            .toBe('Inline description from the direct concept read.');
     });
 
     test('does not present reconstructed node-content title as a description', async () => {

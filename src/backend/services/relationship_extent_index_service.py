@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
+from uuid import uuid4
 
 from pymongo import DeleteMany, ReplaceOne
 from pymongo.collection import Collection
@@ -33,7 +35,11 @@ logger = logging.getLogger(__name__)
 
 RELATIONSHIP_EXTENT_INDEX_STATE_SETTING = "relationship_extent_index_state"
 RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION = 1
-_READINESS_CACHE: dict[str, Any] = {"ready": None, "checked_at": 0.0}
+_READINESS_CACHE: dict[str, Any] = {
+    "ready": None,
+    "checked_at": 0.0,
+    "state": None,
+}
 _READINESS_CACHE_TTL_SECONDS = 10.0
 RELATIONSHIP_EXTENT_PAGE_BATCH_SIZE = int(
     os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_BATCH_SIZE", "128")
@@ -86,10 +92,31 @@ _DEFERRED_SYNC_SOURCE_IDS: ContextVar[set[str] | None] = ContextVar(
     "relationship_extent_deferred_sync_source_ids",
     default=None,
 )
+_REBUILD_LOCK = threading.Lock()
+_REBUILD_STATE_LEASE_SECONDS = max(
+    60.0,
+    float(os.environ.get("VON_RELATIONSHIP_EXTENT_REBUILD_LEASE_SECONDS", "1800")),
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _rebuild_state_has_live_lease(state: Mapping[str, Any]) -> bool:
+    """Return whether a recorded rebuild is recent enough to still be active."""
+
+    started_at = state.get("started_at")
+    if not isinstance(started_at, str) or not started_at.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age_seconds = (_utc_now() - parsed.astimezone(timezone.utc)).total_seconds()
+    return -60.0 <= age_seconds < _REBUILD_STATE_LEASE_SECONDS
 
 
 def _adaptive_advisory_seconds(operation: str, configured_seconds: float) -> float:
@@ -249,24 +276,24 @@ def _mark_relationship_extent_index_degraded(
     """Fail the derived index closed after an incomplete refresh."""
 
     now = _utc_now()
+    degraded_state = {
+        "status": "degraded",
+        "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+        "reason": reason,
+        "degraded_at": now.isoformat(),
+        "source_count": max(0, int(source_count)),
+        "error_type": error_type,
+    }
     _READINESS_CACHE["ready"] = False
     _READINESS_CACHE["checked_at"] = time.monotonic()
+    _READINESS_CACHE["state"] = dict(degraded_state)
     advisory_seconds = _adaptive_advisory_seconds(
         "state_write",
         RELATIONSHIP_EXTENT_STATE_WRITE_ADVISORY_SECONDS,
     )
     started = time.perf_counter()
     try:
-        _record_rebuild_state(
-            {
-                "status": "degraded",
-                "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
-                "reason": reason,
-                "degraded_at": now.isoformat(),
-                "source_count": max(0, int(source_count)),
-                "error_type": error_type,
-            }
-        )
+        _record_rebuild_state(degraded_state)
         _record_successful_operation(
             "state_write",
             time.perf_counter() - started,
@@ -629,6 +656,7 @@ def relationship_extent_index_ready() -> bool:
         return cached_ready
 
     ready = False
+    readiness_state: dict[str, Any] | None = None
     operation = "readiness"
     advisory_seconds = _adaptive_advisory_seconds(
         operation,
@@ -644,6 +672,7 @@ def relationship_extent_index_ready() -> bool:
             )
             value = state.get("value") if isinstance(state, Mapping) else None
             if isinstance(value, Mapping):
+                readiness_state = dict(value)
                 state_is_current = (
                     value.get("schema_version")
                     == RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION
@@ -665,7 +694,93 @@ def relationship_extent_index_ready() -> bool:
 
     _READINESS_CACHE["ready"] = ready
     _READINESS_CACHE["checked_at"] = now_monotonic
+    _READINESS_CACHE["state"] = readiness_state
     return ready
+
+
+def relationship_extent_index_readiness_snapshot() -> dict[str, Any]:
+    """Return bounded readiness metadata from the same cached state read."""
+
+    relationship_extent_index_ready()
+    state = _READINESS_CACHE.get("state")
+    state_payload = dict(state) if isinstance(state, Mapping) else {}
+    return {
+        "ready": _READINESS_CACHE.get("ready") is True,
+        "status": state_payload.get("status") or "missing",
+        "schema_version": state_payload.get("schema_version"),
+        "revision": state_payload.get("rebuild_run_id"),
+        "watermark": state_payload.get("finished_at"),
+        "source_count": state_payload.get("source_count"),
+        "edge_count": state_payload.get("edge_count"),
+    }
+
+
+def relationship_extent_index_state() -> dict[str, Any]:
+    """Return the persisted derived-index state without exposing store details."""
+
+    try:
+        settings = get_application_settings_collection()
+        if settings is None:
+            return {"available": False, "status": "unavailable"}
+        state = settings.find_one(
+            {"setting_name": RELATIONSHIP_EXTENT_INDEX_STATE_SETTING},
+            {"value": 1},
+        )
+        value = state.get("value") if isinstance(state, Mapping) else None
+        if not isinstance(value, Mapping):
+            return {"available": True, "status": "missing"}
+        return {"available": True, **dict(value)}
+    except Exception as exc:
+        logger.warning(
+            "[relationship_extent_index] state_query_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return {
+            "available": False,
+            "status": "unavailable",
+            "error_type": type(exc).__name__,
+        }
+
+
+def reconcile_relationship_extent_index_if_needed(
+    *,
+    reason: str = "startup_reconciliation",
+) -> dict[str, Any]:
+    """Repair missing/degraded index state once, outside latency-sensitive reads."""
+
+    if relationship_extent_index_ready():
+        return {"success": True, "status": "ready", "changed": False}
+    state = relationship_extent_index_state()
+    if state.get("available") is not True:
+        return {
+            "success": False,
+            "status": "unavailable",
+            "changed": False,
+            "reason": "state_store_unavailable",
+        }
+    if state.get("status") == "rebuilding" and _rebuild_state_has_live_lease(
+        state
+    ):
+        return {
+            "success": True,
+            "status": "rebuilding",
+            "changed": False,
+            "reason": "rebuild_already_recorded",
+        }
+    if not _REBUILD_LOCK.acquire(blocking=False):
+        return {
+            "success": True,
+            "status": "rebuilding",
+            "changed": False,
+            "reason": "rebuild_already_running",
+        }
+    try:
+        if relationship_extent_index_ready():
+            return {"success": True, "status": "ready", "changed": False}
+        result = rebuild_relationship_extent_index(reason=reason)
+        return {**result, "changed": result.get("success") is True}
+    finally:
+        _REBUILD_LOCK.release()
 
 
 def rebuild_relationship_extent_index(
@@ -680,19 +795,21 @@ def rebuild_relationship_extent_index(
         return {"success": False, "status": "unavailable"}
 
     started_at = _utc_now()
+    rebuilding_state = {
+        "status": "rebuilding",
+        "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+        "reason": reason,
+        "started_at": started_at.isoformat(),
+    }
     _READINESS_CACHE["ready"] = False
     _READINESS_CACHE["checked_at"] = time.monotonic()
-    _record_rebuild_state(
-        {
-            "status": "rebuilding",
-            "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
-            "reason": reason,
-            "started_at": started_at.isoformat(),
-        }
-    )
+    _READINESS_CACHE["state"] = dict(rebuilding_state)
+    _record_rebuild_state(rebuilding_state)
 
+    rebuild_run_id = f"rei_{uuid4().hex}"
     total_sources = 0
     total_edges = 0
+
     def _flush_pending_docs(pending_docs: list[dict[str, Any]]) -> None:
         if not pending_docs:
             return
@@ -711,7 +828,6 @@ def rebuild_relationship_extent_index(
         coll.bulk_write(operations, ordered=False)
 
     try:
-        coll.delete_many({})
         with bypass_access_control():
             cursor = ConceptsRepository.find(
                 {"relationships": {"$type": "object"}},
@@ -733,6 +849,8 @@ def rebuild_relationship_extent_index(
                 seen_source_ids.add(source_id)
                 total_sources += 1
                 docs = _index_docs_for_concept(concept_doc)
+                for doc in docs:
+                    doc["rebuild_run_id"] = rebuild_run_id
                 total_edges += len(docs)
                 pending_docs.extend(docs)
                 while batch_size > 0 and len(pending_docs) >= batch_size:
@@ -746,6 +864,14 @@ def rebuild_relationship_extent_index(
             if pending_docs:
                 _flush_pending_docs(pending_docs)
 
+        # Only retire prior-generation rows after the complete canonical scan
+        # and all replacements have succeeded. A failed rebuild therefore
+        # leaves the prior derived data recoverable, while readiness remains
+        # degraded so interactive reads cannot mistake it for current state.
+        deleted = coll.delete_many(
+            {"rebuild_run_id": {"$ne": rebuild_run_id}}
+        ).deleted_count
+
         finished_at = _utc_now()
         state = {
             "status": "ready",
@@ -755,27 +881,30 @@ def rebuild_relationship_extent_index(
             "finished_at": finished_at.isoformat(),
             "source_count": total_sources,
             "edge_count": total_edges,
+            "retired_edge_count": deleted,
+            "rebuild_run_id": rebuild_run_id,
         }
         _record_rebuild_state(state)
         _READINESS_CACHE["ready"] = True
         _READINESS_CACHE["checked_at"] = time.monotonic()
+        _READINESS_CACHE["state"] = dict(state)
         return {"success": True, **state}
     except Exception as exc:
         logger.error(
             "Failed rebuilding relationship extent index: %s", exc, exc_info=True
         )
+        failed_state = {
+            "status": "failed",
+            "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            "reason": reason,
+            "started_at": started_at.isoformat(),
+            "failed_at": _utc_now().isoformat(),
+            "error_type": type(exc).__name__,
+        }
         _READINESS_CACHE["ready"] = False
         _READINESS_CACHE["checked_at"] = time.monotonic()
-        _record_rebuild_state(
-            {
-                "status": "failed",
-                "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
-                "reason": reason,
-                "started_at": started_at.isoformat(),
-                "failed_at": _utc_now().isoformat(),
-                "error_type": type(exc).__name__,
-            }
-        )
+        _READINESS_CACHE["state"] = dict(failed_state)
+        _record_rebuild_state(failed_state)
         return {"success": False, "status": "failed", "error_type": type(exc).__name__}
 
 

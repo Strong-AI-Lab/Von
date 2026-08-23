@@ -1413,6 +1413,7 @@ def create_flask_app(
     _configure_internal_mcp_orchestrator_startup(app, gateway_instance)
     _ensure_db_monitor_started(app)
     _maybe_start_startup_rag_requeue(app)
+    _maybe_start_relationship_extent_index_reconciliation(app)
     _bootstrap_concept_summary_fields_for_startup(app)
     _bootstrap_publication_scope_profiles_for_startup(app)
     _configure_durable_workflow_startup(app)
@@ -2541,6 +2542,60 @@ def _maybe_start_startup_rag_requeue(app: Flask) -> None:
             app.logger.warning("[startup] Failed to start requeue thread: %s", exc)
         except Exception:
             pass
+
+
+def _maybe_start_relationship_extent_index_reconciliation(app: Flask) -> None:
+    """Repair a missing/degraded relationship index without delaying startup."""
+
+    if _is_running_under_pytest() or _is_agent_test_instance():
+        return
+    if not _env_bool("VON_RELATIONSHIP_EXTENT_STARTUP_RECONCILE", True):
+        return
+
+    app.config["RELATIONSHIP_EXTENT_INDEX_RECONCILIATION"] = {
+        "status": "queued",
+        "success": None,
+    }
+
+    def _run() -> None:
+        try:
+            from ..services.relationship_extent_index_service import (
+                reconcile_relationship_extent_index_if_needed,
+            )
+
+            result = reconcile_relationship_extent_index_if_needed(
+                reason="server_startup_reconciliation"
+            )
+            app.config["RELATIONSHIP_EXTENT_INDEX_RECONCILIATION"] = result
+            log = app.logger.info if result.get("success") else app.logger.warning
+            log("[relationship_extent_index] startup reconciliation: %s", result)
+        except Exception as exc:  # pragma: no cover - defensive startup boundary
+            app.config["RELATIONSHIP_EXTENT_INDEX_RECONCILIATION"] = {
+                "success": False,
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            }
+            app.logger.warning(
+                "[relationship_extent_index] startup reconciliation failed: %s",
+                exc,
+            )
+
+    try:
+        threading.Thread(
+            target=_run,
+            daemon=True,
+            name="relationship_extent_index_startup_reconciliation",
+        ).start()
+    except Exception as exc:  # pragma: no cover - thread start boundary
+        app.config["RELATIONSHIP_EXTENT_INDEX_RECONCILIATION"] = {
+            "success": False,
+            "status": "failed",
+            "error_type": type(exc).__name__,
+        }
+        app.logger.warning(
+            "[relationship_extent_index] failed to start reconciliation: %s",
+            exc,
+        )
 
 
 def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:

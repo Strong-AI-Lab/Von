@@ -9,11 +9,15 @@ def _reset_relationship_extent_readiness_cache():
     from src.backend.security import access_control
     from src.backend.services import relationship_extent_index_service as service
 
-    service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
+    service._READINESS_CACHE.update(
+        {"ready": None, "checked_at": 0.0, "state": None}
+    )
     service._SUCCESSFUL_OPERATION_MAX_SECONDS.clear()
     access_control.invalidate_current_access_evaluator()
     yield
-    service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
+    service._READINESS_CACHE.update(
+        {"ready": None, "checked_at": 0.0, "state": None}
+    )
     service._SUCCESSFUL_OPERATION_MAX_SECONDS.clear()
     access_control.invalidate_current_access_evaluator()
 
@@ -228,6 +232,144 @@ def test_relationship_extent_rebuild_enforces_batch_size_for_dense_source(
         {"setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING}
     )
     assert state["value"]["status"] == "ready"
+
+
+def test_failed_relationship_extent_rebuild_preserves_prior_generation(
+    monkeypatch,
+):
+    from src.backend.services import relationship_extent_index_service as service
+
+    client = mongomock.MongoClient()
+    coll = client.db.relationship_extent_index
+    settings = client.db.application_settings
+    coll.insert_one(
+        {
+            "relation_id": "prior-row",
+            "source_concept_id": "#V#prior",
+            "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "get_relationship_extent_index_collection",
+        lambda: coll,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_application_settings_collection",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": "#V#new",
+                "relationships": {"#V#mentions": ["#V#target"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        coll,
+        "bulk_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated rebuild failure")
+        ),
+    )
+
+    result = service.rebuild_relationship_extent_index(reason="failure_test")
+
+    assert result["success"] is False
+    assert coll.find_one({"relation_id": "prior-row"}) is not None
+    state = settings.find_one(
+        {"setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING}
+    )
+    assert state["value"]["status"] == "failed"
+
+
+def test_reconcile_relationship_extent_index_repairs_missing_state(monkeypatch):
+    from src.backend.services import relationship_extent_index_service as service
+
+    monkeypatch.setattr(service, "relationship_extent_index_ready", lambda: False)
+    monkeypatch.setattr(
+        service,
+        "relationship_extent_index_state",
+        lambda: {"available": True, "status": "missing"},
+    )
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "rebuild_relationship_extent_index",
+        lambda **kwargs: calls.append(kwargs)
+        or {"success": True, "status": "ready"},
+    )
+
+    result = service.reconcile_relationship_extent_index_if_needed(
+        reason="startup_test"
+    )
+
+    assert result == {"success": True, "status": "ready", "changed": True}
+    assert calls == [{"reason": "startup_test"}]
+
+
+def test_reconcile_relationship_extent_index_repairs_stale_rebuild_state(monkeypatch):
+    from src.backend.services import relationship_extent_index_service as service
+
+    monkeypatch.setattr(service, "relationship_extent_index_ready", lambda: False)
+    monkeypatch.setattr(
+        service,
+        "relationship_extent_index_state",
+        lambda: {
+            "available": True,
+            "status": "rebuilding",
+            "started_at": "2020-01-01T00:00:00+00:00",
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "rebuild_relationship_extent_index",
+        lambda **kwargs: calls.append(kwargs)
+        or {"success": True, "status": "ready"},
+    )
+
+    result = service.reconcile_relationship_extent_index_if_needed(
+        reason="stale_startup_test"
+    )
+
+    assert result == {"success": True, "status": "ready", "changed": True}
+    assert calls == [{"reason": "stale_startup_test"}]
+
+
+def test_reconcile_relationship_extent_index_defers_to_recent_rebuild(monkeypatch):
+    from src.backend.services import relationship_extent_index_service as service
+
+    monkeypatch.setattr(service, "relationship_extent_index_ready", lambda: False)
+    monkeypatch.setattr(
+        service,
+        "relationship_extent_index_state",
+        lambda: {
+            "available": True,
+            "status": "rebuilding",
+            "started_at": service._utc_now().isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "rebuild_relationship_extent_index",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not rebuild")
+        ),
+    )
+
+    result = service.reconcile_relationship_extent_index_if_needed()
+
+    assert result == {
+        "success": True,
+        "status": "rebuilding",
+        "changed": False,
+        "reason": "rebuild_already_recorded",
+    }
 
 
 def test_relationship_extent_query_cursor_and_count_complete_without_deadline(

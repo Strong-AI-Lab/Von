@@ -15,21 +15,23 @@ def test_load_renderer_definitions_from_concept_ids_parses_profile_json(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        service,
-        "get_concept_by_concept_id",
-        lambda concept_id: {"concept_id": concept_id, "relationships": {}},
+        service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": "#V#timeline_renderer", "relationships": {}}
+        ],
     )
     monkeypatch.setattr(
         service,
-        "get_texts_for_concept",
-        lambda concept_id, predicate=None, limit=50: [
-            {
-                "predicate": predicate,
-                "text": '{"renderer_type":"timeline","modalities":["visual"],"priority":80,"screen_element_families":["timeline"]}',
-            }
-        ]
-        if predicate == "#V#has_renderer_profile_json"
-        else [],
+        "get_texts_for_concepts",
+        lambda concept_ids, predicates=None, limit_per_concept=20: {
+            concept_ids[0]: [
+                {
+                    "predicate": "#V#has_renderer_profile_json",
+                    "text": '{"renderer_type":"timeline","modalities":["visual"],"priority":80,"screen_element_families":["timeline"]}',
+                }
+            ]
+        },
     )
 
     definitions, diagnostics = service.load_renderer_definitions_from_concept_ids(
@@ -48,21 +50,23 @@ def test_load_renderer_definitions_reports_malformed_profile_json(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        service,
-        "get_concept_by_concept_id",
-        lambda concept_id: {"concept_id": concept_id, "relationships": {}},
+        service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": "#V#timeline_renderer", "relationships": {}}
+        ],
     )
     monkeypatch.setattr(
         service,
-        "get_texts_for_concept",
-        lambda concept_id, predicate=None, limit=50: [
-            {
-                "predicate": predicate,
-                "text": "{not valid json}",
-            }
-        ]
-        if predicate == "#V#has_renderer_profile_json"
-        else [],
+        "get_texts_for_concepts",
+        lambda concept_ids, predicates=None, limit_per_concept=20: {
+            concept_ids[0]: [
+                {
+                    "predicate": "#V#has_renderer_profile_json",
+                    "text": "{not valid json}",
+                }
+            ]
+        },
     )
 
     definitions, diagnostics = service.load_renderer_definitions_from_concept_ids(

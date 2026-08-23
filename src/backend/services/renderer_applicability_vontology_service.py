@@ -10,9 +10,10 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
+from ..db.repositories.concepts_repository import ConceptsRepository
 from .concept_service import get_concept_by_concept_id
 from .renderer_applicability_service import RendererProfile
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 from .text_value_service import upsert_singleton_text_relation
 
 _DEFAULT_PROFILE_TEXT_PREDICATES: tuple[str, ...] = (
@@ -226,24 +227,40 @@ def load_renderer_definitions_from_concept_ids(
     malformed_profile_concept_ids: list[str] = []
     malformed_profile_entries: list[dict[str, Any]] = []
 
-    for concept_id in ordered_concept_ids:
-        try:
-            concept = get_concept_by_concept_id(concept_id)
-        except Exception:
-            concept = None
+    concept_docs = list(
+        ConceptsRepository.find(
+            {"concept_id": {"$in": list(ordered_concept_ids)}},
+            {"concept_id": 1},
+            limit=len(ordered_concept_ids),
+        )
+    ) if ordered_concept_ids else []
+    resolved_concept_ids = {
+        str(doc.get("concept_id") or "").strip()
+        for doc in concept_docs
+        if isinstance(doc, Mapping)
+    }
+    try:
+        text_rows_by_concept = get_texts_for_concepts(
+            list(ordered_concept_ids),
+            predicates=list(predicates),
+            limit_per_concept=20,
+        )
+    except Exception:
+        text_rows_by_concept = {}
 
-        if not isinstance(concept, Mapping):
+    for concept_id in ordered_concept_ids:
+        if concept_id not in resolved_concept_ids:
             unresolved_concept_ids.append(concept_id)
             continue
 
         concept_definitions: list[dict[str, Any]] = []
         concept_malformed_entries: list[dict[str, Any]] = []
         profile_rows_found = False
+        all_text_rows = text_rows_by_concept.get(concept_id, [])
         for predicate in predicates:
-            try:
-                text_rows = get_texts_for_concept(concept_id, predicate=predicate, limit=20)
-            except Exception:
-                text_rows = []
+            text_rows = [
+                row for row in all_text_rows if row.get("predicate") == predicate
+            ]
             if not text_rows:
                 continue
             profile_rows_found = True
