@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import subprocess
@@ -64,10 +65,56 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
     return _run(["git", "-C", root, *args], check=check).stdout.strip()
 
 
+def _registered_nested_worktree_roots(root: Path) -> frozenset[Path]:
+    roots: set[Path] = set()
+    payload = _git(root, "worktree", "list", "--porcelain")
+    for line in payload.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path_text = line.removeprefix("worktree ").strip()
+        if not path_text:
+            continue
+        candidate = Path(os.path.abspath(path_text))
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if candidate != root:
+            roots.add(candidate)
+    return frozenset(roots)
+
+
+def _porcelain_status_path(line: str) -> str | None:
+    if len(line) < 4:
+        return None
+    raw_path = line[3:]
+    if not raw_path:
+        return None
+    if raw_path.startswith('"'):
+        try:
+            decoded = ast.literal_eval(raw_path)
+        except (SyntaxError, ValueError):
+            return None
+        return decoded if isinstance(decoded, str) and decoded else None
+    return raw_path
+
+
 def _require_clean(root: Path, label: str) -> None:
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
-    if status:
-        first_entries = ", ".join(status.splitlines()[:5])
+    nested_worktree_roots = _registered_nested_worktree_roots(root)
+    blocking_entries: list[str] = []
+    for line in status.splitlines():
+        if line.startswith("?? "):
+            relative_path = _porcelain_status_path(line)
+            if relative_path:
+                candidate = Path(
+                    os.path.abspath(root / relative_path.rstrip("/"))
+                )
+                if candidate in nested_worktree_roots:
+                    continue
+        blocking_entries.append(line)
+    if blocking_entries:
+        first_entries = ", ".join(blocking_entries[:5])
         raise DeploymentError(
             f"Refusing to deploy: {label} worktree is not clean ({first_entries})"
         )
