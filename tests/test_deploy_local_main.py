@@ -90,6 +90,51 @@ def test_prepare_refuses_primary_that_is_not_main(tmp_path: Path) -> None:
         _prepare_primary(primary.resolve(), remote="origin", branch="main")
 
 
+def test_prepare_allows_registered_nested_worktree(tmp_path: Path) -> None:
+    _, _, primary, _ = _setup_repositories(tmp_path)
+    nested_worktree = primary / ".worktrees" / "feature"
+    _git(
+        primary,
+        "worktree",
+        "add",
+        "-b",
+        "feature/nested",
+        str(nested_worktree),
+        "HEAD",
+    )
+    (nested_worktree / "tracked.txt").write_text(
+        "uncommitted feature work\n",
+        encoding="utf-8",
+    )
+
+    prepared = _prepare_primary(primary.resolve(), remote="origin", branch="main")
+
+    assert prepared == _git(primary, "rev-parse", "HEAD")
+    assert (nested_worktree / "tracked.txt").read_text(encoding="utf-8") == (
+        "uncommitted feature work\n"
+    )
+
+
+def test_prepare_still_refuses_other_untracked_files_beside_nested_worktree(
+    tmp_path: Path,
+) -> None:
+    _, _, primary, _ = _setup_repositories(tmp_path)
+    nested_worktree = primary / ".worktrees" / "feature"
+    _git(
+        primary,
+        "worktree",
+        "add",
+        "-b",
+        "feature/nested",
+        str(nested_worktree),
+        "HEAD",
+    )
+    (primary / "ordinary-untracked.txt").write_text("do not ignore me\n")
+
+    with pytest.raises(DeploymentError, match="ordinary-untracked.txt"):
+        _prepare_primary(primary.resolve(), remote="origin", branch="main")
+
+
 def test_health_verification_requires_exact_clean_durable_build() -> None:
     commit = "a" * 40
     payload = {
