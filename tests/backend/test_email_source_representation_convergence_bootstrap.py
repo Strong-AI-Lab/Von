@@ -119,6 +119,46 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
     assert report["gmail_paper_signal_extraction_hint"]["success"] is True
 
 
+def test_email_source_workflow_bootstrap_reuses_prevalidated_paper_dependency(
+    monkeypatch,
+) -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    def fail_if_paper_bootstrap_repeats() -> None:
+        raise AssertionError("paper bootstrap repeated")
+
+    monkeypatch.setattr(
+        mod,
+        "bootstrap_canonical_paper_representation_workflows",
+        fail_if_paper_bootstrap_repeats,
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_email_source_gmail_completion_hint",
+        lambda: {"success": True},
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_email_source_gmail_paper_signal_extraction_hint",
+        lambda: {"success": True},
+    )
+    monkeypatch.setattr(
+        mod,
+        "bootstrap_repo_seed_workflow_bundle",
+        lambda **_kwargs: {"publication": {"counts": {"errors": 0}}},
+    )
+
+    paper_report = {"success": True, "publication": {"skipped": True}}
+    report = mod.bootstrap_canonical_email_source_representation_convergence_workflows(
+        paper_workflow_dependency_report=paper_report
+    )
+
+    assert report["success"] is True
+    assert report["paper_workflow_dependency"] == paper_report
+
+
 def test_email_source_seed_keeps_claim_enrichment_out_of_source_completion() -> None:
     from src.backend.services import (
         email_source_representation_convergence_workflow_vontology_service as mod,

@@ -418,7 +418,7 @@ def deploy(
     remote: str = "origin",
     branch: str = "main",
     health_url: str = "http://127.0.0.1:5001/health",
-    health_timeout_seconds: int = 180,
+    health_timeout_seconds: int = 960,
 ) -> DeploymentResult:
     primary_root = primary_root.resolve()
     runtime_root = runtime_root.resolve()
@@ -492,7 +492,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--branch", default="main")
     parser.add_argument("--health-url", default="http://127.0.0.1:5001/health")
-    parser.add_argument("--health-timeout-seconds", type=int, default=180)
+    parser.add_argument("--health-timeout-seconds", type=int, default=960)
     return parser
 
 

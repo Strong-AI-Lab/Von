@@ -73,7 +73,7 @@ PY
 """
     )
 
-    assert payload == {"health_timeout_seconds": 180}
+    assert payload == {"health_timeout_seconds": 960}
 
 
 def test_run_sh_accepts_an_explicit_existing_launcher_root(tmp_path: Path) -> None:

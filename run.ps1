@@ -41,7 +41,7 @@ param(
     [int]$LogRetention = 20,
     [string]$AdminToken,
     [switch]$SkipHealth,
-    [int]$HealthTimeoutSec = 60,
+    [int]$HealthTimeoutSec = 960,
     [int]$HealthGraceSec = 45,
     [string[]]$ReadyLogPatterns = @('Running with Waitress', 'Press CTRL+C to quit', 'Flask app running'),
     [switch]$DisableLogReady,
@@ -3731,7 +3731,7 @@ Von Launcher Help
         -AdminToken <token>    Provide explicit shutdown token
     -SkipHealth            Do not wait for health during start
         -ShowRelationCoverage  Show relationship coverage summary on start/status
-        -HealthTimeoutSec <n>  Seconds to wait for /health (default 60)
+        -HealthTimeoutSec <n>  Seconds to wait for /health (default 960)
         -HealthGraceSec <n>    Extra seconds after port listens to keep waiting (default 45)
         -ReadyLogPatterns <p>  One or more substrings that indicate readiness (log shortcut)
         -DisableLogReady       Disable log pattern readiness shortcut
@@ -3764,8 +3764,8 @@ Von Launcher Help
 
     Examples:
         .\run.ps1 start
-        .\run.ps1 restart -AgentTest -HealthTimeoutSec 180
-        .\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 180
+        .\run.ps1 restart -AgentTest -HealthTimeoutSec 960
+        .\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 960
         .\run.ps1 status
         .\run.ps1 check          # returns exit code (0 healthy, 2 unhealthy, 3 not running)
         .\run.ps1 logs -Tail 200 -Follow
