@@ -13,8 +13,9 @@ import logging
 import time
 from typing import Any, Mapping, Sequence
 
+from ..db.repositories.concepts_repository import ConceptsRepository
 from .concept_service import get_concept_by_concept_id
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 _logger = logging.getLogger(__name__)
 
@@ -138,9 +139,12 @@ class ConceptSummaryFieldResolver:
 
     def get_summary_fields_for_types(self, type_ids: Sequence[str]) -> tuple[str, ...]:
         self._ensure_cache()
-        for type_id in _normalise_strings(type_ids):
-            fields = self.get_summary_fields_for_type(type_id)
+        ordered_type_ids = _normalise_strings(type_ids)
+        self._load_type_bindings(ordered_type_ids)
+        for type_id in ordered_type_ids:
+            fields = self._summary_fields_by_type.get(type_id, ())
             if fields:
+                self._load_field_metadata_for_fields(fields)
                 return fields
         return ()
 
@@ -198,6 +202,105 @@ class ConceptSummaryFieldResolver:
             if field_keys:
                 break
         self._summary_fields_by_type[type_id] = _dedupe_preserve_order(field_keys)
+
+    def _load_type_bindings(self, type_ids: Sequence[str]) -> None:
+        missing = [
+            type_id
+            for type_id in _normalise_strings(type_ids)
+            if type_id not in self._summary_fields_by_type
+        ]
+        if not missing:
+            return
+        try:
+            docs = list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": missing}},
+                    {"concept_id": 1, "relationships": 1},
+                    limit=len(missing),
+                )
+            )
+        except Exception as exc:
+            _logger.debug(
+                "[summary_field_resolver] Failed to batch-load type bindings: %s",
+                exc,
+            )
+            docs = []
+        docs_by_id = {
+            str(doc.get("concept_id") or "").strip(): doc
+            for doc in docs
+            if isinstance(doc, Mapping)
+        }
+        for type_id in missing:
+            concept = docs_by_id.get(type_id)
+            relationships = (
+                concept.get("relationships")
+                if isinstance(concept, Mapping)
+                else None
+            )
+            if not isinstance(relationships, Mapping):
+                self._summary_fields_by_type[type_id] = ()
+                continue
+            field_keys: list[str] = []
+            for predicate in _TYPE_FIELD_RELATIONSHIP_ALIASES:
+                for field_concept_id in _normalise_strings(
+                    relationships.get(predicate)
+                ):
+                    field_key = _field_key_from_concept_id(field_concept_id)
+                    if field_key:
+                        field_keys.append(field_key)
+                if field_keys:
+                    break
+            self._summary_fields_by_type[type_id] = _dedupe_preserve_order(
+                field_keys
+            )
+
+    def _load_field_metadata_for_fields(self, field_keys: Sequence[str]) -> None:
+        ordered_field_keys = _normalise_strings(field_keys)
+        missing_field_keys = [
+            field_key
+            for field_key in ordered_field_keys
+            if field_key not in self._text_predicates_by_field
+            or field_key not in self._relationship_predicates_by_field
+        ]
+        if not missing_field_keys:
+            return
+        concept_ids = [_field_concept_id(key) for key in missing_field_keys]
+        predicates = _dedupe_preserve_order(
+            [*_TEXT_PREDICATE_CONFIG_ALIASES, *_RELATIONSHIP_PREDICATE_CONFIG_ALIASES]
+        )
+        try:
+            rows_by_concept = get_texts_for_concepts(
+                concept_ids,
+                predicates=predicates,
+                limit_per_concept=10,
+            )
+        except Exception as exc:
+            _logger.debug(
+                "[summary_field_resolver] Failed to batch-load field metadata: %s",
+                exc,
+            )
+            rows_by_concept = {}
+
+        for field_key, concept_id in zip(missing_field_keys, concept_ids):
+            rows = rows_by_concept.get(concept_id, [])
+            text_predicates: tuple[str, ...] = ()
+            relationship_predicates: tuple[str, ...] = ()
+            for predicate in _TEXT_PREDICATE_CONFIG_ALIASES:
+                text_predicates = self._first_config_value(
+                    [row for row in rows if row.get("predicate") == predicate]
+                )
+                if text_predicates:
+                    break
+            for predicate in _RELATIONSHIP_PREDICATE_CONFIG_ALIASES:
+                relationship_predicates = self._first_config_value(
+                    [row for row in rows if row.get("predicate") == predicate]
+                )
+                if relationship_predicates:
+                    break
+            self._text_predicates_by_field[field_key] = text_predicates
+            self._relationship_predicates_by_field[field_key] = (
+                relationship_predicates
+            )
 
     @staticmethod
     def _load_first_predicate_config(

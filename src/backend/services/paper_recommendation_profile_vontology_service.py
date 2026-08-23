@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
+from .concept_type_closure_service import load_type_closure
 from .paper_recommendation_policy_authority_service import (
     normalise_profile_fields,
     resolve_paper_recommendation_policy,
@@ -175,26 +176,12 @@ def _ensure_predicate_concept(*, concept_id: str, name: str, description: str) -
 
 
 def _collect_type_and_ancestor_type_ids(type_ids: Sequence[str] | None) -> list[str]:
-    queue: list[str] = _normalise_concept_id_list(type_ids)
-    visited: set[str] = set()
-    ordered: list[str] = []
-
-    while queue:
-        raw_type_id = queue.pop(0)
-        type_id = _normalise_concept_id(raw_type_id)
-        if not type_id or type_id in visited:
-            continue
-        visited.add(type_id)
-        ordered.append(type_id)
-
-        concept_doc = load_concept(type_id)
-        parent_type_ids = normalise_relationship_targets(
-            (concept_doc or {}).get("relationships", {}).get("is_a_type_of")
+    return list(
+        load_type_closure(_normalise_concept_id_list(type_ids)).get(
+            "ordered_type_ids"
         )
-        for parent_type_id in parent_type_ids:
-            if parent_type_id not in visited:
-                queue.append(parent_type_id)
-    return ordered
+        or []
+    )
 
 
 def _load_profile_type_salient_to_type_ids() -> list[str]:

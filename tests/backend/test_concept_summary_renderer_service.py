@@ -53,6 +53,54 @@ def _install_summary_field_resolver(monkeypatch) -> None:
         lambda: _FakeSummaryFieldResolver(),
     )
 
+    def _type_closure(type_ids):
+        direct = list(type_ids)
+        queue = list(direct)
+        ordered = list(direct)
+        seen = set(direct)
+        docs = {}
+        while queue:
+            type_id = queue.pop(0)
+            try:
+                doc = service.get_concept_by_concept_id(type_id)
+            except Exception:
+                continue
+            docs[type_id] = doc
+            for parent_id in (doc.get("relationships") or {}).get("is_a_type_of") or []:
+                if parent_id in seen:
+                    continue
+                seen.add(parent_id)
+                ordered.append(parent_id)
+                queue.append(parent_id)
+        return {
+            "ordered_type_ids": ordered,
+            "ancestor_type_ids": ordered[len(direct):],
+            "documents_by_id": docs,
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(service, "load_type_closure", _type_closure)
+    monkeypatch.setattr(
+        service,
+        "resolve_concept_display_names",
+        lambda docs: {
+            doc["concept_id"]: doc.get("name") or doc["concept_id"]
+            for doc in docs
+        },
+    )
+
+    def _find_concepts(filter_value, *_args, **_kwargs):
+        ids = (filter_value.get("concept_id") or {}).get("$in") or []
+        docs = []
+        for concept_id in ids:
+            try:
+                docs.append(service.get_concept_by_concept_id(concept_id))
+            except Exception:
+                pass
+        return docs
+
+    monkeypatch.setattr(service.ConceptsRepository, "find", _find_concepts)
+
 
 def test_load_concept_summary_renderer_builds_person_identity_payload(monkeypatch) -> None:
     _install_summary_field_resolver(monkeypatch)

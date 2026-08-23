@@ -59,6 +59,29 @@ let suppressConceptTabPersistence = false;
 let dynamicConceptTabRecencyCounter = 0;
 let conceptTabLoadingSequence = 0;
 const expandedConceptTabBuckets = new Set();
+let conceptTabTemplatePromise = null;
+
+function loadConceptTabTemplate() {
+    if (!conceptTabTemplatePromise) {
+        if (typeof globalThis.fetch !== 'function') {
+            return Promise.reject(new Error('Fetch is unavailable for concept tab template loading'));
+        }
+        conceptTabTemplatePromise = globalThis.fetch('/concept_tab')
+            .then(async (response) => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.text();
+            })
+            .catch((error) => {
+                // A transient preload failure must remain retryable on the next
+                // explicit concept open.
+                conceptTabTemplatePromise = null;
+                throw error;
+            });
+    }
+    return conceptTabTemplatePromise;
+}
 
 export function clampConceptPageWidthPx(requestedWidthPx, availableWidthPx) {
     const available = Number(availableWidthPx);
@@ -2185,13 +2208,9 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
     tabInfo.loadingPromise = (async () => {
     try {
         const initialBucketKind = getConceptTabBucketKind(tabInfo.kind);
-        // Fetch the concept tab template
-        const response = await fetch('/concept_tab');
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const html = await response.text();
+        // Reuse the application-start preload so a concept activation is not
+        // queued behind unrelated runtime requests just to obtain static HTML.
+        const html = await loadConceptTabTemplate();
 
         // Make IDs unique for this dynamic tab.
         // IMPORTANT: Do not rely solely on a non-alnum scrub of conceptId, as that can collide
@@ -2207,6 +2226,8 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
         tabInfo.content.innerHTML = modifiedHtml;
         initialiseConceptPageResizeUI(tabInfo.content);
 
+        let deferredHeaderNodeLoad = null;
+
         // Add a small kind badge and an ID copy chip to the header if available.
         // Fallback inference: if tabInfo.kind is absent (regression / legacy dispatch), infer from node content.
         let nodeJson = null; // Store for both badge and predicate detection
@@ -2214,11 +2235,20 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
             let { kind } = tabInfo;
             const headerSpan = document.getElementById(`conceptTypeDisplayNamePluralElement_${uniqueIdSuffix}`);
             const headerDiv = headerSpan ? headerSpan.closest('.concept-header') : null;
-            // Always attempt inference: even if an initial kind was provided it may be wrong.
-            try {
+            const loadNodeContent = async () => {
                 const nodeResp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`);
-                if (nodeResp.ok) {
-                    nodeJson = await nodeResp.json();
+                return nodeResp.ok ? nodeResp.json() : null;
+            };
+            // Only an unknown-kind tab needs legacy node content before it can
+            // initialise. Search/tree callers already provide a bounded kind;
+            // hydrate node-dependent header controls after primary readiness.
+            if (normaliseConceptTabKind(kind) === 'unknown') {
+                try {
+                    nodeJson = await loadNodeContent();
+                } catch (inferErr) {
+                    console.warn('[dynamicTabs] Kind inference failed', inferErr);
+                }
+                if (nodeJson) {
                     // Prefer backend-provided computed_kind if available
                     if (nodeJson.computed_kind && nodeJson.computed_kind !== kind) {
                         kind = setDynamicConceptTabKind(conceptId, nodeJson.computed_kind, { rebuild: false }) || kind;
@@ -2235,8 +2265,29 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                         kind = setDynamicConceptTabKind(conceptId, inferred, { rebuild: false }) || kind;
                     }
                 }
-            } catch (inferErr) {
-                console.warn('[dynamicTabs] Kind inference failed', inferErr);
+            } else if (headerDiv) {
+                deferredHeaderNodeLoad = async () => {
+                    try {
+                        const deferredNodeJson = await loadNodeContent();
+                        const deferredKind = deferredNodeJson?.computed_kind || deferredNodeJson?.kind || kind;
+                        if (deferredKind && deferredKind !== kind) {
+                            const previousBucket = getConceptTabBucketKind(kind);
+                            kind = setDynamicConceptTabKind(conceptId, deferredKind, { rebuild: false }) || kind;
+                            if (getConceptTabBucketKind(kind) !== previousBucket) {
+                                rebuildConceptTabBuckets();
+                            }
+                        }
+                        const deferredBadge = headerDiv.querySelector('.kind-badge');
+                        if (deferredBadge) {
+                            deferredBadge.className = `kind-badge ${kind}`;
+                            deferredBadge.textContent = kind === 'predicate' ? 'Predicate' : (kind === 'type' ? 'Type' : 'Individual');
+                        }
+                        attachAnalysisButtons(headerDiv, conceptId, kind, deferredNodeJson);
+                    } catch (headerNodeErr) {
+                        console.warn('[dynamicTabs] Deferred header node content failed', headerNodeErr);
+                        attachAnalysisButtons(headerDiv, conceptId, kind, null);
+                    }
+                };
             }
 
             if (headerDiv && (kind === 'type' || kind === 'individual' || kind === 'predicate') && !headerDiv.querySelector('.kind-badge')) {
@@ -2259,7 +2310,9 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                 attachConceptIdCopyChip(headerDiv, conceptId, kind);
                 attachRawDataButton(headerDiv, conceptId, kind, tabInfo.content);
                 attachKeyConceptStarButton(headerDiv, conceptId);
-                attachAnalysisButtons(headerDiv, conceptId, kind, nodeJson);
+                if (nodeJson) {
+                    attachAnalysisButtons(headerDiv, conceptId, kind, nodeJson);
+                }
             }
         } catch (e) {
             console.warn('[dynamicTabs] Could not attach kind badge:', e);
@@ -2322,6 +2375,9 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
         await Promise.resolve();
         console.log(`[dynamicTabs] Initializing concept tab functionality for ${conceptId}`);
         await initializeDynamicConceptTab(conceptId, uniqueIdSuffix);
+        if (deferredHeaderNodeLoad) {
+            void deferredHeaderNodeLoad();
+        }
         try { attachNamesObserver(conceptId, uniqueIdSuffix); } catch (_) { }
         try { backfillNoteGlyphs(tabInfo.content); } catch (e) { console.warn('[dynamicTabs] backfillNoteGlyphs post-init failed', e); }
 
@@ -2905,6 +2961,7 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
         }
 
         let tabKind = (dynamicConceptTabs.get(conceptId) || {}).kind;
+        let individualInitialisationLoad = null;
 
         // Toggle type-only sections visibility by tab kind
         try {
@@ -2952,47 +3009,63 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
 
             // For individuals: adapt UI to show summary/description and hide creation/list sections
             if (tabKind === 'individual') {
-                await adaptIndividualConceptTabUI(conceptId, uniqueIdSuffix);
+                individualInitialisationLoad = adaptIndividualConceptTabUI(conceptId, uniqueIdSuffix);
             }
         } catch (e) {
             console.warn('[dynamicTabs] Unable to toggle type sections for tab', conceptId, e);
         }
 
-        let namesOutcome = null;
-        try {
-            await initializeNamesForm(uniqueIdSuffix);
-            namesOutcome = await loadConceptNames(conceptId, uniqueIdSuffix);
-            // Load attributes (text relations excluding names)
-            await loadConceptAttributes(conceptId, uniqueIdSuffix);
-        } catch (e) {
-            console.warn('[dynamicTabs] Failed to initialize names form for tab', conceptId, e);
-        }
-
-        if (namesOutcome && namesOutcome.status === 'not_found') {
-            console.warn(`[dynamicTabs] Concept ${conceptId} is unavailable; skipping further initialisation.`);
-            return;
-        }
-
-        try {
-            await initializeRelationshipsUI(conceptId, uniqueIdSuffix, tabKind);
-        } catch (e) {
-            console.warn('[dynamicTabs] Failed to initialise relationships UI for tab', conceptId, e);
-        }
-
-        console.log(`[dynamicTabs] Dynamic concept tab initialization complete for ${conceptId}`);
-
-        // Initialize predicate view if this concept is a predicate
-        try {
-            // Fetch concept data to check if it's a predicate
-            const nodeResp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`);
-            if (nodeResp.ok) {
-                const conceptData = await nodeResp.json();
-                if (conceptData.raw_doc) {
-                    await initializePredicateView(conceptId, uniqueIdSuffix, conceptData.raw_doc);
-                }
+        const initialiseSecondarySections = async () => {
+            let namesOutcome = null;
+            try {
+                await initializeNamesForm(uniqueIdSuffix);
+                namesOutcome = await loadConceptNames(conceptId, uniqueIdSuffix);
+                // Load attributes (text relations excluding names)
+                await loadConceptAttributes(conceptId, uniqueIdSuffix);
+            } catch (e) {
+                console.warn('[dynamicTabs] Failed to initialize names form for tab', conceptId, e);
             }
-        } catch (predicateErr) {
-            console.warn('[dynamicTabs] Failed to initialize predicate view', predicateErr);
+
+            if (namesOutcome && namesOutcome.status === 'not_found') {
+                console.warn(`[dynamicTabs] Concept ${conceptId} is unavailable; skipping further initialisation.`);
+                return;
+            }
+
+            try {
+                await initializeRelationshipsUI(conceptId, uniqueIdSuffix, tabKind);
+            } catch (e) {
+                console.warn('[dynamicTabs] Failed to initialise relationships UI for tab', conceptId, e);
+            }
+
+            // Predicate details are also panel-level enrichment.
+            try {
+                const nodeResp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`);
+                if (nodeResp.ok) {
+                    const conceptData = await nodeResp.json();
+                    if (conceptData.raw_doc) {
+                        await initializePredicateView(conceptId, uniqueIdSuffix, conceptData.raw_doc);
+                    }
+                }
+            } catch (predicateErr) {
+                console.warn('[dynamicTabs] Failed to initialize predicate view', predicateErr);
+            }
+            console.log(`[dynamicTabs] Secondary concept panels complete for ${conceptId}`);
+        };
+
+        if (tabKind === 'individual') {
+            // The shell already carries the concept name, kind, identifier,
+            // core controls, and honestly loading content/assertion panels.
+            // Atlas-backed identity enrichment and secondary graph material
+            // continue independently without extending the global busy state.
+            void Promise.resolve(individualInitialisationLoad)
+                .then(() => initialiseSecondarySections())
+                .catch((error) => {
+                    console.warn('[dynamicTabs] Deferred individual initialisation failed', error);
+                });
+            console.log(`[dynamicTabs] Dynamic concept tab primary initialization complete for ${conceptId}`);
+        } else {
+            await initialiseSecondarySections();
+            console.log(`[dynamicTabs] Dynamic concept tab initialization complete for ${conceptId}`);
         }
 
         // Post-init verification: ensure description section actually materialized for type tabs
@@ -3021,6 +3094,12 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
  */
 export function initializeDynamicTabs() {
     console.log('[dynamicTabs] Initializing dynamic tabs functionality');
+
+    // Static concept-tab markup is needed on every concept open. Begin its
+    // retryable preload while the rest of the application initialises.
+    void loadConceptTabTemplate().catch((error) => {
+        console.warn('[dynamicTabs] Concept tab template preload failed', error);
+    });
 
     // Clear any existing dynamic tabs on initialization
     closeAllDynamicConceptTabs({ persist: false });
@@ -3341,15 +3420,44 @@ function attachNamesObserver(conceptId, suffix, attempt = 0) {
 async function adaptIndividualConceptTabUI(conceptId, suffix) {
     try {
         const encodedId = encodeURIComponent(conceptId);
-        // Fetch parents (types) and node content for description
-        const [parentsRes, nodeRes, conceptRes] = await Promise.all([
-            fetch(`/vontology/api/vontology/parents?identifier=${encodedId}`),
-            fetch(`/vontology/api/vontology/node_content?identifier=${encodedId}`),
-            fetch(`/api/concepts/${encodedId}`)
+        // Primary identity/type material is available from the bounded parents
+        // and direct concept reads. The legacy node-content projection scans a
+        // much broader text-relation surface and is only needed later by the
+        // independent predicate-detail panel.
+        const parentsDataPromise = fetch(`/vontology/api/vontology/parents?identifier=${encodedId}`)
+            .then(async (response) => response.ok ? response.json() : { parents: [] });
+        const conceptDataPromise = fetch(`/api/concepts/${encodedId}`)
+            .then(async (response) => response.ok ? response.json() : null);
+
+        // Mount every independently loading panel before waiting on Atlas.
+        // The tab shell can then become globally ready while each projection
+        // remains honest about its own loading, empty, or degraded state.
+        const effectiveAssertionsLoad = (async () => {
+            try {
+                const { ensureConceptEffectiveAssertionsPanel } = await import('./components/conceptEffectiveAssertionsPanel.js');
+                await ensureConceptEffectiveAssertionsPanel({ conceptId, suffix });
+            } catch (assertionErr) {
+                console.warn('[dynamicTabs] Unable to initialise actor-effective assertions panel', assertionErr);
+            }
+        })();
+        const descriptionLoad = ensureUnifiedDescriptionSection(conceptId, suffix, {
+            allowLegacyFallback: false,
+            fallbackDescriptionPromise: conceptDataPromise.then((conceptData) => (
+                typeof conceptData?.description === 'string' ? conceptData.description : null
+            )),
+        });
+        const textSectionsLoad = (async () => {
+            await Promise.allSettled([
+                populateNotesSection(conceptId, suffix),
+                populateContentSection(conceptId, suffix),
+            ]);
+        })();
+
+        const [parentsData, conceptData] = await Promise.all([
+            parentsDataPromise,
+            conceptDataPromise,
         ]);
-        const parentsData = parentsRes.ok ? await parentsRes.json() : { parents: [] };
-        const nodeData = nodeRes.ok ? await nodeRes.json() : {};
-        const conceptData = conceptRes && conceptRes.ok ? await conceptRes.json() : null;
+        const nodeData = {};
 
         // Sync concept selection state and original notes using the shared helper
         try {
@@ -3380,20 +3488,11 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
             if (conceptName) nameInput.value = conceptName;
         }
 
-        // Prefer the dedicated concept summary renderer panel; fall back to the
-        // older type-summary line if the summary payload is unavailable.
+        // Render the small type summary immediately. The specialised summary
+        // renderer is useful enrichment, but it must not block description,
+        // notes, actor-effective knowledge, or the tab's primary readiness.
         const step1 = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
-        let renderedConceptSummary = false;
-        try {
-            const { ensureConceptSummaryRendererPanelForConceptTab } = await import('./components/conceptSummaryRendererPanel.js');
-            renderedConceptSummary = await ensureConceptSummaryRendererPanelForConceptTab({
-                conceptId,
-                suffix,
-            });
-        } catch (rendererErr) {
-            console.warn('[dynamicTabs] Unable to initialise concept summary renderer panel', rendererErr);
-        }
-        if (!renderedConceptSummary && step1 && !step1.querySelector('.concept-types-summary')) {
+        if (step1 && !step1.querySelector('.concept-types-summary')) {
             const summary = document.createElement('div');
             summary.className = 'concept-types-summary';
             summary.style.margin = '6px 0 10px 0';
@@ -3403,35 +3502,39 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
             step1.insertBefore(summary, step1.querySelector('label'));
         }
 
-        // Ensure unified description UI (reuse type description section & logic for individuals)
-        const descriptionLoad = ensureUnifiedDescriptionSection(conceptId, suffix);
+        const summaryRendererLoad = (async () => {
+            try {
+                const { ensureConceptSummaryRendererPanelForConceptTab } = await import('./components/conceptSummaryRendererPanel.js');
+                const rendered = await ensureConceptSummaryRendererPanelForConceptTab({
+                    conceptId,
+                    suffix,
+                });
+                if (rendered && step1) {
+                    step1.querySelector('.concept-types-summary')?.remove();
+                }
+            } catch (rendererErr) {
+                console.warn('[dynamicTabs] Unable to initialise concept summary renderer panel', rendererErr);
+            }
+        })();
         const recommendationProfileLoad = (async () => {
-            const { ensureRecommendationProfilePanelForConceptTab } = await import('./components/paperRecommendationProfilePanel.js');
-            await ensureRecommendationProfilePanelForConceptTab({
-                conceptId,
-                suffix,
-            });
+            try {
+                const { ensureRecommendationProfilePanelForConceptTab } = await import('./components/paperRecommendationProfilePanel.js');
+                await ensureRecommendationProfilePanelForConceptTab({
+                    conceptId,
+                    suffix,
+                });
+            } catch (profileErr) {
+                console.warn('[dynamicTabs] Unable to initialise recommendation profile panel', profileErr);
+            }
         })();
-        const textSectionsLoad = (async () => {
-            // Keep content below notes without making both wait for description/profile panels.
-            await populateNotesSection(conceptId, suffix);
-            await populateContentSection(conceptId, suffix);
-        })();
-        const secondaryLoads = await Promise.allSettled([
-            descriptionLoad,
+        // Observe optional completion without extending the global loading state.
+        void Promise.allSettled([
+            summaryRendererLoad,
+            effectiveAssertionsLoad,
             recommendationProfileLoad,
-            textSectionsLoad
+            textSectionsLoad,
+            descriptionLoad,
         ]);
-        const [descriptionOutcome, profileOutcome, textSectionsOutcome] = secondaryLoads;
-        if (descriptionOutcome.status === 'rejected') {
-            console.warn('[dynamicTabs] Unable to initialise description section', descriptionOutcome.reason);
-        }
-        if (profileOutcome.status === 'rejected') {
-            console.warn('[dynamicTabs] Unable to initialise recommendation profile panel', profileOutcome.reason);
-        }
-        if (textSectionsOutcome.status === 'rejected') {
-            console.warn('[dynamicTabs] Unable to initialise note/content sections', textSectionsOutcome.reason);
-        }
 
         // If pure instance (no type-of parents), hide the concept list entirely
         const isPureInstance = !Array.isArray(parentsData.parents) || parentsData.parents.length === 0;
@@ -3491,7 +3594,7 @@ export async function updateConceptDescription(conceptId, description) {
     }
 }
 
-async function ensureUnifiedDescriptionSection(conceptId, suffix) {
+async function ensureUnifiedDescriptionSection(conceptId, suffix, options = {}) {
     try {
         let step1 = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
         if (!step1) {
@@ -3610,7 +3713,7 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
         // Inject SVG icons into any newly created or upgraded action buttons
         try { upgradeActionButtonIcons(descSection || step1); } catch (_) { }
         // Populate description then emit a deterministic readiness event for tests & other listeners
-        await populateTypeDescription(conceptId, suffix);
+        await populateTypeDescription(conceptId, suffix, options);
         try {
             const evt = new CustomEvent('description-populated', { detail: { conceptId, suffix } });
             document.dispatchEvent(evt);
@@ -4538,7 +4641,7 @@ export function buildDescriptionMetadataRows(record = {}) {
 }
 
 // Helper: show description for Type tabs and attach edit/save/cancel
-async function populateTypeDescription(conceptId, suffix) {
+async function populateTypeDescription(conceptId, suffix, options = {}) {
     try {
         const descSection = document.getElementById(`typeDescriptionSection_${suffix}`) || document.getElementById('typeDescriptionSection');
         const encodedId = encodeURIComponent(conceptId);
@@ -4679,7 +4782,7 @@ async function populateTypeDescription(conceptId, suffix) {
                 synthesized = true;
             }
             if (synthesized || isTestEnv) {
-                return populateTypeDescription(conceptId, suffix);
+                return populateTypeDescription(conceptId, suffix, options);
             }
             console.warn('[dynamicTabs] populateTypeDescription: missing essential elements – will retry shortly', { hasDisplay: !!display, hasEditActions: !!editActions, hasTextarea: !!textarea, hasEdit: !!editBtn, hasSave: !!saveBtn, hasCancel: !!cancelBtn, suffix, synthesized });
             // Light retry strategy (non-test only): attempt a few times with backoff; store attempt count on window-scoped map
@@ -4691,7 +4794,7 @@ async function populateTypeDescription(conceptId, suffix) {
                     rec.attempts += 1;
                     window.__descPopulateRetries.set(key, rec);
                     const delay = 80 * rec.attempts; // incremental backoff
-                    setTimeout(() => { try { populateTypeDescription(conceptId, suffix); } catch (_) { /* swallow */ } }, delay);
+                    setTimeout(() => { try { populateTypeDescription(conceptId, suffix, options); } catch (_) { /* swallow */ } }, delay);
                 } else {
                     console.warn('[dynamicTabs] populateTypeDescription: giving up after retries', { conceptId, suffix });
                 }
@@ -4746,6 +4849,24 @@ async function populateTypeDescription(conceptId, suffix) {
                 if (res.ok && dynamicConceptTabs.get(conceptId)?.newlyCreated) {
                     console.debug('[dynamicTabs] Newly-created concept has no hasDescription relation; skipping legacy description fallbacks', { conceptId });
                     setEmpty();
+                    return;
+                }
+                if (res.ok && options.allowLegacyFallback === false) {
+                    let fallbackDescription = options.fallbackDescription;
+                    if (typeof fallbackDescription !== 'string' && options.fallbackDescriptionPromise) {
+                        fallbackDescription = await Promise.resolve(options.fallbackDescriptionPromise)
+                            .catch(() => null);
+                    }
+                    if (typeof fallbackDescription === 'string') {
+                        applyRawDescription(fallbackDescription);
+                        textarea.value = fallbackDescription;
+                        relationId = null;
+                        renderDescriptionMetadata(null);
+                        console.debug('[dynamicTabs] Description loaded (bounded concept fallback)', { conceptId });
+                    } else {
+                        console.debug('[dynamicTabs] No bounded description found; legacy fallbacks disabled', { conceptId });
+                        setEmpty();
+                    }
                     return;
                 }
                 console.debug('[dynamicTabs] Primary description API returned no data – attempting legacy fallbacks', { status: res.status, bodyKeys: Object.keys(data || {}) });
@@ -7166,39 +7287,30 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
     }
 }
 
-// Metadata cache for concept kind and display names (relationships section)
-const relationshipsConceptMetadataCache = new Map();
-async function getConceptMetadata(conceptId) {
-    if (relationshipsConceptMetadataCache.has(conceptId)) {
-        return relationshipsConceptMetadataCache.get(conceptId);
-    }
-    try {
-        const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}`);
-        if (resp.ok) {
-            const data = await resp.json();
-            const metadata = {
-                kind: data.kind || 'individual',
-                name: data.display_name || conceptId
-            };
-            relationshipsConceptMetadataCache.set(conceptId, metadata);
-            return metadata;
-        }
-    } catch (err) {
-        console.warn('[dynamicTabs] Failed to fetch metadata for', conceptId, err);
-    }
-    return { kind: 'individual', name: conceptId };
+const relationshipExtentPageState = new Map();
+
+function relationshipExtentStateKey(conceptId, suffix) {
+    return `${conceptId}::${suffix}`;
 }
 
-async function renderRelationships(conceptId, suffix, kind) {
+async function renderRelationships(conceptId, suffix, kind, { offset = 0, append = false } = {}) {
     const content = document.getElementById(`relationshipsContent_${suffix}`) || document.getElementById('relationshipsContent');
     if (!content) return;
-    content.innerHTML = '<div>Loading relationships...</div>';
+    if (!append) {
+        content.replaceChildren();
+        const loading = document.createElement('div');
+        loading.textContent = 'Loading relationships...';
+        content.appendChild(loading);
+    }
+    content.dataset.panelState = 'loading';
     try {
         const uiState = getRelationshipExtentUiState(conceptId, suffix);
         const extentQuery = deriveRelationshipExtentQuery(uiState.uncertaintyFilter);
         const params = new URLSearchParams();
         params.set('concept_id', conceptId);
-        params.set('limit', '500');
+        params.set('limit', '50');
+        params.set('offset', String(offset));
+        params.set('bounded_only', 'true');
         if (extentQuery.uncertaintyMode) {
             params.set('uncertainty_mode', extentQuery.uncertaintyMode);
         }
@@ -7211,26 +7323,54 @@ async function renderRelationships(conceptId, suffix, kind) {
         const resp = await fetch(`/vontology/api/vontology/relationships/extent?${params.toString()}`);
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || !data.success) {
-            throw new Error(data.error || `HTTP ${resp.status}`);
+            const error = new Error(data.error || `HTTP ${resp.status}`);
+            error.code = data.error_code || '';
+            error.retryable = data.retryable === true;
+            throw error;
         }
 
-        let rows = Array.isArray(data.rows) ? data.rows : [];
-        if (!rows.length) {
-            try {
-                const conceptResp = await conceptApiFetch(`/api/concepts/${encodeURIComponent(conceptId)}`);
-                if (conceptResp.ok) {
-                    const conceptPayload = await conceptResp.json().catch(() => null);
-                    const fallbackRows = deriveRelationshipExtentFallbackRows(conceptId, conceptPayload);
-                    if (fallbackRows.length) {
-                        rows = fallbackRows;
-                    }
-                }
-            } catch (fallbackErr) {
-                console.debug('[dynamicTabs] Relationship fallback synthesis failed', fallbackErr);
+        const pageRows = Array.isArray(data.rows) ? data.rows : [];
+        const stateKey = relationshipExtentStateKey(conceptId, suffix);
+        const existingState = append
+            ? relationshipExtentPageState.get(stateKey) || { rows: [], metadata: {} }
+            : { rows: [], metadata: {} };
+        const mergedRows = [...existingState.rows];
+        const seenRows = new Set(mergedRows.map((row) => JSON.stringify([
+            row.role,
+            row.source,
+            row.relation_kind,
+            row.predicate_id,
+            row.arg1_value,
+            row.arg2_value,
+            row.arg2_lang,
+        ])));
+        for (const row of pageRows) {
+            const key = JSON.stringify([
+                row.role,
+                row.source,
+                row.relation_kind,
+                row.predicate_id,
+                row.arg1_value,
+                row.arg2_value,
+                row.arg2_lang,
+            ]);
+            if (!seenRows.has(key)) {
+                seenRows.add(key);
+                mergedRows.push(row);
             }
         }
+        const responseMetadata = data.display_metadata && typeof data.display_metadata === 'object'
+            ? data.display_metadata
+            : {};
+        const metadata = { ...existingState.metadata, ...responseMetadata };
+        relationshipExtentPageState.set(stateKey, { rows: mergedRows, metadata });
+        let rows = mergedRows;
         if (!rows.length) {
-            content.innerHTML = '<i>No relationships yet.</i>';
+            content.replaceChildren();
+            const empty = document.createElement('i');
+            empty.textContent = 'No relationships yet.';
+            content.appendChild(empty);
+            content.dataset.panelState = 'complete';
             setRelationshipExtentResizeEnabled(content, suffix, false);
             return;
         }
@@ -7247,25 +7387,18 @@ async function renderRelationships(conceptId, suffix, kind) {
             return normalisePotentialConceptId(trimmed) || normalisePotentialConceptId(`#V#${trimmed}`) || '';
         };
 
-        const conceptIds = new Set();
-        rows.forEach((row) => {
-            const arg1ConceptId = normalisePotentialConceptId(row.arg1_value);
-            if (arg1ConceptId) conceptIds.add(arg1ConceptId);
-            const arg2ConceptId = normalisePotentialConceptId(row.arg2_value);
-            if (arg2ConceptId) conceptIds.add(arg2ConceptId);
-            const predicateConceptId = toPredicateConceptId(row.predicate_id);
-            if (predicateConceptId) {
-                conceptIds.add(predicateConceptId);
-            }
-        });
-
         const metadataMap = new Map();
-        await Promise.all(
-            Array.from(conceptIds).map(async (id) => {
-                const metadata = await getConceptMetadata(id);
-                metadataMap.set(id, metadata || { kind: 'individual', name: id });
-            })
-        );
+        Object.entries(metadata).forEach(([id, value]) => {
+            if (!id.startsWith('#V#') || !value || typeof value !== 'object') return;
+            metadataMap.set(id, {
+                kind: ['type', 'predicate', 'individual'].includes(value.kind)
+                    ? value.kind
+                    : 'individual',
+                name: typeof value.name === 'string' && value.name.trim()
+                    ? value.name.trim()
+                    : id,
+            });
+        });
 
         const createConceptCell = (conceptIdValue, fallbackName = null) => {
             const cell = document.createElement('td');
@@ -7539,11 +7672,45 @@ async function renderRelationships(conceptId, suffix, kind) {
 
         table.appendChild(tbody);
         tableContainer.appendChild(table);
-        content.innerHTML = '';
+        content.replaceChildren();
         content.appendChild(tableContainer);
+        if (data.has_more === true && Number.isInteger(data.next_offset)) {
+            const paging = document.createElement('div');
+            paging.className = 'relationship-extent-paging';
+            const loadMore = document.createElement('button');
+            loadMore.type = 'button';
+            loadMore.className = 'relationship-extent-load-more';
+            loadMore.textContent = 'Load more relationships';
+            loadMore.addEventListener('click', async () => {
+                loadMore.disabled = true;
+                loadMore.textContent = 'Loading...';
+                await renderRelationships(conceptId, suffix, kind, {
+                    offset: data.next_offset,
+                    append: true,
+                });
+            });
+            paging.appendChild(loadMore);
+            content.appendChild(paging);
+        }
+        content.dataset.panelState = data.has_more === true ? 'partial' : 'complete';
         setRelationshipExtentResizeEnabled(content, suffix, true);
     } catch (e) {
-        content.innerHTML = `<span class="relationships-error">Failed to load relationships (${e.message})</span>`;
+        content.replaceChildren();
+        const error = document.createElement('span');
+        error.className = 'relationships-error';
+        error.textContent = e.code === 'relationship_extent_index_not_ready'
+            ? 'Relationships are temporarily unavailable while the bounded index is prepared.'
+            : `Failed to load relationships (${e.message})`;
+        content.appendChild(error);
+        if (e.retryable || e.code === 'relationship_extent_index_not_ready') {
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'relationship-extent-retry';
+            retry.textContent = 'Retry';
+            retry.addEventListener('click', () => renderRelationships(conceptId, suffix, kind));
+            content.appendChild(retry);
+        }
+        content.dataset.panelState = 'degraded';
         setRelationshipExtentResizeEnabled(content, suffix, false);
     }
 }

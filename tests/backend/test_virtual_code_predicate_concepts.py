@@ -689,6 +689,66 @@ def test_relationship_extent_route_falls_back_before_extent_index_build(
     assert rows[0]["predicate_id"] == "#V#attended_event"
 
 
+def test_relationship_extent_route_bounded_only_fails_without_legacy_scan(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_readiness_snapshot",
+        lambda: {
+            "ready": False,
+            "status": "rebuilding",
+            "schema_version": 1,
+            "revision": None,
+            "watermark": None,
+            "source_count": None,
+            "edge_count": None,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("bounded-only unready reads must fail before concept lookup")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("bounded-only reads must not run the legacy aggregate")
+        ),
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?"
+        "concept_id=%23V%23focus&role=arg2&bounded_only=true"
+    )
+
+    assert resp.status_code == 503
+    payload = resp.get_json()
+    assert payload["error_code"] == "relationship_extent_index_not_ready"
+    assert payload["retryable"] is True
+    assert payload["extent_index"] == {
+        "ready": False,
+        "used_extent_index": False,
+        "fallback_used": False,
+        "reason": "relationship_extent_index_not_ready",
+        "index_state": {
+            "ready": False,
+            "status": "rebuilding",
+            "schema_version": 1,
+            "revision": None,
+            "watermark": None,
+            "source_count": None,
+            "edge_count": None,
+        },
+    }
+
+
 def test_relationship_extent_route_supports_uncertain_filters(app_client, monkeypatch):
     _, client = app_client
 
