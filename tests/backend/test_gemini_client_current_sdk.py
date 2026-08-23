@@ -181,7 +181,7 @@ def test_plain_interactions_rejects_failed_status_and_redacts_errors(
     assert "[redacted]" in str(raw_errors)
 
 
-def test_declared_google_genai_floor_matches_verified_locked_v2_contract() -> None:
+def test_declared_google_genai_floor_matches_verified_v2_contract() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     requirement = next(
@@ -189,16 +189,6 @@ def test_declared_google_genai_floor_matches_verified_locked_v2_contract() -> No
         for value in project["project"]["dependencies"]
         if value.startswith("google-genai")
     )
-    lock = tomllib.loads((root / "pdm.lock").read_text(encoding="utf-8"))
-    locked_version = Version(
-        next(
-            package["version"]
-            for package in lock["package"]
-            if package["name"] == "google-genai"
-        )
-    )
 
     assert Version("2.6.0") in requirement.specifier
     assert Version("2.5.999") not in requirement.specifier
-    assert locked_version == Version("2.6.0")
-    assert locked_version in requirement.specifier

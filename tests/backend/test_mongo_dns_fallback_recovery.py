@@ -59,6 +59,11 @@ def test_get_db_uses_dns_fallback_when_local_fallback_disabled(monkeypatch) -> N
     monkeypatch.setattr(mc, "_mongo_client_mock", None)
     monkeypatch.setattr(mc, "_using_fallback_real", False)
     monkeypatch.setattr(mc, "_effective_uri_real", mc.MONGO_URI)
+    # The sticky preference is process-global by design. Earlier tests may
+    # have exercised it, but this case is specifically the initial primary
+    # attempt followed by DNS fallback.
+    monkeypatch.setattr(mc, "_dns_fallback_preferred_until_monotonic", 0.0)
+    monkeypatch.setattr(mc, "_dns_fallback_preference_reason", None)
     monkeypatch.setenv("VON_DB_NAME", "von_db")
 
     db = mc.get_db()
