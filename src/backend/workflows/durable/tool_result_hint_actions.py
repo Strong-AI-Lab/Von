@@ -14,6 +14,7 @@ default ``#V#output_item_signal_extraction_hint``). Callers supply only:
 * ``tool_payload``        -- the raw output of that tool
 * (optional) ``hint_predicate_id`` -- override the hint predicate
 * (optional) ``lang``     -- language for the hint resolution
+* (optional) ``payload_max_chars`` -- authored serialised-payload bound
 
 Anti-drift: this module names no specific external integration. All semantic
 behaviour lives in Vontology hint bodies.
@@ -30,6 +31,8 @@ from ...services.output_hint_contracts import (
     OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
 )
 from ...services.tool_result_hints import (
+    DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS,
+    MAX_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS,
     LLMGenerationError,
     LLMGenerationResult,
     extract_signals_from_tool_result,
@@ -287,6 +290,22 @@ def _handle_extract_signals_from_tool_result(
     )
     lang = _safe_str(inputs.get("lang")) or "en-NZ"
     model = _safe_str(inputs.get("model")) or None
+    raw_payload_max_chars = inputs.get(
+        "payload_max_chars",
+        DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS,
+    )
+    try:
+        payload_max_chars = int(raw_payload_max_chars)
+    except (TypeError, ValueError):
+        payload_max_chars = 0
+    if not (1_000 <= payload_max_chars <= MAX_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS):
+        return WorkflowActionResult(
+            status="failed",
+            error=(
+                "payload_max_chars must be an integer from 1000 through "
+                f"{MAX_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS}."
+            ),
+        )
     policy_stage = _resolve_model_policy_stage(request, inputs)
     llm_generate = _build_model_policy_generate(
         request,
@@ -310,6 +329,7 @@ def _handle_extract_signals_from_tool_result(
         llm_client=llm_client,
         model=model,
         llm_generate=llm_generate,
+        payload_max_chars=payload_max_chars,
         hint_predicate_id=hint_predicate_id,
         lang=lang,
     )
@@ -333,6 +353,10 @@ def _handle_extract_signals_from_tool_result(
         ),
         "llm_calls": list(llm_calls),
         "aux_llm_calls": list(aux_llm_calls),
+        "payload_serialised_chars": result.payload_serialised_chars,
+        "payload_included_chars": result.payload_included_chars,
+        "payload_max_chars": result.payload_max_chars,
+        "payload_truncated": result.payload_truncated,
     }
 
     # Treat "hint not authored" or any LLM-side failure as a workflow failure

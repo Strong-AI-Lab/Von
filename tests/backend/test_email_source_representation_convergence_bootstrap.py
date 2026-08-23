@@ -52,20 +52,45 @@ def _reset_schedule_bootstrap_state(mod) -> None:
     mod._bootstrap_completed = False
 
 
-def test_email_source_seed_authorises_only_the_observed_v19_zhan_migration() -> None:
+def test_email_source_seed_authorises_only_reviewed_exact_migrations() -> None:
     from src.backend.services import (
         email_source_representation_convergence_workflow_vontology_service as mod,
     )
 
     bundle = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "20"
+    assert bundle["seed_version"] == "21"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
+        mod.EMAIL_RESOURCE_LINK_EXTRACTION_WORKFLOW_ID: {
+            "20": ["9706da2f51399e67008283cd74af82f8e58bcb3d1779c76c535f903ed439d6c3"]
+        },
         mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID: {
             "19": [
                 "fd6a3142054690216ed961920ae2984657951d3f7921db3a1379fc59d318e6ce"
             ]
         }
     }
+
+
+def test_email_resource_extraction_authors_sufficient_observable_payload_bounds() -> (
+    None
+):
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    bundle = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in bundle["workflows"]
+        if item["workflow_id"] == mod.EMAIL_RESOURCE_LINK_EXTRACTION_WORKFLOW_ID
+    )
+    steps = {step["state_id"]: step for step in workflow["publication_spec"]["steps"]}
+    fetch_bindings = dict(steps["fetch_payload"]["static_input_bindings"])
+    extraction_bindings = dict(steps["extract_signals"]["static_input_bindings"])
+
+    assert fetch_bindings["tool_arguments"]["include_body"] is True
+    assert fetch_bindings["tool_arguments"]["max_body_chars"] == 65_536
+    assert extraction_bindings["payload_max_chars"] == 100_000
 
 
 def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(

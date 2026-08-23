@@ -32,6 +32,10 @@ from .text_value_service import get_texts_for_concept
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS = 12_000
+MAX_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS = 200_000
+
+
 @dataclass(frozen=True)
 class LLMGenerationResult:
     """Provider-agnostic LLM result plus optional model-policy telemetry."""
@@ -92,6 +96,10 @@ class StructuredSignals:
     aux_llm_calls: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
     selected_model: str | None = None
     selected_candidate: Mapping[str, Any] | None = None
+    payload_serialised_chars: int = 0
+    payload_included_chars: int = 0
+    payload_max_chars: int = DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS
+    payload_truncated: bool = False
 
 
 def resolve_hint_body(
@@ -184,15 +192,36 @@ def _parse_signals(raw_response: str) -> tuple[Mapping[str, Any], tuple[str, ...
     return {}, ("non_object_response",)
 
 
-def _serialise_payload(payload: Any, *, max_chars: int = 12_000) -> str:
+def _serialise_payload_with_diagnostics(
+    payload: Any,
+    *,
+    max_chars: int = DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS,
+) -> tuple[str, int, int, bool]:
     """JSON-serialise the tool payload with a defensive size cap."""
 
     try:
         serialised = json.dumps(payload, default=str, ensure_ascii=False)
     except (TypeError, ValueError):
         serialised = str(payload)
-    if len(serialised) > max_chars:
-        return serialised[:max_chars] + "...[truncated]"
+    serialised_chars = len(serialised)
+    included_chars = min(serialised_chars, max_chars)
+    truncated = serialised_chars > max_chars
+    if truncated:
+        serialised = serialised[:max_chars] + "...[truncated]"
+    return serialised, serialised_chars, included_chars, truncated
+
+
+def _serialise_payload(
+    payload: Any,
+    *,
+    max_chars: int = DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS,
+) -> str:
+    """Compatibility wrapper returning only the bounded payload text."""
+
+    serialised, _, _, _ = _serialise_payload_with_diagnostics(
+        payload,
+        max_chars=max_chars,
+    )
     return serialised
 
 
@@ -240,6 +269,7 @@ def extract_signals_from_tool_result(
     llm_client: Any,
     model: Optional[str] = None,
     llm_generate: Callable[..., Any] | None = None,
+    payload_max_chars: int = DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS,
     hint_predicate_id: str = OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
     lang: str = "en-NZ",
 ) -> StructuredSignals:
@@ -271,6 +301,9 @@ def extract_signals_from_tool_result(
         llm_generate: Optional provider-agnostic generation hook. Callers that
             need workflow model-policy fallbacks can provide this without
             changing the Vontology-authored hint body or embedding policy here.
+        payload_max_chars: Maximum serialised tool-payload characters supplied
+            to the model. Durable callers may author a larger capability-specific
+            bound while the generic compatibility default remains 12,000.
         hint_predicate_id: The predicate to resolve. Defaults to the canonical
             signal-extraction hint; overridable for testing or for alternative
             hint families with the same shape.
@@ -308,7 +341,15 @@ def extract_signals_from_tool_result(
             warnings=("no_llm_client",),
         )
 
-    payload_text = _serialise_payload(tool_payload)
+    (
+        payload_text,
+        payload_serialised_chars,
+        payload_included_chars,
+        payload_truncated,
+    ) = _serialise_payload_with_diagnostics(
+        tool_payload,
+        max_chars=payload_max_chars,
+    )
     prompt = (
         f"{hint_body}\n\n"
         "Apply the instructions above to the following tool result payload "
@@ -360,6 +401,10 @@ def extract_signals_from_tool_result(
             warnings=(f"llm_error:{error_class}",),
             llm_calls=tuple(llm_calls),
             aux_llm_calls=tuple(aux_llm_calls),
+            payload_serialised_chars=payload_serialised_chars,
+            payload_included_chars=payload_included_chars,
+            payload_max_chars=payload_max_chars,
+            payload_truncated=payload_truncated,
         )
 
     (
@@ -380,10 +425,16 @@ def extract_signals_from_tool_result(
         aux_llm_calls=aux_llm_calls,
         selected_model=selected_model,
         selected_candidate=selected_candidate,
+        payload_serialised_chars=payload_serialised_chars,
+        payload_included_chars=payload_included_chars,
+        payload_max_chars=payload_max_chars,
+        payload_truncated=payload_truncated,
     )
 
 
 __all__ = [
+    "DEFAULT_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS",
+    "MAX_SIGNAL_EXTRACTION_PAYLOAD_MAX_CHARS",
     "LLMGenerationError",
     "LLMGenerationResult",
     "StructuredSignals",

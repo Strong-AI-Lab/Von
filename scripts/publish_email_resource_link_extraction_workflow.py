@@ -55,6 +55,11 @@ def _build_authoring_spec() -> dict:
                 "state_key": "fetch_payload",
                 "action_id": SOURCE_TOOL_ACTION_ID,
                 "execution_mode": "deterministic",
+                "static_input_bindings": [
+                    {"tool_param": "format", "value": "full"},
+                    {"tool_param": "include_body", "value": True},
+                    {"tool_param": "max_body_chars", "value": 65_536},
+                ],
                 "context_input_mappings": [
                     {
                         "tool_param": "message_id",
@@ -81,6 +86,10 @@ def _build_authoring_spec() -> dict:
                     {
                         "tool_param": "source_tool_concept",
                         "value": SOURCE_TOOL_CONCEPT_ID,
+                    },
+                    {
+                        "tool_param": "payload_max_chars",
+                        "value": 100_000,
                     },
                 ],
                 "context_input_mappings": [
