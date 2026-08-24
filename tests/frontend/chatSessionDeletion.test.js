@@ -41,7 +41,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/toast.js', () =>
     showToast: jest.fn()
 }));
 
-describe('chat session deletion', () => {
+describe('chat session Trash', () => {
     let originalMatchMedia;
 
     beforeEach(() => {
@@ -94,11 +94,12 @@ describe('chat session deletion', () => {
             ok: true,
             status: 200,
             json: async () => ({
-                status: 'deleted',
+                status: 'trashed',
                 session_id: 'delete-me',
-                acknowledged: true,
-                deleted_count: 1,
-                canonical_absent: true
+                changed: true,
+                recoverable: true,
+                trashed: true,
+                canonical_read_back: { session_id: 'delete-me', trashed: true }
             })
         });
         const chatTab = require(chatTabModulePath);
@@ -125,7 +126,7 @@ describe('chat session deletion', () => {
         expect(
             chatTab.__testOnly_getSessionTabsCache().map((session) => session.session_id)
         ).toEqual(['keep-me']);
-        expect(showToast).toHaveBeenCalledWith('Conversation deleted', 'success');
+        expect(showToast).toHaveBeenCalledWith('Conversation moved to Trash', 'success');
     });
 
     test('retains the tab and reports the HTTP error when the response is not JSON', async () => {
@@ -149,16 +150,16 @@ describe('chat session deletion', () => {
             chatTab.__testOnly_getSessionTabsCache().map((session) => session.session_id)
         ).toEqual(['delete-me', 'keep-me']);
         expect(showToast).toHaveBeenCalledWith(
-            'Failed to delete conversation (HTTP 404)',
+            'Failed to move conversation to Trash (HTTP 404)',
             'error'
         );
     });
 
-    test('retains the tab when a 200 response lacks a deletion receipt', async () => {
+    test('retains the tab when a 200 response lacks a Trash read-back', async () => {
         global.fetch.mockResolvedValue({
             ok: true,
             status: 200,
-            json: async () => ({ status: 'deleted', session_id: 'delete-me' })
+            json: async () => ({ status: 'trashed', session_id: 'delete-me' })
         });
         const chatTab = require(chatTabModulePath);
         const { showToast } = require(
@@ -173,7 +174,7 @@ describe('chat session deletion', () => {
             chatTab.__testOnly_getSessionTabsCache().map((session) => session.session_id)
         ).toEqual(['delete-me', 'keep-me']);
         expect(showToast).toHaveBeenCalledWith(
-            'Conversation deletion could not be verified',
+            'Moving the conversation to Trash could not be verified',
             'error'
         );
     });

@@ -120,6 +120,8 @@ if TYPE_CHECKING:
         _conversation_get,
         _conversation_list,
         _conversation_manage,
+        _conversation_manage_batch,
+        _conversation_search,
         _conversation_telemetry_get_locator,
         _mongo_query_diagnostics_report,
         _testing_verify_arxiv_paper_ingestion_result,
@@ -381,6 +383,8 @@ _bind_imports(
         "_conversation_get",
         "_conversation_list",
         "_conversation_manage",
+        "_conversation_manage_batch",
+        "_conversation_search",
         "_conversation_telemetry_get_locator",
         "_mongo_query_diagnostics_report",
         "_turn_execution_get",
@@ -1006,6 +1010,8 @@ _TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS = frozenset(
         "conversation_list",
         "conversation_get",
         "conversation_manage",
+        "conversation_manage_batch",
+        "conversation_search",
     }
 )
 
@@ -3894,11 +3900,31 @@ async def _handle_conversation_get(
     )
 
 
+async def _handle_conversation_search(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _conversation_search,
+        arguments,
+        tool_family_label="Conversation",
+    )
+
+
 async def _handle_conversation_manage(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _conversation_manage,
+        arguments,
+        tool_family_label="Conversation",
+    )
+
+
+async def _handle_conversation_manage_batch(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _conversation_manage_batch,
         arguments,
         tool_family_label="Conversation",
     )
@@ -4606,8 +4632,10 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "chat_history_get_segments": _handle_chat_history_get_segments,
     "chat_history_get_debug_entry": _handle_chat_history_get_debug_entry,
     "conversation_list": _handle_conversation_list,
+    "conversation_search": _handle_conversation_search,
     "conversation_get": _handle_conversation_get,
     "conversation_manage": _handle_conversation_manage,
+    "conversation_manage_batch": _handle_conversation_manage_batch,
     "conversation_telemetry_get_locator": _handle_conversation_telemetry_get_locator,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,

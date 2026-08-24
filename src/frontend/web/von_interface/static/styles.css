@@ -7336,6 +7336,89 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     scroll-margin-top: calc(var(--von-fixed-shell-height, 104px) + 10px);
 }
 
+.conversation-search {
+    display: flex;
+    flex: 0 1 360px;
+    gap: 6px;
+    align-items: center;
+}
+
+.conversation-search-input {
+    min-width: 150px;
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 7px 9px;
+    font: inherit;
+}
+
+.conversation-search-button,
+.conversation-search-more {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #fff;
+    color: #334155;
+    padding: 7px 10px;
+    cursor: pointer;
+}
+
+.conversation-search-button[aria-pressed="true"] {
+    border-color: #64748b;
+    background: #f1f5f9;
+}
+
+.conversation-search-panel {
+    margin: -2px 0 12px;
+    padding: 10px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+}
+
+.conversation-search-status {
+    margin-bottom: 7px;
+    color: #64748b;
+    font-size: 12px;
+}
+
+.conversation-search-results {
+    display: grid;
+    gap: 6px;
+}
+
+.conversation-search-result {
+    display: grid;
+    grid-template-columns: minmax(150px, 1fr) auto;
+    gap: 3px 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #fff;
+    color: inherit;
+    text-align: left;
+}
+
+.conversation-search-result-title {
+    font-weight: 600;
+}
+
+.conversation-search-result-date,
+.conversation-search-result-snippet {
+    color: #64748b;
+    font-size: 12px;
+}
+
+.conversation-search-result-snippet {
+    grid-column: 1 / -1;
+}
+
+.conversation-search-result-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .chat-session-tab-group-start {
     overflow: visible;
 }

@@ -387,6 +387,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "conversation",
         "display_template": "{count} conversations",
     },
+    "conversation_search": {
+        "salience": "medium",
+        "category": "conversation",
+        "display_template": "{count} conversation matches",
+    },
     "conversation_get": {
         "salience": "medium",
         "category": "conversation",
@@ -396,6 +401,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "conversation",
         "display_template": "Conversation {action}: {session_id}",
+    },
+    "conversation_manage_batch": {
+        "salience": "high",
+        "category": "conversation",
+        "display_template": "{action}: {succeeded_count}/{count} conversations",
     },
     # Jira tools (HIGH salience)
     "jira_create_issue": {
@@ -1317,8 +1327,10 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "chat_history_get_debug_entry",
     "conversation_telemetry_get_locator",
     "conversation_list",
+    "conversation_search",
     "conversation_get",
     "conversation_manage",
+    "conversation_manage_batch",
     "testing_prepare_experiment_spec",
     "testing_prepare_meeting_invitation_spec",
     "testing_prepare_arxiv_paper_ingestion_fixture",
@@ -1406,6 +1418,7 @@ _DEFAULT_WRITE_TOOL_NAMES = {
     "create_repository",
     "create_task",
     "conversation_manage",
+    "conversation_manage_batch",
     "delete_concept",
     "delete_file",
     "delete_text_relation",

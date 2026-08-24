@@ -18,7 +18,7 @@ def _assert_success_schema(method: str, payload: dict) -> None:
 def test_conversation_tools_are_actor_bound_and_manage_is_a_bounded_effect():
     catalogue = build_default_catalogue()
 
-    for name in ("conversation_list", "conversation_get"):
+    for name in ("conversation_list", "conversation_search", "conversation_get"):
         definition = catalogue.get(name)
         assert definition.category == "read"
         assert definition.ordinary_turn_trusted_argument_bindings == {
@@ -36,6 +36,12 @@ def test_conversation_tools_are_actor_bound_and_manage_is_a_bounded_effect():
         "namespace": "turn_namespace",
         "request_id": "turn_id",
     }
+    batch = catalogue.get("conversation_manage_batch")
+    assert batch.category == "write"
+    assert batch.ordinary_turn_effect is True
+    assert batch.ordinary_turn_trusted_argument_bindings == (
+        manage.ordinary_turn_trusted_argument_bindings
+    )
 
 
 def test_conversation_list_uses_trusted_operator_actor_scope(monkeypatch):
@@ -79,8 +85,54 @@ def test_conversation_list_uses_trusted_operator_actor_scope(monkeypatch):
         "organisation_concept_id": "#V#org",
         "limit": 7,
         "include_hidden": True,
+        "include_trashed": False,
+        "cursor": None,
     }
     _assert_success_schema("conversation_list", payload)
+
+
+def test_conversation_search_uses_trusted_actor_scope_and_returns_cursor(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.services import conversation_search_service
+
+    captured = {}
+
+    def _search(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "schema_version": "conversation_search_result.v1",
+            "query": kwargs["query"],
+            "match_mode": kwargs["match_mode"],
+            "sort": kwargs["sort"],
+            "filters": kwargs["filters"],
+            "results": [],
+            "count": 0,
+            "page_size": kwargs["page_size"],
+            "has_more": False,
+            "next_cursor": None,
+            "index_coverage": {},
+            "retrieval": {},
+            "trashed_only": False,
+        }
+
+    monkeypatch.setattr(
+        conversation_search_service, "search_actor_conversations", _search
+    )
+    with bind_internal_mcp_actor_context_source("trusted_operator_payload_fallback"):
+        payload = catalogue._conversation_search(
+            acting_user_concept_id="#V#alice",
+            organisation_concept_id="#V#org",
+            namespace="#V#alice@org",
+            query="detector calibration",
+            page_size=25,
+        )
+
+    assert captured["actor_user_id"] == "#V#alice"
+    assert captured["organisation_concept_id"] == "#V#org"
+    assert captured["namespace"] == "#V#alice@org"
+    assert captured["query"] == "detector calibration"
+    _assert_success_schema("conversation_search", payload)
 
 
 def test_conversation_get_reuses_bounded_carrier_and_names_its_recovery_tool(
@@ -313,3 +365,80 @@ def test_conversation_manage_rejects_foreign_conversation_without_invite(monkeyp
 
     assert payload["success"] is False
     assert payload["error_code"] == "PERMISSION_DENIED"
+
+
+def test_canonical_conversation_reference_names_invalid_schema_field():
+    from src.backend.integrations.internal_mcp import catalogue
+
+    normalised = catalogue._normalise_chat_history_conversation_ref_argument(
+        {
+            "kind": "von_conversation_ref",
+            "schema_version": "conversation_reference.v0",
+            "conversation_ref": {
+                "schema_version": "conversation_reference.v1",
+                "binding_kind": "explicit_session_id",
+                "session_id": "session-1",
+            },
+        }
+    )
+
+    assert normalised["validation_errors"] == [
+        {
+            "field": "conversation_ref.schema_version",
+            "value": "conversation_reference.v0",
+            "expected": "conversation_reference.v1",
+        }
+    ]
+
+    flat = catalogue._normalise_chat_history_conversation_ref_argument(
+        {
+            "schema_version": "conversation_reference.v1",
+            "binding_kind": "explicit_session_id",
+            "session_id": "session-1",
+            "user_concept_id": "#V#alice",
+            "namespace": "#V#alice@org",
+        }
+    )
+    assert flat["recognised_public_ref"] is True
+    assert flat["validation_errors"] == []
+    assert flat["fields"]["session_id"] == "session-1"
+
+
+def test_conversation_manage_batch_preserves_per_item_receipts(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    def _manage(**kwargs):
+        session_id = kwargs["session_id"]
+        if session_id == "denied":
+            return {
+                "success": False,
+                "error_code": "PERMISSION_DENIED",
+                "message": "Not accessible",
+            }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "action": kwargs["action"],
+            "session_id": session_id,
+            "canonical_read_back": {"session_id": session_id, "trashed": True},
+        }
+
+    monkeypatch.setattr(catalogue, "_conversation_manage", _manage)
+    payload = catalogue._conversation_manage_batch(
+        action="trash",
+        session_ids=["one", "denied", "two"],
+        acting_user_concept_id="#V#alice",
+        namespace="#V#alice@org",
+        request_id="turn-1",
+        continuation_cursor="opaque-next-page",
+    )
+
+    assert payload["success"] is False
+    assert payload["effect_status"] == "partial"
+    assert payload["succeeded_count"] == 2
+    assert payload["failed_count"] == 1
+    assert [result["index"] for result in payload["results"]] == [0, 1, 2]
+    assert payload["results"][1]["error_code"] == "PERMISSION_DENIED"
+    assert payload["continuation_cursor"] == "opaque-next-page"
+    _assert_success_schema("conversation_manage_batch", payload)
