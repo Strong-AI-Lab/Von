@@ -1059,6 +1059,85 @@ def get_concept_by_concept_id_exact(concept_id: str) -> Optional[Dict[str, Any]]
         )
 
 
+def get_concepts_by_concept_ids_exact(
+    concept_ids: Iterable[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Retrieve many canonical concept IDs with one bounded collection read.
+
+    The result is keyed by the caller-supplied IDs.  This is the bulk analogue
+    of :func:`get_concept_by_concept_id_exact`: it deliberately performs no
+    alias or name resolution and is intended for callers that already hold
+    authoritative machine IDs.  Missing IDs are omitted.
+    """
+
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+    ordered_ids: List[str] = []
+    canonical_by_requested: Dict[str, str] = {}
+    query_ids: set[str] = set()
+    for raw_id in concept_ids:
+        if not isinstance(raw_id, str):
+            continue
+        requested_id = raw_id.strip()
+        if not requested_id or requested_id in canonical_by_requested:
+            continue
+        canonical_id = canonicalise_vontology_concept_id(requested_id) or requested_id
+        ordered_ids.append(requested_id)
+        canonical_by_requested[requested_id] = canonical_id
+        query_ids.add(requested_id)
+        query_ids.add(canonical_id)
+
+    if not ordered_ids:
+        return {}
+
+    concepts_coll = ConceptsRepository.collection()
+    if concepts_coll is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+
+    try:
+        raw_docs = list(
+            concepts_coll.find(
+                {"concept_id": {"$in": sorted(query_ids)}},
+            )
+        )
+        raw_by_id = {
+            str(doc.get("concept_id") or "").strip(): doc
+            for doc in raw_docs
+            if isinstance(doc, dict)
+            and isinstance(doc.get("concept_id"), str)
+            and str(doc.get("concept_id")).strip()
+        }
+        resolved: Dict[str, Dict[str, Any]] = {}
+        for requested_id in ordered_ids:
+            canonical_id = canonical_by_requested[requested_id]
+            raw_doc = raw_by_id.get(canonical_id) or raw_by_id.get(requested_id)
+            if not isinstance(raw_doc, dict):
+                continue
+            finalised = _finalise_concept_lookup_doc(
+                dict(raw_doc),
+                requested_concept_id=requested_id,
+            )
+            try:
+                from ..security.access_control import sanitize_concept_document
+
+                finalised = sanitize_concept_document(finalised)
+            except Exception:
+                pass
+            if isinstance(finalised, dict):
+                resolved[requested_id] = finalised
+        return resolved
+    except Exception as exc:
+        logger.error(
+            "Error retrieving %d concepts by exact concept_id: %s",
+            len(ordered_ids),
+            exc,
+            exc_info=True,
+        )
+        raise ConceptServiceError(
+            f"Could not retrieve concepts by exact concept_id: {str(exc)}"
+        ) from exc
+
+
 def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve a concept by its ontological concept_id (e.g., '#V#person').
     Returns the full document with 'id' as string if found; otherwise raises ConceptNotFoundError.

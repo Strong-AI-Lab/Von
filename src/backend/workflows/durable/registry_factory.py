@@ -69,6 +69,18 @@ _shared_workflow_registry_lock = Lock()
 _shared_workflow_registry: WorkflowRegistry | None = None
 _shared_action_registry_lock = Lock()
 _shared_action_registry: ActionRegistry | None = None
+_core_workflow_prewarm_lock = Lock()
+_core_workflow_prewarm_generation = 0
+_core_workflow_prewarm_inflight: set[int] = set()
+
+
+def _advance_core_workflow_prewarm_generation() -> int:
+    """Cancel superseded prewarm work and return the new process generation."""
+
+    global _core_workflow_prewarm_generation
+    with _core_workflow_prewarm_lock:
+        _core_workflow_prewarm_generation += 1
+        return _core_workflow_prewarm_generation
 
 
 def _core_workflow_definition_prewarm_enabled() -> bool:
@@ -92,49 +104,76 @@ def _start_core_workflow_definition_prewarm(registry: WorkflowRegistry) -> bool:
     if not workflow_ids:
         return False
 
+    with _core_workflow_prewarm_lock:
+        generation = _core_workflow_prewarm_generation
+        if generation in _core_workflow_prewarm_inflight:
+            logger.info(
+                "[workflow_registry] Core workflow prewarm already in flight "
+                "for generation=%d; coalescing duplicate request.",
+                generation,
+            )
+            return False
+        _core_workflow_prewarm_inflight.add(generation)
+
     def _prewarm() -> None:
         start = time.monotonic()
         loaded: list[str] = []
         missing: list[str] = []
         errors: dict[str, str] = {}
-        for workflow_id in workflow_ids:
-            try:
-                definition = registry.get(workflow_id)
-                if definition is None:
-                    missing.append(workflow_id)
-                else:
-                    loaded.append(workflow_id)
-            except Exception as exc:
-                errors[workflow_id] = type(exc).__name__
-                logger.debug(
-                    "[workflow_registry] Core workflow prewarm failed for %s: %s",
-                    workflow_id,
-                    exc,
-                    exc_info=True,
-                )
-        elapsed_ms = (time.monotonic() - start) * 1000.0
-        logger.info(
-            "[workflow_registry] Core workflow prewarm completed loaded=%d "
-            "missing=%d errors=%d duration_ms=%.0f",
-            len(loaded),
-            len(missing),
-            len(errors),
-            elapsed_ms,
-        )
-        if missing or errors:
-            logger.warning(
-                "[workflow_registry] Core workflow prewarm incomplete missing=%s "
-                "errors=%s",
-                missing[:10],
-                errors,
+        cancelled = False
+        try:
+            for workflow_id in workflow_ids:
+                with _core_workflow_prewarm_lock:
+                    if generation != _core_workflow_prewarm_generation:
+                        cancelled = True
+                        break
+                try:
+                    definition = registry.get(workflow_id)
+                    if definition is None:
+                        missing.append(workflow_id)
+                    else:
+                        loaded.append(workflow_id)
+                except Exception as exc:
+                    errors[workflow_id] = type(exc).__name__
+                    logger.debug(
+                        "[workflow_registry] Core workflow prewarm failed for %s: %s",
+                        workflow_id,
+                        exc,
+                        exc_info=True,
+                    )
+            elapsed_ms = (time.monotonic() - start) * 1000.0
+            logger.info(
+                "[workflow_registry] Core workflow prewarm completed generation=%d "
+                "loaded=%d missing=%d errors=%d cancelled=%s duration_ms=%.0f",
+                generation,
+                len(loaded),
+                len(missing),
+                len(errors),
+                cancelled,
+                elapsed_ms,
             )
+            if missing or errors:
+                logger.warning(
+                    "[workflow_registry] Core workflow prewarm incomplete missing=%s "
+                    "errors=%s",
+                    missing[:10],
+                    errors,
+                )
+        finally:
+            with _core_workflow_prewarm_lock:
+                _core_workflow_prewarm_inflight.discard(generation)
 
     thread = threading.Thread(
         target=_prewarm,
         name="workflow-registry-core-prewarm",
         daemon=True,
     )
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        with _core_workflow_prewarm_lock:
+            _core_workflow_prewarm_inflight.discard(generation)
+        raise
     return True
 
 
@@ -253,6 +292,8 @@ def get_shared_workflow_registry_read_only(
     created_registry = False
     with _shared_workflow_registry_lock:
         if force_rebuild or _shared_workflow_registry is None:
+            if force_rebuild and _shared_workflow_registry is not None:
+                _advance_core_workflow_prewarm_generation()
             _shared_workflow_registry = build_workflow_registry_read_only(
                 defer_parity_work=defer_parity_work,
                 start_deferred_registry_work=start_deferred_registry_work,
@@ -297,6 +338,11 @@ def invalidate_shared_workflow_registry_read_only() -> dict[str, Any]:
     with _shared_workflow_registry_lock:
         had_registry = _shared_workflow_registry is not None
         _shared_workflow_registry = None
+        prewarm_generation = (
+            _advance_core_workflow_prewarm_generation()
+            if had_registry
+            else _core_workflow_prewarm_generation
+        )
     capability_index_invalidated = False
     try:
         from ...services.workflow_capability_service import (
@@ -314,6 +360,7 @@ def invalidate_shared_workflow_registry_read_only() -> dict[str, Any]:
         "success": True,
         "cache": "shared_workflow_registry_read_only",
         "had_cached_value": had_registry,
+        "prewarm_generation": prewarm_generation,
         "capability_index_invalidated": capability_index_invalidated,
     }
 

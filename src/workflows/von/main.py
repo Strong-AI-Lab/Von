@@ -369,10 +369,14 @@ def main():
         registry_preload = preload_model_registry_snapshot()
         logger.info(
             "Model registry startup preload ready=%s source=%s "
-            "cache_state=%s duration_ms=%s.",
+            "cache_state=%s read_strategy=%s read_phases=%s models=%s "
+            "duration_ms=%s.",
             registry_preload.get("ready"),
             registry_preload.get("source"),
             registry_preload.get("cache_state"),
+            registry_preload.get("read_strategy"),
+            registry_preload.get("read_phases"),
+            registry_preload.get("model_count"),
             registry_preload.get("preload_duration_ms"),
         )
     except Exception as exc:

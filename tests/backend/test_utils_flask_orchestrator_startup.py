@@ -114,6 +114,45 @@ def test_retired_orchestrator_startup_does_not_build_or_spawn(monkeypatch):
     assert isinstance(status["started_at"], str)
 
 
+def test_optional_prewarm_keeps_large_vontology_tree_demand_loaded(monkeypatch):
+    import src.backend.server.utils_flask as utils_flask
+
+    listed_models: list[bool] = []
+    log_messages: list[str] = []
+
+    class _Logger:
+        def info(self, message, *_args):
+            log_messages.append(message)
+
+        def warning(self, *_args, **_kwargs):
+            return None
+
+    class _SynchronousThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            self._target()
+
+    class _App:
+        config = {"LIST_MODELS_FUNC": lambda: listed_models.append(True) or ["model"]}
+        logger = _Logger()
+
+        def test_client(self):
+            raise AssertionError("tree endpoint must not be called by default")
+
+    monkeypatch.delenv("VON_PREWARM_DISABLE", raising=False)
+    monkeypatch.delenv("VON_PREWARM_TREE_ENABLE", raising=False)
+    monkeypatch.setattr(utils_flask.threading, "Thread", _SynchronousThread)
+
+    utils_flask._start_prewarm(_App())
+
+    assert listed_models == [True]
+    assert any("demand-loaded" in message for message in log_messages)
+
+
 def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
     _install_google_oauth_stubs()
 

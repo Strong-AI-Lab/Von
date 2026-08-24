@@ -9,6 +9,7 @@ decisions without a Python release or being undone by restart.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from .publication_scope_profile_service import (
 )
 from .text_value_service import (
     get_texts_for_concept,
+    get_texts_for_concepts,
     upsert_singleton_text_relation,
 )
 
@@ -87,12 +89,13 @@ def _ensure_concept(
     *,
     source_tag: str,
     managed_by: str,
+    concepts_by_id: dict[str, Mapping[str, Any]],
 ) -> tuple[str, bool]:
     concept_id = _text(spec.get("concept_id"))
     name = _text(spec.get("name"))
     if not concept_id.startswith("#V#") or not name:
         raise ValueError("publication_scope_seed_concept_identity_invalid")
-    if _get_concept(concept_id) is not None:
+    if concept_id in concepts_by_id:
         return concept_id, False
     attributes = dict(spec.get("attributes") or {})
     attributes.update(
@@ -114,10 +117,12 @@ def _ensure_concept(
         visibility_scope_mode="global_general",
         maintain_relationship_inverses=False,
     )
-    if _get_concept(concept_id) is None:
+    readback = _get_concept(concept_id)
+    if readback is None:
         raise RuntimeError(
             f"publication_scope_seed_concept_readback_failed:{concept_id}"
         )
+    concepts_by_id[concept_id] = dict(readback)
     return concept_id, True
 
 
@@ -126,13 +131,14 @@ def _merge_relationship(
     subject_concept_id: str,
     predicate: str,
     object_concept_ids: Sequence[str],
+    concepts_by_id: dict[str, Mapping[str, Any]],
 ) -> tuple[str, bool]:
     subject_id = _text(subject_concept_id)
     predicate_id = _text(predicate)
     targets = _strings(object_concept_ids)
     if not subject_id.startswith("#V#") or not predicate_id or not targets:
         raise ValueError("publication_scope_seed_relationship_invalid")
-    concept = _get_concept(subject_id)
+    concept = concepts_by_id.get(subject_id)
     if not isinstance(concept, Mapping):
         raise TypeError(f"publication_scope_seed_subject_missing:{subject_id}")
     relationships = dict(concept.get("relationships") or {})
@@ -144,7 +150,7 @@ def _merge_relationship(
             subject_id,
             {f"relationships.{predicate_id}": updated},
         )
-    readback = _get_concept(subject_id)
+    readback = _get_concept(subject_id) if changed else concept
     readback_relationships = (
         readback.get("relationships") if isinstance(readback, Mapping) else None
     )
@@ -157,6 +163,8 @@ def _merge_relationship(
         raise RuntimeError(
             f"publication_scope_seed_relationship_readback_failed:{subject_id}:{predicate_id}"
         )
+    if isinstance(readback, Mapping):
+        concepts_by_id[subject_id] = dict(readback)
     return f"{subject_id}:{predicate_id}", changed
 
 
@@ -184,6 +192,7 @@ def bootstrap_canonical_publication_scope_profiles(
 ) -> dict[str, Any]:
     """Materialise missing represented profiles and read them back exactly."""
 
+    started_at = time.perf_counter()
     bundle = _load_seed_bundle(asset_path)
     source_tag = _text(bundle.get("source_tag")) or "JVNAUTOSCI-2671"
     managed_by = (
@@ -219,6 +228,43 @@ def bootstrap_canonical_publication_scope_profiles(
             }
         )
 
+    relationship_specs: list[Mapping[str, Any]] = [
+        spec for spec in bundle.get("relationships") or () if isinstance(spec, Mapping)
+    ]
+    for profile_spec in profile_specs:
+        profile_id = _text(profile_spec.get("profile_concept_id"))
+        for subject_id in _profile_subject_ids(profile_spec):
+            relationship_specs.append(
+                {
+                    "subject_concept_id": subject_id,
+                    "predicate": PUBLICATION_SCOPE_PROFILE_LINK_PREDICATE,
+                    "object_concept_ids": [profile_id],
+                }
+            )
+
+    required_concept_ids = _strings(
+        [
+            *[_text(spec.get("concept_id")) for spec in concept_specs],
+            *[_text(spec.get("subject_concept_id")) for spec in relationship_specs],
+        ]
+    )
+    concepts_by_id: dict[str, Mapping[str, Any]] = dict(
+        concept_service.get_concepts_by_concept_ids_exact(required_concept_ids)
+    )
+    profile_ids = [_text(spec.get("profile_concept_id")) for spec in profile_specs]
+    profile_query_metadata: dict[str, Any] = {}
+    profile_rows_by_id = get_texts_for_concepts(
+        profile_ids,
+        predicates=_PROFILE_TEXT_PREDICATE_ALIASES,
+        limit_per_concept=10,
+        query_metadata=profile_query_metadata,
+    )
+    profile_ids_with_payload = {
+        profile_id
+        for profile_id, rows in profile_rows_by_id.items()
+        if any(_text(row.get("text")) for row in rows)
+    }
+
     for spec in concept_specs:
         concept_id = _text(spec.get("concept_id"))
         try:
@@ -226,6 +272,7 @@ def bootstrap_canonical_publication_scope_profiles(
                 spec,
                 source_tag=source_tag,
                 managed_by=managed_by,
+                concepts_by_id=concepts_by_id,
             )
             (created_concept_ids if created else existing_concept_ids).append(
                 resolved_id
@@ -244,20 +291,6 @@ def bootstrap_canonical_publication_scope_profiles(
                 }
             )
 
-    relationship_specs: list[Mapping[str, Any]] = [
-        spec for spec in bundle.get("relationships") or () if isinstance(spec, Mapping)
-    ]
-    for profile_spec in profile_specs:
-        profile_id = _text(profile_spec.get("profile_concept_id"))
-        for subject_id in _profile_subject_ids(profile_spec):
-            relationship_specs.append(
-                {
-                    "subject_concept_id": subject_id,
-                    "predicate": PUBLICATION_SCOPE_PROFILE_LINK_PREDICATE,
-                    "object_concept_ids": [profile_id],
-                }
-            )
-
     for spec in relationship_specs:
         subject_id = _text(spec.get("subject_concept_id"))
         predicate = _text(spec.get("predicate"))
@@ -266,6 +299,7 @@ def bootstrap_canonical_publication_scope_profiles(
                 subject_concept_id=subject_id,
                 predicate=predicate,
                 object_concept_ids=_strings(spec.get("object_concept_ids")),
+                concepts_by_id=concepts_by_id,
             )
             relationship_ids.append(relationship_id)
             if changed:
@@ -308,7 +342,7 @@ def bootstrap_canonical_publication_scope_profiles(
             )
             continue
         try:
-            if force_profile_seed or not _profile_has_payload(profile_id):
+            if force_profile_seed or profile_id not in profile_ids_with_payload:
                 upsert_singleton_text_relation(
                     subject_concept_id=profile_id,
                     predicate=PUBLICATION_SCOPE_PROFILE_TEXT_PREDICATE,
@@ -323,11 +357,12 @@ def bootstrap_canonical_publication_scope_profiles(
                     },
                     garbage_collect=True,
                 )
+                if not _profile_has_payload(profile_id):
+                    raise RuntimeError("publication_scope_profile_text_readback_failed")
+                profile_ids_with_payload.add(profile_id)
                 seeded_profile_ids.append(profile_id)
             else:
                 preserved_profile_ids.append(profile_id)
-            if not _profile_has_payload(profile_id):
-                raise RuntimeError("publication_scope_profile_text_readback_failed")
         except (
             TypeError,
             ValueError,
@@ -355,6 +390,14 @@ def bootstrap_canonical_publication_scope_profiles(
         "preserved_profile_ids": preserved_profile_ids,
         "relationship_ids": relationship_ids,
         "changed_relationship_ids": changed_relationship_ids,
+        "changed": bool(
+            created_concept_ids or seeded_profile_ids or changed_relationship_ids
+        ),
+        "read_strategy": "batched_canonical_state",
+        "read_phases": 2,
+        "canonical_read_batches": {"concepts": 1, "text_assertions": 1},
+        "profile_query_metadata": profile_query_metadata,
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
         "errors": errors,
         "counts": {
             "concepts_created": len(created_concept_ids),
