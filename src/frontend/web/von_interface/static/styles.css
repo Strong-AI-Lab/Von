@@ -6392,7 +6392,7 @@ footer {
 
 .footer-org-control {
     display: inline-flex;
-    align-items: stretch;
+    align-items: center;
     position: relative;
     min-width: 0;
 }
@@ -6413,6 +6413,8 @@ footer {
 }
 
 .footer-org-menu-details {
+    display: inline-flex;
+    align-items: center;
     position: relative;
 }
 
@@ -6426,12 +6428,16 @@ footer {
     justify-content: center;
     box-sizing: border-box;
     min-width: 27px;
-    height: 100%;
+    height: auto;
     padding: 2px 7px;
     border-left: 0;
     border-radius: 0 12px 12px 0;
     list-style: none;
     user-select: none;
+}
+
+.footer-org-menu-trigger:focus {
+    box-shadow: inset 0 0 0 2px rgba(33, 150, 243, 0.4);
 }
 
 .footer-org-menu-trigger::-webkit-details-marker {

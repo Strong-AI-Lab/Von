@@ -95,12 +95,19 @@ describe('footer organisation switcher', () => {
         });
     });
 
-    test('uses border-box sizing for the split trigger and responsive menu dimensions', () => {
+    test('keeps the split trigger at the natural centred chip height', () => {
+        const controlRule = styles.match(/\.footer-org-control\s*\{([^}]*)\}/)?.[1] || '';
+        const detailsRule = styles.match(/\.footer-org-menu-details\s*\{([^}]*)\}/)?.[1] || '';
         const triggerRule = styles.match(/\.footer-org-menu-trigger\s*\{([^}]*)\}/)?.[1] || '';
+        const focusRule = styles.match(/\.footer-org-menu-trigger:focus\s*\{([^}]*)\}/)?.[1] || '';
         const menuRule = styles.match(/\.footer-org-menu\s*\{([^}]*)\}/)?.[1] || '';
 
+        expect(controlRule).toMatch(/align-items:\s*center/);
+        expect(detailsRule).toMatch(/display:\s*inline-flex/);
+        expect(detailsRule).toMatch(/align-items:\s*center/);
         expect(triggerRule).toMatch(/box-sizing:\s*border-box/);
-        expect(triggerRule).toMatch(/height:\s*100%/);
+        expect(triggerRule).toMatch(/height:\s*auto/);
+        expect(focusRule).toMatch(/box-shadow:\s*inset/);
         expect(menuRule).toMatch(/box-sizing:\s*border-box/);
     });
 

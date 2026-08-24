@@ -42,7 +42,7 @@ def test_ordinary_create_exposes_scope_choice_but_binds_scope_identity() -> None
     ]
 
 
-def test_governed_create_preserves_default_type_and_one_exact_parent(
+def test_governed_create_preserves_explicit_type_and_one_exact_parent(
     monkeypatch,
 ) -> None:
     from src.backend.services import ontology_mutation_command_service as command
@@ -55,7 +55,7 @@ def test_governed_create_preserves_default_type_and_one_exact_parent(
     resolved = command.resolve_governed_ontology_arguments(
         "create_concepts",
         {
-            "concepts": [{"name": "Default type"}],
+            "concepts": [{"name": "Explicit type", "kind": "type"}],
             "parent_concept_ids": ["#V#parent"],
         },
     )
@@ -75,7 +75,7 @@ def test_governed_create_preserves_default_type_and_one_exact_parent(
         command.resolve_governed_ontology_arguments(
             "create_concepts",
             {
-                "concepts": [{"name": "Conflicting parent"}],
+                "concepts": [{"name": "Conflicting parent", "kind": "type"}],
                 "parent_id": "#V#parent_a",
                 "parent_concept_ids": ["#V#parent_b"],
             },
@@ -812,11 +812,12 @@ def test_http_create_binds_every_actual_field_and_disables_inverse_writes(
     captured: dict[str, Any] = {}
     mutation_kwargs: dict[str, Any] = {}
 
-    monkeypatch.setattr(
-        command,
-        "resolve_governed_ontology_arguments",
-        lambda _method, arguments: dict(arguments),
-    )
+    def resolve(_method, arguments):
+        resolved = dict(arguments)
+        resolved["concepts"] = [{**arguments["concepts"][0], "concept_id": "#V#record"}]
+        return resolved
+
+    monkeypatch.setattr(command, "resolve_governed_ontology_arguments", resolve)
     monkeypatch.setattr(
         concept_routes,
         "_get_current_user_concept_id",
@@ -850,7 +851,7 @@ def test_http_create_binds_every_actual_field_and_disables_inverse_writes(
         "/api/concepts/",
         json={
             "name": "Record",
-            "concept_id": "#V#record",
+            "kind": "type",
             "description": "description",
             "notes": "notes",
             "attributes": {"source": "catalogue"},
@@ -858,7 +859,6 @@ def test_http_create_binds_every_actual_field_and_disables_inverse_writes(
             "user_tags": ["user"],
             "linked_concepts": [{"concept_id": "#V#linked"}],
             "parent_concept_ids": ["#V#record_type", "#V#research_object"],
-            "create_as_instance": False,
             "instance_of_type": "#V#represented_entity",
             "scope_mode": "organisation_general",
             "request_id": "create-record-1",
@@ -872,10 +872,41 @@ def test_http_create_binds_every_actual_field_and_disables_inverse_writes(
     ]
     assert captured["linked_concepts"] == [{"concept_id": "#V#linked"}]
     assert captured["attributes"] == {"source": "catalogue"}
+    assert captured["concepts"][0]["kind"] == "type"
     assert captured["concepts"][0]["instance_of_type"] == ("#V#represented_entity")
+    assert mutation_kwargs["create_as_instance"] is False
     assert mutation_kwargs["maintain_relationship_inverses"] is False
     assert mutation_kwargs["parent_concept_ids"] == captured["parent_concept_ids"]
     assert mutation_kwargs["linked_concepts"] == captured["linked_concepts"]
+
+
+def test_http_create_requires_explicit_kind_without_starting_an_effect() -> None:
+    from src.backend.server.routes import concept_routes
+
+    app = Flask(__name__)
+    app.secret_key = "test"
+    app.register_blueprint(concept_routes.concept_bp, url_prefix="/api/concepts")
+
+    response = app.test_client().post(
+        "/api/concepts/",
+        json={
+            "name": "Ambiguous browser creation",
+            "parent_concept_ids": ["#V#research_object"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "success": False,
+        "effect_status": "not_started",
+        "mutation_outcome": "not_started",
+        "changed": False,
+        "error_code": "concept_kind_required",
+        "error": (
+            "A governed concept create requires an explicit kind: "
+            "'instance', 'type', or 'predicate'."
+        ),
+    }
 
 
 def test_failed_create_readback_never_follows_an_existing_concept_id(

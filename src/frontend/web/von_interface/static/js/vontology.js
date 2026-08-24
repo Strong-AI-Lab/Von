@@ -1,7 +1,7 @@
 import { fetchConceptList, resetConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { clearContainer, elements, getCurrentUserConceptId } from './domUtils.js';
 import { handleVontologyNodeSelection } from './dynamicTabs.js';
-import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import { createConcept, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
 import { createPredicateBadge, getPredicateType } from './predicateUtils.js';
 import { ProgressManager, ProgressPhase } from './progress.js';
 import {
@@ -4470,22 +4470,12 @@ export async function handleCreateType() {
       elements.createConceptStatusP.style.color = "black";
     }
 
-    // CHICKEN-AND-EGG FIX: For root creation, omit parent_id entirely
-    const requestPayload = {
-      new_concept_name: newConceptName,
-      create_as_instance: false
-    };
-    if (!isRootCreation && parentId) {
-      requestPayload.parent_id = parentId;
-    }
-
-    const res = await vontologyFetch('/vontology/api/vontology/create_concept', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestPayload)
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const response = await res.json();
+    // For root creation, omit the parent while retaining the explicit type kind.
+    const response = await createConcept(
+      isRootCreation ? null : parentId,
+      newConceptName,
+      'type'
+    );
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
     const createdConceptName = response?.concept?.name || newConceptName;
@@ -4576,17 +4566,7 @@ export async function handleCreateInstance() {
       elements.createConceptStatusP.style.color = "black";
     }
 
-    const res = await vontologyFetch('/vontology/api/vontology/create_concept', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        new_concept_name: newConceptName,
-        parent_id: parentId,
-        create_as_instance: true
-      })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const response = await res.json();
+    const response = await createConcept(parentId, newConceptName, 'instance');
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
     const createdConceptName = response?.concept?.name || newConceptName;

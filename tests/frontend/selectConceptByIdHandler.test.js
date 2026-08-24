@@ -187,11 +187,11 @@ describe('handleSelectConceptByIdDetail', () => {
                 }
                 return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
             }
-            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+            if (typeof url === 'string' && url === '/api/concepts/') {
                 const body = JSON.parse(opts.body);
-                expect(body.new_concept_name).toBe('disambiguation_result');
-                expect(body.parent_id).toBe('#V#thing');
-                expect(body.create_as_instance).toBe(false);
+                expect(body.name).toBe('disambiguation_result');
+                expect(body.parent_concept_ids).toEqual(['#V#thing']);
+                expect(body.kind).toBe('type');
                 created = true;
                 return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#disambiguation_result' }) });
             }
@@ -267,10 +267,10 @@ describe('handleSelectConceptByIdDetail', () => {
                 }
                 return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
             }
-            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+            if (typeof url === 'string' && url === '/api/concepts/') {
                 const body = JSON.parse(opts.body);
                 // Name derived from canonicalised concept id.
-                expect(body.new_concept_name).toBe('foo_bar');
+                expect(body.name).toBe('foo_bar');
                 created = true;
                 return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#foo_bar' }) });
             }
@@ -317,9 +317,9 @@ describe('handleSelectConceptByIdDetail', () => {
                 }
                 return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
             }
-            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+            if (typeof url === 'string' && url === '/api/concepts/') {
                 const body = JSON.parse(opts.body);
-                expect(body.new_concept_name).toBe('cafe');
+                expect(body.name).toBe('cafe');
                 created = true;
                 return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#cafe' }) });
             }
@@ -381,7 +381,7 @@ describe('handleSelectConceptByIdDetail', () => {
                 }
                 return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
             }
-            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+            if (typeof url === 'string' && url === '/api/concepts/') {
                 created = true;
                 return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#workflow_result' }) });
             }
@@ -464,13 +464,13 @@ describe('handleSelectConceptByIdDetail', () => {
                 }
                 return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
             }
-            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+            if (typeof url === 'string' && url === '/api/concepts/') {
                 const body = JSON.parse(opts.body);
-                createOrder.push(body.new_concept_name);
-                if (body.new_concept_name === 'child_concept') {
+                createOrder.push(body.name);
+                if (body.name === 'child_concept') {
                     childCreated = true;
                 }
-                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: `#V#${body.new_concept_name}` }) });
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: `#V#${body.name}` }) });
             }
             return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
         });
@@ -528,7 +528,7 @@ describe('handleSelectConceptByIdDetail', () => {
                 }
                 return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
             }
-            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+            if (typeof url === 'string' && url === '/api/concepts/') {
                 throw new Error('create_concept should not be called when concept appears before create');
             }
             return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
