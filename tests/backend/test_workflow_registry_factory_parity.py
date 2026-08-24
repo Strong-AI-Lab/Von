@@ -137,12 +137,117 @@ def test_core_workflow_definition_prewarm_resolves_conversation_turn_family(
         "_core_workflow_definition_prewarm_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_generation", 0)
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_inflight", set())
     monkeypatch.setattr(registry_factory.threading, "Thread", _SynchronousThread)
 
     started = registry_factory._start_core_workflow_definition_prewarm(_FakeRegistry())
 
     assert started is True
     assert warmed == list(registry_factory.CONVERSATION_TURN_WORKFLOW_IDS)
+
+
+def test_core_workflow_definition_prewarm_coalesces_same_generation(monkeypatch):
+    queued_targets: list[object] = []
+
+    class _DeferredThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            queued_targets.append(target)
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            return None
+
+    class _FakeRegistry:
+        def get(self, _workflow_id: str):
+            return object()
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_core_workflow_definition_prewarm_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_generation", 7)
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_inflight", set())
+    monkeypatch.setattr(registry_factory.threading, "Thread", _DeferredThread)
+
+    first = registry_factory._start_core_workflow_definition_prewarm(_FakeRegistry())
+    duplicate = registry_factory._start_core_workflow_definition_prewarm(
+        _FakeRegistry()
+    )
+
+    assert first is True
+    assert duplicate is False
+    assert len(queued_targets) == 1
+    assert registry_factory._core_workflow_prewarm_inflight == {7}
+
+    queued_targets[0]()
+    assert registry_factory._core_workflow_prewarm_inflight == set()
+
+
+def test_core_workflow_definition_prewarm_stops_after_generation_changes(
+    monkeypatch,
+):
+    warmed: list[str] = []
+
+    class _FakeRegistry:
+        def get(self, workflow_id: str):
+            warmed.append(workflow_id)
+            registry_factory._advance_core_workflow_prewarm_generation()
+            return object()
+
+    class _SynchronousThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_core_workflow_definition_prewarm_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_generation", 3)
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_inflight", set())
+    monkeypatch.setattr(registry_factory.threading, "Thread", _SynchronousThread)
+
+    started = registry_factory._start_core_workflow_definition_prewarm(_FakeRegistry())
+
+    assert started is True
+    assert warmed == [registry_factory.CONVERSATION_TURN_WORKFLOW_IDS[0]]
+    assert registry_factory._core_workflow_prewarm_generation == 4
+    assert registry_factory._core_workflow_prewarm_inflight == set()
+
+
+def test_core_workflow_definition_prewarm_releases_singleflight_on_start_error(
+    monkeypatch,
+):
+    class _BrokenThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            raise RuntimeError("thread_unavailable")
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_core_workflow_definition_prewarm_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_generation", 5)
+    monkeypatch.setattr(registry_factory, "_core_workflow_prewarm_inflight", set())
+    monkeypatch.setattr(registry_factory.threading, "Thread", _BrokenThread)
+
+    with pytest.raises(RuntimeError, match="thread_unavailable"):
+        registry_factory._start_core_workflow_definition_prewarm(object())
+
+    assert registry_factory._core_workflow_prewarm_inflight == set()
 
 
 def test_invalidate_shared_workflow_registry_read_only_resets_capability_index(

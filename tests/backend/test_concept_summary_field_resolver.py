@@ -4,11 +4,12 @@ from typing import Any
 
 import pytest
 
+import src.backend.services.concept_summary_field_resolver as resolver_module
+import src.backend.services.concept_summary_field_vontology_service as summary_seed_module
 from src.backend.services import concept_service
 from src.backend.services.concept_summary_field_vontology_service import (
     bootstrap_canonical_concept_summary_fields,
 )
-import src.backend.services.concept_summary_field_resolver as resolver_module
 
 
 @pytest.fixture
@@ -163,3 +164,65 @@ def test_summary_field_bootstrap_materialises_vontology_metadata(
         "affiliation",
         "authored_work",
     )
+
+
+def test_summary_field_bootstrap_uses_batched_noop_fast_path(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = bootstrap_canonical_concept_summary_fields()
+    assert first["success"] is True
+
+    concept_reads = 0
+    text_reads = 0
+    original_concept_read = concept_service.get_concepts_by_concept_ids_exact
+    original_text_read = summary_seed_module.get_texts_for_concepts
+
+    def _concept_read(concept_ids):
+        nonlocal concept_reads
+        concept_reads += 1
+        return original_concept_read(concept_ids)
+
+    def _text_read(*args, **kwargs):
+        nonlocal text_reads
+        text_reads += 1
+        return original_text_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        _concept_read,
+    )
+    monkeypatch.setattr(summary_seed_module, "get_texts_for_concepts", _text_read)
+    monkeypatch.setattr(
+        summary_seed_module,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current singleton text must not be rewritten")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "create_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current concepts must not be recreated")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "update_concept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current relationships must not be rewritten")
+        ),
+    )
+
+    second = bootstrap_canonical_concept_summary_fields()
+
+    assert second["success"] is True
+    assert second["changed"] is False
+    assert second["read_strategy"] == "batched_canonical_state"
+    assert second["read_phases"] == 2
+    assert second["counts"]["field_configs_changed"] == 0
+    assert second["counts"]["type_bindings_changed"] == 0
+    assert concept_reads == 1
+    assert text_reads == 1

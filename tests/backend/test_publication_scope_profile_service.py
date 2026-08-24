@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+import src.backend.services.publication_scope_profile_vontology_service as publication_seed_module
 from src.backend.services import concept_service
 from src.backend.services.publication_scope_profile_service import (
     PUBLICATION_SCOPE_PROFILE_LINK_PREDICATE,
@@ -527,10 +528,59 @@ def test_live_profile_edit_changes_fresh_decision_and_bootstrap_preserves_it(
 
 def test_bootstrap_is_idempotent_when_profiles_are_unchanged(
     publication_profile_store: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    concept_reads = 0
+    text_reads = 0
+    original_concept_read = concept_service.get_concepts_by_concept_ids_exact
+    original_text_read = publication_seed_module.get_texts_for_concepts
+
+    def _concept_read(concept_ids):
+        nonlocal concept_reads
+        concept_reads += 1
+        return original_concept_read(concept_ids)
+
+    def _text_read(*args, **kwargs):
+        nonlocal text_reads
+        text_reads += 1
+        return original_text_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        _concept_read,
+    )
+    monkeypatch.setattr(publication_seed_module, "get_texts_for_concepts", _text_read)
+    monkeypatch.setattr(
+        publication_seed_module,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current profile payloads must not be rewritten")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "create_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current concepts must not be recreated")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "update_concept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current relationships must not be rewritten")
+        ),
+    )
+
     second = bootstrap_canonical_publication_scope_profiles()
     assert second["success"] is True
+    assert second["changed"] is False
+    assert second["read_strategy"] == "batched_canonical_state"
+    assert second["read_phases"] == 2
     assert second["counts"]["concepts_created"] == 0
     assert second["counts"]["profiles_seeded"] == 0
     assert second["counts"]["profiles_preserved"] == 19
     assert second["counts"]["relationships_changed"] == 0
+    assert concept_reads == 1
+    assert text_reads == 1

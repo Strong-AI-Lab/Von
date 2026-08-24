@@ -13,6 +13,129 @@ def _build_text_row_lookup(text_map):
     return _get_text_rows
 
 
+def test_batched_graph_loader_preserves_registry_semantics_with_bounded_reads(
+    monkeypatch,
+) -> None:
+    import src.backend.services.model_registry_service as mod
+    from src.backend.services import concept_service, text_value_service
+
+    relation_map = {
+        ("#V#default_model_registry", mod.PRED_HAS_MODEL_ENTRY): [
+            "#V#test_registry_entry"
+        ],
+        ("#V#test_registry_entry", mod.PRED_REFERS_TO_MODEL): ["#V#test_model"],
+        ("#V#test_registry_entry", mod.PRED_HAS_MODEL_API_PROFILE): ["#V#test_profile"],
+        ("#V#test_model", mod.PRED_HAS_PROVIDER): ["#V#test_provider"],
+        ("#V#test_profile", mod.PRED_HAS_MODEL_PARAMETER_CONSTRAINT): [
+            "#V#test_constraint"
+        ],
+        ("#V#test_constraint", mod.PRED_CONSTRAINS_MODEL_PARAMETER): [
+            "#V#temperature_parameter"
+        ],
+    }
+    concept_docs: dict[str, dict] = {}
+    for (subject_id, predicate), targets in relation_map.items():
+        concept_docs.setdefault(
+            subject_id,
+            {"concept_id": subject_id, "relationships": {}},
+        )["relationships"][predicate] = targets
+        for target in targets:
+            concept_docs.setdefault(
+                target,
+                {"concept_id": target, "relationships": {}},
+            )
+
+    text_map = {
+        ("#V#test_provider", "hasName"): ["OpenAI Provider"],
+        ("#V#test_model", "hasName"): ["openai:test-model", "test-model"],
+        ("#V#test_registry_entry", mod.PRED_HAS_MODEL_ID): ["test-model"],
+        ("#V#test_profile", mod.PRED_HAS_API_SURFACE): ["responses"],
+        ("#V#test_profile", mod.PRED_HAS_STRUCTURED_TOOL_CALLING): ["required"],
+        ("#V#test_constraint", mod.PRED_HAS_PARAMETER_ACTION): ["omit"],
+    }
+    concept_read_batches: list[tuple[str, ...]] = []
+    text_read_calls = 0
+
+    def _bulk_concepts(concept_ids):
+        batch = tuple(dict.fromkeys(concept_ids))
+        concept_read_batches.append(batch)
+        return {
+            concept_id: concept_docs[concept_id]
+            for concept_id in batch
+            if concept_id in concept_docs
+        }
+
+    def _bulk_text(subject_ids, *, predicates, **_kwargs):
+        nonlocal text_read_calls
+        text_read_calls += 1
+        predicate_set = set(predicates)
+        return {
+            subject_id: [
+                {"predicate": predicate, "text": value}
+                for (candidate_id, predicate), values in text_map.items()
+                if candidate_id == subject_id and predicate in predicate_set
+                for value in values
+            ]
+            for subject_id in dict.fromkeys(subject_ids)
+        }
+
+    monkeypatch.setattr(
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        _bulk_concepts,
+    )
+    monkeypatch.setattr(text_value_service, "get_texts_for_concepts", _bulk_text)
+
+    snapshot = mod._load_registry_from_vontology_graph_batched()
+
+    assert snapshot is not None
+    assert snapshot["read_strategy"] == "batched_graph"
+    assert snapshot["read_phases"] == 6
+    assert len(concept_read_batches) == 5
+    assert text_read_calls == 1
+    assert snapshot["models"] == [
+        {
+            "model_id": "test-model",
+            "model_aliases": ["openai:test-model", "test-model"],
+            "provider": "openai",
+            "locality": "external",
+            "concept_id": "#V#test_model",
+            "registry_entry_id": "#V#test_registry_entry",
+            "api_profiles": [
+                {
+                    "profile_concept_id": "#V#test_profile",
+                    "api_surface": "responses",
+                    "structured_tool_calling": "required",
+                    "tool_continuation_mode": None,
+                    "response_storage_policy": None,
+                    "connection_id": None,
+                    "deployment_id": None,
+                    "parameter_constraints": [
+                        {
+                            "constraint_concept_id": "#V#test_constraint",
+                            "parameter_concept_id": "#V#temperature_parameter",
+                            "parameter": "temperature",
+                            "action": "omit",
+                            "fixed_value": None,
+                            "allowed_values": [],
+                            "profile_concept_id": "#V#test_profile",
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    del concept_docs["#V#test_registry_entry"]["relationships"][
+        mod.PRED_HAS_MODEL_API_PROFILE
+    ]
+    text_map[
+        ("#V#test_registry_entry", mod.PRED_HAS_MODEL_API_PROFILE)
+    ] = ["#V#test_profile"]
+
+    assert mod._load_registry_from_vontology_graph_batched() is None
+
+
 def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
     monkeypatch,
 ) -> None:

@@ -19,7 +19,9 @@ from .settings_service import resolve_enabled_llm_settings, resolve_llm_setting
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGISTRY_NAME = "default_model_registry"
+_DEFAULT_REGISTRY_CONCEPT_ID = "#V#default_model_registry"
 _LEGACY_REGISTRY_JSON_PREDICATE_NAME = "has_model_registry_json"
+_MODEL_REGISTRY_GRAPH_LOADER_SCHEMA_VERSION = "model_registry_graph_loader.v2-batched"
 
 PRED_HAS_MODEL_ENTRY = "#V#has_model_entry"
 PRED_REFERS_TO_MODEL = "#V#refers_to_model"
@@ -202,6 +204,9 @@ def _model_registry_authority_fingerprint() -> str:
                 effective_mongo_uri
             ),
             "namespace": namespace,
+            "graph_loader_schema_version": (
+                _MODEL_REGISTRY_GRAPH_LOADER_SCHEMA_VERSION
+            ),
         }
     except Exception:
         # The fallback remains secret-free and separates configured databases.
@@ -211,6 +216,9 @@ def _model_registry_authority_fingerprint() -> str:
             "database_name": str(os.getenv("VON_DB_NAME") or "von_db").strip(),
             "mongo_location": {"available": False},
             "namespace": namespace,
+            "graph_loader_schema_version": (
+                _MODEL_REGISTRY_GRAPH_LOADER_SCHEMA_VERSION
+            ),
         }
     encoded = json.dumps(
         authority,
@@ -610,6 +618,375 @@ def _get_related_concept_ids(concept_id: str, predicate: str) -> list[str]:
     ]
 
 
+def _related_concept_ids_from_doc(
+    concept: Mapping[str, Any] | None,
+    predicate: str,
+) -> list[str]:
+    """Read canonical relationship targets from an already-fetched concept."""
+
+    if not isinstance(concept, Mapping):
+        return []
+    relationships = concept.get("relationships")
+    if not isinstance(relationships, Mapping):
+        return []
+    direct_targets = relationships.get(predicate)
+    if isinstance(direct_targets, str) and direct_targets.strip():
+        return [direct_targets.strip()]
+    if isinstance(direct_targets, Sequence) and not isinstance(
+        direct_targets, (str, bytes, bytearray)
+    ):
+        targets = [
+            str(item).strip()
+            for item in direct_targets
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if targets:
+            return targets
+    linked_to = relationships.get("linked_to")
+    if isinstance(linked_to, Sequence) and not isinstance(
+        linked_to, (str, bytes, bytearray)
+    ):
+        return [
+            str(item.get("target") or item.get("concept_id") or "").strip()
+            for item in linked_to
+            if isinstance(item, Mapping)
+            and item.get("predicate") == predicate
+            and str(item.get("target") or item.get("concept_id") or "").strip()
+        ]
+    return []
+
+
+def _first_batched_text(
+    rows_by_concept: Mapping[str, Sequence[Mapping[str, Any]]],
+    concept_id: str,
+    predicate: str,
+) -> str | None:
+    for row in rows_by_concept.get(concept_id, ()):
+        if row.get("predicate") != predicate:
+            continue
+        raw_text = row.get("text")
+        if isinstance(raw_text, str) and raw_text.strip():
+            return raw_text.strip()
+    return None
+
+
+def _batched_text_relationship_targets(
+    rows_by_concept: Mapping[str, Sequence[Mapping[str, Any]]],
+    concept_id: str,
+    predicate: str,
+) -> list[str]:
+    return [
+        str(row.get("text")).strip()
+        for row in rows_by_concept.get(concept_id, ())
+        if row.get("predicate") == predicate
+        and isinstance(row.get("text"), str)
+        and str(row.get("text")).strip().startswith("#V#")
+    ]
+
+
+def _load_registry_from_vontology_graph_batched(
+    *, preferred_language: str | None = None
+) -> Optional[Mapping[str, Any]]:
+    """Hydrate the canonical registry in bounded graph waves.
+
+    The represented graph remains authority.  This function changes only the
+    physical read shape: related concept documents are fetched in batches and
+    all semantic text predicates are resolved in one joined text read.  Legacy
+    text-encoded relationship graphs fall back to the compatibility loader.
+    """
+
+    del preferred_language  # Existing graph text selection is insertion ordered.
+    from .concept_service import get_concepts_by_concept_ids_exact
+    from .text_value_service import get_texts_for_concepts
+
+    root_docs = get_concepts_by_concept_ids_exact([_DEFAULT_REGISTRY_CONCEPT_ID])
+    root = root_docs.get(_DEFAULT_REGISTRY_CONCEPT_ID)
+    entry_ids = _related_concept_ids_from_doc(root, PRED_HAS_MODEL_ENTRY)
+    if not entry_ids:
+        return None
+
+    entry_docs = get_concepts_by_concept_ids_exact(entry_ids)
+    model_ids: list[str] = []
+    profile_ids: list[str] = []
+    for entry_id in entry_ids:
+        entry_doc = entry_docs.get(entry_id)
+        referred_models = _related_concept_ids_from_doc(entry_doc, PRED_REFERS_TO_MODEL)
+        if not referred_models:
+            # A model entry without a direct/linked model edge may be using the
+            # legacy text-relation encoding. Let the compatibility loader decide.
+            return None
+        model_ids.extend(referred_models[:1])
+        profile_ids.extend(
+            _related_concept_ids_from_doc(entry_doc, PRED_HAS_MODEL_API_PROFILE)
+        )
+
+    model_and_profile_docs = get_concepts_by_concept_ids_exact(
+        [*model_ids, *profile_ids]
+    )
+    provider_ids: list[str] = []
+    for model_id in model_ids:
+        provider_ids.extend(
+            _related_concept_ids_from_doc(
+                model_and_profile_docs.get(model_id), PRED_HAS_PROVIDER
+            )[:1]
+        )
+    constraint_ids: list[str] = []
+    for profile_id in profile_ids:
+        constraint_ids.extend(
+            _related_concept_ids_from_doc(
+                model_and_profile_docs.get(profile_id),
+                PRED_HAS_MODEL_PARAMETER_CONSTRAINT,
+            )
+        )
+
+    provider_and_constraint_docs = get_concepts_by_concept_ids_exact(
+        [*provider_ids, *constraint_ids]
+    )
+    parameter_ids: list[str] = []
+    for constraint_id in constraint_ids:
+        parameter_ids.extend(
+            _related_concept_ids_from_doc(
+                provider_and_constraint_docs.get(constraint_id),
+                PRED_CONSTRAINS_MODEL_PARAMETER,
+            )[:1]
+        )
+    parameter_docs = get_concepts_by_concept_ids_exact(parameter_ids)
+    concept_docs: dict[str, Mapping[str, Any]] = {
+        **root_docs,
+        **entry_docs,
+        **model_and_profile_docs,
+        **provider_and_constraint_docs,
+        **parameter_docs,
+    }
+
+    text_subject_ids = [
+        *entry_ids,
+        *model_ids,
+        *provider_ids,
+        *profile_ids,
+        *constraint_ids,
+    ]
+    text_predicates = [
+        "hasName",
+        PRED_HAS_MODEL_API_PROFILE,
+        PRED_HAS_PROVIDER,
+        PRED_HAS_MODEL_PARAMETER_CONSTRAINT,
+        PRED_CONSTRAINS_MODEL_PARAMETER,
+        PRED_HAS_MODEL_ID,
+        PRED_HAS_MODEL_PRICING_JSON,
+        PRED_HAS_MODEL_CAPABILITIES_JSON,
+        PRED_HAS_API_SURFACE,
+        PRED_HAS_STRUCTURED_TOOL_CALLING,
+        PRED_HAS_TOOL_CONTINUATION_MODE,
+        PRED_HAS_RESPONSE_STORAGE_POLICY,
+        PRED_HAS_PROVIDER_CONNECTION_ID,
+        PRED_HAS_DEPLOYMENT_ID,
+        PRED_HAS_PARAMETER_ACTION,
+        PRED_HAS_FIXED_PARAMETER_VALUE,
+        PRED_HAS_ALLOWED_PARAMETER_VALUE,
+    ]
+    rows_by_concept = get_texts_for_concepts(
+        text_subject_ids,
+        predicates=text_predicates,
+        limit_per_concept=100,
+    )
+
+    # Relationship targets historically stored as text assertions remain
+    # supported by the legacy loader. If one is present where this bounded
+    # loader saw no canonical concept edge, delegate the whole snapshot to the
+    # compatibility path rather than silently returning a partial registry.
+    relationship_subjects = [
+        *[
+            (entry_id, entry_docs.get(entry_id), PRED_HAS_MODEL_API_PROFILE)
+            for entry_id in entry_ids
+        ],
+        *[
+            (model_id, model_and_profile_docs.get(model_id), PRED_HAS_PROVIDER)
+            for model_id in model_ids
+        ],
+        *[
+            (
+                profile_id,
+                model_and_profile_docs.get(profile_id),
+                PRED_HAS_MODEL_PARAMETER_CONSTRAINT,
+            )
+            for profile_id in profile_ids
+        ],
+        *[
+            (
+                constraint_id,
+                provider_and_constraint_docs.get(constraint_id),
+                PRED_CONSTRAINS_MODEL_PARAMETER,
+            )
+            for constraint_id in constraint_ids
+        ],
+    ]
+    for subject_id, subject_doc, predicate in relationship_subjects:
+        if _related_concept_ids_from_doc(subject_doc, predicate):
+            continue
+        if _batched_text_relationship_targets(
+            rows_by_concept, subject_id, predicate
+        ):
+            return None
+
+    models: list[dict[str, Any]] = []
+    for registry_entry_id in entry_ids:
+        entry_doc = entry_docs.get(registry_entry_id)
+        referred_models = _related_concept_ids_from_doc(entry_doc, PRED_REFERS_TO_MODEL)
+        if not referred_models:
+            continue
+        model_concept_id = referred_models[0]
+        model_doc = concept_docs.get(model_concept_id)
+        entry_provider_ids = _related_concept_ids_from_doc(model_doc, PRED_HAS_PROVIDER)
+        provider_concept_id = entry_provider_ids[0] if entry_provider_ids else None
+        provider = None
+        if provider_concept_id:
+            provider = _normalise_provider_name(
+                _first_batched_text(rows_by_concept, provider_concept_id, "hasName")
+                or provider_concept_id
+            )
+
+        aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for row in rows_by_concept.get(model_concept_id, ()):
+            if row.get("predicate") != "hasName":
+                continue
+            raw_text = row.get("text")
+            if not isinstance(raw_text, str):
+                continue
+            candidate = raw_text.strip().replace(": ", ":")
+            if not _looks_like_machine_model_name(candidate):
+                continue
+            for alias in (candidate, _strip_provider_prefix(candidate, provider)):
+                alias_key = _normalise_lookup_token(alias)
+                if alias_key and alias_key not in seen_aliases:
+                    seen_aliases.add(alias_key)
+                    aliases.append(alias.strip())
+
+        model_id = _first_batched_text(
+            rows_by_concept, registry_entry_id, PRED_HAS_MODEL_ID
+        ) or _derive_model_id_from_aliases(aliases=aliases, provider=provider)
+
+        api_profiles: list[dict[str, Any]] = []
+        for profile_concept_id in _related_concept_ids_from_doc(
+            entry_doc, PRED_HAS_MODEL_API_PROFILE
+        ):
+            constraints: list[dict[str, Any]] = []
+            for constraint_concept_id in _related_concept_ids_from_doc(
+                concept_docs.get(profile_concept_id),
+                PRED_HAS_MODEL_PARAMETER_CONSTRAINT,
+            ):
+                parameter_ids_for_constraint = _related_concept_ids_from_doc(
+                    concept_docs.get(constraint_concept_id),
+                    PRED_CONSTRAINS_MODEL_PARAMETER,
+                )
+                parameter_concept_id = (
+                    parameter_ids_for_constraint[0]
+                    if parameter_ids_for_constraint
+                    else None
+                )
+                allowed_values = [
+                    str(row.get("text")).strip()
+                    for row in rows_by_concept.get(constraint_concept_id, ())
+                    if row.get("predicate") == PRED_HAS_ALLOWED_PARAMETER_VALUE
+                    and isinstance(row.get("text"), str)
+                    and str(row.get("text")).strip()
+                ]
+                constraints.append(
+                    {
+                        "constraint_concept_id": constraint_concept_id,
+                        "parameter_concept_id": parameter_concept_id,
+                        "parameter": _normalise_parameter_name(parameter_concept_id),
+                        "action": _first_batched_text(
+                            rows_by_concept,
+                            constraint_concept_id,
+                            PRED_HAS_PARAMETER_ACTION,
+                        ),
+                        "fixed_value": _first_batched_text(
+                            rows_by_concept,
+                            constraint_concept_id,
+                            PRED_HAS_FIXED_PARAMETER_VALUE,
+                        ),
+                        "allowed_values": allowed_values,
+                        "profile_concept_id": profile_concept_id,
+                    }
+                )
+            api_profiles.append(
+                {
+                    "profile_concept_id": profile_concept_id,
+                    "api_surface": _first_batched_text(
+                        rows_by_concept, profile_concept_id, PRED_HAS_API_SURFACE
+                    ),
+                    "structured_tool_calling": _first_batched_text(
+                        rows_by_concept,
+                        profile_concept_id,
+                        PRED_HAS_STRUCTURED_TOOL_CALLING,
+                    ),
+                    "tool_continuation_mode": _first_batched_text(
+                        rows_by_concept,
+                        profile_concept_id,
+                        PRED_HAS_TOOL_CONTINUATION_MODE,
+                    ),
+                    "response_storage_policy": _first_batched_text(
+                        rows_by_concept,
+                        profile_concept_id,
+                        PRED_HAS_RESPONSE_STORAGE_POLICY,
+                    ),
+                    "connection_id": _first_batched_text(
+                        rows_by_concept,
+                        profile_concept_id,
+                        PRED_HAS_PROVIDER_CONNECTION_ID,
+                    ),
+                    "deployment_id": _first_batched_text(
+                        rows_by_concept,
+                        profile_concept_id,
+                        PRED_HAS_DEPLOYMENT_ID,
+                    ),
+                    "parameter_constraints": constraints,
+                }
+            )
+
+        entry: dict[str, Any] = {
+            "model_id": model_id,
+            "model_aliases": aliases,
+            "provider": provider,
+            "locality": "local" if provider == "ollama" else "external",
+            "concept_id": model_concept_id,
+            "registry_entry_id": registry_entry_id,
+            "api_profiles": api_profiles,
+        }
+        pricing = _parse_registry_json(
+            _first_batched_text(
+                rows_by_concept, registry_entry_id, PRED_HAS_MODEL_PRICING_JSON
+            )
+            or ""
+        )
+        capabilities = _parse_registry_json(
+            _first_batched_text(
+                rows_by_concept,
+                registry_entry_id,
+                PRED_HAS_MODEL_CAPABILITIES_JSON,
+            )
+            or ""
+        )
+        if pricing is not None:
+            entry["pricing"] = dict(pricing)
+        if capabilities is not None:
+            entry["capabilities"] = dict(capabilities)
+        models.append(entry)
+
+    if not models:
+        return None
+    return {
+        "registry_concept_id": _DEFAULT_REGISTRY_CONCEPT_ID,
+        "models": models,
+        "read_strategy": "batched_graph",
+        "read_phases": 6,
+        "canonical_read_batches": {"concepts": 5, "text_assertions": 1},
+        "loader_schema_version": _MODEL_REGISTRY_GRAPH_LOADER_SCHEMA_VERSION,
+    }
+
+
 def _strip_provider_prefix(model_id: str, provider: str | None = None) -> str:
     cleaned = _normalise_lookup_token(model_id)
     if not cleaned:
@@ -822,7 +1199,7 @@ def _resolve_model_entry_from_graph(
     return entry
 
 
-def _load_registry_from_vontology_graph(
+def _load_registry_from_vontology_graph_legacy(
     *, preferred_language: str | None = None
 ) -> Optional[Mapping[str, Any]]:
     registry_concept_id = _resolve_concept_id_by_name(
@@ -855,6 +1232,21 @@ def _load_registry_from_vontology_graph(
         "registry_concept_id": registry_concept_id,
         "models": models,
     }
+
+
+def _load_registry_from_vontology_graph(
+    *, preferred_language: str | None = None
+) -> Optional[Mapping[str, Any]]:
+    """Use the bounded batch loader with compatibility fallback."""
+
+    registry = _load_registry_from_vontology_graph_batched(
+        preferred_language=preferred_language
+    )
+    if registry is not None:
+        return registry
+    return _load_registry_from_vontology_graph_legacy(
+        preferred_language=preferred_language
+    )
 
 
 def _load_registry_from_vontology_json(
@@ -1280,10 +1672,14 @@ def preload_model_registry_snapshot(
     """Load represented profile authority before the HTTP server accepts calls."""
 
     started_at = time.time()
-    get_model_registry_snapshot(preferred_language=preferred_language)
+    snapshot = get_model_registry_snapshot(preferred_language=preferred_language)
     status = get_model_registry_snapshot_status(preferred_language=preferred_language)
     return {
         **status,
+        "read_strategy": snapshot.get("read_strategy"),
+        "read_phases": snapshot.get("read_phases"),
+        "loader_schema_version": snapshot.get("loader_schema_version"),
+        "model_count": len(snapshot.get("models") or ()),
         "preload_duration_ms": int((time.time() - started_at) * 1000),
     }
 

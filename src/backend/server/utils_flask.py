@@ -2678,6 +2678,21 @@ def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:
 
         report = bootstrap_canonical_concept_summary_fields()
         app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] = report
+        try:
+            app.logger.info(
+                "[concept_summary_fields] bootstrap success=%s changed=%s "
+                "read_strategy=%s read_phases=%s duration_ms=%s raw_relations=%s",
+                report.get("success"),
+                report.get("changed"),
+                report.get("read_strategy"),
+                report.get("read_phases"),
+                report.get("duration_ms"),
+                (report.get("text_query_metadata") or {}).get(
+                    "raw_relation_count"
+                ),
+            )
+        except Exception:
+            pass
         if not bool(report.get("success", False)):
             app.logger.warning(
                 "[concept_summary_fields] bootstrap failed: %s",
@@ -2718,6 +2733,21 @@ def _bootstrap_publication_scope_profiles_for_startup(app: Flask) -> None:
 
         report = bootstrap_canonical_publication_scope_profiles()
         app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] = report
+        try:
+            app.logger.info(
+                "[publication_scope_profiles] bootstrap success=%s changed=%s "
+                "read_strategy=%s read_phases=%s duration_ms=%s raw_relations=%s",
+                report.get("success"),
+                report.get("changed"),
+                report.get("read_strategy"),
+                report.get("read_phases"),
+                report.get("duration_ms"),
+                (report.get("profile_query_metadata") or {}).get(
+                    "raw_relation_count"
+                ),
+            )
+        except Exception:
+            pass
         if not bool(report.get("success", False)):
             app.logger.warning(
                 "[publication_scope_profiles] bootstrap failed: %s",
@@ -4276,21 +4306,29 @@ def _start_prewarm(app: Flask) -> None:
                         )
                 except Exception as exc:
                     app.logger.warning("[prewarm] Model list failed: %s", exc)
-                try:
-                    with app.test_client() as client:
-                        response = client.get("/vontology/api/vontology/tree?refresh=1")
-                        if response.status_code == 200:
-                            app.logger.info(
-                                "[prewarm] Tree build OK (len bytes=%s)",
-                                len(response.data),
+                if _env_bool("VON_PREWARM_TREE_ENABLE", False):
+                    try:
+                        with app.test_client() as client:
+                            response = client.get(
+                                "/vontology/api/vontology/tree?refresh=1"
                             )
-                        else:
-                            app.logger.warning(
-                                "[prewarm] Tree build non-200 status=%s",
-                                response.status_code,
-                            )
-                except Exception as exc:
-                    app.logger.warning("[prewarm] Tree build failed: %s", exc)
+                            if response.status_code == 200:
+                                app.logger.info(
+                                    "[prewarm] Tree build OK (len bytes=%s)",
+                                    len(response.data),
+                                )
+                            else:
+                                app.logger.warning(
+                                    "[prewarm] Tree build non-200 status=%s",
+                                    response.status_code,
+                                )
+                    except Exception as exc:
+                        app.logger.warning("[prewarm] Tree build failed: %s", exc)
+                else:
+                    app.logger.info(
+                        "[prewarm] Vontology tree remains demand-loaded; set "
+                        "VON_PREWARM_TREE_ENABLE=1 to opt in."
+                    )
             finally:
                 app.logger.info("[prewarm] Completed in %.2fs", time.time() - t0)
 
