@@ -308,6 +308,39 @@ class TestGetUserMemberships:
         assert result["total_memberships"] == 0
         assert result["memberships"] == []
 
+    def test_get_memberships_merges_canonical_and_legacy_relationships(
+        self, mock_concepts_repo, mock_access_control, mock_text_repos
+    ):
+        """Both stored membership predicates remain visible and deduplicated."""
+        user_id = "#V#michael_witbrock"
+        mock_concepts_repo.find_one.return_value = {
+            "concept_id": user_id,
+            "relationships": {
+                "memberOf": ["#V#university_of_auckland_strong_ai_lab"],
+                "#V#member_of_organisation": [
+                    "#V#the_lu_witbrock_household",
+                    "#V#university_of_auckland_strong_ai_lab",
+                ],
+            },
+        }
+        text_rels, _ = mock_text_repos
+        text_rels.find.return_value = []
+
+        result = get_user_memberships(user_id)
+
+        assert result["memberships"] == [
+            {
+                "organisation_concept_id": (
+                    "#V#university_of_auckland_strong_ai_lab"
+                ),
+                "role": "member",
+            },
+            {
+                "organisation_concept_id": "#V#the_lu_witbrock_household",
+                "role": "member",
+            },
+        ]
+
     def test_get_memberships_decodes_scope_distinct_equal_roles(
         self, mock_concepts_repo, mock_access_control, mock_text_repos
     ):

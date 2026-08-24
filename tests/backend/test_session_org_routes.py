@@ -102,6 +102,31 @@ def app_client(monkeypatch):
             ),
         },
     )
+    represented_memberships = {
+        "#V#michael_witbrock": [
+            {
+                "organisation_concept_id": "#V#university_of_auckland_strong_ai_lab",
+                "role": "admin",
+            }
+        ],
+        "#V#lu_yunli": [
+            {
+                "organisation_concept_id": "#V#the_lu_witbrock_household",
+                "role": "member",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        memberships,
+        "get_user_memberships",
+        lambda user_concept_id: {
+            "user_concept_id": user_concept_id,
+            "memberships": represented_memberships.get(user_concept_id, []),
+            "total_memberships": len(
+                represented_memberships.get(user_concept_id, [])
+            ),
+        },
+    )
 
     app = utils_flask.create_flask_app(
         list_models_func=lambda: ["dummy-model"],
@@ -415,11 +440,12 @@ def test_get_my_organisations_requires_authentication(app_client):
     assert resp.get_json()["error"] == "Not authenticated"
 
 
-def test_get_my_organisations_returns_stubbed_memberships(app_client):
+def test_get_my_organisations_returns_represented_memberships(app_client):
     _, client = app_client
 
     with client.session_transaction() as sess:
         sess["user_id"] = "michael_witbrock"
+        sess["user_concept_id"] = "#V#michael_witbrock"
 
     resp = client.get("/von/api/organisations/my_organisations")
 
@@ -432,12 +458,13 @@ def test_get_my_organisations_returns_stubbed_memberships(app_client):
     assert org["name"] == "University Of Auckland Strong Ai Lab"
 
 
-def test_get_my_organisations_uses_user_email_for_stub_memberships(app_client):
+def test_get_my_organisations_uses_authenticated_user_not_email(app_client):
     _, client = app_client
 
     with client.session_transaction() as sess:
         sess["user_id"] = "opaque-oauth-subject"
         sess["user_email"] = "lu.yunli@example.com"
+        sess["user_concept_id"] = "#V#michael_witbrock"
 
     resp = client.get("/von/api/organisations/my_organisations")
 
@@ -445,17 +472,17 @@ def test_get_my_organisations_uses_user_email_for_stub_memberships(app_client):
     data = resp.get_json()
     assert data["total_count"] == 1
     org = data["organisations"][0]
-    assert org["concept_id"] == "#V#the_lu_witbrock_household"
-    assert org["role"] == "member"
-    assert org["name"] == "The Lu Witbrock Household"
+    assert org["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
+    assert org["role"] == "admin"
+    assert org["name"] == "University Of Auckland Strong Ai Lab"
 
 
-def test_get_my_organisations_allows_selected_user_concept_id_override(app_client):
+def test_get_my_organisations_ignores_selected_user_concept_id(app_client):
     _, client = app_client
 
-    # Authenticated session identity does not match stub mapping.
     with client.session_transaction() as sess:
-        sess["user_id"] = "jeremyluyunli123@gmail.com"
+        sess["user_id"] = "michael_witbrock"
+        sess["user_concept_id"] = "#V#michael_witbrock"
 
     resp = client.get(
         "/von/api/organisations/my_organisations?user_concept_id=%23V%23lu_yunli"
@@ -465,9 +492,9 @@ def test_get_my_organisations_allows_selected_user_concept_id_override(app_clien
     data = resp.get_json()
     assert data["total_count"] == 1
     org = data["organisations"][0]
-    assert org["concept_id"] == "#V#the_lu_witbrock_household"
-    assert org["role"] == "member"
-    assert org["name"] == "The Lu Witbrock Household"
+    assert org["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
+    assert org["role"] == "admin"
+    assert org["name"] == "University Of Auckland Strong Ai Lab"
 
 
 def test_get_my_organisations_prefers_memberships_from_user_concept_relationships(
@@ -475,33 +502,41 @@ def test_get_my_organisations_prefers_memberships_from_user_concept_relationship
 ):
     _, client = app_client
 
-    # Stub concept lookup via the normal concept service path.
-    import src.backend.services.concept_service as concept_service
+    import src.backend.services.organisation_membership_service as memberships
 
-    def _fake_get_concept_by_concept_id(concept_id: str, **_kwargs):
-        if concept_id == "#V#lu_yunli":
-            return {
-                "concept_id": "#V#lu_yunli",
-                "relationships": {
-                    "#V#member_of_organisation": ["#V#the_lu_witbrock_household"]
-                },
-            }
-        return None
+    seen_user_ids = []
+
+    def _fake_get_user_memberships(user_concept_id: str):
+        seen_user_ids.append(user_concept_id)
+        return {
+            "user_concept_id": user_concept_id,
+            "memberships": [
+                {
+                    "organisation_concept_id": "#V#the_lu_witbrock_household",
+                    "role": "owner",
+                }
+            ],
+            "total_memberships": 1,
+        }
 
     monkeypatch.setattr(
-        concept_service, "get_concept_by_concept_id", _fake_get_concept_by_concept_id
+        memberships,
+        "get_user_memberships",
+        _fake_get_user_memberships,
     )
 
     with client.session_transaction() as sess:
         sess["user_id"] = "lu_yunli"
         sess["user_concept_id"] = "#V#lu_yunli"
+        sess["organisation_concept_id"] = "university_of_auckland_strong_ai_lab"
 
     resp = client.get("/von/api/organisations/my_organisations")
 
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["total_count"] == 1
+    assert seen_user_ids == ["#V#lu_yunli"]
     org = data["organisations"][0]
     assert org["concept_id"] == "#V#the_lu_witbrock_household"
-    assert org["role"] == "member"
+    assert org["role"] == "owner"
     assert org["name"] == "The Lu Witbrock Household"

@@ -4,7 +4,7 @@ jest.mock('../apiService.js', () => ({
     postJson: jest.fn(),
 }));
 
-import { renderOrgSelector } from '../components/orgSelector.js';
+import { loadMyOrganisations, renderOrgSelector } from '../components/orgSelector.js';
 import { getJsonDetailed, getUserContext } from '../apiService.js';
 
 function flushMicrotasks() {
@@ -23,6 +23,25 @@ describe('org selector retryable load state', () => {
 
     afterEach(() => {
         consoleErrorSpy.mockRestore();
+    });
+
+    test('loads memberships without a client-selected user or organisation', async () => {
+        getJsonDetailed.mockResolvedValue({
+            data: {
+                organisations: [
+                    {
+                        concept_id: '#V#the_lu_witbrock_household',
+                        name: 'The Lu Witbrock Household',
+                        role: 'owner',
+                    },
+                ],
+            },
+        });
+
+        await expect(loadMyOrganisations()).resolves.toHaveLength(1);
+        expect(getJsonDetailed).toHaveBeenCalledWith(
+            '/von/api/organisations/my_organisations'
+        );
     });
 
     test('renders retryable failure state and recovers on retry click', async () => {
