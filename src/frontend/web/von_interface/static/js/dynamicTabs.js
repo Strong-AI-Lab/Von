@@ -6189,6 +6189,15 @@ export function sortRelationshipExtentRows(rows, sortBy = 'recency_desc') {
     return working;
 }
 
+export function resolveRelationshipExtentConceptKind(metadataKind, semanticRole = '') {
+    if (semanticRole === 'predicate') {
+        return 'predicate';
+    }
+    return ['type', 'predicate', 'individual'].includes(metadataKind)
+        ? metadataKind
+        : 'individual';
+}
+
 function ensureRelationshipsToolbar(container, conceptId, suffix, kind) {
     if (!container) return;
     const state = getRelationshipExtentUiState(conceptId, suffix);
@@ -7400,7 +7409,11 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
             });
         });
 
-        const createConceptCell = (conceptIdValue, fallbackName = null) => {
+        const createConceptCell = (
+            conceptIdValue,
+            fallbackName = null,
+            semanticRole = ''
+        ) => {
             const cell = document.createElement('td');
             const conceptIdText = normalisePotentialConceptId(conceptIdValue);
             if (!conceptIdText) {
@@ -7412,7 +7425,7 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
             const metadata = metadataMap.get(conceptIdText) || { kind: 'individual', name: fallbackName || conceptIdText };
             const chip = createVontologyCartouche(conceptIdText, {
                 name: metadata.name || fallbackName || conceptIdText,
-                kind: metadata.kind || 'individual',
+                kind: resolveRelationshipExtentConceptKind(metadata.kind, semanticRole),
                 title: conceptIdText,
                 mode: 'compact_kind_bg'
             });
@@ -7498,7 +7511,7 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
             tr.appendChild(roleCell);
 
             const predicateConceptId = toPredicateConceptId(row.predicate_id);
-            tr.appendChild(createConceptCell(predicateConceptId, row.predicate_id || ''));
+            tr.appendChild(createConceptCell(predicateConceptId, row.predicate_id || '', 'predicate'));
 
             const arg1ConceptId = normalisePotentialConceptId(row.arg1_value);
             if (row.arg1_is_concept || arg1ConceptId) {

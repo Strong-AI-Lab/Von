@@ -117,6 +117,30 @@ def test_create_concepts_rejects_missing_required_fields():
     assert "parent_id" in result["error"].lower()
 
 
+@pytest.mark.parametrize(
+    ("concept", "expected_error"),
+    [
+        ({"name": "test_concept_missing_kind"}, "concept_kind_required"),
+        (
+            {"name": "test_concept_ambiguous_kind", "kind": "candidature"},
+            "invalid_concept_kind",
+        ),
+    ],
+)
+def test_create_concepts_requires_an_explicit_supported_kind(
+    concept, expected_error
+):
+    result = _create_concepts(
+        parent_id="#V#abstract_object",
+        concepts=[concept],
+    )
+
+    assert result["successful"] == 0
+    assert result["effect_status"] == "failed"
+    assert result["results"][0]["error_code"] == expected_error
+    assert result["results"][0]["changed"] is False
+
+
 def test_create_concepts_accepts_multiple_unknown_fields():
     """
     Verify that create_concepts tolerates multiple unknown fields.

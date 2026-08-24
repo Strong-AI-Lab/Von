@@ -1830,9 +1830,11 @@ def _create_concepts(**kwargs):
         # Analyse what's being created to give better guidance
         concept_names = [c.get("name", "") for c in concepts if isinstance(c, dict)]
         creating_multiple = len(concepts) > 1
-        kind_requested = "instance"
+        kind_requested = "unspecified"
         if concepts and isinstance(concepts[0], dict):
-            kind_requested = (concepts[0].get("kind") or "type").strip().lower()
+            raw_kind_requested = concepts[0].get("kind")
+            if isinstance(raw_kind_requested, str) and raw_kind_requested.strip():
+                kind_requested = raw_kind_requested.strip().lower()
 
         # Build contextual suggestions
         suggestions = [
@@ -1943,14 +1945,15 @@ def _create_concepts(**kwargs):
         )
     requested_non_predicate_kinds = {
         (
-            str(concept_data.get("kind") or "type").strip().lower()
+            str(concept_data.get("kind") or "unspecified").strip().lower()
             if isinstance(concept_data, dict)
             else "invalid"
         )
         for concept_data in concepts
         if not (
             isinstance(concept_data, dict)
-            and str(concept_data.get("kind") or "type").strip().lower() == "predicate"
+            and str(concept_data.get("kind") or "unspecified").strip().lower()
+            == "predicate"
         )
     }
     if (
@@ -2095,7 +2098,46 @@ def _create_concepts(**kwargs):
                 continue
 
             name = concept_data.get("name")
-            kind = (concept_data.get("kind") or "type").strip().lower()
+            raw_kind = concept_data.get("kind")
+
+            if not isinstance(raw_kind, str) or not raw_kind.strip():
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": "concept_kind_required",
+                        "message": (
+                            "Concept kind is required; choose 'instance', 'type', "
+                            "or 'predicate'. No concept was created."
+                        ),
+                        "concept": None,
+                        "input_name": str(name or ""),
+                        "requested_name": str(name or ""),
+                        "requested_kind": None,
+                    }
+                )
+                continue
+
+            kind = raw_kind.strip().lower()
+            if kind not in {"instance", "individual", "type", "predicate"}:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": "invalid_concept_kind",
+                        "message": (
+                            f"Unsupported concept kind '{raw_kind}'; choose "
+                            "'instance', 'type', or 'predicate'. No concept was created."
+                        ),
+                        "concept": None,
+                        "input_name": str(name or ""),
+                        "requested_name": str(name or ""),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
 
             if not name:
                 results.append(
@@ -10257,9 +10299,9 @@ def _concepts_create_input_schema() -> Schema:
         description=(
             "Governed create_concepts input: parent_id is one exact semantic type "
             "concept ID, and concepts must contain exactly one core concept "
-            "specification: {name, concept_id?, kind?, description?, notes?, "
+            "specification: {name, kind, concept_id?, description?, notes?, "
             "vontology_path?, instance_of_type?}. kind is 'instance' for an "
-            "individual, 'type' for a subtype (the default), or 'predicate' for a "
+            "individual, 'type' for a subtype, or 'predicate' for a "
             "relationship type. duplicate_resolution_mode='canonical_id_only' "
             "skips semantic name resolution after an exact concept-ID miss; "
             "omitting it preserves the default semantic duplicate check. A name "
@@ -38397,9 +38439,9 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_effect=True,
             description=(
                 "Create exactly one governed core concept per effect. Supply one "
-                "concept specification with name and optional concept_id, kind, "
-                "description, notes, vontology_path, or instance_of_type. kind is "
-                "'instance' for an individual, 'type' for a subtype/default, or "
+                "concept specification with required name and kind, plus optional "
+                "concept_id, description, notes, vontology_path, or instance_of_type. "
+                "kind is 'instance' for an individual, 'type' for a subtype, or "
                 "'predicate' for a relationship type. This governed effect "
                 "idempotently reuses an exact actor-visible concept when canonical "
                 "read-back verifies the requested core. An actor-hidden instance-ID "
