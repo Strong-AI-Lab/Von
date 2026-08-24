@@ -1,0 +1,603 @@
+{
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "family_id": "academic_roster_workflow_seed_bundle",
+  "managed_by": "academic_roster_workflow_vontology_service",
+  "source_tag": "JVNAUTOSCI-2679",
+  "seed_version": "1",
+  "supported_action_ids": [
+    "llm.action",
+    "academic_roster.validate_snapshot",
+    "workflow_control.context_set",
+    "workflow_control.for_each",
+    "entity_representation.materialise_from_payload",
+    "academic_appointment.assert_record",
+    "academic_appointment.finalise_non_included",
+    "academic_roster.reconcile_results"
+  ],
+  "support_concepts": [
+    {
+      "concept_id": "#V#has_academic_appointment_record",
+      "name": "Has Academic Appointment Record",
+      "parent_concept_ids": [
+        "#V#binary_text_predicate"
+      ],
+      "create_as_instance": true,
+      "materialise_for_targeted_workflow_bootstrap": true,
+      "description": "Relates a person to an exact source-provenanced academic appointment record without imposing a universal title taxonomy.",
+      "system_tags": [
+        "academic-roster",
+        "predicate",
+        "workflow-support"
+      ]
+    },
+    {
+      "concept_id": "#V#has_graduate_supervision_accreditation_record",
+      "name": "Has Graduate Supervision Accreditation Record",
+      "parent_concept_ids": [
+        "#V#binary_text_predicate"
+      ],
+      "create_as_instance": true,
+      "materialise_for_targeted_workflow_bootstrap": true,
+      "description": "Relates a person to an exact source-provenanced graduate-supervision status record, kept separate from employment or appointment roles.",
+      "system_tags": [
+        "academic-roster",
+        "predicate",
+        "workflow-support"
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#academic_roster_reconciliation_workflow",
+      "display_name": "Academic Roster Reconciliation Workflow",
+      "description": "Acquire or accept a bounded academic-roster source snapshot, preserve the source cohort semantics, validate every source row, delegate each row to the academic appointment workflow, and reconcile a terminal result for every row.",
+      "content": "Use institution-owned public sources and source-defined cohort semantics. Adapt to facets, pagination, grouped pages, APIs, and documents without institution-specific routing. Never equate a supervisor cohort, directory facet, or source page with all academic staff. Preserve exact titles, leadership appointments, exclusions, unresolved rows, and provenance; then delegate every row and reconcile the aggregate.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [],
+        "input_mappings": [
+          {
+            "target_context_key": "academic_roster_snapshot",
+            "source_expression": "inputs.academic_roster_snapshot",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional already-normalised source snapshot for replay, import, or testing."
+          },
+          {
+            "target_context_key": "source_url",
+            "source_expression": "inputs.source_url",
+            "extractor": "identity",
+            "required": false,
+            "description": "Institution-owned source URL to acquire and interpret."
+          },
+          {
+            "target_context_key": "source_material",
+            "source_expression": "inputs.source_material",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional retrieved source material supplied by an upstream bounded read."
+          },
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": false,
+            "description": "User request defining the intended institution, unit, or cohort."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional provisional shared-situation context."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"routing_eligible\":true,\"authoring_intent_required\":false,\"explicit_workflow_context_required\":false,\"prefer_existing_capability\":true,\"selection_guidance\":\"Choose for requests to enumerate, reconcile, or represent academic staff from a university or research-organisation source. Preserve the requested source cohort and delegate each row to the appointment workflow. Do not choose for one already-identified person's profile.\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"academic staff roster\",\"university staff directory\",\"doctoral supervisors\",\"computer science academic staff\",\"research organisation people\",\"represent department academics\"],\"examples\":[\"Represent the accredited doctoral supervisors in this department.\",\"Build a source-grounded roster of this university unit and represent each included appointment.\",\"Reconcile every person on this academic staff page without calling it all staff unless the source does.\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"schema_version\":\"workflow_publication_lifecycle.v1\",\"phase\":\"published\",\"published\":true,\"routing_eligible\":true,\"validation_passed\":true,\"postconditions_verified\":true,\"review_state\":\"approved\",\"reviewed_by\":\"Codex\",\"review_reason\":\"JVNAUTOSCI-2679 workflow-first academic roster capability\",\"rollout_state\":\"published\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"academic_roster_validate_delegate_reconcile\",\"required_effects\":[{\"effect_id\":\"academic_roster_validation\",\"effect_type\":\"grounded_evidence\",\"description\":\"The bounded source snapshot must pass structural and cohort validation.\",\"required_tools\":[\"academic_roster.validate_snapshot\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"academic_roster_validation_missing\",\"failed_failure_code\":\"academic_roster_validation_failed\"},{\"effect_id\":\"academic_roster_delegation\",\"effect_type\":\"grounded_evidence\",\"description\":\"Every validated source row must be delegated to the child workflow.\",\"required_tools\":[\"workflow_control.for_each\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"academic_roster_delegation_missing\",\"failed_failure_code\":\"academic_roster_delegation_failed\"},{\"effect_id\":\"academic_roster_reconciliation\",\"effect_type\":\"grounded_evidence\",\"description\":\"The aggregate must reconcile one terminal non-failed result per validated row.\",\"required_tools\":[\"academic_roster.reconcile_results\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"academic_roster_reconciliation_missing\",\"failed_failure_code\":\"academic_roster_reconciliation_failed\"}]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "route_snapshot_source",
+        "steps": [
+          {
+            "state_id": "route_snapshot_source",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": []
+              }
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "validate_snapshot",
+                "reason": "normalised_snapshot_supplied",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "academic_roster_snapshot",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "academic_roster_snapshot",
+                      "expected": false
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "acquire_and_extract_snapshot",
+                "reason": "source_acquisition_required",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "acquire_and_extract_snapshot",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#prompt_academic_roster_acquisition"
+            ],
+            "llm_policy": {
+              "policy_stage": "academic_roster_acquisition",
+              "tool_mode": "allowed",
+              "allowed_tools": [
+                "search_web",
+                "extract_url",
+                "resilient_extract_url"
+              ],
+              "required_tools": [
+                "resilient_extract_url"
+              ],
+              "max_tool_invocations": 12,
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Requested roster and cohort"
+                },
+                {
+                  "context_key": "source_url",
+                  "label": "Candidate institution-owned source URL"
+                },
+                {
+                  "context_key": "source_material",
+                  "label": "Optional previously retrieved untrusted source material"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Provisional shared situation"
+                }
+              ],
+              "response_contract_text": "Return JSON only with one academic_roster_snapshot.v1 object under academic_roster_snapshot. Use institution-owned public sources. Record the source-defined cohort filters and membership claim exactly; adapt to facets, pagination, grouped sections, APIs, PDFs, and flat pages. Emit one row for every observed member of the bounded cohort, classifying it included, excluded, or unresolved with evidence. Preserve exact role_titles and leadership_roles; keep graduate_supervision separate and assert it only when the source explicitly supports it. Never claim all academic staff unless the source itself defines that exact cohort. Do not invent identities, titles, counts, pages, or supervision status. If acquisition is incomplete, retain unresolved rows or fail honestly rather than silently truncating.",
+              "tool_argument_defaults": {
+                "search_web": {
+                  "search_depth": "advanced",
+                  "max_results": 10,
+                  "include_raw_content": true
+                }
+              }
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_acquisition_snapshot_to_snapshot",
+                "tool_output_field": "validated_json.academic_roster_snapshot",
+                "context_key": "academic_roster_snapshot"
+              }
+            ],
+            "writes_context_keys": [
+              "academic_roster_snapshot"
+            ],
+            "next_state": "validate_snapshot",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "validate_snapshot",
+            "action_id": "academic_roster.validate_snapshot",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_validation_snapshot_to_snapshot_parameter",
+                "context_key": "academic_roster_snapshot",
+                "tool_param": "academic_roster_snapshot",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_validation_result_to_validation",
+                "tool_output_field": "academic_roster_validation",
+                "context_key": "academic_roster_validation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_validation_records_to_records",
+                "tool_output_field": "academic_roster_records",
+                "context_key": "academic_roster_records"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_validation_count_to_count",
+                "tool_output_field": "academic_roster_record_count",
+                "context_key": "academic_roster_record_count"
+              }
+            ],
+            "writes_context_keys": [
+              "academic_roster_validation",
+              "academic_roster_records",
+              "academic_roster_record_count"
+            ],
+            "next_state": "process_every_roster_row",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "process_every_roster_row",
+            "action_id": "workflow_control.for_each",
+            "execution_mode": "control",
+            "static_input_bindings": [
+              {
+                "key": "workflow_id",
+                "value": "#V#academic_appointment_representation_workflow"
+              },
+              {
+                "key": "items_context_key",
+                "value": "academic_roster_records"
+              },
+              {
+                "key": "item_context_key",
+                "value": "current_academic_roster_record"
+              },
+              {
+                "key": "index_context_key",
+                "value": "current_academic_roster_index"
+              },
+              {
+                "key": "max_items",
+                "value": 512
+              },
+              {
+                "key": "max_transitions",
+                "value": 8
+              },
+              {
+                "key": "max_concurrency",
+                "value": 8
+              },
+              {
+                "key": "success_policy",
+                "value": "allow_partial"
+              },
+              {
+                "key": "include_tool_invocations_in_iteration_results",
+                "value": false
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_iteration_results_to_results",
+                "tool_output_field": "iteration_results",
+                "context_key": "academic_roster_iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_success_count_to_count",
+                "tool_output_field": "for_each_success_count",
+                "context_key": "academic_roster_success_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_error_count_to_count",
+                "tool_output_field": "for_each_error_count",
+                "context_key": "academic_roster_error_count"
+              }
+            ],
+            "writes_context_keys": [
+              "academic_roster_iteration_results",
+              "academic_roster_success_count",
+              "academic_roster_error_count"
+            ],
+            "next_state": "reconcile_roster_results",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "reconcile_roster_results",
+            "action_id": "academic_roster.reconcile_results",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_reconcile_validation_to_validation_parameter",
+                "context_key": "academic_roster_validation",
+                "tool_param": "academic_roster_validation",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_reconcile_results_to_results_parameter",
+                "context_key": "academic_roster_iteration_results",
+                "tool_param": "academic_roster_iteration_results",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_reconcile_result_to_reconciliation",
+                "tool_output_field": "academic_roster_reconciliation",
+                "context_key": "academic_roster_reconciliation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_roster_reconcile_response_to_response",
+                "tool_output_field": "response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "academic_roster_reconciliation",
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#academic_appointment_representation_workflow",
+      "display_name": "Academic Appointment Representation Workflow",
+      "description": "Represent one included academic as a Person plus exact source-provenanced appointment and optional separately evidenced graduate-supervision records, or return an explicit non-mutating terminal exclusion or unresolved outcome.",
+      "content": "For each source row, preserve the source classification. Included rows reuse the generic Person materialisation capability before exact appointment assertions and canonical read-back. Excluded and unresolved rows terminate explicitly without knowledge mutation. Role titles and leadership roles remain exact source strings; graduate supervision is a separate claim.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "current_academic_roster_record"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "current_academic_roster_record",
+            "source_expression": "inputs.current_academic_roster_record",
+            "extractor": "identity",
+            "required": true,
+            "description": "One validated roster row."
+          },
+          {
+            "target_context_key": "academic_roster_snapshot",
+            "source_expression": "inputs.academic_roster_snapshot",
+            "extractor": "identity",
+            "required": false,
+            "description": "Parent source and cohort context for a directly launched child run."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"support\",\"routing_eligible\":false,\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"schema_version\":\"workflow_publication_lifecycle.v1\",\"phase\":\"published\",\"published\":true,\"routing_eligible\":false,\"validation_passed\":true,\"postconditions_verified\":true,\"review_state\":\"approved\",\"reviewed_by\":\"Codex\",\"review_reason\":\"JVNAUTOSCI-2679 reusable per-person academic appointment representation\",\"rollout_state\":\"published\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"academic_appointment_person_and_assertion_readback\",\"required_effects\":[{\"effect_id\":\"academic_person_core\",\"effect_type\":\"grounded_evidence\",\"description\":\"Included rows must create or reuse a verified Person core.\",\"required_tools\":[\"entity_representation.materialise_from_payload\"],\"required_tools_match\":\"all\",\"activation_required_tools\":[\"academic_appointment.assert_record\"],\"activation_required_tools_match\":\"any\",\"missing_failure_code\":\"academic_person_core_missing\",\"failed_failure_code\":\"academic_person_core_failed\"},{\"effect_id\":\"academic_appointment_readback\",\"effect_type\":\"grounded_evidence\",\"description\":\"Included rows must assert appointment facts and return canonical read-back receipts.\",\"required_tools\":[\"academic_appointment.assert_record\"],\"required_tools_match\":\"all\",\"activation_required_tools\":[\"entity_representation.materialise_from_payload\"],\"activation_required_tools_match\":\"any\",\"missing_failure_code\":\"academic_appointment_readback_missing\",\"failed_failure_code\":\"academic_appointment_readback_failed\"}]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "route_record_classification",
+        "steps": [
+          {
+            "state_id": "route_record_classification",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "academic_person_name",
+                    "value_from_context_options": [
+                      "current_academic_roster_record.person.name",
+                      "current_academic_roster_record.person.display_name"
+                    ],
+                    "skip_if_unresolved": true
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "academic_person_name"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "materialise_person_core",
+                "reason": "included_source_row",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "current_academic_roster_record.classification",
+                  "value": "included"
+                }
+              },
+              {
+                "to_state": "finalise_non_included_row",
+                "reason": "excluded_or_unresolved_source_row",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "materialise_person_core",
+            "action_id": "entity_representation.materialise_from_payload",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_person_name_to_entity_name_parameter",
+                "context_key": "academic_person_name",
+                "tool_param": "entity_name",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_person_description_to_entity_description_parameter",
+                "context_key": "current_academic_roster_record.person.description",
+                "tool_param": "entity_description",
+                "required": false
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_person_source_text_to_source_text_parameter",
+                "context_key": "current_academic_roster_record.source_evidence.source_text",
+                "tool_param": "entity_source_text",
+                "required": false
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "entity_domain",
+                "value": "person"
+              },
+              {
+                "key": "entity_type_id",
+                "value": "#V#person"
+              },
+              {
+                "key": "requested_facts",
+                "value": []
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_person_concept_to_person_concept",
+                "tool_output_field": "entity_representation_concept_id",
+                "context_key": "academic_person_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_person_verified_to_person_verified",
+                "tool_output_field": "entity_core_representation_verified",
+                "context_key": "academic_person_core_verified"
+              }
+            ],
+            "writes_context_keys": [
+              "academic_person_concept_id",
+              "academic_person_core_verified"
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "academic_roster_person_core_additive_write"
+            },
+            "next_state": "assert_appointment_record",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "assert_appointment_record",
+            "action_id": "academic_appointment.assert_record",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_record_to_record_parameter",
+                "context_key": "current_academic_roster_record",
+                "tool_param": "current_academic_roster_record",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_person_concept_to_subject_parameter",
+                "context_key": "academic_person_concept_id",
+                "tool_param": "person_concept_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_source_to_source_parameter",
+                "context_key": "academic_roster_snapshot.source",
+                "tool_param": "academic_roster_source",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_cohort_to_cohort_parameter",
+                "context_key": "academic_roster_snapshot.cohort",
+                "tool_param": "academic_roster_cohort",
+                "required": true
+              }
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "academic_appointment_actor_scoped_assertion"
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "finalise_non_included_row",
+            "action_id": "academic_appointment.finalise_non_included",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_academic_appointment_nonincluded_record_to_record_parameter",
+                "context_key": "current_academic_roster_record",
+                "tool_param": "current_academic_roster_record",
+                "required": true
+              }
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}

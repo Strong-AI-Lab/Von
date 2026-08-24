@@ -138,6 +138,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     from src.backend.db import transient_errors
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
+        academic_roster_workflow_vontology_service as academic_roster_workflow_bootstrap,
         ai_chat_session_source_profile_vontology_service as ai_chat_session_source_profile_bootstrap,
         benchmark_suite_vontology_service as benchmark_suite_bootstrap,
         concept_search_instance_retrieval_workflow_vontology_service as concept_search_instance_retrieval_workflow_bootstrap,
@@ -329,6 +330,18 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         entity_workflow_bootstrap,
         "bootstrap_canonical_entity_representation_workflows",
         _bootstrap_entity_workflows,
+    )
+    monkeypatch.setattr(
+        academic_roster_workflow_bootstrap,
+        "bootstrap_canonical_academic_roster_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": [
+                "#V#academic_roster_reconciliation_workflow",
+                "#V#academic_appointment_representation_workflow",
+            ],
+            "publication": {"skipped": True},
+        },
     )
     monkeypatch.setattr(
         entity_information_retrieval_workflow_bootstrap,
@@ -640,6 +653,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     entity_workflow_bootstrap_report = result.get("entity_workflow_bootstrap")
     assert isinstance(entity_workflow_bootstrap_report, dict)
     assert entity_workflow_bootstrap_report.get("success") is True
+    academic_roster_workflow_bootstrap_report = result.get(
+        "academic_roster_workflow_bootstrap"
+    )
+    assert isinstance(academic_roster_workflow_bootstrap_report, dict)
+    assert academic_roster_workflow_bootstrap_report.get("success") is True
     entity_information_retrieval_workflow_bootstrap_report = result.get(
         "entity_information_retrieval_workflow_bootstrap"
     )

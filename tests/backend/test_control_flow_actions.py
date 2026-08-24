@@ -434,6 +434,46 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
     }
 
 
+def test_for_each_action_supports_a_bounded_260_item_source_cohort() -> None:
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="child.emit_item",
+            handler=lambda request: WorkflowActionResult(
+                outputs={"item_value": request.data.get("current_item")}
+            ),
+        )
+    )
+    definitions = {
+        "#V#child_each_260": _child_definition(
+            "#V#child_each_260", "child.emit_item"
+        ),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each_260",
+            "items": list(range(260)),
+            "max_items": 260,
+            "max_concurrency": 8,
+            "success_policy": "all_must_succeed",
+            "include_tool_invocations_in_iteration_results": False,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["for_each_item_count"] == 260
+    assert result.outputs["for_each_success_count"] == 260
+    assert result.outputs["for_each_unattempted_count"] == 0
+
+
 def test_for_each_action_emits_empty_invocations_for_empty_input() -> None:
     registry = ActionRegistry()
     definitions = {

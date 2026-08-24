@@ -472,6 +472,9 @@ def _start_durable_workflow_system(
         from ..services.paper_representation_workflow_vontology_service import (
             bootstrap_canonical_paper_representation_workflows,
         )
+        from ..services.academic_roster_workflow_vontology_service import (
+            bootstrap_canonical_academic_roster_workflows,
+        )
         from ..services.conversation_turn_workflow_vontology_service import (
             bootstrap_canonical_conversation_turn_workflows,
         )
@@ -686,6 +689,10 @@ def _start_durable_workflow_system(
             label="entity workflow",
             bootstrap_fn=bootstrap_canonical_entity_representation_workflows,
         )
+        academic_roster_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="academic roster workflow",
+            bootstrap_fn=bootstrap_canonical_academic_roster_workflows,
+        )
         entity_information_retrieval_workflow_bootstrap_report = (
             _run_workflow_family_bootstrap(
                 label="entity-information retrieval workflow",
@@ -799,6 +806,9 @@ def _start_durable_workflow_system(
             )
         )
         result["entity_workflow_bootstrap"] = entity_workflow_bootstrap_report
+        result["academic_roster_workflow_bootstrap"] = (
+            academic_roster_workflow_bootstrap_report
+        )
         result["entity_information_retrieval_workflow_bootstrap"] = (
             entity_information_retrieval_workflow_bootstrap_report
         )
@@ -910,6 +920,11 @@ def _start_durable_workflow_system(
             app_logger.warning(
                 "[durable_workflows] represented-artefact creation workflow bootstrap failed: %s",
                 represented_artefact_creation_workflow_bootstrap_report,
+            )
+        if not bool(academic_roster_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] academic roster workflow bootstrap failed: %s",
+                academic_roster_workflow_bootstrap_report,
             )
         if not bool(
             multilingual_concept_enrichment_workflow_bootstrap_report.get(

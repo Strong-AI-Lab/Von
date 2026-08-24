@@ -2011,6 +2011,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     """
 
     from ..skill_interop import register_skill_interop_actions
+    from .academic_roster_workflow import register_academic_roster_actions
     from .context_bundle_actions import register_context_bundle_actions
     from .control_flow_actions import register_control_flow_actions
     from .enrichment_workflow import register_enrichment_actions
@@ -2081,6 +2082,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from ..workflow_mcp_tool_actions import register_workflow_mcp_tool_actions
 
     register_context_bundle_actions(registry)
+    register_academic_roster_actions(registry)
     register_rag_sync_actions(registry)
     register_enrichment_actions(registry)
     register_episode_evaluation_actions(registry)
