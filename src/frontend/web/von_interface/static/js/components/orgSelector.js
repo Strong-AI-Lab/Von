@@ -95,28 +95,51 @@ function renderRetryableOrgSelectorFailure(container, containerId, error) {
  * Switch to a different organisation
  * JVNAUTOSCI-1011: Now stores in sessionStorage for window-scoped contexts,
  * but also writes to localStorage for persistence across restarts/new windows.
- * @param {string} orgConceptId - The organisation concept ID to switch to
+ * @param {string|null} orgConceptId - The organisation concept ID, or null for Personal
  * @param {string} [orgName] - Optional organisation name for event detail
  */
 export async function switchOrganisation(orgConceptId, orgName = null) {
     try {
+        const targetOrganisationId = orgConceptId || null;
         const response = await postJson('/von/api/session/set_organisation', {
-            organisation_concept_id: orgConceptId
+            organisation_concept_id: targetOrganisationId
         });
 
         if (response.status === 'updated') {
-            const orgData = {
-                concept_id: response.organisation_id,
-                namespace: response.namespace
-            };
+            if (response.organisation_id) {
+                const orgData = {
+                    concept_id: response.organisation_id,
+                    namespace: response.namespace
+                };
+                const currentOrgData = {
+                    id: null,
+                    concept_id: response.organisation_id,
+                    name: orgName || null
+                };
 
-            // JVNAUTOSCI-1011: Store in sessionStorage for window-scoped context
-            sessionStorage.setItem(SS_ORG_CONTEXT, JSON.stringify(orgData));
-            sessionStorage.setItem(SS_ORG_ROLE, response.role);
+                // JVNAUTOSCI-1011: Store in sessionStorage for window-scoped context
+                sessionStorage.setItem(SS_ORG_CONTEXT, JSON.stringify(orgData));
+                sessionStorage.setItem(SS_ORG_ROLE, response.role || 'member');
+                sessionStorage.setItem(SS_CURRENT_ORG, JSON.stringify(currentOrgData));
 
-            // Also store in localStorage for persistence across restarts/new windows
-            localStorage.setItem(LS_ORG_CONTEXT, JSON.stringify(orgData));
-            localStorage.setItem(LS_ORG_ROLE, response.role);
+                // Also store in localStorage for persistence across restarts/new windows
+                localStorage.setItem(LS_ORG_CONTEXT, JSON.stringify(orgData));
+                localStorage.setItem(LS_ORG_ROLE, response.role || 'member');
+                localStorage.setItem(SS_CURRENT_ORG, JSON.stringify(currentOrgData));
+            } else {
+                sessionStorage.removeItem(SS_ORG_CONTEXT);
+                sessionStorage.removeItem(SS_ORG_ROLE);
+                sessionStorage.removeItem(SS_CURRENT_ORG);
+                localStorage.removeItem(LS_ORG_CONTEXT);
+                localStorage.removeItem(LS_ORG_ROLE);
+                localStorage.removeItem(SS_CURRENT_ORG);
+            }
+
+            if (response.namespace) {
+                sessionStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
+                localStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
+            }
+            sessionStorage.removeItem('von_org_switching');
 
             // Dispatch event so other components can react to org change
             const event = new CustomEvent('orgSwitched', {
@@ -212,61 +235,11 @@ export async function renderOrgSelector(containerId) {
                             window.updateModelInfoFooterDisplay();
                         }
                     } catch { }
-                    if (orgId) {
-                        // Get the org name from the selected option
-                        const selected = e.target.selectedOptions?.[0];
-                        const orgDisplayName = normaliseOrganisationDisplayName(selected?.textContent);
-                        const response = await switchOrganisation(orgId, orgDisplayName || null);
-                        try {
-                            const orgData = {
-                                id: null,
-                                concept_id: orgId,
-                                name: orgDisplayName || null
-                            };
-                            // JVNAUTOSCI-1011: Use sessionStorage for window-scoped context
-                            sessionStorage.setItem(SS_CURRENT_ORG, JSON.stringify(orgData));
-                            // Also persist to localStorage for restart/new window scenarios
-                            localStorage.setItem('von_current_org', JSON.stringify(orgData));
-                        } catch { }
-                        try {
-                            if (response?.namespace) {
-                                sessionStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
-                                localStorage.setItem('current_user_namespace', response.namespace);
-                            }
-                        } catch { }
-                        try { sessionStorage.removeItem('von_org_switching'); } catch { }
-                    } else {
-                        // Switch back to personal (no org)
-                        const response = await postJson('/von/api/session/set_organisation', {
-                            organisation_concept_id: null
-                        });
-                        // JVNAUTOSCI-1011: Clear both sessionStorage and localStorage
-                        sessionStorage.removeItem(SS_ORG_CONTEXT);
-                        sessionStorage.removeItem(SS_ORG_ROLE);
-                        localStorage.removeItem(LS_ORG_CONTEXT);
-                        localStorage.removeItem(LS_ORG_ROLE);
-                        try { sessionStorage.removeItem(SS_CURRENT_ORG); } catch { }
-                        try { localStorage.removeItem('von_current_org'); } catch { }
-                        try {
-                            if (response?.namespace) {
-                                sessionStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
-                                localStorage.setItem('current_user_namespace', response.namespace);
-                            }
-                        } catch { }
-                        try { sessionStorage.removeItem('von_org_switching'); } catch { }
-
-                        // Dispatch event
-                        const event = new CustomEvent('orgSwitched', {
-                            detail: {
-                                organisation_id: null,
-                                organisation_name: null,
-                                role: null,
-                                namespace: response.namespace,
-                                window_session_id: response.window_session_id
-                            }
-                        });
-                        document.dispatchEvent(event);
-                    }
+                    const selected = e.target.selectedOptions?.[0];
+                    const orgDisplayName = orgId
+                        ? normaliseOrganisationDisplayName(selected?.textContent)
+                        : null;
+                    await switchOrganisation(orgId, orgDisplayName || null);
 
                     // Refresh the selector to show updated state
                     await renderOrgSelector(containerId);

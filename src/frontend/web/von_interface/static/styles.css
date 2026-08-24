@@ -6384,6 +6384,167 @@ footer {
     box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.4);
 }
 
+/* Footer organisation context: keep the current concept action and expose a
+ * compact, window-scoped switch list without routing through Settings. */
+.footer-org-switcher {
+    white-space: nowrap;
+}
+
+.footer-org-control {
+    display: inline-flex;
+    align-items: stretch;
+    position: relative;
+    min-width: 0;
+}
+
+.footer-org-current-button {
+    max-width: min(34vw, 360px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-radius: 12px 0 0 12px;
+}
+
+.footer-org-current-button:disabled {
+    cursor: default;
+    opacity: 1;
+    color: #475569;
+    background: #f8fafc;
+}
+
+.footer-org-menu-details {
+    position: relative;
+}
+
+.footer-org-menu-details[open] {
+    z-index: 1200;
+}
+
+.footer-org-menu-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 27px;
+    height: 100%;
+    padding: 2px 7px;
+    border-left: 0;
+    border-radius: 0 12px 12px 0;
+    list-style: none;
+    user-select: none;
+}
+
+.footer-org-menu-trigger::-webkit-details-marker {
+    display: none;
+}
+
+.footer-org-menu-details[open] > .footer-org-menu-trigger {
+    background: #e3f2fd;
+    border-color: #90caf9;
+}
+
+.footer-org-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: 1;
+    display: block;
+    width: max-content;
+    min-width: 250px;
+    max-width: min(380px, calc(100vw - 24px));
+    padding: 7px;
+    color: #1f2937;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.2);
+    white-space: normal;
+}
+
+.footer-org-switch-status {
+    display: block;
+    padding: 3px 7px 7px;
+    color: #64748b;
+    font-size: 0.68rem;
+    line-height: 1.3;
+}
+
+.footer-org-switch-status.error {
+    color: #b42318;
+}
+
+.footer-org-options {
+    display: grid;
+    gap: 2px;
+}
+
+.footer-org-option {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    gap: 6px;
+    align-items: center;
+    width: 100%;
+    padding: 7px 8px;
+    color: #1f2937;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.footer-org-option:hover:not(:disabled),
+.footer-org-option:focus-visible {
+    background: #eaf3ff;
+    outline: none;
+}
+
+.footer-org-option:disabled {
+    cursor: default;
+    opacity: 1;
+}
+
+.footer-org-option[data-current="true"] {
+    color: #0d47a1;
+    background: #eef6ff;
+    font-weight: 600;
+}
+
+.footer-org-option-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.footer-org-option-role {
+    color: #64748b;
+    font-size: 0.64rem;
+    font-weight: 400;
+}
+
+.footer-org-retry-button {
+    margin: 3px 7px 5px;
+    padding: 4px 9px;
+    color: #0d47a1;
+    background: #fff;
+    border: 1px solid #90caf9;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.footer-org-menu-details.is-switching .footer-org-menu-trigger {
+    cursor: progress;
+}
+
+@media (max-width: 760px) {
+    .footer-org-current-button {
+        max-width: min(46vw, 230px);
+    }
+
+    .footer-org-menu {
+        width: min(250px, calc(100vw - 24px));
+        min-width: 0;
+    }
+}
+
 /* Informational only: conversation cost changes arrive through a dedicated
  * telemetry event and do not reload the rest of the footer. */
 .conversation-runtime-cost-button {
