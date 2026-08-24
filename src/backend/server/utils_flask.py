@@ -2688,10 +2688,10 @@ def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:
         return
     try:
         from ..services.concept_summary_field_vontology_service import (
-            bootstrap_canonical_concept_summary_fields,
+            ensure_concept_summary_fields_current_for_startup,
         )
 
-        report = bootstrap_canonical_concept_summary_fields()
+        report = ensure_concept_summary_fields_current_for_startup()
         app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] = report
         try:
             app.logger.info(
@@ -2743,10 +2743,10 @@ def _bootstrap_publication_scope_profiles_for_startup(app: Flask) -> None:
         return
     try:
         from ..services.publication_scope_profile_vontology_service import (
-            bootstrap_canonical_publication_scope_profiles,
+            ensure_publication_scope_profiles_current_for_startup,
         )
 
-        report = bootstrap_canonical_publication_scope_profiles()
+        report = ensure_publication_scope_profiles_current_for_startup()
         app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] = report
         try:
             app.logger.info(

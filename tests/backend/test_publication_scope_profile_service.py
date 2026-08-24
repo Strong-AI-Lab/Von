@@ -15,6 +15,7 @@ from src.backend.services.publication_scope_profile_service import (
 )
 from src.backend.services.publication_scope_profile_vontology_service import (
     bootstrap_canonical_publication_scope_profiles,
+    ensure_publication_scope_profiles_current_for_startup,
 )
 from src.backend.services.text_value_service import upsert_singleton_text_relation
 
@@ -584,3 +585,43 @@ def test_bootstrap_is_idempotent_when_profiles_are_unchanged(
     assert second["counts"]["relationships_changed"] == 0
     assert concept_reads == 1
     assert text_reads == 1
+
+
+def test_publication_profile_startup_receipt_hit_performs_no_canonical_scan(
+    publication_profile_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        publication_seed_module.seed_freshness,
+        "check_startup_seed_freshness",
+        lambda **_kwargs: {
+            "fresh": True,
+            "reason": "dependency_receipt_current",
+            "events_examined": 0,
+            "metadata": {"counts": {"profiles_preserved": 19}},
+        },
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("receipt hit must not scan canonical concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        publication_seed_module,
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("receipt hit must not scan canonical text")
+        ),
+    )
+
+    report = ensure_publication_scope_profiles_current_for_startup()
+
+    assert report["success"] is True
+    assert report["skipped"] is True
+    assert report["read_strategy"] == "dependency_receipt"
+    assert report["canonical_read_batches"] == {
+        "concepts": 0,
+        "text_assertions": 0,
+    }

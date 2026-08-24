@@ -417,7 +417,7 @@ def test_publication_scope_profile_startup_records_bootstrap_report(
     expected = {"success": True, "seed_version": "test"}
     monkeypatch.setattr(
         publication_scope_profile_vontology_service,
-        "bootstrap_canonical_publication_scope_profiles",
+        "ensure_publication_scope_profiles_current_for_startup",
         lambda: expected,
     )
     app = types.SimpleNamespace(

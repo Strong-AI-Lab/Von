@@ -8,11 +8,16 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import concept_service
+from . import startup_seed_freshness_service as seed_freshness
 from .concept_summary_field_resolver import get_concept_summary_field_resolver
 from .text_value_service import get_texts_for_concepts, upsert_singleton_text_relation
 
 SUMMARY_FIELD_SEED_SCHEMA_VERSION = "concept_summary_field_seed_bundle.v1"
 SUMMARY_FIELD_TYPE_ID = "#V#summary_field"
+SUMMARY_FIELD_STARTUP_FAMILY_ID = "concept_summary_fields"
+SUMMARY_FIELD_STARTUP_PRODUCER_SCHEMA_VERSION = (
+    "concept_summary_field_startup_materialisation.v1"
+)
 
 _SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -49,6 +54,43 @@ def _load_seed_bundle(asset_path: str | Path | None) -> Mapping[str, Any]:
     if _text(payload.get("schema_version")) != SUMMARY_FIELD_SEED_SCHEMA_VERSION:
         raise ValueError("concept_summary_field_seed_bundle_schema_unsupported")
     return {**payload, "asset_path": str(path)}
+
+
+def _startup_freshness_scope(bundle: Mapping[str, Any]) -> dict[str, list[str]]:
+    concept_specs = [
+        spec for spec in bundle.get("concepts") or () if isinstance(spec, Mapping)
+    ]
+    text_specs = [
+        spec for spec in bundle.get("text_relations") or () if isinstance(spec, Mapping)
+    ]
+    relationship_specs = [
+        spec for spec in bundle.get("relationships") or () if isinstance(spec, Mapping)
+    ]
+    return {
+        "concept_ids": _strings(
+            [
+                *[_text(spec.get("concept_id")) for spec in concept_specs],
+                *[_text(spec.get("subject_concept_id")) for spec in relationship_specs],
+            ]
+        ),
+        "text_relation_subject_ids": _strings(
+            [_text(spec.get("subject_concept_id")) for spec in text_specs]
+        ),
+        "text_relation_predicates": _strings(
+            [_text(spec.get("predicate")) for spec in text_specs]
+        ),
+    }
+
+
+def _startup_source_digest(bundle: Mapping[str, Any]) -> str:
+    return seed_freshness.build_startup_seed_source_digest(
+        asset_path=_text(bundle.get("asset_path")),
+        producer_paths=[Path(__file__), Path(seed_freshness.__file__)],
+        material_configuration={
+            "seed_schema_version": SUMMARY_FIELD_SEED_SCHEMA_VERSION,
+            "producer_schema_version": (SUMMARY_FIELD_STARTUP_PRODUCER_SCHEMA_VERSION),
+        },
+    )
 
 
 def _ensure_concept(
@@ -169,9 +211,10 @@ def _merge_relationship(
     return f"{subject_id}:{predicate}", updated != existing
 
 
-def bootstrap_canonical_concept_summary_fields(
+def _bootstrap_canonical_concept_summary_fields(
     *,
     asset_path: str | Path | None = None,
+    freshness_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Materialise canonical concept-summary field metadata into Vontology."""
 
@@ -195,10 +238,7 @@ def bootstrap_canonical_concept_summary_fields(
     required_concept_ids = _strings(
         [
             *[_text(spec.get("concept_id")) for spec in concept_specs],
-            *[
-                _text(spec.get("subject_concept_id"))
-                for spec in relationship_specs
-            ],
+            *[_text(spec.get("subject_concept_id")) for spec in relationship_specs],
         ]
     )
     concepts_by_id: dict[str, Mapping[str, Any]] = dict(
@@ -253,9 +293,7 @@ def bootstrap_canonical_concept_summary_fields(
             spec,
             source_tag=source_tag,
             managed_by=managed_by,
-            current_rows=rows_by_concept.get(
-                _text(spec.get("subject_concept_id")), []
-            ),
+            current_rows=rows_by_concept.get(_text(spec.get("subject_concept_id")), []),
         ),
     )
     relationship_ids, changed_relationship_ids = apply_many(
@@ -276,7 +314,7 @@ def bootstrap_canonical_concept_summary_fields(
     )
     if changed:
         get_concept_summary_field_resolver().invalidate_cache()
-    return {
+    report: dict[str, Any] = {
         "success": not errors,
         "asset_path": bundle.get("asset_path"),
         "schema_version": bundle.get("schema_version"),
@@ -308,10 +346,139 @@ def bootstrap_canonical_concept_summary_fields(
             "errors": len(errors),
         },
     }
+    if freshness_context is not None:
+        canonical_read_complete = not bool(
+            text_query_metadata.get("relation_query_truncated")
+        )
+        if report["success"] and not changed and canonical_read_complete:
+            tracked_concept_document_ids = [
+                concept.get("_id") or concept.get("id")
+                for concept in concepts_by_id.values()
+                if isinstance(concept, Mapping)
+                and (concept.get("_id") is not None or concept.get("id") is not None)
+            ]
+            tracked_text_relation_document_ids = [
+                row.get("relation_id")
+                for rows in rows_by_concept.values()
+                for row in rows
+                if isinstance(row, Mapping) and row.get("relation_id") is not None
+            ]
+            tracked_text_value_document_ids = [
+                row.get("text_value_id")
+                for rows in rows_by_concept.values()
+                for row in rows
+                if isinstance(row, Mapping) and row.get("text_value_id") is not None
+            ]
+            receipt_result = seed_freshness.record_startup_seed_freshness(
+                family_id=SUMMARY_FIELD_STARTUP_FAMILY_ID,
+                source_digest=_text(freshness_context.get("source_digest")),
+                producer_schema_version=(SUMMARY_FIELD_STARTUP_PRODUCER_SCHEMA_VERSION),
+                concept_ids=required_concept_ids,
+                text_relation_subject_ids=_strings(
+                    [_text(spec.get("subject_concept_id")) for spec in text_specs]
+                ),
+                text_relation_predicates=_strings(
+                    [_text(spec.get("predicate")) for spec in text_specs]
+                ),
+                tracked_concept_document_ids=tracked_concept_document_ids,
+                tracked_text_relation_document_ids=(tracked_text_relation_document_ids),
+                tracked_text_value_document_ids=tracked_text_value_document_ids,
+                observation=(freshness_context.get("observation") or {}),
+                metadata={
+                    "schema_version": report.get("schema_version"),
+                    "seed_version": report.get("seed_version"),
+                    "source_tag": report.get("source_tag"),
+                    "managed_by": report.get("managed_by"),
+                    "counts": report.get("counts"),
+                },
+            )
+        else:
+            receipt_result = {
+                "persisted": False,
+                "reason": (
+                    "canonical_verification_failed"
+                    if not report["success"]
+                    else (
+                        "canonical_read_truncated"
+                        if not canonical_read_complete
+                        else "canonical_state_changed"
+                    )
+                ),
+            }
+        report["freshness_receipt"] = (
+            seed_freshness.public_startup_seed_freshness_result(receipt_result)
+        )
+    return report
+
+
+def bootstrap_canonical_concept_summary_fields(
+    *,
+    asset_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Materialise canonical concept-summary metadata without cache shortcuts."""
+
+    return _bootstrap_canonical_concept_summary_fields(asset_path=asset_path)
+
+
+def ensure_concept_summary_fields_current_for_startup(
+    *,
+    asset_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Use a complete dependency receipt before canonical startup verification."""
+
+    started_at = time.perf_counter()
+    bundle = _load_seed_bundle(asset_path)
+    scope = _startup_freshness_scope(bundle)
+    source_digest = _startup_source_digest(bundle)
+    freshness_check = seed_freshness.check_startup_seed_freshness(
+        family_id=SUMMARY_FIELD_STARTUP_FAMILY_ID,
+        source_digest=source_digest,
+        producer_schema_version=SUMMARY_FIELD_STARTUP_PRODUCER_SCHEMA_VERSION,
+        concept_ids=scope["concept_ids"],
+        text_relation_subject_ids=scope["text_relation_subject_ids"],
+        text_relation_predicates=scope["text_relation_predicates"],
+    )
+    public_check = seed_freshness.public_startup_seed_freshness_result(freshness_check)
+    if freshness_check.get("fresh"):
+        metadata = freshness_check.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "dependency_receipt_current",
+            "changed": False,
+            "asset_path": bundle.get("asset_path"),
+            "schema_version": bundle.get("schema_version"),
+            "seed_version": bundle.get("seed_version"),
+            "source_tag": metadata.get("source_tag") or bundle.get("source_tag"),
+            "managed_by": metadata.get("managed_by") or bundle.get("managed_by"),
+            "read_strategy": "dependency_receipt",
+            "read_phases": 1,
+            "canonical_read_batches": {"concepts": 0, "text_assertions": 0},
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+            "freshness_receipt": public_check,
+            "counts": dict(metadata.get("counts") or {}),
+            "errors": [],
+        }
+
+    observation = seed_freshness.begin_startup_seed_freshness_observation()
+    report = _bootstrap_canonical_concept_summary_fields(
+        asset_path=asset_path,
+        freshness_context={
+            "source_digest": source_digest,
+            "observation": observation,
+        },
+    )
+    report["freshness_receipt_check"] = public_check
+    report["duration_ms"] = int((time.perf_counter() - started_at) * 1000)
+    return report
 
 
 __all__ = [
     "SUMMARY_FIELD_SEED_SCHEMA_VERSION",
+    "SUMMARY_FIELD_STARTUP_FAMILY_ID",
+    "SUMMARY_FIELD_STARTUP_PRODUCER_SCHEMA_VERSION",
     "SUMMARY_FIELD_TYPE_ID",
     "bootstrap_canonical_concept_summary_fields",
+    "ensure_concept_summary_fields_current_for_startup",
 ]
