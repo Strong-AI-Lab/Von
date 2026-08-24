@@ -6424,6 +6424,7 @@ footer {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    box-sizing: border-box;
     min-width: 27px;
     height: 100%;
     padding: 2px 7px;
@@ -6448,6 +6449,7 @@ footer {
     bottom: calc(100% + 8px);
     z-index: 1;
     display: block;
+    box-sizing: border-box;
     width: max-content;
     min-width: 250px;
     max-width: min(380px, calc(100vw - 24px));
