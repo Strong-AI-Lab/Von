@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "34",
+  "seed_version": "35",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -948,9 +948,19 @@
                 "to_state": "attach_title_metadata",
                 "reason": "public_title_present",
                 "condition_spec": {
-                  "kind": "context_exists",
-                  "key": "title",
-                  "expected": true
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "title",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "title",
+                      "expected": false
+                    }
+                  ]
                 }
               }
             ]
@@ -1015,9 +1025,19 @@
                 "to_state": "attach_summary_metadata",
                 "reason": "public_summary_present",
                 "condition_spec": {
-                  "kind": "context_exists",
-                  "key": "summary",
-                  "expected": true
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "summary",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "summary",
+                      "expected": false
+                    }
+                  ]
                 }
               }
             ]
@@ -1081,9 +1101,19 @@
                 "to_state": "attach_publication_date_metadata",
                 "reason": "public_publication_date_present",
                 "condition_spec": {
-                  "kind": "context_exists",
-                  "key": "publication_date",
-                  "expected": true
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "publication_date",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "publication_date",
+                      "expected": false
+                    }
+                  ]
                 }
               }
             ]
