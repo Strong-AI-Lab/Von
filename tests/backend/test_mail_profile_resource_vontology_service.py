@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -11,17 +12,27 @@ from src.backend.services import mail_profile_resource_vontology_service as serv
 @pytest.fixture
 def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_mail_profile_resource_vontology")
 
-    from src.backend.db.mongo_client import get_db
+    from src.backend.db.mongo_client import close_connection, get_db
+    from src.backend.security.access_control import invalidate_current_access_evaluator
+    from src.backend.services.concept_predicate_metadata_service import (
+        invalidate_cache,
+    )
 
-    db = get_db()
-    if db is not None:
+    close_connection()
+    invalidate_cache()
+    invalidate_current_access_evaluator()
+    try:
+        db = get_db()
+        assert db is not None
         for collection_name in ("concepts", "text_relations", "text_values"):
-            try:
-                db.drop_collection(collection_name)
-            except Exception:
-                pass
-    yield
+            db.drop_collection(collection_name)
+        yield
+    finally:
+        close_connection()
+        invalidate_cache()
+        invalidate_current_access_evaluator()
 
 
 def _relationships(concept_id: str) -> dict[str, Any]:
@@ -53,12 +64,16 @@ def test_bootstrap_materialises_mail_profile_resource_vocabulary(
 ) -> None:
     report = service.bootstrap_mail_profile_resource_vocabulary()
 
-    assert report["success"] is True
+    assert report["success"] is True, json.dumps(
+        report, sort_keys=True, default=str
+    )
     assert report["schema_version"] == "mail_profile_resource.v2"
     assert report["errors"] == []
 
     validation = service.validate_mail_profile_resource_vocabulary()
-    assert validation["success"] is True
+    assert validation["success"] is True, json.dumps(
+        validation, sort_keys=True, default=str
+    )
     assert validation["missing_concept_ids"] == []
 
     profile_type_targets = _targets(

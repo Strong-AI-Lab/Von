@@ -124,9 +124,9 @@ def test_pdf_page_projection_stops_at_local_page_boundary(monkeypatch):
 
     if not service._pdf_parser_isolation_supported():
         pytest.skip("hard PDF parser isolation is not available on this host")
-    import fitz
+    import pymupdf
 
-    document = fitz.open()
+    document = pymupdf.open()
     for page_number in range(1, 4):
         page = document.new_page()
         page.insert_text((72, 72), f"page-{page_number}-content")
@@ -140,7 +140,7 @@ def test_pdf_page_projection_stops_at_local_page_boundary(monkeypatch):
         filename="many-pages.pdf",
     )
 
-    assert result["text_extraction"] == "pymupdf"
+    assert result["text_extraction"] == "pymupdf", result
     assert "page-1-content" in result["text"]
     assert "page-2-content" in result["text"]
     assert "page-3-content" not in result["text"]

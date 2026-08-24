@@ -30,6 +30,7 @@ import smtplib
 import ssl
 import sys
 from email.message import EmailMessage
+from pathlib import Path
 
 DEFAULT_RECIPIENT = "zhanvonwitbrock@gmail.com"
 # Copied while the notification path is new and its reliability unproven.
@@ -48,6 +49,16 @@ def build_message(status: str, body: str) -> EmailMessage:
     run_url = (
         f"https://github.com/{repo}/actions/runs/{run_id}" if run_id else "(local run)"
     )
+    evidence_artifact = (
+        f"backend-test-drift-{run_id}"
+        if (
+            run_id
+            and status in {"new_failures", "broken"}
+            and os.environ.get("NIGHTLY_DRIFT_ARTIFACT_AVAILABLE", "true").lower()
+            == "true"
+        )
+        else None
+    )
 
     subject = {
         "new_failures": f"[{repo}] Nightly backend tests: new failures",
@@ -61,9 +72,15 @@ def build_message(status: str, body: str) -> EmailMessage:
     message["To"] = recipient
     if cc and cc != recipient:
         message["Cc"] = cc
+    artifact_note = (
+        f"Complete delta and diagnostics: Actions artifact {evidence_artifact}\n\n"
+        if evidence_artifact
+        else ""
+    )
     message.set_content(
         f"{body.strip()}\n\n"
         f"Run: {run_url}\n\n"
+        f"{artifact_note}"
         "Newly failing tests should be fixed or reverted. Adding them to\n"
         "ci/known_test_failures.txt is not a remedy: that list may only shrink.\n"
     )
@@ -77,7 +94,7 @@ def main() -> int:
     status = sys.argv[1]
     body = ""
     if len(sys.argv) > 2 and os.path.exists(sys.argv[2]):
-        body = open(sys.argv[2], encoding="utf-8").read()
+        body = Path(sys.argv[2]).read_text(encoding="utf-8")
 
     username = os.environ.get("NIGHTLY_SMTP_USERNAME")
     password = os.environ.get("NIGHTLY_SMTP_APP_PASSWORD")
@@ -100,7 +117,7 @@ def main() -> int:
             smtp.starttls(context=ssl.create_default_context())
             smtp.login(username, password)
             smtp.send_message(message)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - notification failure is non-fatal
         # Report the class of failure, never the credentials.
         print(f"notification failed ({type(exc).__name__}): {exc}")
         return 1

@@ -3460,6 +3460,11 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 ) -> None:
     from src.backend.services import turn_execution_record_service
 
+    # This unit test replaces the durable observation write below. Keep the
+    # remaining turn-finality bookkeeping on the in-memory database so an
+    # unavailable developer/CI Mongo does not consume the observer's bounded
+    # release window and turn the intended late success into a late error.
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
     _stub_same_turn_ontology_delegation(monkeypatch)
     release_handler = Event()
     observation_persisted = Event()
