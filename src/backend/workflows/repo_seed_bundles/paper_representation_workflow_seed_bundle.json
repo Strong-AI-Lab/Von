@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "33",
+  "seed_version": "34",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -34,6 +34,9 @@
     "#V#public_paper_title_resolution_workflow": {
       "31": [
         "489e5fe07d965cfcd08343e5d72d1ccb7436b16e30455fc208426c38921ee6c6"
+      ],
+      "33": [
+        "5db3d60cbce6aab7c4a82e1b52fe575b7d2c602255a127e831fc290223e03fca"
       ]
     },
     "#V#scholarly_article_metadata_representation_workflow": {
@@ -5095,7 +5098,7 @@
       "workflow_id": "#V#public_paper_title_resolution_workflow",
       "display_name": "Public Paper Title Resolution Workflow",
       "description": "Resolves public scholarly-paper references from exact DOIs, direct public source URLs, or titles. It verifies DOI metadata against Crossref, extracts direct public-source content, or accepts only one exact normalised arXiv title match before delegating to the canonical global paper-representation workflows.",
-      "content": "For an exact DOI, retrieve public Crossref metadata and require the returned DOI to match. For a direct public source URL, extract that exact source for metadata interpretation without broad-search substitution. Otherwise search arXiv by title and accept exactly one normalised title match, using supplied year or authors only to disambiguate exact-title duplicates. Never invent an identifier or choose a merely similar result. Title alone remains insufficient after public lookup fails.",
+      "content": "For an exact DOI, first reuse an existing complete global scholarly-article representation with that canonical DOI identity; otherwise retrieve public Crossref metadata and require the returned DOI to match. For a direct public source URL, extract that exact source for metadata interpretation without broad-search substitution. Otherwise search arXiv by title and accept exactly one normalised title match, using supplied year or authors only to disambiguate exact-title duplicates. Never invent an identifier or choose a merely similar result. Title alone remains insufficient after public lookup fails.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
@@ -5124,7 +5127,7 @@
             "on_failure_state": "decide_metadata_fallback",
             "conditional_transitions": [
               {
-                "to_state": "resolve_public_doi_metadata",
+                "to_state": "resolve_existing_doi_scope",
                 "reason": "exact_doi_available",
                 "condition_spec": {
                   "kind": "context_value_equals",
@@ -5202,6 +5205,186 @@
               "public_paper_title_search_required",
               "bibliographic_fallback_sufficient",
               "bibliographic_fallback_basis"
+            ]
+          },
+          {
+            "state_id": "resolve_existing_doi_scope",
+            "action_id": "resolve_publication_scope_profile",
+            "execution_mode": "deterministic",
+            "next_state": "resolve_existing_doi_identity",
+            "on_failure_state": "reject_public_reference_metadata_resolution",
+            "static_input_bindings": [
+              [
+                "plane",
+                "instance"
+              ],
+              [
+                "type_concept_ids",
+                [
+                  "#V#scholarly_article"
+                ]
+              ],
+              [
+                "source_kind",
+                "public_scholarly_metadata"
+              ],
+              [
+                "producer",
+                "#V#public_paper_title_resolution_workflow"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_instance_scope_mode",
+                "tool_output_field": "selected_scope_mode",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_resolve_existing_doi_scope_selected_to_paper_instance_scope_mode"
+              },
+              {
+                "context_key": "existing_doi_scope_decision_evidence",
+                "tool_output_field": "decision_evidence",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_resolve_existing_doi_scope_evidence_to_existing_doi_scope_decision_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_instance_scope_mode",
+              "existing_doi_scope_decision_evidence"
+            ]
+          },
+          {
+            "state_id": "resolve_existing_doi_identity",
+            "action_id": "scholarly_paper.normalise_external_identity",
+            "execution_mode": "deterministic",
+            "next_state": "resolve_public_doi_metadata",
+            "on_failure_state": "reject_public_reference_metadata_resolution",
+            "conditional_transitions": [
+              {
+                "to_state": "verify_existing_doi_representation",
+                "reason": "existing_global_doi_identity_resolved",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "paper_external_identity_resolution_status",
+                  "value": "resolved"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "doi",
+                "context_key": "doi",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_resolve_existing_doi_identity_doi_to_doi_parameter"
+              },
+              {
+                "tool_param": "paper_instance_scope_mode",
+                "context_key": "paper_instance_scope_mode",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_resolve_existing_doi_identity_scope_to_paper_instance_scope_mode_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "paper_external_identity_resolution_status",
+                "tool_output_field": "paper_external_identity_resolution_status",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_resolve_existing_doi_identity_status_to_paper_external_identity_resolution_status"
+              },
+              {
+                "context_key": "paper_external_identity_concept_id",
+                "tool_output_field": "paper_external_identity_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_resolve_existing_doi_identity_concept_id_to_paper_external_identity_concept_id"
+              },
+              {
+                "context_key": "paper_concept_id",
+                "tool_output_field": "paper_concept_id",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_resolve_existing_doi_identity_paper_concept_id_to_paper_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_external_identity_resolution_status",
+              "paper_external_identity_concept_id",
+              "paper_concept_id"
+            ]
+          },
+          {
+            "state_id": "verify_existing_doi_representation",
+            "action_id": "scholarly_paper.verify_representation",
+            "execution_mode": "deterministic",
+            "next_state": "resolve_public_doi_metadata",
+            "on_failure_state": "resolve_public_doi_metadata",
+            "conditional_transitions": [
+              {
+                "to_state": "read_back_existing_doi_representation",
+                "reason": "existing_global_doi_representation_complete",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "scholarly_representation_verified",
+                  "expected": true
+                }
+              }
+            ],
+            "static_input_bindings": [
+              [
+                "require_file_copy",
+                false
+              ],
+              [
+                "verification_profile",
+                "generic"
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "paper_concept_id",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_verify_existing_doi_representation_paper_concept_id_to_paper_concept_id_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "scholarly_representation_verified",
+                "tool_output_field": "scholarly_representation_verified",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_verify_existing_doi_representation_verified_to_scholarly_representation_verified"
+              },
+              {
+                "context_key": "existing_doi_verification_failures",
+                "tool_output_field": "verification_failures",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_verify_existing_doi_representation_failures_to_existing_doi_verification_failures"
+              }
+            ],
+            "writes_context_keys": [
+              "scholarly_representation_verified",
+              "existing_doi_verification_failures"
+            ]
+          },
+          {
+            "state_id": "read_back_existing_doi_representation",
+            "action_id": "fetch_concept_content",
+            "execution_mode": "deterministic",
+            "next_state": "capture_success",
+            "on_failure_state": "resolve_public_doi_metadata",
+            "static_input_bindings": [
+              [
+                "reconstruct_md",
+                false
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "tool_param": "concept_id",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "concept_id": "#V#workflow_mapping_public_paper_title_resolution_workflow_read_back_existing_doi_paper_concept_id_to_concept_id_parameter"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "context_key": "article_readback",
+                "tool_output_field": "result",
+                "concept_id": "#V#workflow_mapping_tool_field_public_paper_title_resolution_workflow_read_back_existing_doi_result_to_article_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "article_readback"
             ]
           },
           {

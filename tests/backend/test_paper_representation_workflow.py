@@ -689,13 +689,31 @@ def test_public_title_resolution_workflow_uses_sufficient_bibliographic_fallback
     assert result.data["paper_concept_id"] == "#V#public_bibliographic_example"
 
 
-def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> None:
+def test_public_title_resolution_workflow_preserves_stronger_doi_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    monkeypatch.setattr(mod, "_get_concept", lambda _concept_id: None)
     definition = build_repo_seed_workflow_definitions(
         bundle_paths=[_REPO_SEED_ASSET_PATH],
         target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
     )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
     registry = _paper_registry()
     register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(
+            action_id="resolve_publication_scope_profile",
+            handler=lambda _request: WorkflowActionResult(
+                status="success",
+                outputs={
+                    "selected_scope_mode": "global_general",
+                    "decision_evidence": {"source": "represented_type_profile"},
+                },
+            ),
+        )
+    )
+
     def resolve_doi(request):
         assert request.inputs["tool_name"] == "get_doi_metadata"
         assert request.inputs["tool_arguments"]["doi"] == "10.1000/example"
@@ -748,7 +766,7 @@ def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> N
             handler=invoke_metadata,
         )
     )
-    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
         definition,
         environment=WorkflowEnvironment(llm_client=None),
         data={
@@ -762,6 +780,105 @@ def test_public_title_resolution_workflow_preserves_stronger_doi_identity() -> N
 
     assert result.completed is True
     assert result.data["paper_concept_id"] == "#V#public_doi_10_1000_example"
+
+
+def test_public_title_resolution_workflow_reuses_complete_exact_doi_before_crossref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    existing_paper_id = "#V#external_identity_doi_existing_complete"
+    monkeypatch.setattr(
+        mod,
+        "_get_concept",
+        lambda _concept_id: {
+            "name": "An Existing Complete DOI Paper",
+            "relationships": {
+                "is_an_instance_of": ["#V#scholarly_article"],
+                "#V#authored_by": ["#V#public_author"],
+            },
+        },
+    )
+    monkeypatch.setattr(mod, "_require_global_targets", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "concept_publication_context",
+        lambda _concept_id: mod.PublicationContext.global_context(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_texts_for_concept",
+        lambda **kwargs: (
+            [{"text": "An Existing Complete DOI Paper"}]
+            if kwargs.get("predicate") == "hasName"
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_external_identity_service.canonical_concept_id_for_external_identifiers",
+        lambda *_args, **_kwargs: existing_paper_id,
+    )
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[_REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID],
+    )[PUBLIC_PAPER_TITLE_RESOLUTION_WORKFLOW_ID]
+    registry = _paper_registry()
+    register_control_flow_actions(registry)
+    registry.register(
+        ActionSpec(
+            action_id="resolve_publication_scope_profile",
+            handler=lambda _request: WorkflowActionResult(
+                status="success",
+                outputs={
+                    "selected_scope_mode": "global_general",
+                    "decision_evidence": {"source": "represented_type_profile"},
+                },
+            ),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="workflow_mcp.invoke_tool",
+            handler=lambda _request: pytest.fail(
+                "a complete existing exact DOI must be reused before Crossref"
+            ),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="workflow_invoke_subworkflow",
+            handler=lambda _request: pytest.fail(
+                "exact DOI reuse must not rematerialise the existing paper"
+            ),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="fetch_concept_content",
+            handler=lambda request: WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "concept_id": request.inputs["concept_id"],
+                        "name": "An Existing Complete DOI Paper",
+                    }
+                },
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"doi": "10.5555/existing-complete"},
+    )
+
+    assert result.completed is True, result.error
+    assert result.data["paper_external_identity_resolution_status"] == "resolved"
+    assert result.data["scholarly_representation_verified"] is True
+    assert result.data["paper_concept_id"] == existing_paper_id
+    assert result.data["article_readback"]["concept_id"] == existing_paper_id
 
 
 def test_public_title_resolution_workflow_extracts_exact_public_source() -> None:
