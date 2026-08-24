@@ -1,22 +1,37 @@
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Iterator
 from typing import Any
 
+import pytest
 
-def _reset_mock_vontology_db(monkeypatch: Any) -> None:
+
+@pytest.fixture
+def _isolated_mock_vontology_db(monkeypatch: Any) -> Iterator[None]:
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_tool_metadata_vontology")
 
-    from src.backend.db.mongo_client import get_db
+    from src.backend.db.mongo_client import close_connection, get_db
+    from src.backend.security.access_control import invalidate_current_access_evaluator
+    from src.backend.services.concept_predicate_metadata_service import (
+        invalidate_cache,
+    )
 
-    db = get_db()
-    if db is None:
-        return
-    for collection_name in ("concepts", "text_relations", "text_values"):
-        try:
+    close_connection()
+    invalidate_cache()
+    invalidate_current_access_evaluator()
+    try:
+        db = get_db()
+        assert db is not None
+        for collection_name in ("concepts", "text_relations", "text_values"):
             db.drop_collection(collection_name)
-        except Exception:
-            pass
+        yield
+    finally:
+        close_connection()
+        invalidate_cache()
+        invalidate_current_access_evaluator()
 
 
 def test_gmail_send_metadata_marks_external_surface_and_planner_hint(monkeypatch):
@@ -142,16 +157,18 @@ def test_gmail_read_tools_share_external_surface_metadata(monkeypatch):
         service.invalidate_cache()
 
 
-def test_gmail_read_tools_are_prompt_required_evidence_from_vontology(monkeypatch):
-    _reset_mock_vontology_db(monkeypatch)
-
+def test_gmail_read_tools_are_prompt_required_evidence_from_vontology(
+    _isolated_mock_vontology_db: None,
+):
+    from src.backend.services import tool_metadata_service as service
     from src.backend.services.gmail_tool_evidence_contract_vontology_service import (
         bootstrap_gmail_tool_evidence_contract,
     )
-    from src.backend.services import tool_metadata_service as service
 
     bootstrap_report = bootstrap_gmail_tool_evidence_contract()
-    assert bootstrap_report["success"] is True
+    assert bootstrap_report["success"] is True, json.dumps(
+        bootstrap_report, sort_keys=True, default=str
+    )
 
     service.invalidate_cache()
     try:
