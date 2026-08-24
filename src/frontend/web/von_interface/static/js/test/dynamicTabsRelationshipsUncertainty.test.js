@@ -2,6 +2,7 @@ import {
     buildDescriptionMetadataRows,
     deriveRelationshipExtentQuery,
     getRelationshipConfidenceScore,
+    resolveRelationshipExtentConceptKind,
     sortRelationshipExtentRows,
     summariseRelationshipProvenance
 } from '../dynamicTabs.js';
@@ -64,6 +65,13 @@ describe('dynamicTabs uncertain relationship helpers', () => {
         expect(sorted.map((row) => row.relation_id)).toEqual(['c', 'b', 'a']);
     });
 
+    test('predicate columns never present predicate concepts as individuals', () => {
+        expect(resolveRelationshipExtentConceptKind('individual', 'predicate')).toBe('predicate');
+        expect(resolveRelationshipExtentConceptKind(undefined, 'predicate')).toBe('predicate');
+        expect(resolveRelationshipExtentConceptKind('type', 'argument')).toBe('type');
+        expect(resolveRelationshipExtentConceptKind(undefined, 'argument')).toBe('individual');
+    });
+
     test('buildDescriptionMetadataRows surfaces structured provenance and confidence', () => {
         const rows = buildDescriptionMetadataRows({
             context: {
@@ -83,4 +91,3 @@ describe('dynamicTabs uncertain relationship helpers', () => {
         expect(confidenceRow?.value).toBe('83%');
     });
 });
-

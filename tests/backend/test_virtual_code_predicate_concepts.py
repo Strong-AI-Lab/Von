@@ -380,6 +380,78 @@ def test_relationship_extent_route_returns_outgoing_rows(app_client, monkeypatch
     )
 
 
+def test_relationship_extent_metadata_classifies_all_predicate_rows_as_predicates(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {
+            "relations": [
+                {
+                    "relation_id": "custom-predicate-row",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "#V#has_candidate_person",
+                    "relation_kind": "binary",
+                    "target_values": ["#V#candidate"],
+                    "matched_argument_indexes": [1],
+                },
+                {
+                    "relation_id": "virtual-predicate-row",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "has_instance",
+                    "relation_kind": "binary",
+                    "target_values": ["#V#candidate"],
+                    "matched_argument_indexes": [1],
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find",
+        lambda *a, **k: [
+            {
+                "concept_id": "#V#has_candidate_person",
+                "name": "Has Candidate Person",
+                "kind": "individual",
+                "metadata": {"concept_type": "individual"},
+                "relationships": {
+                    "is_an_instance_of": ["#V#binary_predicate"]
+                },
+            },
+            {
+                "concept_id": "#V#focus",
+                "name": "Focus",
+                "relationships": {"is_an_instance_of": ["#V#person"]},
+            },
+            {
+                "concept_id": "#V#candidate",
+                "name": "Candidate",
+                "relationships": {"is_an_instance_of": ["#V#person"]},
+            },
+        ],
+    )
+
+    response = client.get(
+        "/vontology/api/vontology/relationships/extent?concept_id=%23V%23focus"
+    )
+
+    assert response.status_code == 200
+    metadata = response.get_json()["display_metadata"]
+    assert metadata["#V#has_candidate_person"]["kind"] == "predicate"
+    assert metadata["#V#has_instance"]["kind"] == "predicate"
+    assert metadata["#V#focus"]["kind"] == "individual"
+
+
 def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     app_client, monkeypatch
 ):

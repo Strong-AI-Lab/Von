@@ -141,6 +141,46 @@ def test_governed_create_uses_trusted_org_and_keeps_omission_private(
 
 
 @pytest.mark.parametrize(
+    ("concept", "expected_reason"),
+    (
+        ({"name": "Ambiguous creation"}, "concept_kind_required"),
+        (
+            {"name": "Ambiguous creation", "kind": "candidature"},
+            "invalid_concept_kind",
+        ),
+    ),
+)
+def test_governed_create_requires_explicit_supported_kind(
+    concept: dict[str, str], expected_reason: str
+) -> None:
+    from src.backend.services import ontology_mutation_command_service as command
+
+    with pytest.raises(command.OntologyMutationCommandError) as exc_info:
+        command.resolve_governed_ontology_arguments(
+            "create_concepts",
+            {
+                "parent_id": "#V#research_object",
+                "concepts": [concept],
+            },
+        )
+
+    assert exc_info.value.reason_code == expected_reason
+
+
+def test_governed_create_tool_rejects_missing_kind_before_any_effect() -> None:
+    from src.backend.integrations.internal_mcp import catalogue
+
+    result = catalogue._create_concepts(
+        parent_id="#V#research_object",
+        concepts=[{"name": "Ambiguous creation"}],
+    )
+
+    assert result["error_code"] == "concept_kind_required"
+    assert result["effect_status"] == "not_started"
+    assert result["changed"] is False
+
+
+@pytest.mark.parametrize(
     ("scope_mode", "expected_kind", "role", "role_organisation"),
     (
         (None, "user", None, None),

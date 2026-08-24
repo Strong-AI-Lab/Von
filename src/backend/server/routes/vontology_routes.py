@@ -62,6 +62,7 @@ from ...services.relationship_extent_index_service import (
 from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
+from ...services.relationship_write_service import compute_kind_from_relationships
 from ...security.access_control import (
     bypass_access_control,
     cache_scope_key,
@@ -4025,12 +4026,18 @@ def get_relationships_extent_route():
         metadata_ids: list[str] = []
         seen_metadata_ids: set[str] = set()
         for row in paged_rows:
-            for raw_id in (
-                row.get("predicate_id"),
-                row.get("arg1_value"),
-                row.get("arg2_value"),
+            for raw_id, is_predicate_id in (
+                (row.get("predicate_id"), True),
+                (row.get("arg1_value"), False),
+                (row.get("arg2_value"), False),
             ):
                 candidate = str(raw_id or "").strip()
+                if (
+                    candidate
+                    and is_predicate_id
+                    and not candidate.startswith("#V#")
+                ):
+                    candidate = f"#V#{candidate}"
                 if not candidate.startswith("#V#") or candidate in seen_metadata_ids:
                     continue
                 seen_metadata_ids.add(candidate)
@@ -4054,6 +4061,20 @@ def get_relationships_extent_route():
             if metadata_ids
             else []
         )
+        persisted_metadata_ids = {
+            str(doc.get("concept_id") or "").strip()
+            for doc in metadata_docs
+            if isinstance(doc, Mapping)
+        }
+        if len(persisted_metadata_ids) < len(metadata_ids):
+            from ...vontology.code_concepts_registry import build_virtual_concept_doc
+
+            for metadata_id in metadata_ids:
+                if metadata_id in persisted_metadata_ids:
+                    continue
+                virtual_doc = build_virtual_concept_doc(metadata_id)
+                if virtual_doc is not None:
+                    metadata_docs.append(virtual_doc)
         metadata_names = resolve_concept_display_names(metadata_docs)
         display_metadata: dict[str, dict[str, str]] = {}
         for doc in metadata_docs:
@@ -4068,13 +4089,16 @@ def get_relationships_extent_route():
                 else ""
             )
             relationships = doc.get("relationships")
-            relation_payload = relationships if isinstance(relationships, Mapping) else {}
-            if stored_kind in {"type", "predicate", "individual"}:
+            relation_payload = (
+                relationships if isinstance(relationships, Mapping) else {}
+            )
+            relationship_kind = compute_kind_from_relationships(relation_payload)
+            if relationship_kind in {"type", "predicate"}:
+                display_kind = relationship_kind
+            elif stored_kind in {"type", "predicate", "individual"}:
                 display_kind = stored_kind
-            elif metadata_kind == "predicate":
-                display_kind = "predicate"
-            elif relation_payload.get("is_a_type_of"):
-                display_kind = "type"
+            elif metadata_kind in {"type", "predicate", "individual"}:
+                display_kind = metadata_kind
             else:
                 display_kind = "individual"
             display_metadata[metadata_concept_id] = {

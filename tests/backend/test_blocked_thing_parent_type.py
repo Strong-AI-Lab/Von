@@ -225,7 +225,7 @@ def test_mcp_create_concepts_blocks_thing_as_parent():
 
     result = catalogue._create_concepts(
         parent_id="#V#thing",
-        concepts=[{"name": "Test Concept"}],
+        concepts=[{"name": "Test Concept", "kind": "type"}],
     )
 
     # Operation is blocked

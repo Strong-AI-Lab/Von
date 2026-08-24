@@ -960,11 +960,26 @@ def resolve_governed_ontology_arguments(
                         "A concept name must resolve to one exact canonical ID.",
                     )
                 item["concept_id"] = canonical_id
-            if not _clean_text(item.get("kind")):
-                requested_instance = item.get("create_as_instance")
-                if requested_instance is None:
-                    requested_instance = resolved.get("create_as_instance")
-                item["kind"] = "instance" if requested_instance is True else "type"
+            kind = _clean_text(item.get("kind")).lower()
+            if not kind:
+                raise OntologyMutationCommandError(
+                    "concept_kind_required",
+                    (
+                        "A governed concept create requires an explicit kind: "
+                        "'instance', 'type', or 'predicate'."
+                    ),
+                )
+            if kind == "individual":
+                kind = "instance"
+            if kind not in {"instance", "type", "predicate"}:
+                raise OntologyMutationCommandError(
+                    "invalid_concept_kind",
+                    (
+                        "A governed concept create kind must be 'instance', "
+                        "'type', or 'predicate'."
+                    ),
+                )
+            item["kind"] = kind
             canonical_concepts.append(item)
 
         raw_top_level_instance_type = resolved.get("instance_of_type")
