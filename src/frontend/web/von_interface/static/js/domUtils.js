@@ -8,6 +8,7 @@ import {
   refreshWorkflowCapabilityIndexStatus,
   subscribeToWorkflowCapabilityIndexStatus,
 } from './utils/workflowCapabilityStatusCoordinator.js';
+import { createFooterOrganisationSwitcher } from './components/footerOrganisationSwitcher.js';
 
 export const elements = {};
 
@@ -1225,6 +1226,60 @@ function normaliseWorkflowCapabilityIndexFooterStatus(report) {
   };
 }
 
+async function openFooterConcept({ conceptId, conceptName, displayName }) {
+  const id = conceptId || null;
+  const name = conceptName || null;
+  try {
+    const tabBtn = document.querySelector('.tab-button[data-tab="vontologyTab"]');
+    if (tabBtn) tabBtn.click();
+    if (id) {
+      // Footer user/organisation concepts are individuals, so open their tab directly.
+      document.dispatchEvent(new CustomEvent('open-concept-tab', {
+        detail: { conceptId: id, conceptName: name || displayName || id, kind: 'individual', activate: true }
+      }));
+      // Highlight the best parent type for the individual using the existing chooser.
+      try {
+        const resp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(id)}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          const rawParents = data?.is_an_instance_of || data?.is_a || [];
+          const candidateIds = [];
+          if (Array.isArray(rawParents)) {
+            for (const parent of rawParents) {
+              if (!parent) continue;
+              if (typeof parent === 'string') candidateIds.push(parent);
+              else if (parent.concept_id) candidateIds.push(parent.concept_id);
+              else if (parent.id) candidateIds.push(parent.id);
+              else if (parent['@id']) candidateIds.push(parent['@id']);
+            }
+          }
+          if (candidateIds.length) {
+            let bestParent = null;
+            try {
+              const vmod = await import('./vontology.js');
+              if (vmod.chooseBestTypeForIndividual) {
+                bestParent = await vmod.chooseBestTypeForIndividual(candidateIds);
+              }
+            } catch (_) { /* use first parent below */ }
+            if (!bestParent) bestParent = candidateIds[0];
+            if (bestParent) {
+              document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+                detail: { conceptId: bestParent, createConceptTab: false }
+              }));
+            }
+          }
+        }
+      } catch (_) { /* parent highlighting is non-fatal */ }
+    } else if (name) {
+      document.dispatchEvent(new CustomEvent('von:selectConceptByName', {
+        detail: { name, createConceptTab: true }
+      }));
+    }
+  } catch (error) {
+    console.warn('Concept button navigation failed', error);
+  }
+}
+
 export async function setModelInfoFooterText() {
   const footer = document.getElementById('modelInfoFooter');
   if (!footer) return;
@@ -1356,54 +1411,9 @@ export async function setModelInfoFooterText() {
       if (conceptId) tooltipParts.push(`ID: ${conceptId}`);
       if (conceptName) tooltipParts.push(`Name: ${conceptName}`);
       setKeptNativeTitle(btn, tooltipParts.join('\n'));
-      btn.addEventListener('click', async (ev) => {
+      btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        const id = conceptId || null;
-        const name = conceptName || null;
-        try {
-          const tabBtn = document.querySelector('.tab-button[data-tab="vontologyTab"]');
-          if (tabBtn) { tabBtn.click(); }
-          if (id) {
-            // These footer entities (current user/org) are guaranteed individuals – open their tab directly as individual
-            document.dispatchEvent(new CustomEvent('open-concept-tab', {
-              detail: { conceptId: id, conceptName: name || displayName || id, kind: 'individual', activate: true }
-            }));
-            // Highlight the best parent TYPE for this individual using chooser logic
-            try {
-              const resp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(id)}`);
-              if (resp.ok) {
-                const data = await resp.json();
-                const rawParents = data?.is_an_instance_of || data?.is_a || [];
-                const candidateIds = [];
-                if (Array.isArray(rawParents)) {
-                  for (const p of rawParents) {
-                    if (!p) continue;
-                    if (typeof p === 'string') candidateIds.push(p);
-                    else if (p.concept_id) candidateIds.push(p.concept_id);
-                    else if (p.id) candidateIds.push(p.id);
-                    else if (p['@id']) candidateIds.push(p['@id']);
-                  }
-                }
-                if (candidateIds.length) {
-                  let bestParent = null;
-                  try {
-                    const vmod = await import('./vontology.js');
-                    if (vmod.chooseBestTypeForIndividual) {
-                      bestParent = await vmod.chooseBestTypeForIndividual(candidateIds);
-                    }
-                  } catch (_) { /* fallback below */ }
-                  if (!bestParent) { bestParent = candidateIds[0]; }
-                  if (bestParent) {
-                    document.dispatchEvent(new CustomEvent('von:selectConceptById', { detail: { conceptId: bestParent, createConceptTab: false } }));
-                  }
-                }
-              }
-            } catch (_) { /* non-fatal */ }
-          } else if (name) {
-            // Fall back to name-based selection (may create individual tab heuristically)
-            document.dispatchEvent(new CustomEvent('von:selectConceptByName', { detail: { name, createConceptTab: true } }));
-          }
-        } catch (e) { console.warn('Concept button navigation failed', e); }
+        void openFooterConcept({ conceptId, conceptName, displayName });
       });
     }
     span.appendChild(btn);
@@ -1600,22 +1610,11 @@ export async function setModelInfoFooterText() {
     // We do not pass concept id unless actually known to avoid misleading navigation.
     segments.push(makeConceptButton('User', dName, userInfo?.conceptId || null, userInfo?.name || null));
   }
-  // Organisation segment
-  if (orgInfo.name || orgInfo.conceptId || orgInfo.id) {
-    const dName = orgInfo.name || orgInfo.conceptId || (orgInfo.id ? orgInfo.id.substring(0, 8) + '…' : 'Org');
-    segments.push(makeConceptButton('Org', dName, orgInfo.conceptId, orgInfo.name));
-  } else {
-    const placeholder = document.createElement('span');
-    placeholder.className = 'footer-segment footer-placeholder';
-    const label = document.createElement('span');
-    label.className = 'footer-label-inline';
-    label.textContent = 'Org: ';
-    const value = document.createElement('span');
-    value.textContent = '(none)';
-    placeholder.appendChild(label);
-    placeholder.appendChild(value);
-    segments.push(placeholder);
-  }
+  // Organisation segment: retain concept navigation and add direct switching.
+  segments.push(createFooterOrganisationSwitcher({
+    organisationInfo: orgInfo,
+    onOpenConcept: openFooterConcept,
+  }));
 
   if (workflowCapabilityStatus && workflowCapabilityStatus.ready === false) {
     const workflowIndexSegment = makeActionButton(
@@ -1742,7 +1741,7 @@ export async function setModelInfoFooterText() {
   footer.style.cursor = 'pointer';
   setKeptNativeTitle(footer, 'Click empty area to open settings');
   footer.addEventListener('click', (ev) => {
-    if (ev.target.closest('.concept-footer-button, .conversation-runtime-cost-button')) { return; }
+    if (ev.target.closest('.concept-footer-button, .conversation-runtime-cost-button, .footer-org-switcher')) { return; }
     const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
     if (settingsTabButton) { settingsTabButton.click(); }
   });
