@@ -403,52 +403,38 @@ export async function searchTypes(q, limit = 8, opts = {}) {
   }
 }
 
-// Create a new instance under a selected parent type concept
+// Create one explicitly typed concept through the governed HTTP boundary.
+export async function createConcept(parentConceptId, name, kind, fields = {}) {
+  const cleanName = String(name || '').trim();
+  if (!cleanName) throw new Error('name required');
+  if (!['instance', 'type', 'predicate'].includes(kind)) {
+    throw new Error("kind must be 'instance', 'type', or 'predicate'");
+  }
+
+  const payload = { ...fields, name: cleanName, kind };
+  if (parentConceptId) payload.parent_concept_ids = [parentConceptId];
+  const { data } = await postJsonDetailed('/api/concepts/', payload);
+  return data;
+}
+
+// Create a new instance under a selected parent type concept.
 export async function createInstance(parentConceptId, name) {
-  if (!parentConceptId || !name) throw new Error('parentConceptId and name required');
-  const payload = { parent_id: parentConceptId, new_concept_name: name, create_as_instance: true };
-  const url = '/vontology/api/vontology/create_concept';
+  if (!parentConceptId) throw new Error('parentConceptId required');
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const text = await res.text();
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch (_) { json = { parse_error: true, raw: text }; }
-    if (!res.ok || !json.success) {
-      console.warn('[annotations] createInstance non-OK', { status: res.status, body: json, raw: text.slice(0, 200) });
-      const msg = (json && (json.message || json.error)) ? `${json.message || json.error} (HTTP ${res.status})` : `Create instance failed (HTTP ${res.status})`;
-      throw new Error(msg);
-    }
-    return json.concept || json;
+    const response = await createConcept(parentConceptId, name, 'instance');
+    return response?.concept || response;
   } catch (e) {
     console.error('[annotations] createInstance error', e);
     throw e;
   }
 }
 
-// Create a new TYPE (subtype) under a selected parent type concept
+// Create a new TYPE (subtype) under a selected parent type concept.
 export async function createType(parentConceptId, name) {
-  if (!parentConceptId || !name) throw new Error('parentConceptId and name required');
-  const payload = { parent_id: parentConceptId, new_concept_name: name, create_as_instance: false };
-  const url = '/vontology/api/vontology/create_concept';
+  if (!parentConceptId) throw new Error('parentConceptId required');
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const text = await res.text();
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch (_) { json = { parse_error: true, raw: text }; }
-    if (!res.ok || !json.success) {
-      console.warn('[annotations] createType non-OK', { status: res.status, body: json, raw: text.slice(0, 200) });
-      const msg = (json && (json.message || json.error)) ? `${json.message || json.error} (HTTP ${res.status})` : `Create type failed (HTTP ${res.status})`;
-      throw new Error(msg);
-    }
-    return json.concept || json;
+    const response = await createConcept(parentConceptId, name, 'type');
+    return response?.concept || response;
   } catch (e) {
     console.error('[annotations] createType error', e);
     throw e;

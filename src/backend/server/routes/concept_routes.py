@@ -27,7 +27,10 @@ from ...services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
     maybe_sync_concept_text_relations_to_rag,
 )
-from ...services.ontology_mutation_command_service import delete_legacy_name
+from ...services.ontology_mutation_command_service import (
+    OntologyMutationCommandError,
+    delete_legacy_name,
+)
 from ...services.paper_recommendation_profile_vontology_service import (
     load_paper_recommendation_profile,
     upsert_paper_recommendation_profile,
@@ -476,6 +479,7 @@ def create_concept_route():
         return jsonify(error="Request body must be JSON"), 400
 
     name = data.get("name")
+    kind = data.get("kind")
     concept_id = data.get("concept_id")
     vontology_path = data.get("vontology_path")
     description = data.get("description")
@@ -488,8 +492,6 @@ def create_concept_route():
 
     if not name:
         return jsonify(error="concept name is required"), 400
-    if not concept_id and not vontology_path:
-        return jsonify(error="Either concept_id or vontology_path is required"), 400
     if parent_concept_ids is not None and not isinstance(parent_concept_ids, list):
         return jsonify(error="parent_concept_ids must be a list"), 400
 
@@ -508,13 +510,13 @@ def create_concept_route():
                     {
                         "concept_id": concept_id,
                         "name": name,
+                        "kind": kind,
                         "description": description,
                         "notes": notes,
                         "attributes": attributes,
                         "system_tags": system_tags,
                         "user_tags": user_tags,
                         "linked_concepts": linked_concepts,
-                        "create_as_instance": data.get("create_as_instance", True),
                         "instance_of_type": data.get("instance_of_type"),
                         "vontology_path": vontology_path,
                     }
@@ -531,7 +533,6 @@ def create_concept_route():
                 "attributes": attributes,
                 "system_tags": system_tags,
                 "user_tags": user_tags,
-                "create_as_instance": data.get("create_as_instance", True),
                 "vontology_path": vontology_path,
                 "description": description,
                 "notes": notes,
@@ -540,6 +541,7 @@ def create_concept_route():
         )
         resolved_concept = create_arguments["concepts"][0]
         resolved_parent_ids = create_arguments.get("parent_concept_ids")
+        resolved_kind = resolved_concept.get("kind")
         result = _execute_governed_http_mutation(
             method_name="create_concepts",
             arguments=create_arguments,
@@ -554,7 +556,7 @@ def create_concept_route():
                 user_tags=resolved_concept.get("user_tags"),
                 linked_concepts=resolved_concept.get("linked_concepts"),
                 parent_concept_ids=resolved_parent_ids,
-                create_as_instance=resolved_concept.get("create_as_instance", True),
+                create_as_instance=resolved_kind in {"instance", "predicate"},
                 instance_of_type=resolved_concept.get("instance_of_type"),
                 created_by_concept_id=trusted_actor,
                 organisation_concept_id=trusted_org,
@@ -565,6 +567,20 @@ def create_concept_route():
             ),
         )
         return _governed_mutation_response(result, success_status=201)
+    except OntologyMutationCommandError as e:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "effect_status": "not_started",
+                    "mutation_outcome": "not_started",
+                    "changed": False,
+                    "error_code": e.reason_code,
+                    "error": e.public_message,
+                }
+            ),
+            400,
+        )
     except InvalidConceptDataError as e:
         current_app.logger.warning(f"Invalid data for creating concept: {e}")
         return jsonify(error=str(e)), 400

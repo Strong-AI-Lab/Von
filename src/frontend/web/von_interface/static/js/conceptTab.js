@@ -1,4 +1,4 @@
-import { deleteJson, getJson, patchJson, postJson, putJson } from './apiService.js';
+import { createConcept, deleteJson, getJson, patchJson, postJson, putJson } from './apiService.js';
 import { elements, getCurrentUserConceptId, getUserClientId } from './domUtils.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import { renderMarkdownViaServer } from './markdownUtils.js';
@@ -1355,16 +1355,15 @@ export async function handleSaveConceptOrNotes(suffix = '') {
           // no-op, keep existing
         }
       }
-      const result = await postJson('/vontology/api/vontology/create_concept', {
-        new_concept_name: `Concept ${new Date().toISOString().slice(0, 10)}`,
-        parent_id: parentIdForCreate,
-        create_as_instance: true,  // TRUE = individual (no subtype relationships), FALSE = type
-        // Persist initial notes entered by the user during creation
-        notes: notes || ''
-      });
+      const result = await createConcept(
+        parentIdForCreate,
+        `Concept ${new Date().toISOString().slice(0, 10)}`,
+        'instance',
+        { notes: notes || '' }
+      );
 
       if (result && result.success) {
-        const newConceptId = result.concept_id;
+        const newConceptId = result.concept_id || result.concept?.concept_id;
         setCurrentlySelectedConceptId(newConceptId);
         setSelectedConceptOriginalName('(unnamed)');
         if (conceptStep1Status) {
@@ -3745,7 +3744,7 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
  * Handle creating a new subtype from the concept tab
  * @param {string} suffix - The tab suffix
  */
-async function handleCreateSubtype(suffix = '') {
+export async function handleCreateSubtype(suffix = '') {
   const getSuffixElement = (baseId) => {
     const id = suffix ? `${baseId}_${suffix}` : baseId;
     return document.getElementById(id);
@@ -3796,11 +3795,7 @@ async function handleCreateSubtype(suffix = '') {
       }
     }
 
-    const response = await postJson('/vontology/api/vontology/create_concept', {
-      new_concept_name: finalSubtypeName,
-      parent_id: parentId,
-      create_as_instance: false  // Create as type (subtype)
-    });
+    const response = await createConcept(parentId, finalSubtypeName, 'type');
     recordNameNormalizationMetric('subtype');
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
@@ -3861,7 +3856,7 @@ async function handleCreateSubtype(suffix = '') {
  * Handle creating a new instance from the concept tab
  * @param {string} suffix - The tab suffix
  */
-async function handleCreateInstance(suffix = '') {
+export async function handleCreateInstance(suffix = '') {
   const getSuffixElement = (baseId) => {
     const id = suffix ? `${baseId}_${suffix}` : baseId;
     return document.getElementById(id);
@@ -3912,11 +3907,7 @@ async function handleCreateInstance(suffix = '') {
       instancesStatus.style.color = "black";
     }
 
-    const response = await postJson('/vontology/api/vontology/create_concept', {
-      new_concept_name: sanitizedName,
-      parent_id: parentId,
-      create_as_instance: true  // Create as instance (individual)
-    });
+    const response = await createConcept(parentId, sanitizedName, 'instance');
     recordNameNormalizationMetric('instance');
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;

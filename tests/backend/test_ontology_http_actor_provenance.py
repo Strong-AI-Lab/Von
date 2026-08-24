@@ -123,6 +123,7 @@ def _create_request(client, *, headers: dict[str, str]):
         json={
             "name": "Governed HTTP creation probe",
             "concept_id": "#V#governed_http_creation_probe",
+            "kind": "type",
             "scope_mode": "global_general",
         },
     )

@@ -348,12 +348,13 @@ async function createConceptForId(conceptId, options, fetchFn) {
     const description = (options?.description || '').toString().trim();
 
     const payload = {
-        new_concept_name: name,
-        parent_id: parentId,
-        create_as_instance: createAsInstance
+        concept_id: id,
+        name,
+        kind: createAsInstance ? 'instance' : 'type',
+        parent_concept_ids: parentId ? [parentId] : []
     };
 
-    const res = await fetchFn('/vontology/api/vontology/create_concept', {
+    const res = await fetchFn('/api/concepts/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: JSON.stringify(payload)
