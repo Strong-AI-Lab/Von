@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "32",
+  "seed_version": "33",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -34,6 +34,11 @@
     "#V#public_paper_title_resolution_workflow": {
       "31": [
         "489e5fe07d965cfcd08343e5d72d1ccb7436b16e30455fc208426c38921ee6c6"
+      ]
+    },
+    "#V#scholarly_article_metadata_representation_workflow": {
+      "32": [
+        "cb9f9c59be22a3e368473e4af5d98889439e4496d7cc8bf124655f2e2efd8b8c"
       ]
     }
   },
@@ -1605,9 +1610,19 @@
                 "to_state": "resolve_file_link_scope",
                 "reason": "file_copy_present",
                 "condition_spec": {
-                  "kind": "context_exists",
-                  "key": "file_copy_concept_id",
-                  "expected": true
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "file_copy_concept_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "file_copy_concept_id",
+                      "expected": false
+                    }
+                  ]
                 }
               }
             ]
