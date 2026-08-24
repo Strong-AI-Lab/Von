@@ -178,4 +178,34 @@ describe('chat session Trash', () => {
             'error'
         );
     });
+
+    test('hydrates a selected global-search result into the recent working set', async () => {
+        global.fetch.mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({})
+        });
+        const chatTab = require(chatTabModulePath);
+        chatTab.__testOnly_setActiveChatSession('older-session', 'Older conversation');
+        await new Promise(resolve => setTimeout(resolve, 0));
+        global.fetch.mockClear();
+        chatTab.__testOnly_setSessionTabsCache([]);
+
+        const result = await chatTab.__testOnly_openConversationSearchResult({
+            session_id: 'older-session',
+            session_name: 'Older conversation',
+            last_message_at: '2025-08-23T10:00:00Z',
+            match: { snippet: 'historical match' }
+        });
+
+        expect(result).toEqual({ ok: true, alreadyActive: true });
+        expect(chatTab.__testOnly_getSessionTabsCache()).toEqual([
+            expect.objectContaining({
+                session_id: 'older-session',
+                session_name: 'Older conversation'
+            })
+        ]);
+        expect(document.body.dataset.activeTab).toBe('chatTab');
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
 });

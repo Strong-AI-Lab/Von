@@ -23,7 +23,7 @@
   <!-- Fixed Global Header (title + search above tabs) JVNAUTOSCI-550 -->
   <div class="global-header" id="globalHeader">
     <div class="global-header-shell">
-      <!-- Global Concept Search -->
+      <!-- Global concept and conversation search -->
       <div class="global-concept-search" id="globalConceptSearchRegion">
         <div class="global-concept-search-inner">
           <h2 class="vontology-title" id="vontologyGlobalTitle">
@@ -35,17 +35,28 @@
                   stroke-linecap="round" />
               </svg>
             </span>
-            <span class="visually-hidden">Concept Search</span>
+            <span class="visually-hidden">Search</span>
           </h2>
           <div class="vontology-search" id="globalVontologySearchWrapper">
-            <input type="text" id="vontologySearchInput" placeholder="Search concepts by name…"
-              aria-label="Search concepts" role="combobox" aria-autocomplete="list" aria-expanded="false"
+            <input type="search" id="vontologySearchInput" placeholder="Search conversations and concepts…"
+              aria-label="Search conversations and concepts" role="combobox" aria-autocomplete="list" aria-expanded="false"
               aria-haspopup="listbox" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
               name="_vontology_search" />
             <div id="vontologySearchResults" class="vontology-search-results" role="listbox"
               aria-label="Search results">
             </div>
           </div>
+          <button id="conversationRecoveryButton" class="conversation-recovery-button" type="button" hidden
+            aria-label="Open removed conversations" aria-pressed="false" title="Open removed conversations"
+            data-keep-title="true">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <path d="M4 9h16v10H4z" />
+              <path d="M8 5h8l2 4H6z" />
+              <path d="M14.5 12.5a3.5 3.5 0 1 0 1 2.5" />
+              <path d="M14.5 10.8v3h-3" />
+            </svg>
+            <span id="conversationRecoveryCount" class="conversation-recovery-count" hidden aria-hidden="true"></span>
+          </button>
         </div>
       </div>
 

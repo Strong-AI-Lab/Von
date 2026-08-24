@@ -1060,7 +1060,6 @@ let _pinnedSessionsUserKey = null; // Track current user's localStorage key
 let _agentCreatedSessionsVisibleUserKey = null;
 let chatSessionLastAccessedMap = new Map();
 let _chatSessionLastAccessedUserKey = null;
-let showAllConversationHistoryMatches = false;
 let chatSessionTabsLayout = CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
 let chatSessionTabsLayoutMediaQuery = null;
 let chatSessionTabsLayoutMediaListenerBound = false;
@@ -1070,12 +1069,9 @@ let agentCreatedSessionVisibilityState = {
     newestVisibleSessionId: null
 };
 let serverAgentCreatedSessionVisibilityState = null;
-let conversationSearchState = {
-    query: '',
-    trashedOnly: false,
-    nextCursor: null,
-    results: []
-};
+let serverConversationHistoryRecencyState = null;
+let expandedConversationHistoryLimit = null;
+let expandedConversationHistoryBaseLimit = null;
 
 /**
  * Get the user-scoped localStorage key for hidden sessions.
@@ -1371,10 +1367,12 @@ function saveAgentCreatedSessionsVisibilityPreference() {
 
 function buildChatSessionTabsFetchUrl() {
     const params = new URLSearchParams();
+    const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     params.set('limit', String(CHAT_SESSION_TABS_FETCH_LIMIT));
     params.set('summary', 'light');
     params.set('agent_visibility', showAgentCreatedSessions ? 'include' : 'exclude');
     params.set('keep_newest_agent_created', 'true');
+    params.set('recent_window_days', String(conversationHistorySettings.recentWindowDays));
     return `/von/history/sessions?${params.toString()}`;
 }
 
@@ -1406,6 +1404,18 @@ function normaliseServerAgentCreatedVisibilityState(data) {
         totalAfterVisibility: readNonNegativeCount(data.total_after_agent_visibility),
         hiddenByLimitCount: readNonNegativeCount(data.hidden_by_limit_count),
         rawSessionCount: readNonNegativeCount(data.raw_session_count)
+    };
+}
+
+function normaliseServerConversationHistoryRecencyState(data) {
+    const recentWindowDays = Number(data?.recent_window_days);
+    const olderThanWindowCount = Number(data?.older_than_window_count);
+    if (!Number.isFinite(recentWindowDays) || !Number.isFinite(olderThanWindowCount)) {
+        return null;
+    }
+    return {
+        recentWindowDays: Math.max(1, Math.trunc(recentWindowDays)),
+        olderThanWindowCount: Math.max(0, Math.trunc(olderThanWindowCount))
     };
 }
 
@@ -1770,6 +1780,9 @@ async function deleteConversation(sessionId) {
         }
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
         showToast('Conversation moved to Trash', 'success');
+        document.dispatchEvent(new CustomEvent('von:conversation-trash-changed', {
+            detail: { action: 'trashed', sessionId }
+        }));
         return true;
     } catch (e) {
         console.error('[chatTab] moveConversationToTrash error:', e);
@@ -1778,161 +1791,26 @@ async function deleteConversation(sessionId) {
     }
 }
 
-async function restoreConversation(sessionId) {
-    const sid = String(sessionId || '').trim();
-    if (!sid) return false;
-    try {
-        const response = await fetch('/von/api/session/delete_chat_session', {
-            method: 'POST',
-            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ session_id: sid, action: 'restore' })
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || data?.status !== 'restored' || data?.trashed !== false) {
-            throw new Error(data?.error || 'Conversation restore could not be verified.');
-        }
-        conversationSearchState.results = conversationSearchState.results.filter(
-            row => row?.session_id !== sid
-        );
-        renderConversationSearchResults();
-        scheduleChatSessionTabsRefresh(true);
-        showToast('Conversation restored', 'success');
-        return true;
-    } catch (error) {
-        showToast(error?.message || 'Failed to restore conversation', 'error');
-        return false;
+async function openConversationSearchResult(row) {
+    const sessionId = String(row?.session_id || row?.id || '').trim();
+    if (!sessionId) return { ok: false, error: 'session_id required' };
+    const existing = sessionTabsCache.find(session => session?.session_id === sessionId) || {};
+    const canonical = normaliseConversationSessionViewModel({ ...existing, ...row, session_id: sessionId });
+    sessionTabsCache = normaliseConversationSessionViewModels([
+        ...sessionTabsCache.filter(session => session?.session_id !== sessionId),
+        canonical
+    ]);
+    activateTab('chatTab');
+    if (activeChatSessionId === sessionId) {
+        renderChatSessionTabs(sessionTabsCache, sessionId);
+        return { ok: true, alreadyActive: true };
     }
-}
-
-function renderConversationSearchResults() {
-    const panel = document.getElementById('conversationSearchPanel');
-    const status = document.getElementById('conversationSearchStatus');
-    const results = document.getElementById('conversationSearchResults');
-    const more = document.getElementById('conversationSearchMore');
-    if (!panel || !status || !results || !more) return;
-    panel.hidden = false;
-    results.innerHTML = '';
-    const rows = Array.isArray(conversationSearchState.results)
-        ? conversationSearchState.results
-        : [];
-    status.textContent = rows.length
-        ? `${rows.length} conversation${rows.length === 1 ? '' : 's'}`
-        : (conversationSearchState.trashedOnly ? 'Trash is empty.' : 'No matching conversations.');
-    rows.forEach((row) => {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'conversation-search-result';
-        const title = document.createElement('button');
-        title.type = 'button';
-        title.className = 'conversation-search-result-title';
-        title.textContent = getSessionDisplayName(row, { fallbackToId: false }) || 'Unnamed conversation';
-        title.addEventListener('click', () => {
-            const sid = String(row?.session_id || '').trim();
-            if (!sid || conversationSearchState.trashedOnly) return;
-            if (!sessionTabsCache.some(session => session?.session_id === sid)) {
-                sessionTabsCache = normaliseConversationSessionViewModels([...sessionTabsCache, row]);
-            }
-            void switchToChatSession(sid);
-        });
-        const actions = document.createElement('div');
-        actions.className = 'conversation-search-result-actions';
-        const date = document.createElement('span');
-        date.className = 'conversation-search-result-date';
-        date.textContent = formatSessionTimestamp(row?.last_message_at || row?.created_at) || '';
-        actions.appendChild(date);
-        if (conversationSearchState.trashedOnly) {
-            const restore = document.createElement('button');
-            restore.type = 'button';
-            restore.textContent = 'Restore';
-            restore.addEventListener('click', () => { void restoreConversation(row?.session_id); });
-            actions.appendChild(restore);
-        }
-        wrapper.append(title, actions);
-        const snippetText = row?.match?.snippet;
-        if (typeof snippetText === 'string' && snippetText.trim()) {
-            const snippet = document.createElement('div');
-            snippet.className = 'conversation-search-result-snippet';
-            snippet.textContent = snippetText;
-            wrapper.appendChild(snippet);
-        }
-        results.appendChild(wrapper);
-    });
-    more.hidden = !conversationSearchState.nextCursor;
-}
-
-async function performConversationSearch({ append = false, trashedOnly = null } = {}) {
-    const input = document.getElementById('conversationSearchInput');
-    const panel = document.getElementById('conversationSearchPanel');
-    const status = document.getElementById('conversationSearchStatus');
-    const requestedTrash = typeof trashedOnly === 'boolean'
-        ? trashedOnly
-        : conversationSearchState.trashedOnly;
-    const query = requestedTrash ? '*' : String(input?.value || '').trim();
-    if (!query) {
-        if (panel) panel.hidden = true;
-        return;
-    }
-    if (panel) panel.hidden = false;
-    if (status) status.textContent = requestedTrash ? 'Loading Trash…' : 'Searching…';
-    const params = new URLSearchParams({
-        q: query,
-        match_mode: requestedTrash ? 'lexical' : 'hybrid',
-        page_size: '20',
-        trashed_only: requestedTrash ? 'true' : 'false'
-    });
-    if (append && conversationSearchState.nextCursor) {
-        params.set('cursor', conversationSearchState.nextCursor);
-    }
-    try {
-        const response = await fetch(`/von/api/session/conversation_search?${params.toString()}`, {
-            cache: 'no-store',
-            headers: buildChatFetchHeaders()
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data?.error || 'Conversation search failed.');
-        conversationSearchState = {
-            query,
-            trashedOnly: requestedTrash,
-            nextCursor: data?.next_cursor || null,
-            results: append
-                ? [...conversationSearchState.results, ...(Array.isArray(data?.results) ? data.results : [])]
-                : (Array.isArray(data?.results) ? data.results : [])
-        };
-        renderConversationSearchResults();
-        if (status && data?.index_coverage?.complete_for_accessible_window === false) {
-            status.textContent += ' Older conversations are still being indexed.';
-        }
-    } catch (error) {
-        if (status) status.textContent = error?.message || 'Conversation search unavailable.';
-    }
-}
-
-function initialiseConversationSearch() {
-    const input = document.getElementById('conversationSearchInput');
-    const search = document.getElementById('conversationSearchButton');
-    const trash = document.getElementById('conversationTrashButton');
-    const more = document.getElementById('conversationSearchMore');
-    search?.addEventListener('click', () => { void performConversationSearch({ trashedOnly: false }); });
-    input?.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            trash?.setAttribute('aria-pressed', 'false');
-            void performConversationSearch({ trashedOnly: false });
-        }
-    });
-    trash?.addEventListener('click', () => {
-        const next = trash.getAttribute('aria-pressed') !== 'true';
-        trash.setAttribute('aria-pressed', next ? 'true' : 'false');
-        if (!next) {
-            document.getElementById('conversationSearchPanel')?.setAttribute('hidden', '');
-            return;
-        }
-        void performConversationSearch({ trashedOnly: true });
-    });
-    more?.addEventListener('click', () => { void performConversationSearch({ append: true }); });
+    return switchToChatSession(sessionId);
 }
 
 let orgSwitchListenerBound = false;
 let authStatusListenerBound = false;
+let conversationSearchSelectionListenerBound = false;
 let diagnosticsExportShortcutBound = false;
 
 // JVNAUTOSCI-942: Tool-use progress while "Thinking..."
@@ -23126,7 +23004,6 @@ try {
         ) {
             return;
         }
-        showAllConversationHistoryMatches = false;
         if (Array.isArray(sessionTabsCache)) {
             renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
         }
@@ -25703,9 +25580,11 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
     if (!container) {
         return;
     }
+    const historyControls = document.getElementById('chatSessionHistoryControls');
 
     container.hidden = false;
     container.innerHTML = '';
+    if (historyControls) historyControls.innerHTML = '';
 
     setChatSessionCount(null);
 
@@ -25866,6 +25745,7 @@ async function refreshChatSessionTabs() {
 
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
         serverAgentCreatedSessionVisibilityState = normaliseServerAgentCreatedVisibilityState(data);
+        serverConversationHistoryRecencyState = normaliseServerConversationHistoryRecencyState(data);
         const acceptedInvites = Array.isArray(incomingInviteState?.acceptedInvites)
             ? incomingInviteState.acceptedInvites
             : [];
@@ -26017,6 +25897,8 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     if (!container) {
         return;
     }
+    const historyControls = document.getElementById('chatSessionHistoryControls');
+    if (historyControls) historyControls.innerHTML = '';
 
     const canonicalSessions = normaliseConversationSessionViewModels(sessions);
     if (canonicalSessions.length === 0) {
@@ -26058,12 +25940,19 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         };
 
     const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
+    if (expandedConversationHistoryBaseLimit !== conversationHistorySettings.recentLimit) {
+        expandedConversationHistoryLimit = null;
+        expandedConversationHistoryBaseLimit = conversationHistorySettings.recentLimit;
+    }
+    const effectiveRecentLimit = Number.isFinite(expandedConversationHistoryLimit)
+        ? Math.max(conversationHistorySettings.recentLimit, Math.trunc(expandedConversationHistoryLimit))
+        : conversationHistorySettings.recentLimit;
     const filteredResult = selectConversationHistorySessions({
         sessions: sessionsAfterAgentFilter,
         accessTimestampBySessionId: getConversationHistoryAccessLookup(sessionsAfterAgentFilter),
-        recentLimit: conversationHistorySettings.recentLimit,
+        recentLimit: effectiveRecentLimit,
         recentWindowDays: conversationHistorySettings.recentWindowDays,
-        showAll: showAllConversationHistoryMatches
+        showAll: false
     });
     let visibleSessions = Array.isArray(filteredResult.sessionsToRender)
         ? filteredResult.sessionsToRender
@@ -26161,6 +26050,56 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
     // Always show the "+" button to create new chats
     fragment.appendChild(createNewChatTabButton());
+
+    const serverOlderCount = (
+        serverConversationHistoryRecencyState?.recentWindowDays === filteredResult.recentWindowDays
+    )
+        ? serverConversationHistoryRecencyState.olderThanWindowCount
+        : null;
+    const olderThanWindowCount = Number.isFinite(serverOlderCount)
+        ? serverOlderCount
+        : filteredResult.olderThanWindowCount;
+    if (historyControls && olderThanWindowCount > 0) {
+        const olderIndicator = document.createElement('span');
+        const formattedOlderCount = olderThanWindowCount.toLocaleString();
+        olderIndicator.className = 'chat-session-history-indicator';
+        olderIndicator.textContent = `[${formattedOlderCount} > ${filteredResult.recentWindowDays}d]`;
+        olderIndicator.title = `${formattedOlderCount} conversations are older than ${filteredResult.recentWindowDays} days and hidden from this recent-conversation strip. Search can still find them.`;
+        olderIndicator.setAttribute(
+            'aria-label',
+            `${formattedOlderCount} conversations older than ${filteredResult.recentWindowDays} days`
+        );
+        olderIndicator.setAttribute('data-keep-title', 'true');
+        olderIndicator.tabIndex = 0;
+        historyControls.appendChild(olderIndicator);
+    }
+
+    if (historyControls && filteredResult.totalMatchingCount > filteredResult.recentLimit) {
+        const overflowButton = document.createElement('button');
+        const hiddenCount = filteredResult.hiddenByLimitCount;
+        const nextTrancheSize = Math.min(hiddenCount, filteredResult.recentLimit);
+        const ordinaryClickShowsAll = nextTrancheSize >= hiddenCount;
+        overflowButton.type = 'button';
+        overflowButton.className = 'chat-session-history-toggle';
+        overflowButton.textContent = `+${hiddenCount}`;
+        overflowButton.title = ordinaryClickShowsAll
+            ? `${hiddenCount} more conversations fall within the ${filteredResult.recentWindowDays}-day window. Click to show all of them.`
+            : `${hiddenCount} more conversations fall within the ${filteredResult.recentWindowDays}-day window. Click to show the next ${nextTrancheSize}; Shift-click to show all.`;
+        overflowButton.setAttribute(
+            'aria-label',
+            ordinaryClickShowsAll
+                ? `Show all ${hiddenCount} more recent conversations`
+                : `Show the next ${nextTrancheSize} of ${hiddenCount} more recent conversations; Shift-click to show all`
+        );
+        overflowButton.setAttribute('data-keep-title', 'true');
+        overflowButton.addEventListener('click', (event) => {
+            expandedConversationHistoryLimit = event.shiftKey
+                ? filteredResult.totalMatchingCount
+                : filteredResult.recentLimit + nextTrancheSize;
+            renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+        });
+        historyControls.appendChild(overflowButton);
+    }
 
     if (orderedVisibleSessions.length === 0) {
         const placeholder = document.createElement('div');
@@ -26472,24 +26411,6 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         fragment.appendChild(tab);
     });
-
-    if (filteredResult.totalMatchingCount > filteredResult.recentLimit) {
-        const toggleMoreButton = document.createElement('button');
-        toggleMoreButton.type = 'button';
-        toggleMoreButton.className = 'chat-session-tab chat-session-tab-more';
-        if (showAllConversationHistoryMatches) {
-            toggleMoreButton.textContent = '[...] Show less';
-            toggleMoreButton.title = `Collapse to ${filteredResult.recentLimit} conversations`;
-        } else {
-            toggleMoreButton.textContent = `[...] Show all (${filteredResult.hiddenByLimitCount} more)`;
-            toggleMoreButton.title = `Show all ${filteredResult.totalMatchingCount} matching conversations`;
-        }
-        toggleMoreButton.addEventListener('click', () => {
-            showAllConversationHistoryMatches = !showAllConversationHistoryMatches;
-            renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
-        });
-        fragment.appendChild(toggleMoreButton);
-    }
 
     container.appendChild(fragment);
 
@@ -31775,8 +31696,9 @@ async function handleOrgSwitchForChatTab(_detail) {
     // session to null below is a no-op).
     invalidateLlmExecutionContextForOrgSwitch();
     const container = getChatSessionTabsContainer();
-    showAllConversationHistoryMatches = false;
     sessionTabsCache = [];
+    expandedConversationHistoryLimit = null;
+    expandedConversationHistoryBaseLimit = null;
     lastRenderedSessionCount = 0;
     chatSessionMetadataOpenKey = null;
     _clearChatSessionMetadata();
@@ -31852,10 +31774,10 @@ function handleAuthStatusChangeForChatTab(detail) {
     loadChatSessionLastAccessedMap();
     loadChatSessionTabsLayoutPreference();
     setupChatSessionTabsResponsiveLayout();
-    showAllConversationHistoryMatches = false;
-
     const container = getChatSessionTabsContainer();
     sessionTabsCache = [];
+    expandedConversationHistoryLimit = null;
+    expandedConversationHistoryBaseLimit = null;
     lastRenderedSessionCount = 0;
     chatSessionMetadataOpenKey = null;
     _clearChatSessionMetadata();
@@ -31916,7 +31838,18 @@ export function initializeChatTab() {
     loadChatSessionLastAccessedMap();
     loadChatSessionTabsLayoutPreference();
     setupChatSessionTabsResponsiveLayout();
-    initialiseConversationSearch();
+
+    if (!conversationSearchSelectionListenerBound) {
+        conversationSearchSelectionListenerBound = true;
+        document.addEventListener('von:open-conversation-search-result', event => {
+            void openConversationSearchResult(event?.detail?.conversation || {});
+        });
+        document.addEventListener('von:conversation-trash-changed', event => {
+            if (event?.detail?.action === 'restored') {
+                scheduleChatSessionTabsRefresh(true);
+            }
+        });
+    }
 
     // Reload hidden sessions when user changes (settings change event)
     try {
@@ -31940,7 +31873,6 @@ export function initializeChatTab() {
             if (newAccessKey !== _chatSessionLastAccessedUserKey) {
                 console.log(`[chatTab] User changed, reloading conversation last-accessed map (${_chatSessionLastAccessedUserKey} -> ${newAccessKey})`);
                 loadChatSessionLastAccessedMap();
-                showAllConversationHistoryMatches = false;
                 shouldRerenderTabs = true;
             }
 
@@ -38301,14 +38233,8 @@ export function __testOnly_getSessionTabsCache() {
 export async function __testOnly_deleteConversation(sessionId) {
     return deleteConversation(sessionId);
 }
-export async function __testOnly_performConversationSearch(options = {}) {
-    return performConversationSearch(options);
-}
-export async function __testOnly_restoreConversation(sessionId) {
-    return restoreConversation(sessionId);
-}
-export function __testOnly_getConversationSearchState() {
-    return { ...conversationSearchState, results: [...conversationSearchState.results] };
+export async function __testOnly_openConversationSearchResult(row = {}) {
+    return openConversationSearchResult(row);
 }
 export async function __testOnly_refreshChatPromptQueueFromServer() {
     return refreshChatPromptQueueFromServer({ silent: false });

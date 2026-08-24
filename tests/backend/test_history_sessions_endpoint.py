@@ -92,6 +92,17 @@ def test_history_sessions_passes_agent_visibility_and_returns_counts(
         "get_chat_history_session_summaries_result",
         _fake_summaries,
     )
+    recency_call = {}
+
+    def _fake_older_count(*args, **kwargs):
+        recency_call.update(kwargs)
+        return 41
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_sessions_older_than_count",
+        _fake_older_count,
+    )
 
     import src.backend.services.shared_conversation_service as shared_conversation_service
 
@@ -112,7 +123,7 @@ def test_history_sessions_passes_agent_visibility_and_returns_counts(
     )
 
     response = client.get(
-        "/von/history/sessions?limit=50&summary=light&agent_visibility=exclude&keep_newest_agent_created=true",
+        "/von/history/sessions?limit=50&summary=light&agent_visibility=exclude&keep_newest_agent_created=true&recent_window_days=30",
         headers={"X-Von-Window-Session": "ws_test"},
     )
 
@@ -128,6 +139,10 @@ def test_history_sessions_passes_agent_visibility_and_returns_counts(
     assert payload["hidden_agent_created_session_count"] == 59
     assert payload["agent_created_session_total"] == 60
     assert payload["newest_visible_agent_created_session_id"] == "agent-new"
+    assert payload["older_than_window_count"] == 41
+    assert payload["recent_window_days"] == 30
+    assert recency_call["namespace"] == "#V#u@org"
+    assert recency_call["agent_visibility"] == "exclude"
 
 
 def test_history_sessions_projects_server_conversation_preferences(
