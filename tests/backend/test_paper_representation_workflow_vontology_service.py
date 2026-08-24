@@ -59,6 +59,7 @@ from src.backend.workflows.engine import (
     WorkflowDefinition,
     WorkflowExecutor,
     WorkflowStateSpec,
+    evaluate_transition_condition_spec,
 )
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
@@ -981,6 +982,52 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ].to_state
         == reject_title_reuse_state_id
     )
+    optional_text_metadata_guards = {
+        "attach_metadata": ("public_title_present", "title"),
+        "decide_summary_metadata": ("public_summary_present", "summary"),
+        "decide_publication_date_metadata": (
+            "public_publication_date_present",
+            "publication_date",
+        ),
+    }
+    for state_name, (reason, context_key) in optional_text_metadata_guards.items():
+        state_id = authority_service._step_concept_id(
+            workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+            state_id=state_name,
+        )
+        transitions = {
+            transition.reason: transition
+            for transition in metadata_definition.states[state_id].transitions
+        }
+        condition_spec = transitions[reason].condition_spec
+        assert condition_spec == {
+            "kind": "all",
+            "conditions": [
+                {
+                    "kind": "context_exists",
+                    "key": context_key,
+                    "expected": True,
+                },
+                {
+                    "kind": "context_is_null",
+                    "key": context_key,
+                    "expected": False,
+                },
+            ],
+        }
+        assert (
+            evaluate_transition_condition_spec(
+                context={context_key: None}, condition_spec=condition_spec
+            )
+            is False
+        )
+        assert (
+            evaluate_transition_condition_spec(
+                context={context_key: "public metadata"},
+                condition_spec=condition_spec,
+            )
+            is True
+        )
     resolve_topics_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="resolve_topics",
@@ -2328,7 +2375,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "34" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "35" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -3724,7 +3771,11 @@ def test_metadata_workflow_represents_sparse_source_uri_without_title(
             user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
             org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
         ),
-        data={"source_uri": source_uri},
+        data={
+            "source_uri": source_uri,
+            "summary": None,
+            "publication_date": None,
+        },
     )
 
     assert result.completed is True
