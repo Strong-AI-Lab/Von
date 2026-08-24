@@ -1,8 +1,15 @@
 /** @jest-environment jsdom */
 
+const fs = require('fs');
+const path = require('path');
+
 const componentPath = '../../src/frontend/web/von_interface/static/js/components/footerOrganisationSwitcher.js';
 const apiServicePath = '../../src/frontend/web/von_interface/static/js/apiService.js';
 const orgSelectorPath = '../../src/frontend/web/von_interface/static/js/components/orgSelector.js';
+const styles = fs.readFileSync(
+    path.resolve(__dirname, '../../src/frontend/web/von_interface/static/styles.css'),
+    'utf8',
+);
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     getUserContext: jest.fn(),
@@ -86,6 +93,15 @@ describe('footer organisation switcher', () => {
             conceptName: 'University of Auckland Strong AI Lab',
             displayName: 'University of Auckland Strong AI Lab',
         });
+    });
+
+    test('uses border-box sizing for the split trigger and responsive menu dimensions', () => {
+        const triggerRule = styles.match(/\.footer-org-menu-trigger\s*\{([^}]*)\}/)?.[1] || '';
+        const menuRule = styles.match(/\.footer-org-menu\s*\{([^}]*)\}/)?.[1] || '';
+
+        expect(triggerRule).toMatch(/box-sizing:\s*border-box/);
+        expect(triggerRule).toMatch(/height:\s*100%/);
+        expect(menuRule).toMatch(/box-sizing:\s*border-box/);
     });
 
     test('switches exactly once, exposes progress, and updates the current footer concept', async () => {
