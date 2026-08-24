@@ -49,6 +49,7 @@ describe('conversationHistoryPreferences', () => {
         });
         expect(limited.totalMatchingCount).toBe(3);
         expect(limited.hiddenByLimitCount).toBe(1);
+        expect(limited.olderThanWindowCount).toBe(1);
         expect(limited.sessionsToRender.map((s) => s.session_id)).toEqual(['b', 'a']);
 
         const expanded = selectConversationHistorySessions({

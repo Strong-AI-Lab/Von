@@ -3958,6 +3958,106 @@ def get_chat_history_session_count(
         ) from e
 
 
+def get_chat_history_sessions_older_than_count(
+    user_id: str,
+    *,
+    cutoff: datetime,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
+) -> int:
+    """Count actor-owned, untrashed sessions older than a recency cutoff.
+
+    This deliberately counts through a small metadata query instead of deriving
+    the value from the bounded session-tab result window.  The UI can therefore
+    explain that older conversations exist without materialising their history.
+    """
+
+    if not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(cutoff, datetime):
+        raise ChatHistoryServiceError("cutoff must be a datetime.")
+
+    cutoff_utc = cutoff
+    if cutoff_utc.tzinfo is None:
+        cutoff_utc = cutoff_utc.replace(tzinfo=timezone.utc)
+    else:
+        cutoff_utc = cutoff_utc.astimezone(timezone.utc)
+
+    visibility = _normalise_chat_session_agent_visibility(agent_visibility)
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_sessions_older_than_count")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    query["trashed_at"] = None
+    clauses: list[Dict[str, Any]] = [
+        {
+            "$or": [
+                {"updated_at": {"$lt": cutoff_utc}},
+                {
+                    "updated_at": {"$in": [None, ""]},
+                    "created_at": {"$lt": cutoff_utc},
+                },
+            ]
+        }
+    ]
+    agent_created_clause: Dict[str, Any] = {
+        "$or": [
+            {
+                "is_agent_created": {
+                    "$in": [True, "true", "1", "yes", "on", "y"]
+                }
+            },
+            {"origin_kind": {"$in": sorted(CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS)}},
+            {
+                "test_artifact_kind": {
+                    "$exists": True,
+                    "$nin": [None, "", " "],
+                }
+            },
+        ]
+    }
+    if visibility == CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE:
+        clauses.append({"$nor": [agent_created_clause]})
+    elif visibility == CHAT_SESSION_AGENT_VISIBILITY_ONLY:
+        clauses.append(agent_created_clause)
+    query["$and"] = clauses
+
+    try:
+        summary = next(
+            _read_aggregate(
+                chat_history_coll,
+                [{"$match": query}, {"$count": "session_count"}],
+                operation="get_chat_history_sessions_older_than_count.aggregate",
+            ),
+            None,
+        )
+        count = 0
+        if isinstance(summary, dict):
+            raw_count = summary.get("session_count")
+            if isinstance(raw_count, int) and raw_count >= 0:
+                count = raw_count
+        _record_chat_history_read_success()
+        return count
+    except PyMongoError as e:
+        _record_chat_history_read_failure(
+            "get_chat_history_sessions_older_than_count", e
+        )
+        logger.error(
+            "Error retrieving older chat history session count: %s", e, exc_info=True
+        )
+        raise ChatHistoryServiceError(
+            f"Could not retrieve older chat history session count: {e}"
+        ) from e
+
+
 def _build_session_summary_from_metadata(
     doc: Dict[str, Any],
     *,

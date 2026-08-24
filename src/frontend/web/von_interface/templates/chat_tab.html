@@ -4,25 +4,12 @@
     <div id="conversationWorkspace" class="conversation-workspace" data-tabs-layout="horizontal"
       data-effective-tabs-layout="horizontal">
       <div class="chat-session-tabs-row" aria-label="Conversation sessions">
-        <div class="conversation-search" role="search" aria-label="Search conversations">
-          <label class="sr-only" for="conversationSearchInput">Search conversation titles and content</label>
-          <input id="conversationSearchInput" class="conversation-search-input" type="search"
-            placeholder="Search conversations" autocomplete="off" />
-          <button id="conversationSearchButton" class="conversation-search-button" type="button">Search</button>
-          <button id="conversationTrashButton" class="conversation-search-button" type="button"
-            aria-pressed="false">Trash</button>
-        </div>
         <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"
           aria-orientation="horizontal"></div>
-        <div id="chatSessionCount" class="chat-session-count" aria-label="Conversation count" title="Conversations">—
+        <div class="chat-session-history-summary" aria-label="Conversation history summary">
+          <div id="chatSessionHistoryControls" class="chat-session-history-controls"></div>
         </div>
       </div>
-      <div id="conversationSearchPanel" class="conversation-search-panel" hidden>
-        <div id="conversationSearchStatus" class="conversation-search-status" role="status" aria-live="polite"></div>
-        <div id="conversationSearchResults" class="conversation-search-results"></div>
-        <button id="conversationSearchMore" class="conversation-search-more" type="button" hidden>Load more</button>
-      </div>
-
       <div class="chat-conversation-main">
         <div class="chat-conversation-masthead">
           <div class="chat-conversation-context">

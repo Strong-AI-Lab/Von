@@ -2566,6 +2566,7 @@ body {
 }
 
 .global-header .vontology-search-results {
+    display: none;
     position: absolute;
     top: 100%;
     left: 0;
@@ -2574,11 +2575,15 @@ body {
     border: 1px solid #d1d5db;
     border-top: none;
     border-radius: 0 0 6px 6px;
-    max-height: 300px;
+    max-height: min(520px, calc(100vh - var(--von-fixed-shell-height, 104px) - 20px));
     overflow-y: auto;
     z-index: 1300;
     /* Above header (1200) */
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.global-header .vontology-search-results.open {
+    display: block;
 }
 
 .global-header .vontology-search {
@@ -2586,6 +2591,186 @@ body {
     flex: 1;
     max-width: none;
     margin: 0;
+}
+
+.conversation-recovery-button {
+    position: relative;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #fff;
+    color: #64748b;
+    cursor: pointer;
+}
+
+.conversation-recovery-button[hidden],
+.conversation-recovery-count[hidden] {
+    display: none;
+}
+
+.conversation-recovery-button:hover,
+.conversation-recovery-button[aria-pressed="true"] {
+    border-color: #94a3b8;
+    background: #f1f5f9;
+    color: #334155;
+}
+
+.conversation-recovery-button:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+.conversation-recovery-button svg {
+    width: 19px;
+    height: 19px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.conversation-recovery-count {
+    position: absolute;
+    top: -7px;
+    right: -8px;
+    min-width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 0 4px;
+    border: 2px solid #fff;
+    border-radius: 999px;
+    background: #475569;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
+
+.unified-search-group + .unified-search-group {
+    border-top: 1px solid #e2e8f0;
+}
+
+.unified-search-group-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 7px 10px 5px;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.unified-search-provider-notice {
+    padding: 8px 10px;
+    color: #64748b;
+    font-size: 12px;
+}
+
+.unified-search-provider-notice.is-error {
+    color: #9f1239;
+}
+
+.unified-search-provider-notice.is-partial {
+    border-top: 1px dashed #e2e8f0;
+    background: #fffbeb;
+    color: #854d0e;
+}
+
+.global-header .vontology-search-results .unified-search-conversation-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.global-header .vontology-search-results .unified-search-conversation-item:hover,
+.global-header .vontology-search-results .unified-search-conversation-item.active {
+    background: #f1f5f9;
+}
+
+.unified-search-conversation-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 10px;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 9px 10px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+}
+
+button.unified-search-conversation-main {
+    cursor: pointer;
+}
+
+.unified-search-conversation-title {
+    min-width: 0;
+    overflow: hidden;
+    color: #0f172a;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.unified-search-conversation-date {
+    color: #64748b;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.unified-search-conversation-snippet {
+    grid-column: 1 / -1;
+    min-width: 0;
+    overflow: hidden;
+    color: #64748b;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.unified-search-more-button,
+.unified-search-restore-button {
+    margin: 7px 10px;
+    padding: 5px 9px;
+    border: 1px solid #cbd5e1;
+    border-radius: 7px;
+    background: #fff;
+    color: #334155;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.unified-search-more-button:hover,
+.unified-search-restore-button:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
+.unified-search-restore-button:disabled {
+    cursor: wait;
+    opacity: 0.65;
 }
 
 /* Search result items within global header */
@@ -7320,6 +7505,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 
 .chat-session-tabs {
     display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
     align-items: flex-end;
     gap: 6px;
     margin-bottom: 0;
@@ -7334,89 +7521,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     gap: 10px;
     margin-bottom: 10px;
     scroll-margin-top: calc(var(--von-fixed-shell-height, 104px) + 10px);
-}
-
-.conversation-search {
-    display: flex;
-    flex: 0 1 360px;
-    gap: 6px;
-    align-items: center;
-}
-
-.conversation-search-input {
-    min-width: 150px;
-    width: 100%;
-    border: 1px solid #cbd5e1;
-    border-radius: 8px;
-    padding: 7px 9px;
-    font: inherit;
-}
-
-.conversation-search-button,
-.conversation-search-more {
-    border: 1px solid #cbd5e1;
-    border-radius: 8px;
-    background: #fff;
-    color: #334155;
-    padding: 7px 10px;
-    cursor: pointer;
-}
-
-.conversation-search-button[aria-pressed="true"] {
-    border-color: #64748b;
-    background: #f1f5f9;
-}
-
-.conversation-search-panel {
-    margin: -2px 0 12px;
-    padding: 10px;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    background: #f8fafc;
-}
-
-.conversation-search-status {
-    margin-bottom: 7px;
-    color: #64748b;
-    font-size: 12px;
-}
-
-.conversation-search-results {
-    display: grid;
-    gap: 6px;
-}
-
-.conversation-search-result {
-    display: grid;
-    grid-template-columns: minmax(150px, 1fr) auto;
-    gap: 3px 10px;
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    background: #fff;
-    color: inherit;
-    text-align: left;
-}
-
-.conversation-search-result-title {
-    font-weight: 600;
-}
-
-.conversation-search-result-date,
-.conversation-search-result-snippet {
-    color: #64748b;
-    font-size: 12px;
-}
-
-.conversation-search-result-snippet {
-    grid-column: 1 / -1;
-}
-
-.conversation-search-result-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
 }
 
 .chat-session-tab-group-start {
@@ -7464,6 +7568,21 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     font-variant-numeric: tabular-nums;
     -webkit-user-select: none;
     user-select: none;
+}
+
+.chat-session-history-summary,
+.chat-session-history-controls {
+    display: flex;
+    align-items: center;
+}
+
+.chat-session-history-summary {
+    flex: 0 0 auto;
+    gap: 6px;
+}
+
+.chat-session-history-controls {
+    gap: 4px;
 }
 
 .chat-session-tabs::-webkit-scrollbar {
@@ -7655,20 +7774,44 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     justify-content: center;
 }
 
-.chat-session-tab-more {
-    background: #f8fafc;
-    border-style: dashed;
-    border-color: #94a3b8;
-    color: #334155;
-    align-items: center;
-    justify-content: center;
-    max-width: none;
-    padding: 6px 10px;
+.chat-session-history-toggle {
+    flex: 0 0 auto;
+    min-width: 30px;
+    padding: 3px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #fff;
+    color: #475569;
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.2;
+    cursor: pointer;
 }
 
-.chat-session-tab-more:hover {
+.chat-session-history-toggle:hover,
+.chat-session-history-toggle:focus-visible {
     background: #f1f5f9;
     border-color: #64748b;
+}
+
+.chat-session-history-indicator {
+    flex: 0 0 auto;
+    align-self: center;
+    padding: 3px 6px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 999px;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: help;
+}
+
+.chat-session-history-indicator:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
 }
 
 .chat-session-tab-header {
@@ -8013,7 +8156,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     scrollbar-color: #cbd5e1 transparent;
 }
 
-.conversation-workspace[data-effective-tabs-layout="vertical"] .chat-session-count {
+.conversation-workspace[data-effective-tabs-layout="vertical"] .chat-session-history-summary {
     order: -1;
     align-self: flex-end;
     padding-right: 3px;

@@ -3213,12 +3213,32 @@ let __vontologySearchState = {
   items: [],
   activeIndex: -1,
   lastQuery: '',
-  abortController: null
+  abortController: null,
+  requestGeneration: 0,
+  mode: 'search',
+  concepts: {
+    items: [],
+    status: 'idle',
+    error: ''
+  },
+  conversations: {
+    items: [],
+    status: 'idle',
+    error: '',
+    nextCursor: null,
+    coverage: null
+  },
+  recoveryCount: null,
+  recoveryCountConfirmedZero: false,
+  recoveryCountCoverageComplete: false
 };
 // JVNAUTOSCI-550 additions: queue selections before tree ready & guard init
 let __vontologyTreeReady = false;
 const __pendingTreeSelections = [];
 let __searchUiInitialised = false;
+let __conversationRecoveryInitialised = false;
+let __conversationRecoveryCountAbortController = null;
+let __conversationRecoveryCountGeneration = 0;
 // Session-scoped caches for performance
 const __instanceCountsCache = new Map(); // key: joined candidate ids -> counts object
 const __idToElement = new Map(); // concept_id -> span.vontology-node-name
@@ -3358,15 +3378,27 @@ export function setupVontologySearchUI() {
 
   const debounced = debounce(async () => {
     const q = input.value.trim();
-    if (!q) { clearSearchResults(); return; }
+    if (!q) { clearSearchResults({ invalidate: true }); return; }
     await performVontologySearch(q);
   }, 180);
 
   // Input handlers
-  input.addEventListener('input', debounced);
+  const handleInput = () => {
+    if (!input.value.trim()) {
+      clearSearchResults({ invalidate: true });
+      return;
+    }
+    if (__vontologySearchState.mode !== 'search') {
+      __vontologySearchState.mode = 'search';
+      setRecoveryButtonPressed(false);
+    }
+    debounced();
+  };
+  input.addEventListener('input', handleInput);
+  input.addEventListener('search', handleInput);
   input.addEventListener('focus', () => {
-    if (__vontologySearchState.items.length) openResults();
-    setExpanded(__vontologySearchState.items.length > 0);
+    if (searchHasVisibleContent()) openResults();
+    setExpanded(searchHasVisibleContent());
   });
 
   // Keyboard navigation
@@ -3375,7 +3407,7 @@ export function setupVontologySearchUI() {
     // Allow Escape even if no items
     if (e.key === 'Escape') {
       e.preventDefault();
-      clearSearchResults();
+      clearSearchResults({ invalidate: true });
       input.blur();
       return;
     }
@@ -3415,11 +3447,14 @@ export function setupVontologySearchUI() {
 
   // Click outside to close
   document.addEventListener('click', (e) => {
-    if (!results.contains(e.target) && e.target !== input) {
-      clearSearchResults();
+    const recoveryButton = document.getElementById('conversationRecoveryButton');
+    if (!results.contains(e.target) && e.target !== input && !recoveryButton?.contains(e.target)) {
+      clearSearchResults({ invalidate: true });
       setExpanded(false);
     }
   });
+
+  initialiseConversationRecoveryUI();
 }
 
 function debounce(fn, wait) {
@@ -3430,99 +3465,185 @@ function debounce(fn, wait) {
   };
 }
 
-export async function performVontologySearch(q) {
-  const results = elements.vontologySearchResults;
-  if (!results) return;
-  __vontologySearchState.lastQuery = q;
-  __vontologySearchState.activeIndex = -1;
-  // Cancel previous in-flight request
+function beginUnifiedSearchRequest(mode = 'search') {
   try { __vontologySearchState.abortController?.abort(); } catch (_) { }
-  const ac = new AbortController();
-  __vontologySearchState.abortController = ac;
-  try {
-    const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=20&include_individuals=true`;
-    const res = await vontologyFetch(url, { signal: ac.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    let items = Array.isArray(data?.results) ? data.results : [];
+  const abortController = new AbortController();
+  const requestGeneration = __vontologySearchState.requestGeneration + 1;
+  __vontologySearchState.abortController = abortController;
+  __vontologySearchState.requestGeneration = requestGeneration;
+  __vontologySearchState.mode = mode;
+  __vontologySearchState.activeIndex = -1;
+  return { abortController, requestGeneration };
+}
 
-    const trimmedQuery = q?.trim() || '';
-    if (trimmedQuery.startsWith('#V#')) {
-      const idLower = trimmedQuery.toLowerCase();
-      const alreadyPresent = items.some(it => (it.id || '').toLowerCase() === idLower);
-      if (!alreadyPresent) {
-        try {
-          const nodeRes = await vontologyFetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(trimmedQuery)}`, { signal: ac.signal });
-          if (nodeRes.ok) {
-            const nodeData = await nodeRes.json();
-            if (nodeData && !nodeData.error) {
-              // Derive a friendly label if the node has one; otherwise keep the ID so users know it exists.
-              const deriveName = () => {
-                if (typeof nodeData.name === 'string' && nodeData.name.trim()) return nodeData.name.trim();
-                if (typeof nodeData.display_name === 'string' && nodeData.display_name.trim()) return nodeData.display_name.trim();
-                const raw = nodeData.raw_doc || {};
-                if (typeof raw.name === 'string' && raw.name.trim()) return raw.name.trim();
-                if (typeof raw.display_name === 'string' && raw.display_name.trim()) return raw.display_name.trim();
-                return trimmedQuery;
-              };
-              const deriveKind = () => {
-                if (typeof nodeData.kind === 'string') return nodeData.kind;
-                if (typeof nodeData.computed_kind === 'string') return nodeData.computed_kind;
-                const relationships = nodeData.raw_doc?.relationships || {};
-                const instanceRels = Array.isArray(nodeData.is_an_instance_of) ? nodeData.is_an_instance_of : relationships.is_an_instance_of;
-                const typeRels = Array.isArray(nodeData.is_a_type_of) ? nodeData.is_a_type_of : relationships.is_a_type_of;
-                if (Array.isArray(instanceRels) && instanceRels.length && (!Array.isArray(typeRels) || !typeRels.length)) {
-                  return 'individual';
-                }
-                return 'type';
-              };
-              const fallbackItem = {
-                id: trimmedQuery,
-                name: deriveName(),
-                kind: deriveKind() || 'type'
-              };
-              items = [fallbackItem, ...items];
-            }
-          } else {
-            let errorPayload = null;
-            try { errorPayload = await nodeRes.json(); } catch (_) { }
-            items = [
-              makeExactIdSearchErrorItem(trimmedQuery, nodeRes.status, errorPayload),
-              ...items
-            ];
+function isCurrentUnifiedSearchRequest(requestGeneration) {
+  return __vontologySearchState.requestGeneration === requestGeneration;
+}
+
+function sortConceptSearchItems(items) {
+  if (!items.length || !items.some(it => typeof it.relevance_score === 'number')) {
+    return items;
+  }
+  return items.slice().sort((a, b) => {
+    const aScore = typeof a.relevance_score === 'number' ? a.relevance_score : -1;
+    const bScore = typeof b.relevance_score === 'number' ? b.relevance_score : -1;
+    return bScore - aScore;
+  });
+}
+
+async function fetchConceptSearchItems(q, signal) {
+  const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=20&include_individuals=true`;
+  const res = await vontologyFetch(url, { signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  let items = Array.isArray(data?.results) ? data.results : [];
+
+  const trimmedQuery = q?.trim() || '';
+  if (trimmedQuery.startsWith('#V#')) {
+    const idLower = trimmedQuery.toLowerCase();
+    const alreadyPresent = items.some(it => (it.id || '').toLowerCase() === idLower);
+    if (!alreadyPresent) {
+      try {
+        const nodeRes = await vontologyFetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(trimmedQuery)}`, { signal });
+        if (nodeRes.ok) {
+          const nodeData = await nodeRes.json();
+          if (nodeData && !nodeData.error) {
+            const deriveName = () => {
+              if (typeof nodeData.name === 'string' && nodeData.name.trim()) return nodeData.name.trim();
+              if (typeof nodeData.display_name === 'string' && nodeData.display_name.trim()) return nodeData.display_name.trim();
+              const raw = nodeData.raw_doc || {};
+              if (typeof raw.name === 'string' && raw.name.trim()) return raw.name.trim();
+              if (typeof raw.display_name === 'string' && raw.display_name.trim()) return raw.display_name.trim();
+              return trimmedQuery;
+            };
+            const deriveKind = () => {
+              if (typeof nodeData.kind === 'string') return nodeData.kind;
+              if (typeof nodeData.computed_kind === 'string') return nodeData.computed_kind;
+              const relationships = nodeData.raw_doc?.relationships || {};
+              const instanceRels = Array.isArray(nodeData.is_an_instance_of) ? nodeData.is_an_instance_of : relationships.is_an_instance_of;
+              const typeRels = Array.isArray(nodeData.is_a_type_of) ? nodeData.is_a_type_of : relationships.is_a_type_of;
+              if (Array.isArray(instanceRels) && instanceRels.length && (!Array.isArray(typeRels) || !typeRels.length)) {
+                return 'individual';
+              }
+              return 'type';
+            };
+            items = [{
+              id: trimmedQuery,
+              name: deriveName(),
+              kind: deriveKind() || 'type'
+            }, ...items];
           }
-        } catch (lookupErr) {
-          if (lookupErr?.name === 'AbortError') throw lookupErr;
-          console.debug('[vontology search] id lookup failed', lookupErr);
-          items = [
-            makeExactIdSearchErrorItem(trimmedQuery, null, null),
-            ...items
-          ];
+        } else {
+          let errorPayload = null;
+          try { errorPayload = await nodeRes.json(); } catch (_) { }
+          items = [makeExactIdSearchErrorItem(trimmedQuery, nodeRes.status, errorPayload), ...items];
         }
+      } catch (lookupErr) {
+        if (lookupErr?.name === 'AbortError') throw lookupErr;
+        console.debug('[vontology search] id lookup failed', lookupErr);
+        items = [makeExactIdSearchErrorItem(trimmedQuery, null, null), ...items];
       }
     }
-    // Use backend relevance scores if available; otherwise use legacy client-side sorting
-    if (items.length && items.some(it => typeof it.relevance_score === 'number')) {
-      // Sort by relevance_score descending (higher scores first)
-      items = items.slice(); // copy
-      items.sort((a, b) => {
-        const aScore = typeof a.relevance_score === 'number' ? a.relevance_score : -1;
-        const bScore = typeof b.relevance_score === 'number' ? b.relevance_score : -1;
-        return bScore - aScore; // descending order
-      });
-    }
-    __vontologySearchState.items = items;
-    renderSearchResults(items);
-  } catch (err) {
-    if (err?.name === 'AbortError') return; // expected
-    console.warn('[vontology search] error:', err);
-    const trimmedQuery = q?.trim() || '';
-    const errorItems = trimmedQuery.startsWith('#V#')
-      ? [makeExactIdSearchErrorItem(trimmedQuery, null, null)]
-      : [];
-    __vontologySearchState.items = errorItems;
-    renderSearchResults(errorItems);
   }
+  return sortConceptSearchItems(items);
+}
+
+async function fetchConversationSearchPage(query, {
+  cursor = null,
+  signal = null,
+  trashedOnly = false,
+  pageSize = 8,
+  sort = 'relevance'
+} = {}) {
+  const params = new URLSearchParams({
+    q: query,
+    // The interactive UI uses the indexed title/content path for predictable
+    // typeahead latency. The MCP conversation_search capability retains hybrid
+    // RAG search for model-driven retrieval.
+    match_mode: 'lexical',
+    page_size: String(pageSize),
+    sort,
+    trashed_only: trashedOnly ? 'true' : 'false'
+  });
+  if (cursor) params.set('cursor', cursor);
+  const response = await vontologyFetch(`/von/api/session/conversation_search?${params.toString()}`, {
+    cache: 'no-store',
+    signal
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error || `Conversation search failed (HTTP ${response.status})`);
+  }
+  return data;
+}
+
+export async function performVontologySearch(q) {
+  const results = elements.vontologySearchResults;
+  const trimmedQuery = String(q || '').trim();
+  if (!results) return;
+  if (!trimmedQuery) {
+    clearSearchResults({ invalidate: true });
+    return;
+  }
+
+  const { abortController, requestGeneration } = beginUnifiedSearchRequest('search');
+  __vontologySearchState.lastQuery = trimmedQuery;
+  __vontologySearchState.concepts = { items: [], status: 'loading', error: '' };
+  __vontologySearchState.conversations = {
+    items: [], status: 'loading', error: '', nextCursor: null, coverage: null
+  };
+  setRecoveryButtonPressed(false);
+  renderSearchResults();
+
+  const conceptTask = fetchConceptSearchItems(trimmedQuery, abortController.signal)
+    .then(conceptItems => {
+      if (!isCurrentUnifiedSearchRequest(requestGeneration)) return;
+      __vontologySearchState.concepts = {
+        items: conceptItems,
+        status: conceptItems.length ? 'ready' : 'empty',
+        error: ''
+      };
+      renderSearchResults();
+    })
+    .catch(error => {
+      if (error?.name === 'AbortError' || !isCurrentUnifiedSearchRequest(requestGeneration)) return;
+      console.warn('[unified search] concept provider failed:', error);
+      const exactIdItems = trimmedQuery.startsWith('#V#')
+        ? [makeExactIdSearchErrorItem(trimmedQuery, null, null)]
+        : [];
+      __vontologySearchState.concepts = {
+        items: exactIdItems,
+        status: 'error',
+        error: 'Concept search is temporarily unavailable.'
+      };
+      renderSearchResults();
+    });
+  const conversationTask = fetchConversationSearchPage(trimmedQuery, { signal: abortController.signal })
+    .then(data => {
+      if (!isCurrentUnifiedSearchRequest(requestGeneration)) return;
+      const conversationItems = Array.isArray(data?.results) ? data.results : [];
+      __vontologySearchState.conversations = {
+        items: conversationItems,
+        status: conversationItems.length ? 'ready' : 'empty',
+        error: '',
+        nextCursor: data?.next_cursor || null,
+        coverage: data?.index_coverage || null
+      };
+      renderSearchResults();
+    })
+    .catch(error => {
+      if (error?.name === 'AbortError' || !isCurrentUnifiedSearchRequest(requestGeneration)) return;
+      console.warn('[unified search] conversation provider failed:', error);
+      __vontologySearchState.conversations = {
+        items: [],
+        status: 'error',
+        error: 'Conversation search is temporarily unavailable.',
+        nextCursor: null,
+        coverage: null
+      };
+      renderSearchResults();
+    });
+  await Promise.all([conceptTask, conversationTask]);
 }
 
 function makeExactIdSearchErrorItem(conceptId, status, payload) {
@@ -3572,81 +3693,286 @@ async function copySearchConceptIdToClipboard(conceptId) {
   }
 }
 
-function renderSearchResults(items) {
+function isConversationWorkspaceActive() {
+  return document.body?.dataset?.activeTab === 'chatTab'
+    || document.getElementById('chatTab')?.classList.contains('active') === true;
+}
+
+function searchHasVisibleContent() {
+  return __vontologySearchState.mode === 'recovery'
+    || Boolean(__vontologySearchState.lastQuery)
+    || ['loading', 'ready', 'empty', 'error'].includes(__vontologySearchState.concepts.status)
+    || ['loading', 'ready', 'empty', 'error', 'loading-more'].includes(__vontologySearchState.conversations.status);
+}
+
+function normaliseConceptSearchItem(item) {
+  return { ...item, searchType: 'concept' };
+}
+
+function normaliseConversationSearchItem(item) {
+  const sessionId = String(item?.session_id || '').trim();
+  const displayName = String(item?.display_name || item?.session_name || '').trim() || 'Unnamed conversation';
+  return {
+    ...item,
+    id: sessionId,
+    name: displayName,
+    searchType: 'conversation'
+  };
+}
+
+function getOrderedSearchGroups() {
+  if (__vontologySearchState.mode === 'recovery') return ['conversations'];
+  return isConversationWorkspaceActive()
+    ? ['conversations', 'concepts']
+    : ['concepts', 'conversations'];
+}
+
+function rebuildSearchKeyboardItems() {
+  const providers = {
+    concepts: __vontologySearchState.concepts.items.map(normaliseConceptSearchItem),
+    conversations: __vontologySearchState.mode === 'recovery'
+      ? []
+      : __vontologySearchState.conversations.items.map(normaliseConversationSearchItem)
+  };
+  __vontologySearchState.items = getOrderedSearchGroups()
+    .flatMap(groupKey => providers[groupKey] || [])
+    .filter(item => !item.disabled && item.id);
+}
+
+function formatConversationSearchDate(item) {
+  const raw = item?.last_message_at || item?.created_at;
+  if (!raw) return '';
+  const date = new Date(raw);
+  if (!Number.isFinite(date.getTime())) return '';
+  const options = { day: 'numeric', month: 'short' };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+  return date.toLocaleDateString(undefined, options);
+}
+
+function createSearchGroupHeading(text, id) {
+  const heading = document.createElement('div');
+  heading.className = 'unified-search-group-heading';
+  heading.id = id;
+  heading.textContent = text;
+  return heading;
+}
+
+function createSearchProviderNotice(text, className = '') {
+  const notice = document.createElement('div');
+  notice.className = `unified-search-provider-notice ${className}`.trim();
+  notice.setAttribute('role', 'status');
+  notice.textContent = text;
+  return notice;
+}
+
+function renderConceptSearchRow(item, keyboardIndex) {
+  const row = document.createElement('div');
+  row.className = item.error
+    ? 'vontology-search-item unified-search-option vontology-search-item-error'
+    : 'vontology-search-item unified-search-option';
+  row.setAttribute('role', 'option');
+  if (keyboardIndex !== null) row.dataset.searchIndex = String(keyboardIndex);
+  if (item.disabled) row.setAttribute('aria-disabled', 'true');
+
+  const name = document.createElement('span');
+  name.className = 'vontology-search-item-name';
+  name.textContent = item.name || item.id;
+  if (ENABLE_VONTOLOGY_SEARCH_TOOLTIPS) {
+    name.title = `${item.name || item.id} \u2014 ${item.id}`;
+  }
+  const badgeKind = item.kind;
+  const badgeText = item.kind === 'predicate'
+    ? 'Predicate'
+    : (item.kind === 'individual' ? 'Individual' : (item.kind === 'status' ? 'Status' : 'Type'));
+  const kind = document.createElement('span');
+  kind.className = `vontology-search-item-kind ${badgeKind}`;
+  kind.textContent = badgeText;
+  row.appendChild(name);
+  if (!ENABLE_VONTOLOGY_SEARCH_TOOLTIPS) {
+    const idInline = document.createElement('span');
+    idInline.className = 'vontology-search-item-id-inline';
+    idInline.textContent = item.id;
+    row.appendChild(idInline);
+  }
+  row.appendChild(kind);
+
+  if (!item.disabled && keyboardIndex !== null) {
+    row.addEventListener('mouseenter', () => setActiveIndex(keyboardIndex));
+    row.addEventListener('mouseleave', () => setActiveIndex(-1));
+    row.addEventListener('click', () => selectSearchItem(normaliseConceptSearchItem(item)));
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void copySearchConceptIdToClipboard(item.id);
+    });
+  }
+  return row;
+}
+
+function renderConversationSearchRow(item, keyboardIndex, { recovery = false } = {}) {
+  const normalised = normaliseConversationSearchItem(item);
+  const row = document.createElement('div');
+  row.className = 'unified-search-conversation-item unified-search-option';
+  row.setAttribute('role', recovery ? 'group' : 'option');
+  if (keyboardIndex !== null) row.dataset.searchIndex = String(keyboardIndex);
+
+  const main = document.createElement('div');
+  main.className = 'unified-search-conversation-main';
+
+  const title = document.createElement('span');
+  title.className = 'unified-search-conversation-title';
+  title.textContent = normalised.name;
+  const date = document.createElement('span');
+  date.className = 'unified-search-conversation-date';
+  date.textContent = formatConversationSearchDate(item);
+  main.appendChild(title);
+  if (date.textContent) main.appendChild(date);
+
+  const snippetText = String(item?.match?.snippet || '').trim();
+  if (snippetText) {
+    const snippet = document.createElement('span');
+    snippet.className = 'unified-search-conversation-snippet';
+    snippet.textContent = snippetText;
+    main.appendChild(snippet);
+  }
+
+  if (!recovery && keyboardIndex !== null) {
+    row.addEventListener('click', () => selectSearchItem(normalised));
+    row.addEventListener('mouseenter', () => setActiveIndex(keyboardIndex));
+    row.addEventListener('mouseleave', () => setActiveIndex(-1));
+  }
+  row.appendChild(main);
+
+  if (recovery) {
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'unified-search-restore-button';
+    restore.textContent = 'Restore';
+    restore.addEventListener('click', () => { void restoreConversationFromRecovery(item, restore); });
+    row.appendChild(restore);
+  }
+  return row;
+}
+
+function appendSearchProviderState(group, groupKey, provider) {
+  const label = groupKey === 'concepts' ? 'concepts' : 'conversations';
+  if (provider.status === 'loading') {
+    group.appendChild(createSearchProviderNotice(`Searching ${label}\u2026`, 'is-loading'));
+  } else if (provider.status === 'loading-more') {
+    group.appendChild(createSearchProviderNotice(`Loading more ${label}\u2026`, 'is-loading'));
+  } else if (provider.status === 'error') {
+    group.appendChild(createSearchProviderNotice(provider.error || `${label} search is unavailable.`, 'is-error'));
+  } else if (provider.status === 'empty' && provider.items.length === 0) {
+    const emptyMessage = __vontologySearchState.mode === 'recovery' && groupKey === 'conversations'
+      ? 'No removed conversations.'
+      : `No matching ${label}.`;
+    group.appendChild(createSearchProviderNotice(emptyMessage, 'is-empty'));
+  }
+
+  if (groupKey === 'conversations' && provider.coverage) {
+    const coverageIncomplete = provider.coverage.complete_for_accessible_window === false
+      || provider.coverage.candidate_window_complete === false;
+    if (coverageIncomplete) {
+      const notice = createSearchProviderNotice('Some older conversations may not appear yet.', 'is-partial');
+      const limitations = Array.isArray(provider.coverage.limitations)
+        ? provider.coverage.limitations.join(', ')
+        : '';
+      if (limitations) {
+        notice.title = limitations;
+        notice.setAttribute('data-keep-title', 'true');
+      }
+      group.appendChild(notice);
+    }
+  }
+}
+
+function renderSearchResults() {
   const results = elements.vontologySearchResults;
   if (!results) return;
   results.innerHTML = '';
-  if (!items.length) { results.classList.remove('open'); return; }
-  const list = document.createElement('div');
-  list.setAttribute('role', 'listbox');
-  items.forEach((it, idx) => {
-    const row = document.createElement('div');
-    row.className = it.error
-      ? 'vontology-search-item vontology-search-item-error'
-      : 'vontology-search-item';
-    row.setAttribute('role', 'option');
-    row.dataset.index = String(idx);
-    if (it.disabled) row.setAttribute('aria-disabled', 'true');
-    // left: name (with id tooltip)
-    const name = document.createElement('span');
-    name.className = 'vontology-search-item-name';
-    name.textContent = it.name || it.id;
-    if (ENABLE_VONTOLOGY_SEARCH_TOOLTIPS) {
-      // Provide combined name + id via native tooltip when enabled
-      name.title = `${it.name || it.id} \u2014 ${it.id}`;
-    } else {
-      // Ensure no stray title attribute remains (defensive if refactored elsewhere)
-      if (name.hasAttribute('title')) name.removeAttribute('title');
+  rebuildSearchKeyboardItems();
+  __vontologySearchState.activeIndex = -1;
+
+  if (!searchHasVisibleContent()) {
+    results.classList.remove('open');
+    try { elements.vontologySearchInput?.setAttribute('aria-expanded', 'false'); } catch (_) { }
+    return;
+  }
+
+  const keyboardIndexByKey = new Map(
+    __vontologySearchState.items.map((item, index) => [`${item.searchType}:${item.id}`, index])
+  );
+  getOrderedSearchGroups().forEach(groupKey => {
+    const provider = __vontologySearchState[groupKey];
+    const group = document.createElement('section');
+    const headingId = `unifiedSearch${groupKey === 'concepts' ? 'Concepts' : 'Conversations'}Heading`;
+    const headingText = __vontologySearchState.mode === 'recovery' && groupKey === 'conversations'
+      ? 'Removed conversations'
+      : (groupKey === 'concepts' ? 'Concepts' : 'Conversations');
+    group.className = `unified-search-group unified-search-group-${groupKey}`;
+    group.setAttribute('role', 'group');
+    group.setAttribute('aria-labelledby', headingId);
+    group.appendChild(createSearchGroupHeading(headingText, headingId));
+
+    provider.items.forEach(item => {
+      if (groupKey === 'concepts') {
+        const normalised = normaliseConceptSearchItem(item);
+        const index = normalised.disabled ? null : keyboardIndexByKey.get(`concept:${normalised.id}`);
+        group.appendChild(renderConceptSearchRow(item, Number.isInteger(index) ? index : null));
+      } else {
+        const normalised = normaliseConversationSearchItem(item);
+        const index = __vontologySearchState.mode === 'recovery'
+          ? null
+          : keyboardIndexByKey.get(`conversation:${normalised.id}`);
+        group.appendChild(renderConversationSearchRow(item, Number.isInteger(index) ? index : null, {
+          recovery: __vontologySearchState.mode === 'recovery'
+        }));
+      }
+    });
+    appendSearchProviderState(group, groupKey, provider);
+
+    if (groupKey === 'conversations' && provider.nextCursor) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'unified-search-more-button';
+      more.textContent = __vontologySearchState.mode === 'recovery'
+        ? 'More removed conversations'
+        : 'More conversations';
+      more.addEventListener('click', () => { void loadMoreConversationSearchResults(); });
+      group.appendChild(more);
     }
-    // right: kind badge (use backend's three-way classification)
-    const badgeKind = it.kind; // 'type', 'predicate', or 'individual' from backend
-    const badgeText = it.kind === 'predicate' ? 'Predicate' : (it.kind === 'individual' ? 'Individual' : (it.kind === 'status' ? 'Status' : 'Type'));
-    const kind = document.createElement('span');
-    kind.className = `vontology-search-item-kind ${badgeKind}`;
-    kind.textContent = badgeText;
-    row.appendChild(name);
-    if (!ENABLE_VONTOLOGY_SEARCH_TOOLTIPS) {
-      const idInline = document.createElement('span');
-      idInline.className = 'vontology-search-item-id-inline';
-      idInline.textContent = it.id;
-      row.appendChild(idInline);
-    }
-    row.appendChild(kind);
-    // interactions
-    if (!it.disabled) {
-      row.addEventListener('mouseenter', () => setActiveIndex(idx));
-      row.addEventListener('mouseleave', () => setActiveIndex(-1));
-      row.addEventListener('click', () => selectSearchItem(it));
-      row.addEventListener('contextmenu', (e) => {
-        try {
-          e.preventDefault();
-          e.stopPropagation();
-          copySearchConceptIdToClipboard(it.id);
-        } catch (_) {
-          // no-op
-        }
-      });
-    }
-    list.appendChild(row);
+    results.appendChild(group);
   });
-  results.appendChild(list);
   openResults();
 }
 
 function openResults() {
   const results = elements.vontologySearchResults;
   if (!results) return;
-  if (__vontologySearchState.items.length) results.classList.add('open');
-  try { elements.vontologySearchInput?.setAttribute('aria-expanded', __vontologySearchState.items.length ? 'true' : 'false'); } catch (_) { }
+  const open = searchHasVisibleContent();
+  results.classList.toggle('open', open);
+  try { elements.vontologySearchInput?.setAttribute('aria-expanded', open ? 'true' : 'false'); } catch (_) { }
 }
 
-function clearSearchResults() {
+function clearSearchResults({ invalidate = false } = {}) {
   const results = elements.vontologySearchResults;
-  if (!results) return;
-  results.classList.remove('open');
-  results.innerHTML = '';
+  if (invalidate) {
+    try { __vontologySearchState.abortController?.abort(); } catch (_) { }
+    __vontologySearchState.requestGeneration += 1;
+  }
+  if (results) {
+    results.classList.remove('open');
+    results.innerHTML = '';
+  }
   __vontologySearchState.items = [];
   __vontologySearchState.activeIndex = -1;
+  __vontologySearchState.lastQuery = '';
+  __vontologySearchState.concepts = { items: [], status: 'idle', error: '' };
+  __vontologySearchState.conversations = {
+    items: [], status: 'idle', error: '', nextCursor: null, coverage: null
+  };
+  __vontologySearchState.mode = 'search';
+  setRecoveryButtonPressed(false);
   try { elements.vontologySearchInput?.setAttribute('aria-expanded', 'false'); } catch (_) { }
 }
 
@@ -3654,9 +3980,10 @@ function setActiveIndex(idx) {
   __vontologySearchState.activeIndex = idx;
   const results = elements.vontologySearchResults;
   if (!results) return;
-  results.querySelectorAll('.vontology-search-item').forEach((el, i) => {
-    if (i === idx) el.classList.add('active');
-    else el.classList.remove('active');
+  results.querySelectorAll('.unified-search-option[data-search-index]').forEach(el => {
+    const active = Number(el.dataset.searchIndex) === idx;
+    el.classList.toggle('active', active);
+    el.setAttribute('aria-selected', active ? 'true' : 'false');
   });
 }
 
@@ -3666,18 +3993,253 @@ function moveActive(delta) {
   let idx = __vontologySearchState.activeIndex;
   idx = (idx + delta + n) % n;
   setActiveIndex(idx);
-  // ensure visible
   const results = elements.vontologySearchResults;
-  const el = results?.querySelector(`.vontology-search-item[data-index="${idx}"]`);
+  const el = results?.querySelector(`.unified-search-option[data-search-index="${idx}"]`);
   if (el && results) {
-    const r = results.getBoundingClientRect();
-    const e = el.getBoundingClientRect();
-    if (e.bottom > r.bottom) {
-      results.scrollTop += (e.bottom - r.bottom);
-    } else if (e.top < r.top) {
-      results.scrollTop -= (r.top - e.top);
+    const resultBounds = results.getBoundingClientRect();
+    const itemBounds = el.getBoundingClientRect();
+    if (itemBounds.bottom > resultBounds.bottom) {
+      results.scrollTop += (itemBounds.bottom - resultBounds.bottom);
+    } else if (itemBounds.top < resultBounds.top) {
+      results.scrollTop -= (resultBounds.top - itemBounds.top);
     }
   }
+}
+
+function setRecoveryButtonPressed(pressed) {
+  const button = document.getElementById('conversationRecoveryButton');
+  button?.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+}
+
+function updateConversationRecoveryButton() {
+  const button = document.getElementById('conversationRecoveryButton');
+  const badge = document.getElementById('conversationRecoveryCount');
+  if (!button || !badge) return;
+  const active = isConversationWorkspaceActive();
+  button.hidden = !active || __vontologySearchState.recoveryCountConfirmedZero;
+  const count = __vontologySearchState.recoveryCount;
+  if (Number.isFinite(count) && count > 0) {
+    badge.hidden = false;
+    badge.textContent = count > 99 ? '99+' : String(count);
+    const countDescription = __vontologySearchState.recoveryCountCoverageComplete
+      ? `${count} removed conversation${count === 1 ? '' : 's'}`
+      : `at least ${count} removed conversation${count === 1 ? '' : 's'}`;
+    button.title = `Open ${countDescription}`;
+    button.setAttribute('aria-label', `Open ${countDescription}`);
+  } else {
+    badge.hidden = true;
+    badge.textContent = '';
+    button.title = 'Open removed conversations';
+    button.setAttribute('aria-label', 'Open removed conversations');
+  }
+}
+
+function acceptConversationRecoveryCountPayload(data) {
+  const candidateCount = Number(data?.index_coverage?.accessible_window_count);
+  const count = Number.isFinite(candidateCount)
+    ? Math.max(0, Math.trunc(candidateCount))
+    : null;
+  const coverageComplete = data?.index_coverage?.candidate_window_complete === true;
+  __vontologySearchState.recoveryCount = count;
+  __vontologySearchState.recoveryCountCoverageComplete = coverageComplete;
+  __vontologySearchState.recoveryCountConfirmedZero = count === 0 && coverageComplete;
+  updateConversationRecoveryButton();
+}
+
+async function refreshConversationRecoveryCount() {
+  const requestGeneration = __conversationRecoveryCountGeneration + 1;
+  __conversationRecoveryCountGeneration = requestGeneration;
+  try { __conversationRecoveryCountAbortController?.abort(); } catch (_) { }
+  const abortController = new AbortController();
+  __conversationRecoveryCountAbortController = abortController;
+  try {
+    const data = await fetchConversationSearchPage('*', {
+      trashedOnly: true,
+      pageSize: 1,
+      sort: 'updated',
+      signal: abortController.signal
+    });
+    if (__conversationRecoveryCountGeneration !== requestGeneration) return;
+    acceptConversationRecoveryCountPayload(data);
+  } catch (error) {
+    if (error?.name === 'AbortError') return;
+    console.debug('[conversation recovery] count unavailable', error);
+    if (__conversationRecoveryCountGeneration === requestGeneration) {
+      __vontologySearchState.recoveryCountConfirmedZero = false;
+      updateConversationRecoveryButton();
+    }
+  }
+}
+
+async function openRemovedConversations() {
+  const results = elements.vontologySearchResults;
+  if (!results) return;
+  if (__vontologySearchState.mode === 'recovery' && results.classList.contains('open')) {
+    clearSearchResults({ invalidate: true });
+    return;
+  }
+  const input = elements.vontologySearchInput;
+  if (input) input.value = '';
+  const { abortController, requestGeneration } = beginUnifiedSearchRequest('recovery');
+  __vontologySearchState.lastQuery = '';
+  __vontologySearchState.concepts = { items: [], status: 'idle', error: '' };
+  __vontologySearchState.conversations = {
+    items: [], status: 'loading', error: '', nextCursor: null, coverage: null
+  };
+  setRecoveryButtonPressed(true);
+  renderSearchResults();
+  try {
+    const data = await fetchConversationSearchPage('*', {
+      trashedOnly: true,
+      pageSize: 20,
+      sort: 'updated',
+      signal: abortController.signal
+    });
+    if (!isCurrentUnifiedSearchRequest(requestGeneration)) return;
+    const items = Array.isArray(data?.results) ? data.results : [];
+    __vontologySearchState.conversations = {
+      items,
+      status: items.length ? 'ready' : 'empty',
+      error: '',
+      nextCursor: data?.next_cursor || null,
+      coverage: data?.index_coverage || null
+    };
+    acceptConversationRecoveryCountPayload(data);
+    renderSearchResults();
+  } catch (error) {
+    if (error?.name === 'AbortError' || !isCurrentUnifiedSearchRequest(requestGeneration)) return;
+    __vontologySearchState.conversations = {
+      items: [], status: 'error', error: 'Removed conversations are temporarily unavailable.', nextCursor: null, coverage: null
+    };
+    renderSearchResults();
+  }
+}
+
+async function loadMoreConversationSearchResults() {
+  const current = __vontologySearchState.conversations;
+  if (!current.nextCursor) return;
+  const mode = __vontologySearchState.mode;
+  const query = mode === 'recovery' ? '*' : __vontologySearchState.lastQuery;
+  const existingItems = current.items.slice();
+  const { abortController, requestGeneration } = beginUnifiedSearchRequest(mode);
+  __vontologySearchState.conversations = { ...current, status: 'loading-more', error: '' };
+  renderSearchResults();
+  try {
+    const data = await fetchConversationSearchPage(query, {
+      cursor: current.nextCursor,
+      trashedOnly: mode === 'recovery',
+      pageSize: mode === 'recovery' ? 20 : 8,
+      sort: mode === 'recovery' ? 'updated' : 'relevance',
+      signal: abortController.signal
+    });
+    if (!isCurrentUnifiedSearchRequest(requestGeneration)) return;
+    const appended = Array.isArray(data?.results) ? data.results : [];
+    const seen = new Set();
+    const items = [...existingItems, ...appended].filter(item => {
+      const id = String(item?.session_id || '');
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    __vontologySearchState.conversations = {
+      items,
+      status: items.length ? 'ready' : 'empty',
+      error: '',
+      nextCursor: data?.next_cursor || null,
+      coverage: data?.index_coverage || current.coverage || null
+    };
+    if (mode === 'recovery') acceptConversationRecoveryCountPayload(data);
+    renderSearchResults();
+  } catch (error) {
+    if (error?.name === 'AbortError' || !isCurrentUnifiedSearchRequest(requestGeneration)) return;
+    __vontologySearchState.conversations = {
+      ...current,
+      items: existingItems,
+      status: 'error',
+      error: 'More conversations could not be loaded.'
+    };
+    renderSearchResults();
+  }
+}
+
+async function restoreConversationFromRecovery(item, button) {
+  const sessionId = String(item?.session_id || '').trim();
+  if (!sessionId) return false;
+  const previousLabel = button?.textContent || 'Restore';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Restoring\u2026';
+  }
+  try {
+    const response = await vontologyFetch('/von/api/session/delete_chat_session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, action: 'restore' })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.status !== 'restored' || data?.trashed !== false) {
+      throw new Error(data?.error || 'Conversation restore could not be verified.');
+    }
+    __vontologySearchState.conversations.items = __vontologySearchState.conversations.items.filter(
+      row => row?.session_id !== sessionId
+    );
+    if (__vontologySearchState.conversations.items.length === 0 && !__vontologySearchState.conversations.nextCursor) {
+      __vontologySearchState.conversations.status = 'empty';
+    }
+    if (Number.isFinite(__vontologySearchState.recoveryCount)) {
+      __vontologySearchState.recoveryCount = Math.max(0, __vontologySearchState.recoveryCount - 1);
+      __vontologySearchState.recoveryCountConfirmedZero = false;
+    }
+    renderSearchResults();
+    document.dispatchEvent(new CustomEvent('von:conversation-trash-changed', {
+      detail: { action: 'restored', sessionId, source: 'recovery' }
+    }));
+    await refreshConversationRecoveryCount();
+    if (__vontologySearchState.recoveryCountConfirmedZero) {
+      clearSearchResults({ invalidate: true });
+      elements.vontologySearchInput?.focus();
+    }
+    return true;
+  } catch (error) {
+    __vontologySearchState.conversations.status = 'error';
+    __vontologySearchState.conversations.error = error?.message || 'Conversation restore failed.';
+    renderSearchResults();
+    return false;
+  } finally {
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.textContent = previousLabel;
+    }
+  }
+}
+
+function initialiseConversationRecoveryUI() {
+  if (__conversationRecoveryInitialised) return;
+  const button = document.getElementById('conversationRecoveryButton');
+  if (!button) return;
+  __conversationRecoveryInitialised = true;
+  button.addEventListener('click', () => { void openRemovedConversations(); });
+  document.addEventListener('von:conversation-trash-changed', event => {
+    if (event?.detail?.source === 'recovery') return;
+    void refreshConversationRecoveryCount();
+  });
+  document.addEventListener('von:tab-activated', event => {
+    updateConversationRecoveryButton();
+    if (event?.detail?.tabId === 'chatTab') void refreshConversationRecoveryCount();
+  });
+  const resetForActorContext = () => {
+    __vontologySearchState.recoveryCount = null;
+    __vontologySearchState.recoveryCountConfirmedZero = false;
+    __vontologySearchState.recoveryCountCoverageComplete = false;
+    clearSearchResults({ invalidate: true });
+    if (elements.vontologySearchInput) elements.vontologySearchInput.value = '';
+    updateConversationRecoveryButton();
+    void refreshConversationRecoveryCount();
+  };
+  document.addEventListener('orgSwitched', resetForActorContext);
+  document.addEventListener('authStatusChanged', resetForActorContext);
+  updateConversationRecoveryButton();
+  void refreshConversationRecoveryCount();
 }
 
 
@@ -3685,6 +4247,19 @@ async function selectSearchItem(item) {
   const __perfStartSearchSel = (typeof window !== 'undefined' && window.performance ? performance.now() : Date.now());
   if (!item) return;
   if (item.disabled) return;
+  if (item.searchType === 'conversation') {
+    const input = elements?.vontologySearchInput;
+    if (input) input.value = item.name || '';
+    clearSearchResults({ invalidate: true });
+    try {
+      document.dispatchEvent(new CustomEvent('von:open-conversation-search-result', {
+        detail: { conversation: item }
+      }));
+    } catch (error) {
+      console.error('[selectSearchItem] Failed to dispatch conversation selection', error);
+    }
+    return;
+  }
   const inputEl = elements && elements.vontologySearchInput;
   if (inputEl) {
     try {
@@ -4845,6 +5420,22 @@ export function __test_retireVontologyPreload() { retireVontologyPreload(); }
 
 // Export for testing
 export function __test_selectSearchItem(item) { return selectSearchItem(item); }
+export function __test_getUnifiedSearchState() {
+  return {
+    items: __vontologySearchState.items.map(item => ({ ...item })),
+    activeIndex: __vontologySearchState.activeIndex,
+    lastQuery: __vontologySearchState.lastQuery,
+    mode: __vontologySearchState.mode,
+    concepts: { ...__vontologySearchState.concepts, items: __vontologySearchState.concepts.items.map(item => ({ ...item })) },
+    conversations: { ...__vontologySearchState.conversations, items: __vontologySearchState.conversations.items.map(item => ({ ...item })) },
+    recoveryCount: __vontologySearchState.recoveryCount,
+    recoveryCountConfirmedZero: __vontologySearchState.recoveryCountConfirmedZero,
+    recoveryCountCoverageComplete: __vontologySearchState.recoveryCountCoverageComplete
+  };
+}
+export function __test_openRemovedConversations() { return openRemovedConversations(); }
+export function __test_refreshConversationRecoveryCount() { return refreshConversationRecoveryCount(); }
+export function __test_loadMoreConversationSearchResults() { return loadMoreConversationSearchResults(); }
 // Export for testing
 export function __test_renderSelectedNodePathContent(target, selectedNode, parents = []) {
   renderSelectedNodePathContent(target, selectedNode, parents);

@@ -22,7 +22,9 @@ describe('chat session pinning', () => {
         const olderRecentTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
         document.body.innerHTML = `
+            <input id="vontologySearchInput" />
             <div id="chatSessionTabs"></div>
+            <div id="chatSessionHistoryControls"></div>
             <div id="chatSessionMetadata"></div>
             <div id="scrollableField"></div>
         `;
@@ -218,5 +220,111 @@ describe('chat session pinning', () => {
             session_id: 's2',
             action: 'unpin',
         });
+    });
+
+    test('keeps compact history controls and reveals recent conversations in tranches', async () => {
+        localStorage.setItem('chatHistoryRecentLimit', '2');
+        localStorage.setItem('chatHistoryRecentWindowDays', '30');
+        const sessions = Array.from({ length: 4 }, (_, index) => ({
+            session_id: `recent-${index}`,
+            session_name: `Recent ${index}`,
+            last_message_at: new Date(Date.now() - index * 60_000).toISOString(),
+            created_at: new Date(Date.now() - index * 60_000).toISOString(),
+        }));
+        global.fetch = jest.fn(async (url) => {
+            if (String(url).startsWith('/von/api/session/context')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        user_id: '#V#pin_user',
+                        organisation_id: '#V#test_org',
+                        namespace: '#V#pin_user@test_org',
+                    })
+                };
+            }
+            if (String(url).startsWith('/von/history/sessions')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: null,
+                        sessions,
+                        recent_window_days: 30,
+                        older_than_window_count: 37,
+                    })
+                };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        require(chatTabModulePath);
+        await window.refreshChatSessionTabsForOrgSwitch();
+
+        const container = document.getElementById('chatSessionTabs');
+        const controls = document.getElementById('chatSessionHistoryControls');
+        expect(container.children[0].classList.contains('chat-session-tab-new')).toBe(true);
+        expect(container.children[1].dataset.sessionId).toBeTruthy();
+        expect(controls.children[0].classList.contains('chat-session-history-indicator')).toBe(true);
+        expect(controls.children[0].textContent).toBe('[37 > 30d]');
+        expect(controls.children[0].title).toContain('37 conversations are older than 30 days');
+        expect(controls.children[1].classList.contains('chat-session-history-toggle')).toBe(true);
+        expect(controls.children[1].textContent).toBe('+2');
+
+        controls.children[1].click();
+
+        expect(controls.querySelector('.chat-session-history-toggle')).toBeNull();
+        expect(container.querySelectorAll('[data-session-id]')).toHaveLength(4);
+        expect(container.children[1].dataset.sessionId).toBeTruthy();
+    });
+
+    test('Shift-click reveals every remaining recent conversation at once', async () => {
+        localStorage.setItem('chatHistoryRecentLimit', '2');
+        localStorage.setItem('chatHistoryRecentWindowDays', '30');
+        const sessions = Array.from({ length: 7 }, (_, index) => ({
+            session_id: `recent-${index}`,
+            session_name: `Recent ${index}`,
+            last_message_at: new Date(Date.now() - index * 60_000).toISOString(),
+            created_at: new Date(Date.now() - index * 60_000).toISOString(),
+        }));
+        global.fetch = jest.fn(async (url) => {
+            if (String(url).startsWith('/von/api/session/context')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        user_id: '#V#pin_user',
+                        organisation_id: '#V#test_org',
+                        namespace: '#V#pin_user@test_org',
+                    })
+                };
+            }
+            if (String(url).startsWith('/von/history/sessions')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: null,
+                        sessions,
+                        recent_window_days: 30,
+                        older_than_window_count: 0,
+                    })
+                };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        require(chatTabModulePath);
+        await window.refreshChatSessionTabsForOrgSwitch();
+
+        const container = document.getElementById('chatSessionTabs');
+        const overflowButton = document.querySelector('.chat-session-history-toggle');
+        expect(overflowButton.textContent).toBe('+5');
+        expect(overflowButton.title).toContain('Shift-click to show all');
+
+        overflowButton.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+        expect(document.querySelector('.chat-session-history-toggle')).toBeNull();
+        expect(container.querySelectorAll('[data-session-id]')).toHaveLength(7);
     });
 });

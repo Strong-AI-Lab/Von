@@ -50,17 +50,30 @@ describe('Global Vontology search selection', () => {
         localStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#michael_witbrock' }));
         sessionStorage.setItem('von_window_session_id', 'ws-search-test');
 
-        global.fetch = jest
-            .fn()
-            .mockResolvedValueOnce({
-                ok: true,
-                json: async () => ({ results: [] }),
-            })
-            .mockResolvedValueOnce({
+        global.fetch = jest.fn((url) => {
+            const raw = String(url);
+            if (raw.includes('/vontology/api/vontology/search')) {
+                return Promise.resolve({ ok: true, json: async () => ({ results: [] }) });
+            }
+            if (raw.includes('/von/api/session/conversation_search')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        results: [],
+                        next_cursor: null,
+                        index_coverage: {
+                            complete_for_accessible_window: true,
+                            candidate_window_complete: true
+                        }
+                    })
+                });
+            }
+            return Promise.resolve({
                 ok: false,
                 status: 404,
                 json: async () => ({ error: "Concept '#V#missing' not found in MongoDB." }),
             });
+        });
 
         await vontology.performVontologySearch('#V#missing');
 

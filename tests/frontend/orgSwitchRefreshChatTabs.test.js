@@ -57,7 +57,7 @@ describe('org switch chat session refresh', () => {
         await window.refreshChatSessionTabsForOrgSwitch();
 
         expect(global.fetch).toHaveBeenCalledWith(
-            '/von/history/sessions?limit=200&summary=light&agent_visibility=exclude&keep_newest_agent_created=true',
+            '/von/history/sessions?limit=200&summary=light&agent_visibility=exclude&keep_newest_agent_created=true&recent_window_days=30',
             expect.any(Object)
         );
     });

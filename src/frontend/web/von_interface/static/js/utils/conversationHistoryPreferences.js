@@ -104,9 +104,14 @@ export function selectConversationHistorySessions({
     const safeWindowDays = clampConversationHistoryRecentWindowDays(recentWindowDays);
     const cutoffMs = nowMs - (safeWindowDays * DAY_MS);
 
+    let olderThanWindowCount = 0;
     const sessionsInWindow = sessions.filter((session) => {
         const occurredAtMs = getSessionOccurredAtMs(session);
-        return occurredAtMs !== null && occurredAtMs >= cutoffMs;
+        if (occurredAtMs !== null && occurredAtMs < cutoffMs) {
+            olderThanWindowCount += 1;
+            return false;
+        }
+        return occurredAtMs !== null;
     });
 
     const sorted = sessionsInWindow.slice().sort((a, b) => (
@@ -121,6 +126,7 @@ export function selectConversationHistorySessions({
         sessionsToRender: limited,
         totalMatchingCount: sorted.length,
         hiddenByLimitCount,
+        olderThanWindowCount,
         recentLimit: safeLimit,
         recentWindowDays: safeWindowDays
     };

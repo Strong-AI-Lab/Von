@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 from urllib.parse import unquote
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, Mapping, Sequence, cast
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
@@ -15646,6 +15646,9 @@ def history_sessions():
         or chat_history_service.CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
     )
     keep_newest_agent_created = request.args.get("keep_newest_agent_created")
+    recent_window_days = request.args.get("recent_window_days", type=int)
+    if recent_window_days is not None:
+        recent_window_days = max(1, min(recent_window_days, 3650))
     active_session_id: str | None = None
     try:
         from ...services.shared_conversation_service import (
@@ -15695,6 +15698,26 @@ def history_sessions():
             agent_visibility=agent_visibility,
             keep_newest_agent_created=keep_newest_agent_created,
         )
+        older_than_window_count: int | None = None
+        if recent_window_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=recent_window_days)
+            try:
+                older_than_window_count = (
+                    chat_history_service.get_chat_history_sessions_older_than_count(
+                        user_concept_id,
+                        cutoff=cutoff,
+                        namespace=namespace,
+                        include_legacy=include_legacy,
+                        agent_visibility=agent_visibility,
+                    )
+                )
+            except chat_history_service.ChatHistoryServiceError as exc:
+                current_app.logger.warning(
+                    "history_sessions: older-than-window count unavailable for %s: %s",
+                    user_concept_id,
+                    exc,
+                )
+                warnings.append("older_than_window_count_unavailable")
         sessions = (
             session_result.get("sessions") if isinstance(session_result, dict) else []
         )
@@ -15936,6 +15959,13 @@ def history_sessions():
             "sessions": combined,
             "active_session_id": active_session_id,
         }
+        if older_than_window_count is not None:
+            response_payload.update(
+                {
+                    "older_than_window_count": older_than_window_count,
+                    "recent_window_days": recent_window_days,
+                }
+            )
         if isinstance(session_result, dict):
             response_payload.update(
                 {

@@ -237,6 +237,46 @@ def test_light_session_summaries_bound_agent_visibility_overfetch(monkeypatch):
     assert result["raw_session_count_is_bounded"] is True
 
 
+def test_older_session_count_uses_unbounded_metadata_count_query(monkeypatch):
+    collection = object()
+    captured = {}
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: collection,
+    )
+
+    def _fake_aggregate(received_collection, pipeline, **kwargs):
+        captured["collection"] = received_collection
+        captured["pipeline"] = pipeline
+        captured["operation"] = kwargs.get("operation")
+        return iter([{"session_count": 37}])
+
+    monkeypatch.setattr(chat_history_service, "_read_aggregate", _fake_aggregate)
+    cutoff = _utc("2026-01-25T00:00:00Z")
+
+    count = chat_history_service.get_chat_history_sessions_older_than_count(
+        "#V#u",
+        cutoff=cutoff,
+        namespace="#V#u@org",
+        include_legacy=False,
+        agent_visibility="exclude",
+    )
+
+    assert count == 37
+    assert captured["collection"] is collection
+    assert captured["operation"] == (
+        "get_chat_history_sessions_older_than_count.aggregate"
+    )
+    match = captured["pipeline"][0]["$match"]
+    assert match["user_id"] == "#V#u"
+    assert match["namespace"] == "#V#u@org"
+    assert match["trashed_at"] is None
+    assert match["$and"][0]["$or"][0] == {"updated_at": {"$lt": cutoff}}
+    assert "$nor" in match["$and"][1]
+    assert captured["pipeline"][1] == {"$count": "session_count"}
+
+
 def test_chat_history_indexes_include_namespaced_recency_index() -> None:
     class _IndexCollection:
         def __init__(self) -> None:
