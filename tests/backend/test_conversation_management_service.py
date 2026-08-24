@@ -139,9 +139,7 @@ def test_list_actor_conversations_combines_shared_and_filters_hidden(monkeypatch
     monkeypatch.setattr(
         service,
         "get_user_memberships",
-        lambda _actor: {
-            "memberships": [{"organisation_concept_id": "#V#org"}]
-        },
+        lambda _actor: {"memberships": [{"organisation_concept_id": "#V#org"}]},
     )
     monkeypatch.setattr(
         service.chat_history_service,
@@ -150,13 +148,15 @@ def test_list_actor_conversations_combines_shared_and_filters_hidden(monkeypatch
     )
     monkeypatch.setattr(
         service.chat_history_service,
-        "get_chat_history_session_summary",
+        "get_chat_history_session_summaries_by_ids",
         lambda *args, **kwargs: {
-            "session_id": "shared-1",
-            "session_name": "Shared",
-            "last_message_at": "2026-08-17T11:00:00+00:00",
-            "namespace": "#V#owner@org",
-            "organisation_concept_id": "#V#org",
+            "shared-1": {
+                "session_id": "shared-1",
+                "session_name": "Shared",
+                "last_message_at": "2026-08-17T11:00:00+00:00",
+                "namespace": "#V#owner@org",
+                "organisation_concept_id": "#V#org",
+            }
         },
     )
     service.set_conversation_preference(
@@ -193,6 +193,16 @@ def test_list_actor_conversations_combines_shared_and_filters_hidden(monkeypatch
         shared["conversation_ref"]["conversation_ref"]["organisation_concept_id"]
         == "#V#org"
     )
+    assert shared["conversation_reference"]["schema_version"] == (
+        "conversation_reference.v1"
+    )
+    assert shared["conversation_reference"]["binding_kind"] == "explicit_session_id"
+    assert shared["access_mode"] == "invitee"
+    assert "trash" not in shared["available_actions"]
+    owned = next(
+        row for row in all_rows["conversations"] if row["session_id"] == "owned-1"
+    )
+    assert "trash" in owned["available_actions"]
 
 
 def test_list_prefers_shared_owner_summary_over_local_join_stub(monkeypatch):
@@ -229,9 +239,7 @@ def test_list_prefers_shared_owner_summary_over_local_join_stub(monkeypatch):
     monkeypatch.setattr(
         service,
         "get_user_memberships",
-        lambda _actor: {
-            "memberships": [{"organisation_concept_id": "#V#org"}]
-        },
+        lambda _actor: {"memberships": [{"organisation_concept_id": "#V#org"}]},
     )
     monkeypatch.setattr(
         service.chat_history_service,
@@ -240,11 +248,13 @@ def test_list_prefers_shared_owner_summary_over_local_join_stub(monkeypatch):
     )
     monkeypatch.setattr(
         service.chat_history_service,
-        "get_chat_history_session_summary",
+        "get_chat_history_session_summaries_by_ids",
         lambda *args, **kwargs: {
-            "session_id": "shared-1",
-            "session_name": "Owner summary",
-            "namespace": "#V#owner@org",
+            "shared-1": {
+                "session_id": "shared-1",
+                "session_name": "Owner summary",
+                "namespace": "#V#owner@org",
+            }
         },
     )
 
@@ -289,7 +299,7 @@ def test_list_excludes_shared_conversation_when_org_membership_is_absent(monkeyp
     summary_calls: list[str] = []
     monkeypatch.setattr(
         service.chat_history_service,
-        "get_chat_history_session_summary",
+        "get_chat_history_session_summaries_by_ids",
         lambda *args, **kwargs: summary_calls.append(args[1]),
     )
 
@@ -326,3 +336,46 @@ def test_preference_projection_serialises_datetime(monkeypatch):
     )["session-1"]
 
     assert preference["updated_at"] == "2026-08-17T00:00:00+00:00"
+
+
+def test_list_cursor_pages_more_than_250_without_duplicates(monkeypatch):
+    from src.backend.services import conversation_management_service as service
+
+    monkeypatch.setattr(
+        service, "get_application_settings_collection", lambda: _PreferenceCollection()
+    )
+    sessions = [
+        {
+            "session_id": f"session-{index:03d}",
+            "session_name": f"Conversation {index}",
+            "last_message_at": f"2026-08-{1 + index // 24:02d}T{index % 24:02d}:00:00+00:00",
+            "namespace": "#V#alice@org",
+            "trashed": False,
+        }
+        for index in range(275)
+    ]
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "get_chat_history_session_summaries_result",
+        lambda *args, **kwargs: {"sessions": sessions},
+    )
+    monkeypatch.setattr(service, "list_accepted_invites_for_user", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        service, "get_user_memberships", lambda _actor: {"memberships": []}
+    )
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(3):
+        page = service.list_actor_conversations(
+            actor_user_id="#V#alice",
+            namespace="#V#alice@org",
+            limit=100,
+            cursor=cursor,
+        )
+        seen.extend(row["session_id"] for row in page["conversations"])
+        cursor = page["next_cursor"]
+
+    assert len(seen) == 275
+    assert len(set(seen)) == 275
+    assert cursor is None

@@ -8,6 +8,7 @@ preferences, so they live in ``application_settings`` rather than Vontology.
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,11 @@ from pymongo.errors import PyMongoError
 
 from ..db.mongo_setup import get_application_settings_collection
 from . import chat_history_service
+from .opaque_cursor_service import (
+    OpaqueCursorError,
+    decode_opaque_cursor,
+    encode_opaque_cursor,
+)
 from .organisation_membership_service import get_user_memberships
 from .shared_conversation_service import (
     list_accepted_invites_for_user,
@@ -25,10 +31,41 @@ from .shared_conversation_service import (
 PREFERENCE_SCHEMA_VERSION = "conversation_preference.v1"
 _PREFERENCE_SETTING_PREFIX = "conversation_preference.v1"
 _SESSION_NAME_MAX_LEN = 80
+_PREFERENCE_SEARCH_INDEX_NAME = "conversation_preference_actor_title_text_v1"
+_PREFERENCE_INDEX_READY = False
+_PREFERENCE_INDEX_LOCK = threading.Lock()
+_MAX_SHARED_INVITES = 500
+_MAX_SHARED_OWNER_SCOPES = 50
 
 
 class ConversationManagementError(RuntimeError):
     """Raised when conversation discovery or preference persistence fails."""
+
+
+def _ensure_preference_indexes(collection: Any) -> None:
+    global _PREFERENCE_INDEX_READY
+    if _PREFERENCE_INDEX_READY:
+        return
+    with _PREFERENCE_INDEX_LOCK:
+        if _PREFERENCE_INDEX_READY:
+            return
+        try:
+            existing = {row.get("name") for row in collection.list_indexes()}
+            if _PREFERENCE_SEARCH_INDEX_NAME not in existing:
+                collection.create_index(
+                    [
+                        ("actor_user_id", 1),
+                        ("preference_kind", 1),
+                        ("search_session_name_override", "text"),
+                    ],
+                    name=_PREFERENCE_SEARCH_INDEX_NAME,
+                    default_language="none",
+                )
+        except (PyMongoError, AttributeError, TypeError):
+            # Existing preference behaviour must remain available if optional
+            # index management is unavailable in a constrained runtime.
+            pass
+        _PREFERENCE_INDEX_READY = True
 
 
 def _required_text(value: Any, *, field: str) -> str:
@@ -114,6 +151,7 @@ def get_conversation_preferences(
         raise ConversationManagementError(
             "Could not connect to conversation preference storage."
         )
+    _ensure_preference_indexes(collection)
     try:
         rows = collection.find(
             {
@@ -196,6 +234,7 @@ def set_conversation_preference(
         raise ConversationManagementError(
             "Could not connect to conversation preference storage."
         )
+    _ensure_preference_indexes(collection)
     query = {
         "setting_name": setting_name,
         "actor_user_id": actor,
@@ -228,6 +267,9 @@ def set_conversation_preference(
                         "session_id": session,
                         "preference_kind": PREFERENCE_SCHEMA_VERSION,
                         "value": desired,
+                        "search_session_name_override": desired[
+                            "session_name_override"
+                        ],
                         "updated_at": now,
                     }
                 },
@@ -258,6 +300,41 @@ def set_conversation_preference(
     return {"changed": changed, "preference": read_back}
 
 
+def search_conversation_preference_session_ids(
+    *, actor_user_id: str, query: str, limit: int = 200
+) -> list[str]:
+    """Search actor-specific display-name overrides through their text index."""
+
+    actor = _required_text(actor_user_id, field="actor_user_id")
+    query_text = _required_text(query, field="query")
+    collection = get_application_settings_collection()
+    if collection is None:
+        raise ConversationManagementError(
+            "Could not connect to conversation preference storage."
+        )
+    _ensure_preference_indexes(collection)
+    try:
+        rows = collection.find(
+            {
+                "actor_user_id": actor,
+                "preference_kind": PREFERENCE_SCHEMA_VERSION,
+                "$text": {"$search": query_text},
+            },
+            {"_id": 0, "session_id": 1},
+        ).limit(max(1, min(int(limit), 500)))
+        return [
+            str(row.get("session_id"))
+            for row in rows
+            if isinstance(row, Mapping)
+            and isinstance(row.get("session_id"), str)
+            and row.get("session_id")
+        ]
+    except PyMongoError as exc:
+        raise ConversationManagementError(
+            f"Could not search conversation display-name preferences: {exc}"
+        ) from exc
+
+
 def apply_conversation_preferences(
     *, actor_user_id: str, conversations: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -283,6 +360,62 @@ def apply_conversation_preferences(
     return projected
 
 
+def _project_actor_conversation_contract(
+    *, actor_user_id: str, row: Mapping[str, Any]
+) -> dict[str, Any]:
+    projected = dict(row)
+    session_id = str(projected.get("session_id") or "")
+    shared = projected.get("shared_with_me") is True
+    owner_user_id = (
+        str(projected.get("shared_owner_user_id") or "") if shared else actor_user_id
+    )
+    access_mode = "invitee" if shared else "owner"
+    trashed = projected.get("trashed") is True
+    hidden = projected.get("hidden") is True
+    pinned = projected.get("pinned") is True
+    available_actions = [
+        "conversation_get",
+        "rename",
+        "unhide" if hidden else "hide",
+        "unpin" if pinned else "pin",
+    ]
+    if not shared:
+        available_actions.append("restore" if trashed else "trash")
+    canonical_reference = {
+        "schema_version": "conversation_reference.v1",
+        "binding_kind": "explicit_session_id",
+        "session_id": session_id,
+        "user_concept_id": owner_user_id,
+        "namespace": projected.get("namespace"),
+        "organisation_concept_id": _normalise_concept_id(
+            projected.get("organisation_concept_id")
+        ),
+        "include_legacy": True,
+    }
+    projected.update(
+        {
+            "display_name": projected.get("session_name"),
+            "display_date": projected.get("last_message_at")
+            or projected.get("created_at"),
+            "access_mode": access_mode,
+            "available_actions": available_actions,
+            "lifecycle": {
+                "hidden": hidden,
+                "pinned": pinned,
+                "trashed": trashed,
+                "trashed_at": projected.get("trashed_at"),
+            },
+            "conversation_reference": canonical_reference,
+            "conversation_ref": {
+                "kind": "von_conversation_ref",
+                "schema_version": "conversation_reference.v1",
+                "conversation_ref": canonical_reference,
+            },
+        }
+    )
+    return projected
+
+
 def _normalise_concept_id(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -297,12 +430,14 @@ def list_actor_conversations(
     organisation_concept_id: str | None = None,
     limit: int = 20,
     include_hidden: bool = False,
+    include_trashed: bool = False,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """List recent owned and accepted-shared conversations for one actor."""
 
     actor = _required_text(actor_user_id, field="actor_user_id")
-    safe_limit = max(1, min(int(limit), 100))
-    scan_limit = min(200, max(safe_limit, safe_limit * 2))
+    safe_limit = max(1, min(int(limit), 500))
+    scan_limit = 500
     owned_result = chat_history_service.get_chat_history_session_summaries_result(
         actor,
         limit=scan_limit,
@@ -324,13 +459,20 @@ def list_actor_conversations(
     }
     shared_rows: list[dict[str, Any]] = []
     warnings: list[str] = []
+    accepted_invites_available = True
     try:
-        accepted_invites = list_accepted_invites_for_user(user_concept_id=actor)
+        accepted_invites_all = list_accepted_invites_for_user(user_concept_id=actor)
     except Exception as exc:  # noqa: BLE001 - list discovery is deliberately fail-soft
-        accepted_invites = []
+        accepted_invites_all = []
+        accepted_invites_available = False
         warnings.append(f"accepted_invites_unavailable:{type(exc).__name__}")
+    accepted_invites = accepted_invites_all[:_MAX_SHARED_INVITES]
+    shared_invite_window_complete = len(accepted_invites_all) <= _MAX_SHARED_INVITES
+    if not shared_invite_window_complete:
+        warnings.append("shared_conversation_invite_window_limit_reached")
 
     membership_org_ids: set[str] | None
+    membership_lookup_available = True
     try:
         membership_result = get_user_memberships(actor)
         membership_org_ids = {
@@ -342,9 +484,11 @@ def list_actor_conversations(
         }
     except Exception as exc:  # noqa: BLE001 - shared reads fail closed on membership lookup
         membership_org_ids = None
+        membership_lookup_available = False
         warnings.append(f"organisation_memberships_unavailable:{type(exc).__name__}")
 
     requested_org = _normalise_concept_id(organisation_concept_id)
+    authorised_invites: list[tuple[Mapping[str, Any], str, str, str | None]] = []
     for invite in accepted_invites:
         if not isinstance(invite, Mapping):
             continue
@@ -371,27 +515,38 @@ def list_actor_conversations(
             warnings.append(f"shared_conversation_owner_unresolved:{session_id}")
             continue
         owner_namespace = chat_history_service.resolve_chat_history_namespace(owner_id)
+        authorised_invites.append((invite, session_id, owner_id, owner_namespace))
+
+    invite_groups: dict[tuple[str, str | None], list[str]] = {}
+    for _invite, session_id, owner_id, owner_namespace in authorised_invites:
+        invite_groups.setdefault((owner_id, owner_namespace), []).append(session_id)
+    shared_owner_scope_window_complete = (
+        len(invite_groups) <= _MAX_SHARED_OWNER_SCOPES
+    )
+    if not shared_owner_scope_window_complete:
+        warnings.append("shared_conversation_owner_scope_limit_reached")
+    allowed_groups = dict(list(invite_groups.items())[:_MAX_SHARED_OWNER_SCOPES])
+    shared_summaries: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for (owner_id, owner_namespace), session_ids in allowed_groups.items():
         try:
-            summary = chat_history_service.get_chat_history_session_summary(
+            owner_rows = chat_history_service.get_chat_history_session_summaries_by_ids(
                 owner_id,
-                session_id,
+                session_ids,
                 namespace=owner_namespace,
                 include_legacy=True,
-                summary_mode="light",
             )
-            if not isinstance(summary, Mapping):
-                summary = chat_history_service.get_chat_history_session_summary(
-                    owner_id,
-                    session_id,
-                    namespace=None,
-                    include_legacy=True,
-                    summary_mode="light",
-                )
         except Exception as exc:  # noqa: BLE001 - one bad shared row must not hide others
             warnings.append(
-                f"shared_conversation_summary_unavailable:{session_id}:{type(exc).__name__}"
+                f"shared_conversation_summary_unavailable:{owner_id}:{type(exc).__name__}"
             )
             continue
+        for session_id, summary in owner_rows.items():
+            shared_summaries[(owner_id, session_id)] = summary
+
+    for invite, session_id, owner_id, owner_namespace in authorised_invites:
+        if (owner_id, owner_namespace) not in allowed_groups:
+            continue
+        summary = shared_summaries.get((owner_id, session_id))
         if not isinstance(summary, Mapping):
             summary = owned_rows_by_session.get(session_id)
         if not isinstance(summary, Mapping):
@@ -408,6 +563,14 @@ def list_actor_conversations(
             }
         )
         shared_rows.append(row)
+
+    shared_summary_window_complete = all(
+        (owner_id, session_id) in shared_summaries
+        for _invite, session_id, owner_id, owner_namespace in authorised_invites
+        if (owner_id, owner_namespace) in allowed_groups
+    )
+    if not shared_summary_window_complete:
+        warnings.append("shared_conversation_summary_window_incomplete")
 
     # Accepted shared conversations can have a local join/session stub with the
     # same identifier. Prefer the owner's authoritative summary and shared
@@ -426,39 +589,115 @@ def list_actor_conversations(
     combined = apply_conversation_preferences(
         actor_user_id=actor, conversations=[*owned_rows, *shared_rows]
     )
+    combined = [
+        _project_actor_conversation_contract(actor_user_id=actor, row=row)
+        for row in combined
+    ]
     combined.sort(
-        key=lambda row: str(row.get("last_message_at") or row.get("created_at") or ""),
+        key=lambda row: (
+            str(row.get("last_message_at") or row.get("created_at") or ""),
+            str(row.get("session_id") or ""),
+        ),
         reverse=True,
     )
+    trashed_count = sum(1 for row in combined if row.get("trashed") is True)
+    if not include_trashed:
+        combined = [row for row in combined if row.get("trashed") is not True]
     hidden_count = sum(1 for row in combined if row.get("hidden") is True)
     if not include_hidden:
         combined = [row for row in combined if row.get("hidden") is not True]
-    conversations = combined[:safe_limit]
-    for row in conversations:
-        owner_id = (
-            row.get("shared_owner_user_id")
-            if row.get("shared_with_me") is True
-            else actor
+    cursor_scope = {
+        "actor_user_id": actor,
+        "namespace": namespace,
+        "organisation_concept_id": _normalise_concept_id(organisation_concept_id),
+        "include_hidden": include_hidden,
+        "include_trashed": include_trashed,
+    }
+    if cursor:
+        try:
+            cursor_payload = decode_opaque_cursor(
+                cursor=cursor, purpose="conversation_list"
+            )
+        except OpaqueCursorError as exc:
+            raise ConversationManagementError(f"Invalid conversation cursor: {exc}") from exc
+        if cursor_payload.get("scope") != cursor_scope:
+            raise ConversationManagementError(
+                "Invalid conversation cursor: actor or filters do not match."
+            )
+        position = cursor_payload.get("position")
+        if not isinstance(position, Mapping):
+            raise ConversationManagementError(
+                "Invalid conversation cursor: position is missing."
+            )
+        marker = (
+            str(position.get("timestamp") or ""),
+            str(position.get("session_id") or ""),
         )
-        row["conversation_ref"] = {
-            "kind": "von_conversation_ref",
-            "conversation_ref": {
-                "session_id": row.get("session_id"),
-                "user_concept_id": owner_id,
-                "namespace": row.get("namespace"),
-                "organisation_concept_id": _normalise_concept_id(
-                    row.get("organisation_concept_id")
-                ),
-                "include_legacy": True,
+        combined = [
+            row
+            for row in combined
+            if (
+                str(row.get("last_message_at") or row.get("created_at") or ""),
+                str(row.get("session_id") or ""),
+            )
+            < marker
+        ]
+    has_more = len(combined) > safe_limit
+    conversations = combined[:safe_limit]
+    next_cursor = None
+    if has_more and conversations:
+        final_row = conversations[-1]
+        next_cursor = encode_opaque_cursor(
+            purpose="conversation_list",
+            payload={
+                "scope": cursor_scope,
+                "position": {
+                    "timestamp": str(
+                        final_row.get("last_message_at")
+                        or final_row.get("created_at")
+                        or ""
+                    ),
+                    "session_id": str(final_row.get("session_id") or ""),
+                },
             },
-        }
+        )
+    owned_metadata_limit = owned_result.get("metadata_query_limit")
+    owned_raw_count = owned_result.get("raw_session_count")
+    owned_window_complete = not (
+        isinstance(owned_metadata_limit, int)
+        and isinstance(owned_raw_count, int)
+        and owned_raw_count >= owned_metadata_limit
+    )
+    coverage_complete = (
+        owned_window_complete
+        and accepted_invites_available
+        and membership_lookup_available
+        and shared_invite_window_complete
+        and shared_owner_scope_window_complete
+        and shared_summary_window_complete
+    )
     return {
         "success": True,
         "conversations": conversations,
         "count": len(conversations),
         "limit": safe_limit,
         "include_hidden": include_hidden,
+        "include_trashed": include_trashed,
         "hidden_count": hidden_count,
-        "has_more": len(combined) > safe_limit,
+        "trashed_count": trashed_count,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "coverage_complete": coverage_complete,
+        "coverage": {
+            "owned_window_complete": owned_window_complete,
+            "accepted_invites_available": accepted_invites_available,
+            "membership_lookup_available": membership_lookup_available,
+            "shared_invite_window_complete": shared_invite_window_complete,
+            "shared_owner_scope_window_complete": shared_owner_scope_window_complete,
+            "shared_summary_window_complete": shared_summary_window_complete,
+            "owned_window_limit": owned_metadata_limit,
+            "shared_invite_window_limit": _MAX_SHARED_INVITES,
+            "shared_owner_scope_limit": _MAX_SHARED_OWNER_SCOPES,
+        },
         "warnings": warnings,
     }

@@ -63,6 +63,9 @@ _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR: Optional[str] = None
 _CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME = (
     "namespace_user_recency_session_metadata_v1"
 )
+CONVERSATION_SEARCH_INDEX_VERSION = 1
+_CONVERSATION_SEARCH_TEXT_INDEX_NAME = "conversation_search_text_v1"
+_CONVERSATION_SEARCH_MAX_SEGMENT_CHARS = 5_000
 _MAX_FOCAL_CONCEPT_IDS = 4
 CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE = "browser_test_fixture"
 CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS = "benchmark_harness"
@@ -499,6 +502,31 @@ def _ensure_chat_history_indexes(collection) -> None:
                     ],
                     name="namespace_1_user_id_1_focal_concept_ids_1_updated_at_-1",
                 )
+            if _CONVERSATION_SEARCH_TEXT_INDEX_NAME not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("conversation_search_title", "text"),
+                        ("conversation_search_text", "text"),
+                    ],
+                    name=_CONVERSATION_SEARCH_TEXT_INDEX_NAME,
+                    weights={
+                        "conversation_search_title": 8,
+                        "conversation_search_text": 1,
+                    },
+                    default_language="none",
+                )
+            if "namespace_1_user_id_1_trashed_at_1_updated_at_-1" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("trashed_at", ASCENDING),
+                        ("updated_at", DESCENDING),
+                    ],
+                    name="namespace_1_user_id_1_trashed_at_1_updated_at_-1",
+                )
         except Exception as exc:
             logger.warning(
                 "Index creation skipped for chat_history collection: %s", exc
@@ -515,6 +543,57 @@ def _normalise_session_name(value: Any) -> Optional[str]:
     if len(name) > _SESSION_NAME_MAX_LEN:
         name = name[: _SESSION_NAME_MAX_LEN - 3].rstrip() + "..."
     return name
+
+
+def _conversation_search_message_text(message: Mapping[str, Any]) -> Optional[str]:
+    """Return only user-visible conversational text for the lexical projection."""
+
+    role = message.get("role")
+    if role not in {"user", "assistant"}:
+        return None
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    return content.strip()[:_CONVERSATION_SEARCH_MAX_SEGMENT_CHARS]
+
+
+def _conversation_search_segment(
+    message: Mapping[str, Any], *, history_index: int | None = None
+) -> Optional[Dict[str, Any]]:
+    """Build a safe searchable segment with a stable source locator."""
+
+    text = _conversation_search_message_text(message)
+    if text is None:
+        return None
+    timestamp = message.get("timestamp")
+    if isinstance(timestamp, datetime):
+        timestamp = timestamp.isoformat()
+    elif not isinstance(timestamp, str):
+        timestamp = None
+    message_id = next(
+        (
+            value.strip()
+            for key in ("message_id", "turn_id", "request_id", "id")
+            for value in [message.get(key)]
+            if isinstance(value, str) and value.strip()
+        ),
+        None,
+    )
+    locator = {
+        key: value
+        for key, value in {
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "history_index": history_index,
+            "role": message.get("role"),
+        }.items()
+        if value is not None
+    }
+    return {
+        "text": text,
+        "role": message.get("role"),
+        "source_locator": locator,
+    }
 
 
 def _normalise_session_provenance_text(
@@ -1070,6 +1149,10 @@ class ChatHistoryServiceError(Exception):
     """Exception raised for chat history service errors."""
 
     pass
+
+
+class ConversationActiveWorkError(ChatHistoryServiceError):
+    """Raised when recoverable Trash is blocked by queued or running work."""
 
 
 def get_chat_history_collection_service(*, read_only: bool = False):
@@ -3246,6 +3329,14 @@ def add_message_to_history(
         )
 
         set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+        search_segment = _conversation_search_segment(stored_message)
+        search_text = search_segment.get("text") if search_segment is not None else None
+        if search_text is not None:
+            set_fields.update(
+                {
+                    "conversation_search_indexed_at": datetime.now(timezone.utc),
+                }
+            )
         # NOTE: namespace is intentionally NOT in $set - it should only be set
         # on document creation via $setOnInsert. Otherwise, when a shared
         # conversation participant adds a message, their namespace would
@@ -3257,15 +3348,23 @@ def add_message_to_history(
             set_on_insert["namespace"] = ns.strip()
         if isinstance(org_concept_id, str) and org_concept_id.strip():
             set_on_insert["organisation_concept_id"] = org_concept_id.strip()
+        if search_text is not None:
+            set_on_insert["conversation_search_index_version"] = (
+                CONVERSATION_SEARCH_INDEX_VERSION
+            )
         role_value = effective_session_context.get("role_in_org")
         if isinstance(role_value, str) and role_value.strip():
             set_on_insert["role_in_org"] = role_value.strip()
 
         # Update or insert the session document
+        push_fields: Dict[str, Any] = {"history": stored_message}
+        if search_text is not None:
+            push_fields["conversation_search_text"] = search_text
+            push_fields["conversation_search_segments"] = search_segment
         chat_history_coll.update_one(
             {"user_id": user_id, "session_id": session_id},
             {
-                "$push": {"history": stored_message},
+                "$push": push_fields,
                 "$set": set_fields,
                 "$setOnInsert": set_on_insert,
             },
@@ -3897,6 +3996,15 @@ def _build_session_summary_from_metadata(
         "created_at": created_ts.isoformat() if created_ts else None,
         "namespace": doc.get("namespace"),
         "organisation_concept_id": doc.get("organisation_concept_id"),
+        "trashed_at": (
+            doc.get("trashed_at").isoformat()
+            if isinstance(doc.get("trashed_at"), datetime)
+            else doc.get("trashed_at")
+        ),
+        "trashed": doc.get("trashed_at") is not None,
+        "conversation_search_index_version": doc.get(
+            "conversation_search_index_version"
+        ),
         "preview": None,
         **focus,
         **provenance,
@@ -3918,6 +4026,8 @@ def _get_chat_history_session_summaries_metadata_only(
             "updated_at": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
+            "trashed_at": 1,
+            "conversation_search_index_version": 1,
             "focal_concept_ids": 1,
             "focal_concept_ids_source": 1,
             "focal_concept_ids_updated_at": 1,
@@ -3963,6 +4073,52 @@ def _get_chat_history_session_summaries_metadata_only(
     if safe_limit is None:
         return summaries
     return summaries[:safe_limit]
+
+
+def get_chat_history_session_summaries_by_ids(
+    user_id: str,
+    session_ids: Iterable[str],
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    """Read a bounded set of metadata summaries in one owner-scoped query."""
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    unique_session_ids = list(
+        dict.fromkeys(
+            value.strip()
+            for value in session_ids
+            if isinstance(value, str) and value.strip()
+        )
+    )
+    if not unique_session_ids:
+        return {}
+    if len(unique_session_ids) > 500:
+        raise ChatHistoryServiceError(
+            "A batched conversation summary read is limited to 500 session IDs."
+        )
+    collection = get_chat_history_collection_service(read_only=True)
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id.strip(), namespace=namespace, include_legacy=include_legacy
+    )
+    query["session_id"] = {"$in": unique_session_ids}
+    try:
+        rows = _get_chat_history_session_summaries_metadata_only(
+            collection, query=query, safe_limit=len(unique_session_ids)
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not retrieve batched conversation summaries: {exc}"
+        ) from exc
+    return {
+        str(row["session_id"]): row
+        for row in rows
+        if isinstance(row.get("session_id"), str)
+    }
 
 
 def _bounded_light_session_metadata_query_limit(
@@ -4038,6 +4194,8 @@ def _load_chat_history_session_summaries(
                 "updated_at": 1,
                 "namespace": 1,
                 "organisation_concept_id": 1,
+                "trashed_at": 1,
+                "conversation_search_index_version": 1,
                 "session_name": 1,
                 "focal_concept_ids": 1,
                 "focal_concept_ids_source": 1,
@@ -4139,6 +4297,15 @@ def _load_chat_history_session_summaries(
                     "created_at": created_ts.isoformat() if created_ts else None,
                     "namespace": doc.get("namespace"),
                     "organisation_concept_id": doc.get("organisation_concept_id"),
+                    "trashed_at": (
+                        doc.get("trashed_at").isoformat()
+                        if isinstance(doc.get("trashed_at"), datetime)
+                        else doc.get("trashed_at")
+                    ),
+                    "trashed": doc.get("trashed_at") is not None,
+                    "conversation_search_index_version": doc.get(
+                        "conversation_search_index_version"
+                    ),
                     "preview": preview,
                     **focus,
                     **provenance,
@@ -4547,6 +4714,11 @@ def create_chat_session(
     }
     if name:
         set_on_insert["session_name"] = name
+        set_on_insert["conversation_search_title"] = name
+        set_on_insert["conversation_search_index_version"] = (
+            CONVERSATION_SEARCH_INDEX_VERSION
+        )
+        set_on_insert["conversation_search_indexed_at"] = now
     if normalised_focus:
         set_on_insert["focal_concept_ids"] = normalised_focus
         set_on_insert["focal_concept_ids_source"] = "conversation_launch"
@@ -4634,7 +4806,13 @@ def rename_chat_session(
         )
         result = chat_history_coll.update_one(
             query,
-            {"$set": {"session_name": new_name}},
+            {
+                "$set": {
+                    "session_name": new_name,
+                    "conversation_search_title": new_name,
+                    "conversation_search_indexed_at": datetime.now(timezone.utc),
+                }
+            },
         )
         updated = bool(getattr(result, "modified_count", 0) > 0)
         matched = bool(getattr(result, "matched_count", 0) > 0)
@@ -4642,6 +4820,237 @@ def rename_chat_session(
     except PyMongoError as e:
         logger.error(f"Error renaming chat session: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not rename chat session: {e}") from e
+
+
+def set_chat_session_trashed(
+    *,
+    user_id: str,
+    session_id: str,
+    trashed: bool,
+    actor_user_id: str,
+    namespace: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    include_legacy: bool = False,
+    verify_active_work: bool = True,
+) -> Dict[str, Any]:
+    """Move an owner-scoped conversation to or from recoverable Trash."""
+
+    if not isinstance(trashed, bool):
+        raise ChatHistoryServiceError("trashed must be a boolean.")
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if actor_user_id != user_id:
+        raise ChatHistoryServiceError("Only the conversation owner can change Trash state.")
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    try:
+        before = chat_history_coll.find_one(query, {"_id": 1, "trashed_at": 1})
+        if not isinstance(before, Mapping):
+            return {"matched": False, "changed": False, "trashed": trashed}
+        was_trashed = before.get("trashed_at") is not None
+        changed = was_trashed != trashed
+        active_work = {
+            "policy": "block_trash_while_prompt_is_queued_or_in_progress",
+            "status": "not_applicable" if not trashed else "clear",
+            "active_queue_ids": [],
+        }
+        if changed and trashed and verify_active_work:
+            try:
+                from . import chat_prompt_queue_service
+
+                queue_scope = chat_prompt_queue_service.build_queue_scope(
+                    user_concept_id=actor_user_id,
+                    organisation_concept_id=organisation_concept_id,
+                    namespace=namespace,
+                )
+                active_records = chat_prompt_queue_service.list_active_queue_records(
+                    scope=queue_scope, limit=500
+                )
+            except Exception as exc:  # noqa: BLE001 - mutation fails closed.
+                raise ChatHistoryServiceError(
+                    "Could not verify queued or running work before moving the conversation to Trash."
+                ) from exc
+            matching_records = [
+                row
+                for row in active_records
+                if isinstance(row, Mapping) and row.get("session_id") == session_id
+            ]
+            if matching_records:
+                active_work = {
+                    "policy": "block_trash_while_prompt_is_queued_or_in_progress",
+                    "status": "blocked",
+                    "active_queue_ids": [
+                        str(row.get("queue_id"))
+                        for row in matching_records
+                        if row.get("queue_id")
+                    ],
+                }
+                raise ConversationActiveWorkError(
+                    "conversation_has_active_work: finish or cancel queued/running prompts before moving this conversation to Trash."
+                )
+        if changed:
+            if trashed:
+                update = {
+                    "$set": {
+                        "trashed_at": datetime.now(timezone.utc),
+                        "trashed_by_actor_user_id": actor_user_id,
+                    }
+                }
+            else:
+                update = {
+                    "$unset": {
+                        "trashed_at": "",
+                        "trashed_by_actor_user_id": "",
+                    }
+                }
+            result = chat_history_coll.update_one(query, update)
+            if getattr(result, "acknowledged", True) is False:
+                raise ChatHistoryServiceError("Conversation Trash update was not acknowledged.")
+        read_back = chat_history_coll.find_one(
+            query,
+            {
+                "_id": 0,
+                "session_id": 1,
+                "session_name": 1,
+                "namespace": 1,
+                "organisation_concept_id": 1,
+                "created_at": 1,
+                "updated_at": 1,
+                "trashed_at": 1,
+            },
+        )
+        if not isinstance(read_back, Mapping):
+            raise ChatHistoryServiceError("Conversation Trash canonical read-back failed.")
+        is_trashed = read_back.get("trashed_at") is not None
+        if is_trashed != trashed:
+            raise ChatHistoryServiceError(
+                "Conversation Trash canonical read-back did not match the update."
+            )
+        return {
+            "matched": True,
+            "changed": changed,
+            "trashed": is_trashed,
+            "effect_id": f"conversation_lifecycle:{uuid.uuid4()}",
+            "effect_status": "succeeded",
+            "active_work": active_work,
+            "index_reconciliation": {
+                "status": "succeeded",
+                "lexical_visibility": (
+                    "trash_only" if is_trashed else "active"
+                ),
+                "semantic_visibility": "canonical_reauthorisation_required",
+                "index_version": CONVERSATION_SEARCH_INDEX_VERSION,
+            },
+            "sharing_impact": {
+                "owner_carrier_visibility": (
+                    "trash_only" if is_trashed else "active"
+                ),
+                "accepted_invites_preserved": True,
+                "shared_participant_active_visibility_may_change": changed,
+            },
+            "related_records": {
+                "canonical_tasks_preserved": True,
+                "canonical_effects_preserved": True,
+                "conversation_provenance_preserved": True,
+            },
+            "canonical_read_back": _build_session_summary_from_metadata(
+                dict(read_back)
+            ),
+        }
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not update conversation Trash state: {exc}"
+        ) from exc
+
+
+def backfill_conversation_search_index(
+    *,
+    user_concept_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    max_sessions: int = 500,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Build the sanitised title/content lexical projection for older sessions."""
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    safe_limit = max(1, min(int(max_sessions), 5_000))
+    query: Dict[str, Any] = {}
+    if isinstance(user_concept_id, str) and user_concept_id.strip():
+        query["user_id"] = user_concept_id.strip()
+    if isinstance(namespace, str) and namespace.strip():
+        query["namespace"] = namespace.strip()
+    query["$or"] = [
+        {"conversation_search_index_version": {"$ne": CONVERSATION_SEARCH_INDEX_VERSION}},
+        {"conversation_search_index_version": {"$exists": False}},
+    ]
+    examined = 0
+    updated = 0
+    cursor = chat_history_coll.find(
+        query,
+        {"_id": 1, "session_name": 1, "history": 1},
+    ).limit(safe_limit)
+    try:
+        cursor = cursor.batch_size(min(safe_limit, 100))
+    except Exception:
+        pass
+    try:
+        for doc in cursor:
+            if not isinstance(doc, Mapping):
+                continue
+            examined += 1
+            safe_segments = [
+                segment
+                for history_index, message in enumerate(doc.get("history") or [])
+                if isinstance(message, Mapping)
+                and (
+                    segment := _conversation_search_segment(
+                        message, history_index=history_index
+                    )
+                )
+                is not None
+            ]
+            set_fields: Dict[str, Any] = {
+                "conversation_search_text": [
+                    segment["text"] for segment in safe_segments
+                ],
+                "conversation_search_segments": safe_segments,
+                "conversation_search_index_version": CONVERSATION_SEARCH_INDEX_VERSION,
+                "conversation_search_indexed_at": datetime.now(timezone.utc),
+            }
+            title = _normalise_session_name(doc.get("session_name"))
+            if title:
+                set_fields["conversation_search_title"] = title
+            if not dry_run:
+                result = chat_history_coll.update_one(
+                    {"_id": doc.get("_id")}, {"$set": set_fields}
+                )
+                if getattr(result, "acknowledged", True) is False:
+                    raise ChatHistoryServiceError(
+                        "Conversation search backfill update was not acknowledged."
+                    )
+            updated += 1
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Conversation search index backfill failed: {exc}"
+        ) from exc
+    return {
+        "status": "ok",
+        "dry_run": bool(dry_run),
+        "sessions_examined": examined,
+        "sessions_updated": updated,
+        "limit": safe_limit,
+        "limit_reached": examined >= safe_limit,
+        "index_version": CONVERSATION_SEARCH_INDEX_VERSION,
+    }
 
 
 def _normalise_concept_id_list(values: Any) -> List[str]:

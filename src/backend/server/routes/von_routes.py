@@ -53,6 +53,7 @@ from ...services.request_progress_service import (
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
 from ...services import conversation_management_service
+from ...services import conversation_search_service
 from ...services.adaptive_turn_service import (
     build_effect_outcome_spoken_fallback,
     execute_adaptive_turn,
@@ -15915,6 +15916,11 @@ def history_sessions():
                 exc,
             )
             warnings.append("conversation_preferences_unavailable")
+        combined = [
+            row
+            for row in combined
+            if not isinstance(row, dict) or row.get("trashed") is not True
+        ]
         combined.sort(
             key=lambda s: (
                 chat_history_service._coerce_datetime(
@@ -17405,15 +17411,90 @@ def set_conversation_preference():
         return jsonify({"error": str(exc)}), 503
 
 
+@von_bp.route("/api/session/conversation_search", methods=["GET"])
+def search_conversations():
+    """Search the authenticated actor's canonical conversation corpus."""
+
+    try:
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id_with_source,
+        )
+
+        user_concept_id, actor_source = get_effective_user_concept_id_with_source()
+        if not user_concept_id or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+            return jsonify({"error": "Not authenticated"}), 401
+        query_text = request.args.get("q") or request.args.get("query")
+        if not isinstance(query_text, str) or not query_text.strip():
+            return jsonify({"error": "query required"}), 400
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get("namespace") or (
+            chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        )
+        if not isinstance(namespace, str) or not namespace.strip():
+            return (
+                jsonify(
+                    {
+                        "error": "Conversation namespace unavailable",
+                        "error_code": "conversation_namespace_unavailable",
+                    }
+                ),
+                503,
+            )
+        filters = {
+            key: request.args.get(key)
+            for key in ("date_from", "date_to", "focal_concept_id", "access_mode")
+            if request.args.get(key) is not None
+        }
+        result = conversation_search_service.search_actor_conversations(
+            actor_user_id=user_concept_id,
+            namespace=namespace.strip(),
+            organisation_concept_id=_normalise_concept_id(
+                effective.get("organisation_id")
+            ),
+            query=query_text,
+            match_mode=request.args.get("match_mode", "hybrid"),
+            filters=filters,
+            sort=request.args.get("sort", "relevance"),
+            page_size=request.args.get("page_size", default=20, type=int),
+            cursor=request.args.get("cursor"),
+            include_hidden=request.args.get("include_hidden", "false").lower()
+            == "true",
+            trashed_only=request.args.get("trashed_only", "false").lower()
+            == "true",
+        )
+        return jsonify(result)
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "Window session does not belong to the authenticated user",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
+    except conversation_search_service.ConversationSearchError as exc:
+        return jsonify({"error": str(exc), "error_code": "conversation_search_failed"}), 400
+    except Exception:
+        current_app.logger.exception("Unexpected error searching conversations")
+        return (
+            jsonify(
+                {
+                    "error": "Conversation search unavailable",
+                    "error_code": "conversation_search_unavailable",
+                }
+            ),
+            503,
+        )
+
+
 @von_bp.route("/api/session/delete_chat_session", methods=["POST"])
 def delete_chat_session():
-    """Delete a chat session for the current user.
-
-    JVNAUTOSCI-1014: Only allows deletion of sessions with fewer than a threshold
-    number of turns (currently 4) to prevent accidental deletion of substantial
-    conversations.
-    """
-    MAX_DELETABLE_TURNS = 4
+    """Compatibility route for recoverable owner-scoped Trash and restore."""
     try:
         from ...security.access_control import (
             LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
@@ -17432,6 +17513,9 @@ def delete_chat_session():
         if not isinstance(session_id, str) or not session_id.strip():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
+        action = data.get("action", "trash")
+        if action not in {"trash", "restore"}:
+            return jsonify({"error": "action must be trash or restore"}), 400
 
         # JVNAUTOSCI-1011: Use window session context if available
         window_session_id = request.headers.get("X-Von-Window-Session")
@@ -17453,72 +17537,34 @@ def delete_chat_session():
             )
         namespace = namespace.strip()
 
-        # Count only the exact namespaced session without loading its full history.
-        message_count = chat_history_service.get_chat_history_session_message_count(
+        receipt = chat_history_service.set_chat_session_trashed(
             user_id=user_concept_id,
             session_id=session_id,
+            trashed=action == "trash",
+            actor_user_id=user_concept_id,
             namespace=namespace,
-        )
-        if message_count is None:
-            return jsonify({"error": "Session not found"}), 404
-
-        turn_count = max(0, (message_count + 1) // 2)
-        if turn_count >= MAX_DELETABLE_TURNS:
-            return (
-                jsonify(
-                    {
-                        "error": f"Cannot delete conversations with {MAX_DELETABLE_TURNS} or more turns",
-                        "turn_count": turn_count,
-                    }
-                ),
-                403,
-            )
-
-        receipt = chat_history_service.delete_chat_history(
-            user_concept_id,
-            session_id,
-            namespace=namespace,
-        )
-        acknowledged = receipt.get("acknowledged") is True
-        deleted_count = receipt.get("deleted_count")
-        canonical_absent = receipt.get("canonical_absent") is True
-        deleted_once = (
-            isinstance(deleted_count, int)
-            and not isinstance(deleted_count, bool)
-            and deleted_count == 1
-        )
-        if not acknowledged or not deleted_once or not canonical_absent:
-            current_app.logger.warning(
-                "Conversation deletion could not be verified for %s: %s",
-                session_id,
-                receipt,
-            )
-            return (
-                jsonify(
-                    {
-                        "status": "delete_unverified",
-                        "error": "Conversation deletion could not be verified",
-                        "error_code": "conversation_delete_unverified",
-                        "session_id": session_id,
-                        "acknowledged": acknowledged,
-                        "deleted_count": deleted_count,
-                        "canonical_absent": canonical_absent,
-                    }
-                ),
-                409,
-            )
-
-        return (
-            jsonify(
-                {
-                    "status": "deleted",
-                    "session_id": session_id,
-                    "acknowledged": True,
-                    "deleted_count": 1,
-                    "canonical_absent": True,
-                }
+            organisation_concept_id=_normalise_concept_id(
+                effective.get("organisation_id")
             ),
-            200,
+            include_legacy=False,
+        )
+        if receipt.get("matched") is not True:
+            return jsonify({"error": "Session not found"}), 404
+        return jsonify(
+            {
+                "status": "trashed" if action == "trash" else "restored",
+                "session_id": session_id,
+                "changed": receipt.get("changed") is True,
+                "recoverable": True,
+                "trashed": receipt.get("trashed") is True,
+                "effect_id": receipt.get("effect_id"),
+                "effect_status": receipt.get("effect_status"),
+                "active_work": receipt.get("active_work"),
+                "index_reconciliation": receipt.get("index_reconciliation"),
+                "sharing_impact": receipt.get("sharing_impact"),
+                "related_records": receipt.get("related_records"),
+                "canonical_read_back": receipt.get("canonical_read_back"),
+            }
         )
     except WindowSessionOwnershipError:
         return (
@@ -17529,6 +17575,16 @@ def delete_chat_session():
                 }
             ),
             403,
+        )
+    except chat_history_service.ConversationActiveWorkError as exc:
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "error_code": "conversation_has_active_work",
+                }
+            ),
+            409,
         )
     except chat_history_service.ChatHistoryServiceError as exc:
         current_app.logger.warning("Conversation deletion failed: %s", exc)

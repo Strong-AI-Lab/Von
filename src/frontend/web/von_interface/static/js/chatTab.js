@@ -1043,7 +1043,6 @@ const LS_CHAT_SESSION_TABS_LAYOUT_PREFIX = 'von:chatSessionTabsLayout';
 const CHAT_SESSION_TABS_LAYOUT_HORIZONTAL = 'horizontal';
 const CHAT_SESSION_TABS_LAYOUT_VERTICAL = 'vertical';
 const CHAT_SESSION_TABS_NARROW_MEDIA_QUERY = '(max-width: 800px)';
-const MAX_DELETABLE_TURNS = 4;
 const CHAT_SESSION_TABS_FETCH_LIMIT = 200;
 const AGENT_CREATED_CHAT_SESSION_ORIGIN_KINDS = new Set([
     'browser_test_fixture',
@@ -1071,6 +1070,12 @@ let agentCreatedSessionVisibilityState = {
     newestVisibleSessionId: null
 };
 let serverAgentCreatedSessionVisibilityState = null;
+let conversationSearchState = {
+    query: '',
+    trashedOnly: false,
+    nextCursor: null,
+    results: []
+};
 
 /**
  * Get the user-scoped localStorage key for hidden sessions.
@@ -1734,17 +1739,13 @@ async function deleteConversation(sessionId) {
         }
         if (!resp.ok) {
             const errorMsg = data?.error
-                || `Failed to delete conversation (HTTP ${resp.status || 'unknown'})`;
+                || `Failed to move conversation to Trash (HTTP ${resp.status || 'unknown'})`;
             showToast(errorMsg, 'error');
             return false;
         }
-        if (
-            data?.status !== 'deleted'
-            || data?.deleted_count !== 1
-            || data?.canonical_absent !== true
-        ) {
+        if (data?.status !== 'trashed' || data?.trashed !== true || data?.recoverable !== true) {
             showToast(
-                data?.error || 'Conversation deletion could not be verified',
+                data?.error || 'Moving the conversation to Trash could not be verified',
                 'error'
             );
             return false;
@@ -1768,13 +1769,166 @@ async function deleteConversation(sessionId) {
             }
         }
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
-        showToast('Conversation deleted', 'success');
+        showToast('Conversation moved to Trash', 'success');
         return true;
     } catch (e) {
-        console.error('[chatTab] deleteConversation error:', e);
-        showToast('Failed to delete conversation', 'error');
+        console.error('[chatTab] moveConversationToTrash error:', e);
+        showToast('Failed to move conversation to Trash', 'error');
         return false;
     }
+}
+
+async function restoreConversation(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return false;
+    try {
+        const response = await fetch('/von/api/session/delete_chat_session', {
+            method: 'POST',
+            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ session_id: sid, action: 'restore' })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data?.status !== 'restored' || data?.trashed !== false) {
+            throw new Error(data?.error || 'Conversation restore could not be verified.');
+        }
+        conversationSearchState.results = conversationSearchState.results.filter(
+            row => row?.session_id !== sid
+        );
+        renderConversationSearchResults();
+        scheduleChatSessionTabsRefresh(true);
+        showToast('Conversation restored', 'success');
+        return true;
+    } catch (error) {
+        showToast(error?.message || 'Failed to restore conversation', 'error');
+        return false;
+    }
+}
+
+function renderConversationSearchResults() {
+    const panel = document.getElementById('conversationSearchPanel');
+    const status = document.getElementById('conversationSearchStatus');
+    const results = document.getElementById('conversationSearchResults');
+    const more = document.getElementById('conversationSearchMore');
+    if (!panel || !status || !results || !more) return;
+    panel.hidden = false;
+    results.innerHTML = '';
+    const rows = Array.isArray(conversationSearchState.results)
+        ? conversationSearchState.results
+        : [];
+    status.textContent = rows.length
+        ? `${rows.length} conversation${rows.length === 1 ? '' : 's'}`
+        : (conversationSearchState.trashedOnly ? 'Trash is empty.' : 'No matching conversations.');
+    rows.forEach((row) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'conversation-search-result';
+        const title = document.createElement('button');
+        title.type = 'button';
+        title.className = 'conversation-search-result-title';
+        title.textContent = getSessionDisplayName(row, { fallbackToId: false }) || 'Unnamed conversation';
+        title.addEventListener('click', () => {
+            const sid = String(row?.session_id || '').trim();
+            if (!sid || conversationSearchState.trashedOnly) return;
+            if (!sessionTabsCache.some(session => session?.session_id === sid)) {
+                sessionTabsCache = normaliseConversationSessionViewModels([...sessionTabsCache, row]);
+            }
+            void switchToChatSession(sid);
+        });
+        const actions = document.createElement('div');
+        actions.className = 'conversation-search-result-actions';
+        const date = document.createElement('span');
+        date.className = 'conversation-search-result-date';
+        date.textContent = formatSessionTimestamp(row?.last_message_at || row?.created_at) || '';
+        actions.appendChild(date);
+        if (conversationSearchState.trashedOnly) {
+            const restore = document.createElement('button');
+            restore.type = 'button';
+            restore.textContent = 'Restore';
+            restore.addEventListener('click', () => { void restoreConversation(row?.session_id); });
+            actions.appendChild(restore);
+        }
+        wrapper.append(title, actions);
+        const snippetText = row?.match?.snippet;
+        if (typeof snippetText === 'string' && snippetText.trim()) {
+            const snippet = document.createElement('div');
+            snippet.className = 'conversation-search-result-snippet';
+            snippet.textContent = snippetText;
+            wrapper.appendChild(snippet);
+        }
+        results.appendChild(wrapper);
+    });
+    more.hidden = !conversationSearchState.nextCursor;
+}
+
+async function performConversationSearch({ append = false, trashedOnly = null } = {}) {
+    const input = document.getElementById('conversationSearchInput');
+    const panel = document.getElementById('conversationSearchPanel');
+    const status = document.getElementById('conversationSearchStatus');
+    const requestedTrash = typeof trashedOnly === 'boolean'
+        ? trashedOnly
+        : conversationSearchState.trashedOnly;
+    const query = requestedTrash ? '*' : String(input?.value || '').trim();
+    if (!query) {
+        if (panel) panel.hidden = true;
+        return;
+    }
+    if (panel) panel.hidden = false;
+    if (status) status.textContent = requestedTrash ? 'Loading Trash…' : 'Searching…';
+    const params = new URLSearchParams({
+        q: query,
+        match_mode: requestedTrash ? 'lexical' : 'hybrid',
+        page_size: '20',
+        trashed_only: requestedTrash ? 'true' : 'false'
+    });
+    if (append && conversationSearchState.nextCursor) {
+        params.set('cursor', conversationSearchState.nextCursor);
+    }
+    try {
+        const response = await fetch(`/von/api/session/conversation_search?${params.toString()}`, {
+            cache: 'no-store',
+            headers: buildChatFetchHeaders()
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.error || 'Conversation search failed.');
+        conversationSearchState = {
+            query,
+            trashedOnly: requestedTrash,
+            nextCursor: data?.next_cursor || null,
+            results: append
+                ? [...conversationSearchState.results, ...(Array.isArray(data?.results) ? data.results : [])]
+                : (Array.isArray(data?.results) ? data.results : [])
+        };
+        renderConversationSearchResults();
+        if (status && data?.index_coverage?.complete_for_accessible_window === false) {
+            status.textContent += ' Older conversations are still being indexed.';
+        }
+    } catch (error) {
+        if (status) status.textContent = error?.message || 'Conversation search unavailable.';
+    }
+}
+
+function initialiseConversationSearch() {
+    const input = document.getElementById('conversationSearchInput');
+    const search = document.getElementById('conversationSearchButton');
+    const trash = document.getElementById('conversationTrashButton');
+    const more = document.getElementById('conversationSearchMore');
+    search?.addEventListener('click', () => { void performConversationSearch({ trashedOnly: false }); });
+    input?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            trash?.setAttribute('aria-pressed', 'false');
+            void performConversationSearch({ trashedOnly: false });
+        }
+    });
+    trash?.addEventListener('click', () => {
+        const next = trash.getAttribute('aria-pressed') !== 'true';
+        trash.setAttribute('aria-pressed', next ? 'true' : 'false');
+        if (!next) {
+            document.getElementById('conversationSearchPanel')?.setAttribute('hidden', '');
+            return;
+        }
+        void performConversationSearch({ trashedOnly: true });
+    });
+    more?.addEventListener('click', () => { void performConversationSearch({ append: true }); });
 }
 
 let orgSwitchListenerBound = false;
@@ -26290,15 +26444,12 @@ function renderChatSessionTabs(sessions, activeSessionId) {
                 });
             }
 
-            // Delete option for short conversations (< MAX_DELETABLE_TURNS turns)
-            // Only show if this is the currently active conversation (so user can see what they're deleting)
-            const msgCount = Number.isFinite(session?.message_count) ? Number(session.message_count) : 0;
-            const turns = Math.max(0, Math.ceil(msgCount / 2));
-            if (turns < MAX_DELETABLE_TURNS && sid === activeChatSessionId) {
+            const isSharedConversation = !!(session?.shared_with_me || session?.shared_from_user_id || session?.invite_id);
+            if (!isSharedConversation) {
                 menuItems.push({
-                    label: 'Delete',
+                    label: 'Move to Trash',
                     onClick: () => {
-                        if (window.confirm(`Delete this conversation? This cannot be undone.`)) {
+                        if (window.confirm('Move this conversation to Trash? You can restore it later.')) {
                             void deleteConversation(sid);
                         }
                     }
@@ -26307,7 +26458,6 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
             // JVNAUTOSCI-1039: Move to Organisation option for owned conversations
             // Only show for non-shared conversations (user owns this conversation)
-            const isSharedConversation = !!(session?.shared_with_me || session?.shared_from_user_id || session?.invite_id);
             if (!isSharedConversation) {
                 menuItems.push({
                     label: 'Move to Organisation…',
@@ -31766,6 +31916,7 @@ export function initializeChatTab() {
     loadChatSessionLastAccessedMap();
     loadChatSessionTabsLayoutPreference();
     setupChatSessionTabsResponsiveLayout();
+    initialiseConversationSearch();
 
     // Reload hidden sessions when user changes (settings change event)
     try {
@@ -38149,6 +38300,15 @@ export function __testOnly_getSessionTabsCache() {
 }
 export async function __testOnly_deleteConversation(sessionId) {
     return deleteConversation(sessionId);
+}
+export async function __testOnly_performConversationSearch(options = {}) {
+    return performConversationSearch(options);
+}
+export async function __testOnly_restoreConversation(sessionId) {
+    return restoreConversation(sessionId);
+}
+export function __testOnly_getConversationSearchState() {
+    return { ...conversationSearchState, results: [...conversationSearchState.results] };
 }
 export async function __testOnly_refreshChatPromptQueueFromServer() {
     return refreshChatPromptQueueFromServer({ silent: false });
