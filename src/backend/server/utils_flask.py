@@ -8,7 +8,8 @@ import os
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from flask import Flask, g, jsonify, redirect, request, url_for
@@ -3223,6 +3224,79 @@ def _build_health_runtime_authority_projection(app: Flask) -> dict[str, object]:
         "mongo": mongo,
         "durable_workflows": durable,
         "model_registry": model_registry,
+        "startup_seed_materialisations": (
+            _build_startup_seed_materialisations_projection(app)
+        ),
+    }
+
+
+def _build_startup_seed_materialisations_projection(
+    app: Flask,
+) -> dict[str, object]:
+    """Expose bounded startup seed readiness without canonical re-reads."""
+
+    family_configs = {
+        "concept_summary_fields": "CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT",
+        "publication_scope_profiles": (
+            "PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"
+        ),
+    }
+    families: dict[str, dict[str, object]] = {}
+    for family, config_key in family_configs.items():
+        raw_report = app.config.get(config_key)
+        report = raw_report if isinstance(raw_report, Mapping) else {}
+        reason = str(report.get("reason") or "").strip() or None
+        state = str(report.get("state") or "").strip() or None
+        ready_value = report.get("ready")
+        if not state and reason == "agent_test_instance":
+            state = "skipped"
+        elif not state and report:
+            state = "ready" if report.get("success") else "unavailable"
+        elif not state:
+            state = "not_checked"
+        ready = ready_value if isinstance(ready_value, bool) else state == "ready"
+        freshness_receipt = report.get("freshness_receipt")
+        receipt_reason = (
+            str(freshness_receipt.get("reason") or "").strip() or None
+            if isinstance(freshness_receipt, Mapping)
+            else None
+        )
+        families[family] = {
+            "ready": ready,
+            "state": state,
+            "reason": reason,
+            "reconciliation_required": bool(
+                report.get("reconciliation_required", False)
+            ),
+            "receipt_reason": receipt_reason,
+            "duration_ms": (
+                report.get("duration_ms")
+                if isinstance(report.get("duration_ms"), int)
+                else None
+            ),
+        }
+
+    active_states = {
+        str(family.get("state"))
+        for family in families.values()
+        if family.get("state") not in {"skipped", "not_checked"}
+    }
+    if "unavailable" in active_states:
+        state = "unavailable"
+    elif "initialising" in active_states:
+        state = "initialising"
+    elif active_states and active_states == {"ready"}:
+        state = "ready"
+    elif all(family.get("state") == "skipped" for family in families.values()):
+        state = "skipped"
+    else:
+        state = "not_checked"
+
+    return {
+        "schema_version": "startup_seed_materialisation_status.v1",
+        "ready": state == "ready",
+        "state": state,
+        "families": families,
     }
 
 

@@ -546,11 +546,84 @@ def bootstrap_canonical_publication_scope_profiles(
     )
 
 
+def reconcile_canonical_publication_scope_profiles(
+    *,
+    asset_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Apply and verify this release seed, then publish a freshness receipt.
+
+    The maintenance path deliberately preserves represented profile payloads
+    that already exist.  Ordinary process startup only checks the resulting
+    receipt and never invokes this mutating operation implicitly.
+    """
+
+    started_at = time.perf_counter()
+    bundle = _load_seed_bundle(asset_path)
+    source_digest = _startup_source_digest(bundle)
+    passes: list[dict[str, Any]] = []
+
+    def run_canonical_pass() -> dict[str, Any]:
+        observation = seed_freshness.begin_startup_seed_freshness_observation()
+        report = _bootstrap_canonical_publication_scope_profiles(
+            asset_path=asset_path,
+            freshness_context={
+                "source_digest": source_digest,
+                "observation": observation,
+            },
+        )
+        passes.append(report)
+        return report
+
+    final_report = run_canonical_pass()
+    final_receipt = final_report.get("freshness_receipt")
+    receipt_persisted = bool(
+        isinstance(final_receipt, Mapping) and final_receipt.get("persisted")
+    )
+    if final_report.get("success") and (
+        final_report.get("changed") or not receipt_persisted
+    ):
+        final_report = run_canonical_pass()
+        final_receipt = final_report.get("freshness_receipt")
+        receipt_persisted = bool(
+            isinstance(final_receipt, Mapping) and final_receipt.get("persisted")
+        )
+
+    ready = bool(
+        final_report.get("success")
+        and not final_report.get("changed")
+        and receipt_persisted
+    )
+    receipt_reason = (
+        str(final_receipt.get("reason") or "").strip()
+        if isinstance(final_receipt, Mapping)
+        else ""
+    )
+    return {
+        "schema_version": "startup_seed_reconciliation.v1",
+        "family_id": PUBLICATION_SCOPE_PROFILE_STARTUP_FAMILY_ID,
+        "success": ready,
+        "ready": ready,
+        "state": "ready" if ready else "unavailable",
+        "reason": (
+            "canonical_reconciliation_verified"
+            if ready
+            else receipt_reason or "canonical_reconciliation_unverified"
+        ),
+        "changed": any(bool(report.get("changed")) for report in passes),
+        "reconciliation_pass_count": len(passes),
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        "freshness_receipt": (
+            dict(final_receipt) if isinstance(final_receipt, Mapping) else {}
+        ),
+        "passes": passes,
+    }
+
+
 def ensure_publication_scope_profiles_current_for_startup(
     *,
     asset_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Use a complete dependency receipt before canonical startup verification."""
+    """Check the dependency receipt without running release reconciliation."""
 
     started_at = time.perf_counter()
     bundle = _load_seed_bundle(asset_path)
@@ -572,8 +645,11 @@ def ensure_publication_scope_profiles_current_for_startup(
         metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
         return {
             "success": True,
+            "ready": True,
+            "state": "ready",
             "skipped": True,
             "reason": "dependency_receipt_current",
+            "reconciliation_required": False,
             "changed": False,
             "asset_path": bundle.get("asset_path"),
             "schema_version": bundle.get("schema_version"),
@@ -589,17 +665,23 @@ def ensure_publication_scope_profiles_current_for_startup(
             "errors": [],
         }
 
-    observation = seed_freshness.begin_startup_seed_freshness_observation()
-    report = _bootstrap_canonical_publication_scope_profiles(
-        asset_path=asset_path,
-        freshness_context={
-            "source_digest": source_digest,
-            "observation": observation,
-        },
-    )
-    report["freshness_receipt_check"] = public_check
-    report["duration_ms"] = int((time.perf_counter() - started_at) * 1000)
-    return report
+    return {
+        "success": False,
+        "ready": False,
+        "state": "unavailable",
+        "skipped": True,
+        "reason": "startup_seed_reconciliation_required",
+        "reconciliation_required": True,
+        "asset_path": bundle.get("asset_path"),
+        "schema_version": bundle.get("schema_version"),
+        "seed_version": bundle.get("seed_version"),
+        "read_strategy": "dependency_receipt",
+        "read_phases": 1,
+        "canonical_read_batches": {"concepts": 0, "text_assertions": 0},
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        "freshness_receipt": public_check,
+        "errors": [],
+    }
 
 
 __all__ = [
@@ -609,4 +691,5 @@ __all__ = [
     "PUBLICATION_SCOPE_PROFILE_TYPE_ID",
     "bootstrap_canonical_publication_scope_profiles",
     "ensure_publication_scope_profiles_current_for_startup",
+    "reconcile_canonical_publication_scope_profiles",
 ]

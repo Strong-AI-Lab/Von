@@ -74,12 +74,16 @@ checkout on `main`:
 
 This is the canonical local deployment operation. It fetches `origin/main`,
 fast-forwards a clean primary `main`, checks out the exact commit detached in
-the dedicated sibling `Von-runtime-main` worktree, restarts that runtime, and
-verifies the running commit, clean-build marker, durable workflow services,
-and both background indexing workers. It refuses a dirty, divergent, wrong-
-branch, or unrelated runtime checkout. Set `VON_RUNTIME_WORKTREE` or pass
-`-RuntimeWorktree <path>` only when the runtime worktree intentionally lives
-elsewhere.
+the dedicated sibling `Von-runtime-main` worktree, runs that release's explicit
+startup-seed reconciliation from the runtime checkout, restarts the runtime,
+and verifies the running commit, clean-build marker, startup-seed receipts,
+durable workflow services, and both background indexing workers. The
+reconciliation is a trusted local operator action that may write canonical
+Vontology state; ordinary Flask startup only checks its derived receipts. The
+deployment refuses a dirty, divergent, wrong-branch, unrelated runtime
+checkout, failed reconciliation, or unavailable startup materialisation. Set
+`VON_RUNTIME_WORKTREE` or pass `-RuntimeWorktree <path>` only when the runtime
+worktree intentionally lives elsewhere.
 
 The primary checkout owns the local `main` branch. The runtime worktree is
 deliberately detached at the deployed commit; it must not maintain a second
@@ -111,6 +115,21 @@ Isolated agent-test restart:
 
 Agent-test replay tools normally target `http://127.0.0.1:5010` and should
 verify that `/health` reports `agent_test_instance=true`.
+
+To reconcile the same release inputs explicitly without deploying or starting
+a server, run this from the checkout whose derived receipt path the eventual
+runtime will use:
+
+```sh
+.venv/bin/python scripts/reconcile_startup_seed_materialisations.py
+```
+
+Use `--family concept-summary-fields` or
+`--family publication-scope-profiles` for a bounded repair. A zero exit status
+means the command applied any missing canonical state, performed a subsequent
+unchanged verification when needed, and published a current dependency
+receipt. This command is not a startup workaround and must not be scheduled on
+every restart.
 
 ### 3.3 Clean up repeated local helpers
 

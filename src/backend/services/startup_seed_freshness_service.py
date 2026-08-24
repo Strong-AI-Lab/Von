@@ -1,8 +1,11 @@
 """Change-aware freshness receipts for bounded startup seed materialisations.
 
 The receipts in this module are derived support state.  They never replace
-Vontology as authority: a missing, incompatible, or unresumable receipt is a
-cache miss and callers retain their canonical verification path.
+Vontology as authority: a missing, incompatible, or unresumable receipt makes
+the affected startup subsystem unavailable until an explicit release or
+maintenance reconciliation verifies canonical state and publishes a new
+receipt.  Ordinary process startup never turns that miss into hidden canonical
+reads or writes.
 """
 
 from __future__ import annotations
