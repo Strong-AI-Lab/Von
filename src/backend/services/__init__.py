@@ -11,6 +11,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 _SERVICE_EXPORT_MODULES = {
+    "academic_roster_workflow_vontology_service": ".academic_roster_workflow_vontology_service",
     "ai_chat_session_source_profile_vontology_service": ".ai_chat_session_source_profile_vontology_service",
     "annotation_extraction_service": ".annotation_extraction_service",
     "benchmark_suite_vontology_service": ".benchmark_suite_vontology_service",
@@ -47,6 +48,9 @@ _SERVICE_EXPORT_MODULES = {
 }
 
 if TYPE_CHECKING:
+    from . import (
+        academic_roster_workflow_vontology_service as academic_roster_workflow_vontology_service,
+    )
     from . import (
         ai_chat_session_source_profile_vontology_service as ai_chat_session_source_profile_vontology_service,
     )
@@ -142,6 +146,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "academic_roster_workflow_vontology_service",
     "ai_chat_session_source_profile_vontology_service",
     "annotation_extraction_service",
     "benchmark_suite_vontology_service",
