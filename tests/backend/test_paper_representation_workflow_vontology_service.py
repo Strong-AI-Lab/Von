@@ -2328,7 +2328,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "32" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "33" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2799,6 +2799,9 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
             org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
         ),
         data={
+            # Parent workflows preserve optional mapped fields as explicit nulls.
+            # A null file-copy value must not enter the private file-link branch.
+            "file_copy_concept_id": None,
             "paper_metadata": {
                 "title": "Composable Identity Control for Multi-Character Illustration",
                 "abstract": "A paper about composable identity control.",
@@ -2823,6 +2826,8 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     assert result.final_state.endswith("_completed"), result.data.get(
         "last_action_outputs"
     )
+    assert result.data.get("file_link_gate") == "optional"
+    assert "file_link_scope_mode" not in result.data
     paper_concept_id = result.data.get("paper_concept_id")
     assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
     assert result.data.get("verification_passed") is True
