@@ -10,6 +10,7 @@ from src.backend.services import concept_service
 from src.backend.services.concept_summary_field_vontology_service import (
     bootstrap_canonical_concept_summary_fields,
     ensure_concept_summary_fields_current_for_startup,
+    reconcile_canonical_concept_summary_fields,
 )
 
 
@@ -269,42 +270,105 @@ def test_summary_field_startup_receipt_hit_performs_no_canonical_scan(
     }
 
 
-def test_summary_field_startup_miss_records_only_quiet_unchanged_state(
+def test_summary_field_startup_miss_requires_explicit_reconciliation_without_scan(
     _reset_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = bootstrap_canonical_concept_summary_fields()
-    assert first["success"] is True
-    recorded: dict[str, Any] = {}
-
     monkeypatch.setattr(
         summary_seed_module.seed_freshness,
         "check_startup_seed_freshness",
         lambda **_kwargs: {"fresh": False, "reason": "receipt_missing"},
     )
     monkeypatch.setattr(
-        summary_seed_module.seed_freshness,
-        "begin_startup_seed_freshness_observation",
-        lambda: {"success": True, "_start_at_operation_time": "before-scan"},
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not scan canonical concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        summary_seed_module,
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not scan canonical text")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "create_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not create concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "update_concept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not update concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        summary_seed_module,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not write text relations")
+        ),
     )
 
+    report = ensure_concept_summary_fields_current_for_startup()
+
+    assert report["success"] is False
+    assert report["ready"] is False
+    assert report["state"] == "unavailable"
+    assert report["reason"] == "startup_seed_reconciliation_required"
+    assert report["reconciliation_required"] is True
+    assert report["canonical_read_batches"] == {
+        "concepts": 0,
+        "text_assertions": 0,
+    }
+    assert report["freshness_receipt"]["reason"] == "receipt_missing"
+
+
+def test_summary_field_explicit_reconciliation_verifies_after_write(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[dict[str, Any]] = []
+    recorded: list[dict[str, Any]] = []
+
+    def _observe() -> dict[str, Any]:
+        observation = {
+            "success": True,
+            "_start_at_operation_time": f"before-pass-{len(observations) + 1}",
+        }
+        observations.append(observation)
+        return observation
+
     def _record(**kwargs):
-        recorded.update(kwargs)
+        recorded.append(kwargs)
         return {"persisted": True, "reason": "dependency_receipt_persisted"}
 
+    monkeypatch.setattr(
+        summary_seed_module.seed_freshness,
+        "begin_startup_seed_freshness_observation",
+        _observe,
+    )
     monkeypatch.setattr(
         summary_seed_module.seed_freshness,
         "record_startup_seed_freshness",
         _record,
     )
 
-    report = ensure_concept_summary_fields_current_for_startup()
+    report = reconcile_canonical_concept_summary_fields()
 
     assert report["success"] is True
-    assert report["changed"] is False
-    assert report["read_strategy"] == "batched_canonical_state"
+    assert report["ready"] is True
+    assert report["state"] == "ready"
+    assert report["changed"] is True
+    assert report["reconciliation_pass_count"] == 2
+    assert report["passes"][0]["changed"] is True
+    assert report["passes"][1]["changed"] is False
     assert report["freshness_receipt"]["persisted"] is True
-    assert recorded["observation"]["_start_at_operation_time"] == "before-scan"
-    assert recorded["tracked_concept_document_ids"]
-    assert recorded["tracked_text_relation_document_ids"]
-    assert recorded["tracked_text_value_document_ids"]
+    assert recorded[0]["observation"]["_start_at_operation_time"] == (
+        "before-pass-2"
+    )

@@ -16,6 +16,7 @@ from src.backend.services.publication_scope_profile_service import (
 from src.backend.services.publication_scope_profile_vontology_service import (
     bootstrap_canonical_publication_scope_profiles,
     ensure_publication_scope_profiles_current_for_startup,
+    reconcile_canonical_publication_scope_profiles,
 )
 from src.backend.services.text_value_service import upsert_singleton_text_relation
 
@@ -625,3 +626,106 @@ def test_publication_profile_startup_receipt_hit_performs_no_canonical_scan(
         "concepts": 0,
         "text_assertions": 0,
     }
+
+
+def test_publication_profile_startup_miss_requires_explicit_reconciliation_without_scan(
+    publication_profile_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        publication_seed_module.seed_freshness,
+        "check_startup_seed_freshness",
+        lambda **_kwargs: {"fresh": False, "reason": "source_digest_mismatch"},
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not scan canonical concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        publication_seed_module,
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not scan canonical text")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "create_concept",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not create concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "update_concept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not update concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        publication_seed_module,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup receipt miss must not write text relations")
+        ),
+    )
+
+    report = ensure_publication_scope_profiles_current_for_startup()
+
+    assert report["success"] is False
+    assert report["ready"] is False
+    assert report["state"] == "unavailable"
+    assert report["reason"] == "startup_seed_reconciliation_required"
+    assert report["reconciliation_required"] is True
+    assert report["canonical_read_batches"] == {
+        "concepts": 0,
+        "text_assertions": 0,
+    }
+    assert report["freshness_receipt"]["reason"] == "source_digest_mismatch"
+
+
+def test_publication_profile_explicit_reconciliation_publishes_current_receipt(
+    publication_profile_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[dict[str, Any]] = []
+    recorded: list[dict[str, Any]] = []
+
+    def _observe() -> dict[str, Any]:
+        observation = {
+            "success": True,
+            "_start_at_operation_time": f"before-pass-{len(observations) + 1}",
+        }
+        observations.append(observation)
+        return observation
+
+    def _record(**kwargs):
+        recorded.append(kwargs)
+        return {"persisted": True, "reason": "dependency_receipt_persisted"}
+
+    monkeypatch.setattr(
+        publication_seed_module.seed_freshness,
+        "begin_startup_seed_freshness_observation",
+        _observe,
+    )
+    monkeypatch.setattr(
+        publication_seed_module.seed_freshness,
+        "record_startup_seed_freshness",
+        _record,
+    )
+
+    report = reconcile_canonical_publication_scope_profiles()
+
+    assert report["success"] is True
+    assert report["ready"] is True
+    assert report["state"] == "ready"
+    assert report["changed"] is False
+    assert report["reconciliation_pass_count"] == 1
+    assert report["passes"][0]["changed"] is False
+    assert report["freshness_receipt"]["persisted"] is True
+    assert recorded[0]["observation"]["_start_at_operation_time"] == (
+        "before-pass-1"
+    )

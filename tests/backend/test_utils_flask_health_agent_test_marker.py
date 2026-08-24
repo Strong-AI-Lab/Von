@@ -85,6 +85,9 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
         "effective_database_name_sha256": hashlib.sha256(b"von").hexdigest(),
     }
     assert runtime_authority["durable_workflows"]["worker_running"] is False
+    assert runtime_authority["startup_seed_materialisations"]["state"] == (
+        "not_checked"
+    )
     assert "secret-user" not in json.dumps(payload)
     assert "secret-password" not in json.dumps(payload)
     assert network_calls == {"socket": 0, "urlopen": 0}
@@ -257,3 +260,59 @@ def test_health_runtime_authority_uses_count_free_durable_status(monkeypatch) ->
         "last_refresh_succeeded": True,
     }
     assert "worker_id" not in json.dumps(payload)
+
+
+def test_health_projects_startup_seed_family_readiness_without_raw_report() -> None:
+    import src.backend.server.utils_flask as utils_flask
+
+    app = Flask(__name__)
+    app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] = {
+        "success": True,
+        "ready": True,
+        "state": "ready",
+        "reason": "dependency_receipt_current",
+        "duration_ms": 12,
+        "freshness_receipt": {
+            "reason": "dependency_receipt_current",
+            "private_checkpoint": "must-not-be-public",
+        },
+    }
+    app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] = {
+        "success": False,
+        "ready": False,
+        "state": "unavailable",
+        "reason": "startup_seed_reconciliation_required",
+        "reconciliation_required": True,
+        "duration_ms": 8,
+        "freshness_receipt": {
+            "reason": "source_digest_mismatch",
+            "private_checkpoint": "must-not-be-public",
+        },
+    }
+
+    payload = utils_flask._build_startup_seed_materialisations_projection(app)
+
+    assert payload == {
+        "schema_version": "startup_seed_materialisation_status.v1",
+        "ready": False,
+        "state": "unavailable",
+        "families": {
+            "concept_summary_fields": {
+                "ready": True,
+                "state": "ready",
+                "reason": "dependency_receipt_current",
+                "reconciliation_required": False,
+                "receipt_reason": "dependency_receipt_current",
+                "duration_ms": 12,
+            },
+            "publication_scope_profiles": {
+                "ready": False,
+                "state": "unavailable",
+                "reason": "startup_seed_reconciliation_required",
+                "reconciliation_required": True,
+                "receipt_reason": "source_digest_mismatch",
+                "duration_ms": 8,
+            },
+        },
+    }
+    assert "private_checkpoint" not in json.dumps(payload)

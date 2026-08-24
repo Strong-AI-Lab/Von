@@ -13,9 +13,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import psutil
 
@@ -208,6 +209,42 @@ def _prepare_runtime(
         raise DeploymentError("Runtime checkout must be detached, but it is on a branch")
 
 
+def _reconcile_startup_seed_materialisations(
+    runtime_root: Path,
+) -> dict[str, Any]:
+    """Run the target release's explicit canonical seed reconciliation."""
+
+    script = runtime_root / "scripts" / "reconcile_startup_seed_materialisations.py"
+    if not script.is_file():
+        raise DeploymentError(
+            f"Startup seed reconciliation command missing after checkout: {script}"
+        )
+    result = _run(
+        [sys.executable, script, "--machine-readable"],
+        cwd=runtime_root,
+    )
+    receipt_prefix = "VON_STARTUP_SEED_RECONCILIATION_RECEIPT="
+    receipt_line = next(
+        (
+            line.removeprefix(receipt_prefix)
+            for line in reversed(result.stdout.splitlines())
+            if line.startswith(receipt_prefix)
+        ),
+        "",
+    )
+    try:
+        payload = json.loads(receipt_line)
+    except json.JSONDecodeError as exc:
+        raise DeploymentError(
+            "Startup seed reconciliation did not return a JSON receipt"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise DeploymentError(
+            f"Startup seed reconciliation was not ready: {payload!r}"
+        )
+    return payload
+
+
 def _read_health(url: str) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
@@ -344,6 +381,21 @@ def _health_error(payload: dict[str, Any], target_commit: str) -> str | None:
     missing = [name for name in required if durable.get(name) is not True]
     if missing:
         return f"durable workflow readiness false: {', '.join(missing)}"
+    startup_materialisations = (
+        authority.get("startup_seed_materialisations")
+        if isinstance(authority, dict)
+        else None
+    )
+    if not isinstance(startup_materialisations, dict):
+        return "startup seed materialisation health missing"
+    if (
+        startup_materialisations.get("ready") is not True
+        or startup_materialisations.get("state") != "ready"
+    ):
+        return (
+            "startup seed materialisation readiness false: "
+            f"{startup_materialisations.get('state')!r}"
+        )
     return None
 
 
@@ -447,6 +499,7 @@ def deploy(
     launcher = runtime_root / "run.sh"
     if not launcher.is_file():
         raise DeploymentError(f"Runtime launcher missing after checkout: {launcher}")
+    _reconcile_startup_seed_materialisations(runtime_root)
     _run(
         [
             "bash",

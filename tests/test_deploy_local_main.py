@@ -13,7 +13,9 @@ from scripts.deploy_local_main import (
     _matching_von_process_root,
     _prepare_primary,
     _prepare_runtime,
+    _reconcile_startup_seed_materialisations,
     _stop_verified_predecessor,
+    deploy,
 )
 
 
@@ -145,7 +147,11 @@ def test_health_verification_requires_exact_clean_durable_build() -> None:
                 "database_connected": True,
                 "worker_running": True,
                 "scheduler_running": True,
-            }
+            },
+            "startup_seed_materialisations": {
+                "ready": True,
+                "state": "ready",
+            },
         },
     }
     assert _health_error(payload, commit) is None
@@ -165,6 +171,105 @@ def test_health_verification_requires_exact_clean_durable_build() -> None:
     assert _health_error(no_scheduler, commit) == (
         "durable workflow readiness false: scheduler_running"
     )
+
+    stale_seed = json.loads(json.dumps(payload))
+    stale_seed["runtime_authority"]["startup_seed_materialisations"] = {
+        "ready": False,
+        "state": "unavailable",
+    }
+    assert _health_error(stale_seed, commit) == (
+        "startup seed materialisation readiness false: 'unavailable'"
+    )
+
+
+def test_runtime_reconciliation_uses_target_checkout_and_reads_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "Von-runtime-main"
+    script = runtime / "scripts" / "reconcile_startup_seed_materialisations.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# target release command\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def _record_run(args, **kwargs):
+        calls.append({"args": list(args), **kwargs})
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            "diagnostic output\n"
+            "VON_STARTUP_SEED_RECONCILIATION_RECEIPT="
+            + json.dumps({"success": True, "state": "ready"}),
+            "",
+        )
+
+    monkeypatch.setattr("scripts.deploy_local_main._run", _record_run)
+
+    report = _reconcile_startup_seed_materialisations(runtime)
+
+    assert report == {"success": True, "state": "ready"}
+    assert calls[0]["args"][1] == script
+    assert calls[0]["args"][2] == "--machine-readable"
+    assert calls[0]["cwd"] == runtime
+
+
+def test_deploy_reconciles_target_runtime_before_server_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = (tmp_path / "Von").resolve()
+    runtime = (tmp_path / "Von-runtime-main").resolve()
+    primary.mkdir()
+    runtime.mkdir()
+    (primary / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (runtime / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    commit = "a" * 40
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._prepare_primary",
+        lambda *_args, **_kwargs: commit,
+    )
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._validate_runtime",
+        lambda *_args, **_kwargs: events.append("validate"),
+    )
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._stop_verified_predecessor",
+        lambda **_kwargs: events.append("stop_predecessor"),
+    )
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._prepare_runtime",
+        lambda *_args, **_kwargs: events.append("prepare_runtime"),
+    )
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._reconcile_startup_seed_materialisations",
+        lambda *_args, **_kwargs: events.append("reconcile")
+        or {"success": True},
+    )
+
+    def _record_run(args, **_kwargs):
+        if "start" in args:
+            events.append("start")
+        elif "stop" in args:
+            events.append("stop_runtime")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("scripts.deploy_local_main._run", _record_run)
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._wait_for_verified_health",
+        lambda *_args, **_kwargs: {"pid": 1234},
+    )
+    monkeypatch.setattr(
+        "scripts.deploy_local_main._verify_workers",
+        lambda *_args, **_kwargs: (2345, 3456),
+    )
+
+    result = deploy(primary_root=primary, runtime_root=runtime)
+
+    assert result.commit == commit
+    assert events.index("prepare_runtime") < events.index("reconcile")
+    assert events.index("reconcile") < events.index("start")
 
 
 def test_matching_von_process_root_accepts_only_exact_checkout_and_port(
