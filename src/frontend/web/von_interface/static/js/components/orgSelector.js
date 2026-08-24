@@ -9,7 +9,7 @@
  * windows without interference.
  */
 
-import { getJsonDetailed, getUserContext, postJson } from '../apiService.js';
+import { getJsonDetailed, postJson } from '../apiService.js';
 import {
     armRetryableLoadState,
     clearRetryableLoadState,
@@ -36,13 +36,7 @@ export function normaliseOrganisationDisplayName(label) {
  * Load user's available organisations from backend
  */
 export async function loadMyOrganisations() {
-    const ctx = getUserContext();
-    const userConceptId = ctx?.user_id;
-    const url = userConceptId
-        ? `/von/api/organisations/my_organisations?user_concept_id=${encodeURIComponent(userConceptId)}`
-        : '/von/api/organisations/my_organisations';
-
-    const { data } = await getJsonDetailed(url);
+    const { data } = await getJsonDetailed('/von/api/organisations/my_organisations');
     return data?.organisations || [];
 }
 

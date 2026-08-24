@@ -18640,115 +18640,50 @@ def stream_shared_conversation():
 @von_bp.route("/api/organisations/my_organisations", methods=["GET"])
 def get_my_organisations():
     """
-    Get list of organisations the user is member of.
+    Get the authenticated user's organisation memberships.
+
+    Membership discovery deliberately does not use the active organisation
+    context: that context selects a working namespace, while this endpoint must
+    enumerate every organisation the actor can switch to. Client-supplied user
+    identifiers are ignored; the actor always comes from trusted server context.
 
     Returns: {organisations: [{concept_id, name, role}, ...], total_count}
     """
     try:
-        from ...security.role_resolver import get_all_user_organisations, get_user_role
-        from ...services.concept_service import get_concept_by_concept_id
-
-        user_id = (
-            session.get("user_id")
-            or session.get("user_concept_id")
-            or session.get("user_email")
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id_with_source,
         )
-        if not user_id:
+        from ...services.organisation_membership_service import get_user_memberships
+
+        user_concept_id, actor_source = get_effective_user_concept_id_with_source()
+        if (
+            not user_concept_id
+            or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
+        ):
             return jsonify({"error": "Not authenticated"}), 401
-
-        requested_user_concept_id = request.args.get("user_concept_id")
-        user_concept_id = requested_user_concept_id or session.get("user_concept_id")
-        user_email = session.get("user_email")
-
-        def _normalise_relationships(rel):
-            if not isinstance(rel, (dict, list)):
-                return {}
-            if isinstance(rel, list):
-                out = {}
-                for item in rel:
-                    if not isinstance(item, dict):
-                        continue
-                    pred = item.get("predicate")
-                    tgt = item.get("target")
-                    if not pred or not tgt:
-                        continue
-                    out.setdefault(pred, [])
-                    if isinstance(tgt, list):
-                        out[pred].extend(tgt)
-                    else:
-                        out[pred].append(tgt)
-                return out
-            return rel or {}
 
         def _prettify_concept_id(concept_id: str) -> str:
             return concept_id.replace("#V#", "").replace("_", " ").title()
 
-        # Derive a slug for stub role resolution.
-        # Prefer identifiers that are stable/meaningful (concept ID or email) over
-        # opaque auth subjects.
-        slug_source = user_concept_id or user_email or user_id
-
-        user_slug = str(slug_source)
-        if user_slug.startswith("#V#"):
-            user_slug = user_slug[3:]
-        if "@" in user_slug:
-            user_slug = user_slug.split("@", 1)[0]
-        if "+" in user_slug:
-            user_slug = user_slug.split("+", 1)[0]
-
-        import re
-
-        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
-
-        USER_PREF_ORG_PREDICATE = "#V#member_of_organisation"
-
+        membership_result = get_user_memberships(user_concept_id)
         organisations = []
-
-        # Prefer memberships stored on the selected/authenticated user concept.
-        if isinstance(user_concept_id, str) and user_concept_id.strip():
-            try:
-                user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
-            except Exception:
-                user_concept = None
-            if isinstance(user_concept, dict):
-                rel = _normalise_relationships(user_concept.get("relationships", {}))
-                org_raw = rel.get(USER_PREF_ORG_PREDICATE)
-
-                org_targets: list[str] = []
-                if isinstance(org_raw, str) and org_raw:
-                    org_targets = [org_raw]
-                elif isinstance(org_raw, list):
-                    org_targets = [t for t in org_raw if isinstance(t, str) and t]
-
-                for org_cid in org_targets:
-                    org_cid = org_cid if org_cid.startswith("#V#") else f"#V#{org_cid}"
-                    org_slug = org_cid[3:] if org_cid.startswith("#V#") else org_cid
-                    org_slug = org_slug.strip().lower().replace(" ", "_")
-                    try:
-                        role = get_user_role(user_slug, org_slug)
-                    except Exception:
-                        role = "member"
-
-                    organisations.append(
-                        {
-                            "concept_id": org_cid,
-                            "name": _prettify_concept_id(org_cid),
-                            "role": role,
-                        }
-                    )
-
-        # Fallback: stub role resolver mappings (Phase 1 hardcoded)
-        if not organisations:
-            org_roles = get_all_user_organisations(user_slug)
-            for org_id, role in org_roles.items():
-                concept_id = org_id if org_id.startswith("#V#") else f"#V#{org_id}"
-                organisations.append(
-                    {
-                        "concept_id": concept_id,
-                        "name": _prettify_concept_id(concept_id),
-                        "role": role,
-                    }
-                )
+        for membership in membership_result.get("memberships", []):
+            if not isinstance(membership, dict):
+                continue
+            concept_id = membership.get("organisation_concept_id")
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                continue
+            concept_id = concept_id.strip()
+            if not concept_id.startswith("#V#"):
+                concept_id = f"#V#{concept_id}"
+            organisations.append(
+                {
+                    "concept_id": concept_id,
+                    "name": _prettify_concept_id(concept_id),
+                    "role": str(membership.get("role") or "member"),
+                }
+            )
 
         return (
             jsonify(
