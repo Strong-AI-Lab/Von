@@ -9,6 +9,7 @@ import src.backend.services.concept_summary_field_vontology_service as summary_s
 from src.backend.services import concept_service
 from src.backend.services.concept_summary_field_vontology_service import (
     bootstrap_canonical_concept_summary_fields,
+    ensure_concept_summary_fields_current_for_startup,
 )
 
 
@@ -226,3 +227,84 @@ def test_summary_field_bootstrap_uses_batched_noop_fast_path(
     assert second["counts"]["type_bindings_changed"] == 0
     assert concept_reads == 1
     assert text_reads == 1
+
+
+def test_summary_field_startup_receipt_hit_performs_no_canonical_scan(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        summary_seed_module.seed_freshness,
+        "check_startup_seed_freshness",
+        lambda **_kwargs: {
+            "fresh": True,
+            "reason": "dependency_receipt_current",
+            "events_examined": 0,
+            "metadata": {"counts": {"fields_seen": 17}},
+        },
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "get_concepts_by_concept_ids_exact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("receipt hit must not scan canonical concepts")
+        ),
+    )
+    monkeypatch.setattr(
+        summary_seed_module,
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("receipt hit must not scan canonical text")
+        ),
+    )
+
+    report = ensure_concept_summary_fields_current_for_startup()
+
+    assert report["success"] is True
+    assert report["skipped"] is True
+    assert report["read_strategy"] == "dependency_receipt"
+    assert report["canonical_read_batches"] == {
+        "concepts": 0,
+        "text_assertions": 0,
+    }
+
+
+def test_summary_field_startup_miss_records_only_quiet_unchanged_state(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = bootstrap_canonical_concept_summary_fields()
+    assert first["success"] is True
+    recorded: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        summary_seed_module.seed_freshness,
+        "check_startup_seed_freshness",
+        lambda **_kwargs: {"fresh": False, "reason": "receipt_missing"},
+    )
+    monkeypatch.setattr(
+        summary_seed_module.seed_freshness,
+        "begin_startup_seed_freshness_observation",
+        lambda: {"success": True, "_start_at_operation_time": "before-scan"},
+    )
+
+    def _record(**kwargs):
+        recorded.update(kwargs)
+        return {"persisted": True, "reason": "dependency_receipt_persisted"}
+
+    monkeypatch.setattr(
+        summary_seed_module.seed_freshness,
+        "record_startup_seed_freshness",
+        _record,
+    )
+
+    report = ensure_concept_summary_fields_current_for_startup()
+
+    assert report["success"] is True
+    assert report["changed"] is False
+    assert report["read_strategy"] == "batched_canonical_state"
+    assert report["freshness_receipt"]["persisted"] is True
+    assert recorded["observation"]["_start_at_operation_time"] == "before-scan"
+    assert recorded["tracked_concept_document_ids"]
+    assert recorded["tracked_text_relation_document_ids"]
+    assert recorded["tracked_text_value_document_ids"]
