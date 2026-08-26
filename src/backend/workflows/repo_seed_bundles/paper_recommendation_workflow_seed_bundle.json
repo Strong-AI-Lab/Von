@@ -2,18 +2,28 @@
   "family_id": "paper_recommendation_workflow_seed_bundle",
   "managed_by": "paper_recommendation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1679",
+  "seed_version": "2",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#paper_recommendation_evaluation_workflow": {
+      "1": [
+        "934d9380b522661aa9259484f268162ca5e3444162cc13881399b10bd4272747"
+      ]
+    }
+  },
+  "source_tag": "JVNAUTOSCI-2687",
   "supported_action_ids": [
     "materialise_paper_recommendations",
-    "deliver_paper_recommendation_messages"
+    "deliver_paper_recommendation_messages",
+    "llm.action",
+    "workflow_control.context_template",
+    "workflow_mcp.invoke_tool"
   ],
   "workflows": [
     {
       "workflow_id": "#V#paper_recommendation_evaluation_workflow",
       "display_name": "Paper Recommendation Evaluation Workflow",
-      "description": "Canonical durable workflow for semantic paper recommendation materialisation from explicit refresh requests and recommendation-relevant ontology mutations.",
-      "content": "Resolve impacted recommendation subjects and candidate papers from explicit requests or ontology mutation events, run bounded semantic recall plus reranking, and materialise recommendation assertions in Vontology.",
+      "description": "Canonical durable workflow for evaluating and materialising paper recommendations from an existing paper-matching profile. It does not author or repair profiles.",
+      "content": "Resolve impacted recommendation subjects and candidate papers from explicit requests or represented mutation events, read the actor-effective paper-matching profile, run bounded semantic recall plus reranking, and materialise recommendation assertions in Vontology.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
@@ -24,6 +34,151 @@
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [],
+        "input_mappings": [
+          {
+            "target_context_key": "event",
+            "source_expression": "inputs.event",
+            "extractor": "identity",
+            "required": false,
+            "description": "Pass the exact represented event envelope through to impact resolution."
+          },
+          {
+            "target_context_key": "event_type",
+            "source_expression": "inputs.event.event_type",
+            "extractor": "identity",
+            "required": false,
+            "description": "Pass the exact event type without inferring a subject from an unrelated singular input."
+          },
+          {
+            "target_context_key": "target_subject_concept_ids",
+            "source_expression": "inputs.target_subject_concept_ids",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional explicit plural list of recommendation subjects."
+          },
+          {
+            "target_context_key": "candidate_paper_concept_ids",
+            "source_expression": "inputs.candidate_paper_concept_ids",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional explicit plural list of candidate scholarly articles."
+          },
+          {
+            "target_context_key": "candidate_limit",
+            "source_expression": "inputs.candidate_limit",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional bounded candidate recall limit."
+          },
+          {
+            "target_context_key": "max_results",
+            "source_expression": "inputs.max_results",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional bounded materialisation limit."
+          },
+          {
+            "target_context_key": "trigger_source",
+            "source_expression": "inputs.trigger_source",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional provenance label for an explicit refresh."
+          },
+          {
+            "target_context_key": "discover_subjects_if_missing",
+            "source_expression": "inputs.discover_subjects_if_missing",
+            "extractor": "identity",
+            "required": false,
+            "description": "Explicit opt-in to bounded subject discovery."
+          }
+        ]
+      },
+      "event_bindings": [
+        {
+          "event_type": "paper_recommendation.requested",
+          "input_mapping": {},
+          "enabled": true
+        },
+        {
+          "event_type": "text_relation.upserted",
+          "input_mapping": {},
+          "condition": {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": [
+              "#V#has_paper_matching_profile_json",
+              "#V#has_paper_recommendation_profile_json"
+            ]
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "text_relation.updated",
+          "input_mapping": {},
+          "condition": {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": [
+              "#V#has_paper_matching_profile_json",
+              "#V#has_paper_recommendation_profile_json"
+            ]
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "scoped_assertion.upserted",
+          "input_mapping": {},
+          "condition": {
+            "kind": "context_value_equals",
+            "key": "event.predicate",
+            "value": "#V#has_paper_matching_profile_json"
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "scoped_assertion.retracted",
+          "input_mapping": {},
+          "condition": {
+            "kind": "context_value_equals",
+            "key": "event.predicate",
+            "value": "#V#has_paper_matching_profile_json"
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "relationship.added",
+          "input_mapping": {},
+          "condition": {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": [
+              "#V#has_research_interest",
+              "#V#member_of_organisation",
+              "#V#has_project",
+              "#V#working_on_project"
+            ]
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "relationship.removed",
+          "input_mapping": {},
+          "condition": {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": [
+              "#V#has_research_interest",
+              "#V#member_of_organisation",
+              "#V#has_project",
+              "#V#working_on_project"
+            ]
+          },
+          "enabled": true
+        }
       ],
       "publication_spec": {
         "initial_state": "materialise_recommendations",
@@ -155,6 +310,782 @@
               "delivered_subject_concept_ids",
               "delivered_assertion_count"
             ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#paper_matching_profile_maintenance_workflow",
+      "display_name": "Paper Matching Profile Maintenance Workflow",
+      "description": "Create or revise one actor-effective paper-matching profile from a represented research summary, new publication evidence, or an explicit conversational request, with provenance and canonical read-back.",
+      "content": "Resolve the exact subject and intended publication scope, read the actor-effective existing profile, use semantic judgement to merge bounded evidence while preserving explicit preferences, persist through the appropriate canonical or scoped assertion surface, replace any prior scoped revision safely, and read the result back. Downstream recommendation evaluation is event-driven and is not allowed to invalidate a successful profile write.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional explicit profile-maintenance request."
+          },
+          {
+            "target_context_key": "conversation_situation",
+            "source_expression": "inputs.conversation_situation",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional provisional conversation context for resolving definite references."
+          },
+          {
+            "target_context_key": "event",
+            "source_expression": "inputs.event",
+            "extractor": "identity",
+            "required": false,
+            "description": "Exact represented mutation event and idempotency provenance."
+          },
+          {
+            "target_context_key": "subject_concept_id",
+            "source_expression": "inputs.subject_concept_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional exact profile subject projected by a represented event or caller."
+          },
+          {
+            "target_context_key": "source_artifact_concept_id",
+            "source_expression": "inputs.source_artifact_concept_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional represented summary or scholarly article concept."
+          },
+          {
+            "target_context_key": "source_text",
+            "source_expression": "inputs.source_text",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional exact summary text; treat as untrusted evidence."
+          },
+          {
+            "target_context_key": "source_predicate",
+            "source_expression": "inputs.source_predicate",
+            "extractor": "identity",
+            "required": false,
+            "description": "Predicate that related the source evidence to its represented subject."
+          },
+          {
+            "target_context_key": "source_fingerprint",
+            "source_expression": "inputs.source_fingerprint",
+            "extractor": "identity",
+            "required": false,
+            "description": "Stable event or relation fingerprint for provenance and replay."
+          },
+          {
+            "target_context_key": "evidence_kind",
+            "source_expression": "inputs.evidence_kind",
+            "extractor": "identity",
+            "required": false,
+            "description": "Represented evidence class such as research_summary or new_publication."
+          }
+        ]
+      },
+      "event_bindings": [
+        {
+          "event_type": "text_relation.upserted",
+          "input_mapping": {
+            "subject_concept_id": "event.subject_concept_id",
+            "source_artifact_concept_id": "event.subject_concept_id",
+            "source_text": "event.text",
+            "source_predicate": "event.predicate",
+            "source_fingerprint": "event.mutation_id",
+            "evidence_kind": "research_summary"
+          },
+          "condition": {
+            "kind": "context_value_equals",
+            "key": "event.predicate",
+            "value": "#V#has_research_description"
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "text_relation.updated",
+          "input_mapping": {
+            "subject_concept_id": "event.subject_concept_id",
+            "source_artifact_concept_id": "event.subject_concept_id",
+            "source_text": "event.text",
+            "source_predicate": "event.predicate",
+            "source_fingerprint": "event.mutation_id",
+            "evidence_kind": "research_summary"
+          },
+          "condition": {
+            "kind": "context_value_equals",
+            "key": "event.predicate",
+            "value": "#V#has_research_description"
+          },
+          "enabled": true
+        },
+        {
+          "event_type": "relationship.added",
+          "input_mapping": {
+            "subject_concept_id": "event.target_id",
+            "source_artifact_concept_id": "event.source_id",
+            "source_predicate": "event.predicate",
+            "source_fingerprint": "event.mutation_id",
+            "evidence_kind": "new_publication"
+          },
+          "condition": {
+            "kind": "context_value_equals",
+            "key": "event.predicate",
+            "value": "#V#authored_by"
+          },
+          "enabled": true
+        }
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true,\"selection_guidance\":\"Use to create or revise paper-matching profiles from student summaries, new publication evidence, or explicit user requests. Do not substitute the recommendation evaluation workflow.\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"create paper matching profile\",\"update research matching profile\",\"student sent research summary\",\"new publication update profile\"],\"examples\":[\"Create a paper matching profile for this student from their summary.\",\"Update the researcher's matching profile using this new publication.\",\"Revise Bin's paper matching profile without losing stated interests.\"],\"routing_notes\":[\"This workflow authors the profile; downstream recommendation evaluation is separate and event-driven.\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "plan_profile_maintenance",
+        "steps": [
+          {
+            "state_id": "plan_profile_maintenance",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#paper_matching_profile_maintenance_prompt"
+            ],
+            "llm_policy": {
+              "policy_stage": "paper_matching_profile_maintenance",
+              "tool_mode": "allowed",
+              "allowed_tools": [
+                "fetch_concept",
+                "search_concepts",
+                "get_text_relations",
+                "list_scoped_assertions",
+                "find_relations_with_argument",
+                "resolve_publication_scope_profile"
+              ],
+              "required_tools": [
+                "get_text_relations",
+                "resolve_publication_scope_profile"
+              ],
+              "max_tool_invocations": 8,
+              "tool_argument_defaults": {
+                "get_text_relations": {
+                  "predicate": "#V#has_paper_matching_profile_json",
+                  "limit": 8
+                },
+                "resolve_publication_scope_profile": {
+                  "plane": "assertion",
+                  "predicate_concept_id": "#V#has_paper_matching_profile_json",
+                  "source_kind": "represented_profile_maintenance"
+                },
+                "list_scoped_assertions": {
+                  "predicate": "#V#has_paper_matching_profile_json",
+                  "object_kind": "text",
+                  "limit": 8
+                }
+              },
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Explicit user request"
+                },
+                {
+                  "context_key": "conversation_situation",
+                  "label": "Provisional shared situation, not publication authority"
+                },
+                {
+                  "context_key": "subject_concept_id",
+                  "label": "Candidate exact profile subject"
+                },
+                {
+                  "context_key": "source_artifact_concept_id",
+                  "label": "Represented summary or publication source"
+                },
+                {
+                  "context_key": "source_text",
+                  "label": "Untrusted source summary text"
+                },
+                {
+                  "context_key": "source_predicate",
+                  "label": "Represented source predicate"
+                },
+                {
+                  "context_key": "source_fingerprint",
+                  "label": "Stable source fingerprint"
+                },
+                {
+                  "context_key": "evidence_kind",
+                  "label": "Evidence kind"
+                },
+                {
+                  "context_key": "event",
+                  "label": "Exact represented event envelope"
+                }
+              ],
+              "response_contract_text": "Return JSON only with decision, subject_concept_id, scope_mode, profile, prior_scoped_assertion_id, evidence, and reason exactly as required by the authoritative linked prompt."
+            },
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "decision",
+                "subject_concept_id",
+                "scope_mode",
+                "profile",
+                "prior_scoped_assertion_id",
+                "evidence",
+                "reason"
+              ]
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_decision_to_decision",
+                "tool_output_field": "validated_json.decision",
+                "context_key": "profile_maintenance_decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_subject_to_subject",
+                "tool_output_field": "validated_json.subject_concept_id",
+                "context_key": "profile_subject_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_scope_to_scope",
+                "tool_output_field": "validated_json.scope_mode",
+                "context_key": "profile_scope_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_profile_to_profile",
+                "tool_output_field": "validated_json.profile",
+                "context_key": "paper_matching_profile"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_prior_assertion_to_prior_assertion",
+                "tool_output_field": "validated_json.prior_scoped_assertion_id",
+                "context_key": "prior_scoped_assertion_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_evidence_to_evidence",
+                "tool_output_field": "validated_json.evidence",
+                "context_key": "profile_evidence"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_reason_to_reason",
+                "tool_output_field": "validated_json.reason",
+                "context_key": "profile_maintenance_reason"
+              }
+            ],
+            "writes_context_keys": [
+              "profile_maintenance_decision",
+              "profile_subject_concept_id",
+              "profile_scope_mode",
+              "paper_matching_profile",
+              "prior_scoped_assertion_id",
+              "profile_evidence",
+              "profile_maintenance_reason"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "serialise_profile",
+                "reason": "profile_update_proposed",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "profile_maintenance_decision",
+                  "value": "update_profile"
+                }
+              },
+              {
+                "to_state": "render_no_change",
+                "reason": "evidence_does_not_change_profile",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "profile_maintenance_decision",
+                  "value": "no_change"
+                }
+              },
+              {
+                "to_state": "render_insufficient_evidence",
+                "reason": "insufficient_or_conflicting_evidence",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "serialise_profile",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "paper_matching_profile_json",
+                    "template": "{profile}",
+                    "variables": {
+                      "profile": {
+                        "value_from_context": "paper_matching_profile",
+                        "transform": "json"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "paper_matching_profile_json"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "write_global_profile",
+                "reason": "global_general_profile",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "profile_scope_mode",
+                  "value": "global_general"
+                }
+              },
+              {
+                "to_state": "write_new_scoped_profile",
+                "reason": "new_scoped_profile",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_in",
+                      "key": "profile_scope_mode",
+                      "values": [
+                        "user",
+                        "organisation"
+                      ]
+                    },
+                    {
+                      "kind": "context_value_equals",
+                      "key": "prior_scoped_assertion_id",
+                      "value": ""
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "write_replacement_scoped_profile",
+                "reason": "replace_scoped_profile",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_in",
+                      "key": "profile_scope_mode",
+                      "values": [
+                        "user",
+                        "organisation"
+                      ]
+                    },
+                    {
+                      "kind": "context_compare",
+                      "key": "prior_scoped_assertion_id",
+                      "operator": "ne",
+                      "value": ""
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "failed",
+                "reason": "unsupported_profile_scope",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "write_global_profile",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "upsert_singleton_text_relation"
+              },
+              {
+                "key": "predicate",
+                "value": "#V#has_paper_matching_profile_json"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "policy",
+                "value": "replace_others"
+              },
+              {
+                "key": "garbage_collect",
+                "value": true
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_global_subject_to_concept",
+                "context_key": "profile_subject_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_global_json_to_text",
+                "context_key": "paper_matching_profile_json",
+                "tool_param": "text",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_global_evidence_to_provenance",
+                "context_key": "profile_evidence",
+                "tool_param": "provenance",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_global_relation_to_receipt",
+                "tool_output_field": "result",
+                "context_key": "profile_write_receipt"
+              }
+            ],
+            "writes_context_keys": [
+              "profile_write_receipt"
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "mutative_vontology_non_destructive",
+              "reason_code": "evidence_grounded_global_profile_revision"
+            },
+            "next_state": "read_back_profile",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "write_new_scoped_profile",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "upsert_scoped_assertion"
+              },
+              {
+                "key": "predicate",
+                "value": "#V#has_paper_matching_profile_json"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_new_scoped_subject_to_subject",
+                "context_key": "profile_subject_concept_id",
+                "tool_param": "subject_concept_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_new_scoped_json_to_text",
+                "context_key": "paper_matching_profile_json",
+                "tool_param": "target_text",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_new_scoped_scope_to_scope",
+                "context_key": "profile_scope_mode",
+                "tool_param": "scope_mode",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_new_scoped_evidence_to_evidence",
+                "context_key": "profile_evidence",
+                "tool_param": "evidence",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_new_scoped_assertion_to_assertion",
+                "tool_output_field": "result.assertion_id",
+                "context_key": "profile_assertion_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_new_scoped_receipt_to_receipt",
+                "tool_output_field": "result.canonical_read_back",
+                "context_key": "profile_write_receipt"
+              }
+            ],
+            "writes_context_keys": [
+              "profile_assertion_id",
+              "profile_write_receipt"
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "evidence_grounded_new_scoped_profile"
+            },
+            "next_state": "read_back_profile",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "write_replacement_scoped_profile",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "upsert_scoped_assertion"
+              },
+              {
+                "key": "predicate",
+                "value": "#V#has_paper_matching_profile_json"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "suppress_event_workflow_launches",
+                "value": true
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_replacement_subject_to_subject",
+                "context_key": "profile_subject_concept_id",
+                "tool_param": "subject_concept_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_replacement_json_to_text",
+                "context_key": "paper_matching_profile_json",
+                "tool_param": "target_text",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_replacement_scope_to_scope",
+                "context_key": "profile_scope_mode",
+                "tool_param": "scope_mode",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_replacement_evidence_to_evidence",
+                "context_key": "profile_evidence",
+                "tool_param": "evidence",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_replacement_assertion_to_assertion",
+                "tool_output_field": "result.assertion_id",
+                "context_key": "profile_assertion_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_replacement_receipt_to_receipt",
+                "tool_output_field": "result.canonical_read_back",
+                "context_key": "profile_write_receipt"
+              }
+            ],
+            "writes_context_keys": [
+              "profile_assertion_id",
+              "profile_write_receipt"
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "evidence_grounded_scoped_profile_replacement_write"
+            },
+            "next_state": "retract_prior_scoped_profile",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "retract_prior_scoped_profile",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "retract_scoped_assertion"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_prior_assertion_to_retract_assertion",
+                "context_key": "prior_scoped_assertion_id",
+                "tool_param": "assertion_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_retraction_receipt_to_receipt",
+                "tool_output_field": "result.canonical_read_back",
+                "context_key": "prior_profile_retraction_receipt"
+              }
+            ],
+            "writes_context_keys": [
+              "prior_profile_retraction_receipt"
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "mutative_vontology_non_destructive",
+              "reason_code": "retire_replaced_scoped_profile_revision"
+            },
+            "next_state": "read_back_profile",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_back_profile",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "get_text_relations"
+              },
+              {
+                "key": "predicate",
+                "value": "#V#has_paper_matching_profile_json"
+              },
+              {
+                "key": "limit",
+                "value": 8
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_subject_to_readback_concept",
+                "context_key": "profile_subject_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_profile_maintenance_readback_to_readback",
+                "tool_output_field": "result",
+                "context_key": "profile_canonical_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "profile_canonical_readback"
+            ],
+            "next_state": "render_updated",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_updated",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "response_text",
+                    "template": "Updated the actor-effective paper-matching profile for {subject} with {scope} scope and read the persisted result back.",
+                    "variables": {
+                      "subject": {
+                        "value_from_context": "profile_subject_concept_id"
+                      },
+                      "scope": {
+                        "value_from_context": "profile_scope_mode"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_no_change",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "response_text",
+                    "template": "The evidence did not materially change the paper-matching profile: {reason}",
+                    "variables": {
+                      "reason": {
+                        "value_from_context": "profile_maintenance_reason",
+                        "default": "no material change"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_insufficient_evidence",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "response_text",
+                    "template": "The paper-matching profile was not changed because the evidence was insufficient or conflicting: {reason}",
+                    "variables": {
+                      "reason": {
+                        "value_from_context": "profile_maintenance_reason",
+                        "default": "subject, scope, or active profile could not be resolved safely"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
           },
           {
             "state_id": "completed"

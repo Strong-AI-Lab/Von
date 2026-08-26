@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 
 import mongomock
 import pytest
@@ -342,6 +342,58 @@ def test_visible_global_subject_accepts_user_scoped_text_assertion(monkeypatch):
     assert read_back["scope"]["mode"] == "organisation"
     assert read_back["canonical_publication"] is False
     assert read_back["provenance"]["turn_id"] == "turn-1"
+
+
+def test_scoped_assertion_mutations_emit_actor_bound_content_free_events(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+    from src.backend.services import workflow_event_integration_service as events
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    launches: list[dict] = []
+    monkeypatch.setattr(
+        events,
+        "maybe_launch_vontology_mutation_workflow",
+        lambda **kwargs: launches.append(kwargs) or {"success": True},
+    )
+
+    first = service.upsert_scoped_assertion(
+        subject_concept_id="#V#bin",
+        predicate="hasDescription",
+        target_text="Private matching profile content.",
+        acting_user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="#V#strong_ai_lab",
+        namespace="#V#michael_witbrock@strong_ai_lab",
+    )
+    replay = service.upsert_scoped_assertion(
+        subject_concept_id="#V#bin",
+        predicate="hasDescription",
+        target_text="Private matching profile content.",
+        acting_user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="#V#strong_ai_lab",
+        namespace="#V#michael_witbrock@strong_ai_lab",
+    )
+    service.retract_scoped_assertion(
+        assertion_id=first["assertion_id"],
+        acting_user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="#V#strong_ai_lab",
+        namespace="#V#michael_witbrock@strong_ai_lab",
+    )
+
+    assert replay["changed"] is False
+    assert [item["mutation_event_type"] for item in launches] == [
+        events.EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
+        events.EVENT_TYPE_SCOPED_ASSERTION_RETRACTED,
+    ]
+    assert all(item["user_id"] == "#V#michael_witbrock" for item in launches)
+    assert all(item["org_id"] == "#V#strong_ai_lab" for item in launches)
+    assert all("text" not in item["event_payload"] for item in launches)
+    assert launches[0]["event_payload"]["subject_concept_id"] == "#V#bin"
 
 
 def test_org_members_keep_distinct_immutable_assertion_provenance(monkeypatch):

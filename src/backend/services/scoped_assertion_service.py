@@ -8,10 +8,10 @@ authority over that concept.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -1041,16 +1041,52 @@ def upsert_scoped_assertion(
     read_back = _serialise(persisted)
     if read_back is None:
         raise RuntimeError("scoped assertion write did not produce read-back")
-    return {
+    changed = bool(created or reactivated is not None)
+    result = {
         "success": True,
         "effect_status": "succeeded",
-        "changed": bool(created or reactivated is not None),
+        "changed": changed,
         "assertion_id": assertion_id,
         "assertion": read_back,
         "canonical_read_back": read_back,
         "canonical_publication": False,
         "storage_surface": STORAGE_SURFACE,
     }
+    if changed:
+        # Scoped knowledge is a first-class mutation surface. Emit the same
+        # actor-bound, best-effort event shape used by canonical Vontology
+        # writes so represented workflows can react without task-specific
+        # polling or database coupling. Do not put private assertion content in
+        # the event envelope; an authorised consumer can read it canonically.
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
+                maybe_launch_vontology_mutation_workflow,
+            )
+
+            event_payload = {
+                "assertion_id": assertion_id,
+                "subject_concept_id": subject_id,
+                "predicate": storage_predicate,
+                "object_kind": object_kind,
+                "scope_mode": scope["mode"],
+                "canonical_publication": False,
+            }
+            maybe_launch_vontology_mutation_workflow(
+                mutation_event_type=EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
+                mutation_id=assertion_id,
+                user_id=actor_context["user_concept_id"],
+                org_id=actor_context["organisation_concept_id"],
+                namespace=actor_context["namespace"],
+                event_payload=event_payload,
+                inputs=dict(event_payload),
+            )
+        except Exception:
+            # The durable assertion and canonical read-back are authoritative;
+            # event fan-out is recoverable and must not turn that write into an
+            # ambiguous failure.
+            pass
+    return result
 
 
 def retract_scoped_assertion(
@@ -1178,6 +1214,32 @@ def retract_scoped_assertion(
             "durable": True,
             "rag_index": read_back.get("rag_index"),
         }
+    if changed and read_back.get("assertion_form") != STANDALONE_TEXT_ASSERTION_FORM:
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_SCOPED_ASSERTION_RETRACTED,
+                maybe_launch_vontology_mutation_workflow,
+            )
+
+            event_payload = {
+                "assertion_id": assertion_token,
+                "subject_concept_id": read_back.get("subject_concept_id"),
+                "predicate": read_back.get("predicate"),
+                "object_kind": read_back.get("object_kind"),
+                "scope_mode": (read_back.get("scope") or {}).get("mode"),
+                "canonical_publication": False,
+            }
+            maybe_launch_vontology_mutation_workflow(
+                mutation_event_type=EVENT_TYPE_SCOPED_ASSERTION_RETRACTED,
+                mutation_id=assertion_token,
+                user_id=user_id,
+                org_id=org_id,
+                namespace=actor_context["namespace"],
+                event_payload=event_payload,
+                inputs=dict(event_payload),
+            )
+        except Exception:
+            pass
     return receipt
 
 

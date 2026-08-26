@@ -292,13 +292,23 @@ def _load_profile_json_from_text_relations(
     *,
     subject_concept_id: str,
     predicate_ids: Sequence[str],
-) -> tuple[dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "context_view": "actor_effective",
+        "candidate_count": 0,
+        "scoped_candidate_count": 0,
+        "base_candidate_count": 0,
+        "conflict": False,
+        "candidates": [],
+    }
     for predicate in predicate_ids:
         rows = get_texts_for_concept(
             subject_concept_id=subject_concept_id,
             predicate=predicate,
             limit=8,
+            context_view="actor_effective",
         )
+        candidates: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, Mapping):
                 continue
@@ -310,8 +320,58 @@ def _load_profile_json_from_text_relations(
             except json.JSONDecodeError:
                 continue
             if isinstance(parsed, Mapping):
-                return dict(parsed), predicate
-    return None, None
+                row_kind = _safe_str(row.get("row_kind")) or "base_text_relation"
+                candidates.append(
+                    {
+                        "profile": dict(parsed),
+                        "row_kind": row_kind,
+                        "relation_id": _safe_str(row.get("relation_id")) or None,
+                        "assertion_id": _safe_str(row.get("assertion_id")) or None,
+                        "scope": row.get("assertion_scope"),
+                    }
+                )
+        if not candidates:
+            continue
+
+        scoped = [
+            candidate
+            for candidate in candidates
+            if candidate["row_kind"] == "scoped_assertion"
+        ]
+        base = [
+            candidate
+            for candidate in candidates
+            if candidate["row_kind"] != "scoped_assertion"
+        ]
+        effective_candidates = scoped or base
+        distinct_payloads = {
+            json.dumps(
+                candidate["profile"],
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for candidate in effective_candidates
+        }
+        diagnostics = {
+            "context_view": "actor_effective",
+            "candidate_count": len(candidates),
+            "scoped_candidate_count": len(scoped),
+            "base_candidate_count": len(base),
+            "conflict": len(distinct_payloads) > 1,
+            "candidates": [
+                {
+                    key: value
+                    for key, value in candidate.items()
+                    if key != "profile"
+                }
+                for candidate in candidates
+            ],
+        }
+        if diagnostics["conflict"]:
+            return None, predicate, diagnostics
+        return dict(effective_candidates[0]["profile"]), predicate, diagnostics
+    return None, None, diagnostics
 
 
 def resolve_subject_ids_for_legacy_profile_concept(profile_concept_id: str) -> list[str]:
@@ -344,9 +404,11 @@ def load_subject_paper_matching_profile(subject_concept_id: str) -> dict[str, An
             "subject_concept_id": subject_id,
         }
 
-    profile_json, source_predicate = _load_profile_json_from_text_relations(
-        subject_concept_id=subject_id,
-        predicate_ids=(GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,),
+    profile_json, source_predicate, profile_diagnostics = (
+        _load_profile_json_from_text_relations(
+            subject_concept_id=subject_id,
+            predicate_ids=(GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,),
+        )
     )
     profile_concept_id: str | None = None
     legacy_payload: Mapping[str, Any] | None = None
@@ -355,17 +417,27 @@ def load_subject_paper_matching_profile(subject_concept_id: str) -> dict[str, An
             (subject_doc.get("relationships") or {}).get(_LEGACY_PROFILE_LINK_PREDICATE_ID)
         )
         for profile_id in linked_profiles:
-            legacy_json, legacy_predicate = _load_profile_json_from_text_relations(
-                subject_concept_id=profile_id,
-                predicate_ids=(_LEGACY_PROFILE_JSON_PREDICATE_ID, "hasContent"),
+            legacy_json, legacy_predicate, legacy_diagnostics = (
+                _load_profile_json_from_text_relations(
+                    subject_concept_id=profile_id,
+                    predicate_ids=(
+                        _LEGACY_PROFILE_JSON_PREDICATE_ID,
+                        "hasContent",
+                    ),
+                )
             )
+            if legacy_diagnostics.get("conflict"):
+                profile_diagnostics = legacy_diagnostics
+                source_predicate = legacy_predicate
+                break
             if legacy_json is None:
                 continue
             profile_json = legacy_json
             source_predicate = legacy_predicate
+            profile_diagnostics = legacy_diagnostics
             profile_concept_id = profile_id
             break
-        if profile_json is None:
+        if profile_json is None and not profile_diagnostics.get("conflict"):
             try:
                 from .paper_recommendation_profile_vontology_service import (
                     load_paper_recommendation_profile,
@@ -390,10 +462,19 @@ def load_subject_paper_matching_profile(subject_concept_id: str) -> dict[str, An
         "success": True,
         "subject_concept_id": subject_id,
         "subject_doc": dict(subject_doc),
-        "profile": _normalise_profile_overlay(profile_json, subject_concept_id=subject_id),
+        "profile": (
+            {}
+            if profile_diagnostics.get("conflict")
+            else _normalise_profile_overlay(
+                profile_json,
+                subject_concept_id=subject_id,
+            )
+        ),
         "profile_concept_id": profile_concept_id,
         "profile_source_predicate": source_predicate,
         "profile_present": profile_json is not None,
+        "profile_conflict": bool(profile_diagnostics.get("conflict")),
+        "profile_diagnostics": profile_diagnostics,
         "legacy_profile_payload": dict(legacy_payload)
         if isinstance(legacy_payload, Mapping)
         else None,
@@ -1181,8 +1262,8 @@ def list_paper_recommendation_feedback(
 __all__ = [
     "build_paper_recommendation_assertion_concept_id",
     "ensure_paper_recommendation_primitives",
-    "list_subject_concept_ids_with_paper_matching_profiles",
     "list_paper_recommendation_feedback",
+    "list_subject_concept_ids_with_paper_matching_profiles",
     "load_materialised_paper_recommendations",
     "load_subject_paper_matching_profile",
     "persist_subject_paper_matching_profile",

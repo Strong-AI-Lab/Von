@@ -7,15 +7,24 @@ launch code across routes, MCP handlers, or services.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from contextvars import ContextVar
-from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Iterator, Mapping
 
+from ..workflows.durable.models import EventWorkflowBinding
+from ..workflows.durable.startup import get_instance_manager
+from ..workflows.durable.workflow_instance_submission_service import (
+    submit_verified_workflow_instance,
+)
+from ..workflows.engine import (
+    compile_transition_condition_spec,
+    evaluate_transition_condition_spec,
+)
 from .episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_AUTOTRIGGER_ENV,
     EPISODE_EVALUATION_AUTOTRIGGER_LEGACY_ENV,
@@ -30,19 +39,10 @@ from .feature_flags import (
     get_event_workflow_integration_enabled,
 )
 from .namespace_service import (
-    concept_id_to_namespace_slug,
     coerce_namespace,
+    concept_id_to_namespace_slug,
     derive_actor_context_from_namespace,
     derive_namespace_for_actor,
-)
-from ..workflows.durable.models import EventWorkflowBinding
-from ..workflows.durable.startup import get_instance_manager
-from ..workflows.durable.workflow_instance_submission_service import (
-    submit_verified_workflow_instance,
-)
-from ..workflows.engine import (
-    compile_transition_condition_spec,
-    evaluate_transition_condition_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,8 @@ EVENT_TYPE_RELATIONSHIP_REMOVED = "relationship.removed"
 EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
 EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
 EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
+EVENT_TYPE_SCOPED_ASSERTION_UPSERTED = "scoped_assertion.upserted"
+EVENT_TYPE_SCOPED_ASSERTION_RETRACTED = "scoped_assertion.retracted"
 EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
 
@@ -333,7 +335,8 @@ def resolve_event_actor_context(
 
     if resolved_org is None:
         try:
-            from flask import has_request_context, session as flask_session
+            from flask import has_request_context
+            from flask import session as flask_session
 
             if has_request_context():
                 org_raw = flask_session.get("organisation_concept_id")

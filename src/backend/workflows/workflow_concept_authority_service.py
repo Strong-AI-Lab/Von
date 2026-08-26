@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..security.visibility_predicates import (
+    get_specific_to_org_values,
+    get_specific_to_user_values,
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
@@ -24,12 +30,6 @@ from ..services.text_value_service import (
     get_texts_for_concept,
     upsert_singleton_text_relation,
     upsert_text_for_concept,
-)
-from ..security.visibility_predicates import (
-    get_specific_to_org_values,
-    get_specific_to_user_values,
-    set_specific_to_org_values,
-    set_specific_to_user_values,
 )
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -42,6 +42,13 @@ from .definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
+from .engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+    WorkflowTransitionSpec,
+    build_transition_condition,
+)
 from .parent_specificity_workflow_contracts import (
     PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
     ParentSpecificityToolOutputMappingSpec,
@@ -50,6 +57,12 @@ from .static_input_binding_utils import (
     coerce_static_input_binding,
     dedupe_static_input_bindings,
     serialise_static_input_binding_value,
+)
+from .subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
+    build_subworkflow_contract,
+    normalise_subworkflow_contract,
 )
 from .vontology_loader import (
     WORKFLOW_GRAPH_PREDICATE_ALIASES,
@@ -74,22 +87,9 @@ from .workflow_creation_contracts import (
     WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID,
     WORKFLOW_CREATION_WORKFLOW_ID,
 )
-from .engine import (
-    WorkflowActionInvocation,
-    WorkflowDefinition,
-    WorkflowStateSpec,
-    WorkflowTransitionSpec,
-    build_transition_condition,
-)
 from .workflow_definition_identity_service import (
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
-)
-from .subworkflow_contracts import (
-    WORKFLOW_SUBWORKFLOW_ACTION_ID,
-    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
-    build_subworkflow_contract,
-    normalise_subworkflow_contract,
 )
 from .workflow_registry import WorkflowRegistry
 
@@ -820,6 +820,7 @@ def _load_repo_seed_workflow_bundle_cached(
     workflow_type_ids: dict[str, tuple[str, ...]] = {}
     workflow_text_relations: dict[str, tuple[dict[str, Any], ...]] = {}
     workflow_launch_input_contracts: dict[str, Mapping[str, Any]] = {}
+    workflow_event_bindings: dict[str, tuple[dict[str, Any], ...]] = {}
     step_text_relations: dict[str, tuple[dict[str, Any], ...]] = {}
 
     for item in workflows_payload:
@@ -870,6 +871,12 @@ def _load_repo_seed_workflow_bundle_cached(
         launch_input_contract = item.get("launch_input_contract")
         if isinstance(launch_input_contract, Mapping):
             workflow_launch_input_contracts[workflow_id] = dict(launch_input_contract)
+
+        event_bindings = _normalise_seed_bundle_mapping_tuple(
+            item.get("event_bindings")
+        )
+        if event_bindings:
+            workflow_event_bindings[workflow_id] = event_bindings
 
         raw_step_text_relations = item.get("step_text_relations")
         if isinstance(raw_step_text_relations, Mapping):
@@ -982,6 +989,7 @@ def _load_repo_seed_workflow_bundle_cached(
         "workflow_type_ids": workflow_type_ids,
         "workflow_text_relations": workflow_text_relations,
         "workflow_launch_input_contracts": workflow_launch_input_contracts,
+        "workflow_event_bindings": workflow_event_bindings,
         "step_text_relations": step_text_relations,
     }
 

@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .paper_recommendation_constants import (
-    GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
+    PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID,
+    PAPER_MATCHING_PROFILE_MAINTENANCE_WORKFLOW_ID,
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
@@ -18,17 +19,9 @@ from .paper_recommendation_constants import (
 )
 from .paper_recommendation_policy_authority_service import (
     ensure_paper_recommendation_policy_authority,
-    resolve_paper_recommendation_policy,
 )
 from .text_value_service import upsert_singleton_text_relation
-from .workflow_event_integration_service import (
-    EVENT_TYPE_RELATIONSHIP_ADDED,
-    EVENT_TYPE_RELATIONSHIP_REMOVED,
-    EVENT_TYPE_TEXT_RELATION_UPDATED,
-    EVENT_TYPE_TEXT_RELATION_UPSERTED,
-    _normalise_event_binding_condition,
-    launch_event_workflow,
-)
+from .workflow_event_integration_service import launch_event_workflow
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
     WorkflowPromptConceptSpec,
@@ -40,11 +33,9 @@ from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 from .workflow_vontology_materialisation_helpers import (
     suspend_event_workflow_integration,
 )
-from ..workflows.durable.startup import get_instance_manager
 
 _MANAGED_BY = "paper_recommendation_workflow_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-1679"
-_LEGACY_PROFILE_JSON_PREDICATE_ID = "#V#has_paper_recommendation_profile_json"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -69,6 +60,12 @@ _RATIONALE_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "paper_recommendation_rationale_prompt_seed.md"
 )
+_PROFILE_MAINTENANCE_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "paper_matching_profile_maintenance_prompt_seed.md"
+)
 
 
 def _load_paper_recommendation_prompt_seed_text() -> str:
@@ -91,6 +88,15 @@ def _load_paper_recommendation_rationale_prompt_seed_text() -> str:
     prompt_text = _RATIONALE_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
     if not prompt_text:
         raise ValueError("paper_recommendation_rationale_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_paper_matching_profile_maintenance_prompt_seed_text() -> str:
+    prompt_text = _PROFILE_MAINTENANCE_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("paper_matching_profile_maintenance_prompt_seed_missing")
     return prompt_text
 
 
@@ -123,6 +129,16 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
                     "Canonical prompt for generating user-facing paragraph "
                     "rationales for one scholarly paper recommendation against a "
                     "specific Von subject profile."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
+                concept_id=PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID,
+                name="Paper matching profile maintenance prompt",
+                description=(
+                    "Canonical prompt for evidence-grounded maintenance of "
+                    "actor-effective paper matching profiles from summaries, "
+                    "publication evidence, and explicit conversational requests."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -167,6 +183,10 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
             PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
             _load_paper_recommendation_rationale_prompt_seed_text,
         ),
+        (
+            PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID,
+            _load_paper_matching_profile_maintenance_prompt_seed_text,
+        ),
     )
     for prompt_concept_id, prompt_loader in seed_specs:
         if prompt_concept_has_content(prompt_concept_id):
@@ -190,68 +210,12 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
         prompt_concept_has_content(PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID)
     ) and bool(
         prompt_concept_has_content(PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID)
+    ) and bool(
+        prompt_concept_has_content(
+            PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID
+        )
     )
     return report
-
-
-def _ensure_paper_recommendation_event_bindings() -> dict[str, Any]:
-    manager = get_instance_manager()
-    policy = resolve_paper_recommendation_policy()
-    profile_predicates = sorted(
-        {
-            GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
-            _LEGACY_PROFILE_JSON_PREDICATE_ID,
-        }
-    )
-    subject_relationship_predicates = sorted(
-        set(policy.matching_string_tuple("affecting_subject_relationship_predicates"))
-    )
-    condition_by_event_type: dict[str, dict[str, Any] | None] = {
-        PAPER_RECOMMENDATION_REQUESTED_EVENT_TYPE: None,
-        EVENT_TYPE_TEXT_RELATION_UPSERTED: {
-            "kind": "context_value_in",
-            "key": "event.predicate",
-            "values": profile_predicates,
-        },
-        EVENT_TYPE_TEXT_RELATION_UPDATED: {
-            "kind": "context_value_in",
-            "key": "event.predicate",
-            "values": profile_predicates,
-        },
-        EVENT_TYPE_RELATIONSHIP_ADDED: {
-            "kind": "context_value_in",
-            "key": "event.predicate",
-            "values": subject_relationship_predicates,
-        },
-        EVENT_TYPE_RELATIONSHIP_REMOVED: {
-            "kind": "context_value_in",
-            "key": "event.predicate",
-            "values": subject_relationship_predicates,
-        },
-    }
-    created_count = 0
-    updated_count = 0
-    bindings: list[dict[str, Any]] = []
-    for event_type, condition in condition_by_event_type.items():
-        binding, created, updated = manager.upsert_event_binding(
-            event_type=event_type,
-            workflow_id=PAPER_RECOMMENDATION_WORKFLOW_ID,
-            input_mapping={},
-            condition=_normalise_event_binding_condition(condition),
-            enabled=True,
-            actor=_MANAGED_BY,
-            replace_existing=True,
-        )
-        created_count += 1 if created else 0
-        updated_count += 1 if updated else 0
-        bindings.append(binding.to_status_dict())
-    return {
-        "success": True,
-        "created_count": created_count,
-        "updated_count": updated_count,
-        "binding_count": len(bindings),
-        "bindings": bindings,
-    }
 
 
 def bootstrap_canonical_paper_recommendation_workflow(
@@ -267,14 +231,20 @@ def bootstrap_canonical_paper_recommendation_workflow(
         publish_context_manager_factory=suspend_event_workflow_integration,
         force_republish=force_republish,
     )
-    event_bindings = _ensure_paper_recommendation_event_bindings()
+    event_bindings = publication.get("event_bindings") or {
+        "success": True,
+        "bindings": [],
+    }
     return {
         "success": bool(prompt_support.get("success"))
         and bool(policy_support.get("success"))
         and bool(event_bindings.get("success"))
         and int((publication.get("publication") or {}).get("counts", {}).get("errors") or 0)
         == 0,
-        "workflow_ids": [PAPER_RECOMMENDATION_WORKFLOW_ID],
+        "workflow_ids": [
+            PAPER_RECOMMENDATION_WORKFLOW_ID,
+            PAPER_MATCHING_PROFILE_MAINTENANCE_WORKFLOW_ID,
+        ],
         "prompt_support": prompt_support,
         "policy_support": policy_support,
         "publication": publication.get("publication"),
