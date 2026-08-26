@@ -13,10 +13,20 @@ import mongomock
 import pytest
 
 from src.backend.integrations.google import gmail_service as gs
+from src.backend.services import gmail_visible_disclosure_policy_service
 from src.backend.services.gmail_outbound_mailbox_identity_service import (
     derive_canonical_gmail_mailbox_key,
 )
 from src.backend.services.settings_service import GmailOutboundRateLimitSettings
+
+
+@pytest.fixture(autouse=True)
+def _default_test_disclosure_policy_off(monkeypatch):
+    monkeypatch.setattr(
+        gmail_visible_disclosure_policy_service,
+        "load_concepts",
+        lambda _concept_ids: {},
+    )
 
 
 def _outbound_test_collections():
@@ -679,9 +689,7 @@ def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch)
     quota_collection, delivery_collection = _outbound_test_collections()
     request_id = "turn-verified-1"
     expected_fingerprint = gs._outbound_delivery_identity(
-        canonical_mailbox_key=derive_canonical_gmail_mailbox_key(
-            "zhan@example.test"
-        ),
+        canonical_mailbox_key=derive_canonical_gmail_mailbox_key("zhan@example.test"),
         request_id=request_id,
         to=["recipient@example.test"],
         cc=["copy@example.test"],
@@ -697,17 +705,13 @@ def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch)
     canonical_message["Cc"] = "copy@example.test"
     canonical_message["Bcc"] = "blind-copy@example.test"
     canonical_message["Subject"] = "Agent message"
-    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=off"
     canonical_message[gs.DELIVERY_FINGERPRINT_HEADER] = expected_fingerprint
-    canonical_message["Message-ID"] = (
-        "<provider-rewritten-message-id@example.test>"
+    canonical_message["Message-ID"] = "<provider-rewritten-message-id@example.test>"
+    canonical_message.set_content("Private research summary.")
+    canonical_raw = base64.urlsafe_b64encode(canonical_message.as_bytes()).decode(
+        "ascii"
     )
-    canonical_message.set_content(
-        "Private research summary.\n\n" + gs.AI_AGENT_DISCLOSURE_TEXT
-    )
-    canonical_raw = base64.urlsafe_b64encode(
-        canonical_message.as_bytes()
-    ).decode("ascii")
 
     class _Request:
         def __init__(self, payload):
@@ -784,13 +788,11 @@ def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch)
     )
 
     sent_message = BytesParser(policy=default_email_policy).parsebytes(
-        base64.urlsafe_b64decode(
-            captured["send_kwargs"]["body"]["raw"].encode("ascii")
-        )
+        base64.urlsafe_b64decode(captured["send_kwargs"]["body"]["raw"].encode("ascii"))
     )
-    assert gs.AI_AGENT_DISCLOSURE_TEXT in sent_message.get_body(
-        preferencelist=("plain",)
-    ).get_content()
+    assert sent_message.get_body(preferencelist=("plain",)).get_content() == (
+        "Private research summary.\n"
+    )
     assert sent_message.get_body(preferencelist=("html",)) is None
     assert sent_message["From"] == "Von AI Agent <zhan@example.test>"
     assert captured["profile_kwargs"] == {"userId": "me"}
@@ -817,10 +819,15 @@ def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch)
     assert readback["bcc_count"] == 1
     assert readback["recipients_verified"] is True
     assert readback["subject_verified"] is True
+    assert readback["resolved_disclosure_mode"] == "off"
+    assert readback["visible_disclosure_count"] == 0
+    assert readback["body_sha256_verified"] is True
     assert readback["disclosure_verified"] is True
     assert readback["machine_disclosure_verified"] is True
     assert readback["delivery_fingerprint_verified"] is True
     assert result["delivery_ledger_status"] == "succeeded"
+    assert result["ai_agent_disclosure"]["resolved_mode"] == "off"
+    assert result["ai_agent_disclosure"]["visible_text"] is None
     assert result["quota"]["allowed"] is True
     assert "Private research summary." not in json.dumps(readback)
     assert "raw" not in readback
@@ -850,6 +857,144 @@ def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch)
     assert replay["outcome_finality"] == "durable_idempotent_replay"
 
 
+def test_send_message_required_policy_is_localised_exact_once_and_read_back(
+    monkeypatch,
+):
+    captured: dict = {}
+    quota_collection, delivery_collection = _outbound_test_collections()
+    profile_resource_id = "#V#gmail_profile_zhan_gmail"
+    notice = "由 Von 这个人工智能助理发送（文本由用户提供）。"
+    represented_policy = {
+        "schema_version": (
+            gmail_visible_disclosure_policy_service.GMAIL_VISIBLE_DISCLOSURE_POLICY_SCHEMA_VERSION
+        ),
+        "policy_id": "mailbox-required-zh",
+        "policy_version": "2026-08-26",
+        "mode": "required",
+        "binding": True,
+        "default_language": "zh-Hans",
+        "templates": {
+            "zh-Hans": {
+                "von_sent": "由 Von 这个人工智能助理发送。",
+                "von_drafted_and_sent": "由 Von 这个人工智能助理起草并发送。",
+                "user_authored_von_sent": notice,
+            }
+        },
+    }
+    monkeypatch.setattr(
+        gmail_visible_disclosure_policy_service,
+        "load_concepts",
+        lambda _concept_ids: {
+            profile_resource_id: {
+                "attributes": {
+                    gmail_visible_disclosure_policy_service.GMAIL_VISIBLE_DISCLOSURE_POLICY_ATTRIBUTE: represented_policy
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class _Messages:
+        def send(self, **kwargs):
+            captured["raw"] = kwargs["body"]["raw"]
+            captured["send_count"] = captured.get("send_count", 0) + 1
+            return _Request({"id": "sent-required-1", "threadId": "thread-1"})
+
+        def get(self, **_kwargs):
+            return _Request(
+                {
+                    "id": "sent-required-1",
+                    "threadId": "thread-1",
+                    "labelIds": ["SENT"],
+                    "raw": captured["raw"],
+                }
+            )
+
+    class _Users:
+        def messages(self):
+            return _Messages()
+
+        def getProfile(self, **_kwargs):
+            return _Request({"emailAddress": "zhan@example.test"})
+
+    class _Service:
+        def users(self):
+            return _Users()
+
+    profiles = {
+        "zhan-gmail": gs.GmailProfile(
+            profile_id="zhan-gmail",
+            token_path="/tmp/fake-token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: _Service())
+    body_text = f"研究摘要。\n\n{notice}"
+
+    result = gs.send_message(
+        profile_id="zhan-gmail",
+        to="recipient@example.test",
+        subject="研究摘要",
+        body_text=body_text,
+        body_language="zh-Hans",
+        body_authorship="user_supplied",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id="turn-required-zh-1",
+            profile_resource_concept_id=profile_resource_id,
+        ),
+    )
+
+    sent_message = BytesParser(policy=default_email_policy).parsebytes(
+        base64.urlsafe_b64decode(captured["raw"].encode("ascii"))
+    )
+    sent_body = sent_message.get_body(preferencelist=("plain",)).get_content()
+    assert sent_body.count(notice) == 1
+    assert sent_message[gs.AI_AGENT_MACHINE_HEADER] == "Von; disclosure=required"
+    assert result["success"] is True
+    assert result["canonical_readback"]["visible_disclosure_count"] == 1
+    assert result["canonical_readback"]["body_sha256_verified"] is True
+    assert result["ai_agent_disclosure"] == {
+        "schema_version": "gmail_visible_ai_agent_disclosure.v2",
+        "requested_policies": [
+            {
+                "mode": "required",
+                "policy_id": "mailbox-required-zh",
+                "policy_version": "2026-08-26",
+                "authority_scope": "mailbox",
+                "authority_concept_id": profile_resource_id,
+                "binding": True,
+            }
+        ],
+        "resolved_mode": "required",
+        "policy_id": "mailbox-required-zh",
+        "policy_version": "2026-08-26",
+        "authority_scope": "mailbox",
+        "authority_concept_id": profile_resource_id,
+        "binding": True,
+        "selection_reason": "binding_required",
+        "requested_language": "zh-Hans",
+        "resolved_language": "zh-hans",
+        "body_authorship": "user_supplied",
+        "template_role": "user_authored_von_sent",
+        "visible_text": notice,
+        "plain_text_part": True,
+        "html_part": False,
+        "machine_header": "X-Von-AI-Agent",
+    }
+    assert "研究摘要。" not in json.dumps(result, ensure_ascii=False)
+
+
 def test_send_message_aliases_share_mailbox_delivery_and_quota_identity(monkeypatch):
     """Two authorised aliases for one Gmail mailbox cannot bypass controls."""
 
@@ -873,17 +1018,13 @@ def test_send_message_aliases_share_mailbox_delivery_and_quota_identity(monkeypa
     canonical_message["From"] = f"Von AI Agent <{canonical_address}>"
     canonical_message["To"] = "recipient@example.test"
     canonical_message["Subject"] = "Alias-safe agent message"
-    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=off"
     canonical_message[gs.DELIVERY_FINGERPRINT_HEADER] = expected_fingerprint
-    canonical_message["Message-ID"] = (
-        "<provider-rewritten-message-id@example.test>"
+    canonical_message["Message-ID"] = "<provider-rewritten-message-id@example.test>"
+    canonical_message.set_content("Private research summary.")
+    canonical_raw = base64.urlsafe_b64encode(canonical_message.as_bytes()).decode(
+        "ascii"
     )
-    canonical_message.set_content(
-        "Private research summary.\n\n" + gs.AI_AGENT_DISCLOSURE_TEXT
-    )
-    canonical_raw = base64.urlsafe_b64encode(
-        canonical_message.as_bytes()
-    ).decode("ascii")
     captured = {"send_count": 0, "messages_calls": 0, "profile_reads": 0}
 
     class _Request:
@@ -1151,9 +1292,7 @@ def test_send_message_reconciles_lost_provider_response_without_redispatch(
     monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
     request_id = "turn-provider-response-lost-1"
     expected_fingerprint = gs._outbound_delivery_identity(
-        canonical_mailbox_key=derive_canonical_gmail_mailbox_key(
-            "zhan@example.test"
-        ),
+        canonical_mailbox_key=derive_canonical_gmail_mailbox_key("zhan@example.test"),
         request_id=request_id,
         to=["recipient@example.test"],
         cc=[],
@@ -1167,17 +1306,13 @@ def test_send_message_reconciles_lost_provider_response_without_redispatch(
     canonical_message["From"] = "Von AI Agent <zhan@example.test>"
     canonical_message["To"] = "recipient@example.test"
     canonical_message["Subject"] = "Reconciled agent message"
-    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    canonical_message[gs.AI_AGENT_MACHINE_HEADER] = "Von; disclosure=off"
     canonical_message[gs.DELIVERY_FINGERPRINT_HEADER] = expected_fingerprint
-    canonical_message["Message-ID"] = (
-        "<provider-rewritten-message-id@example.test>"
+    canonical_message["Message-ID"] = "<provider-rewritten-message-id@example.test>"
+    canonical_message.set_content("Private research summary.")
+    canonical_raw = base64.urlsafe_b64encode(canonical_message.as_bytes()).decode(
+        "ascii"
     )
-    canonical_message.set_content(
-        "Private research summary.\n\n" + gs.AI_AGENT_DISCLOSURE_TEXT
-    )
-    canonical_raw = base64.urlsafe_b64encode(
-        canonical_message.as_bytes()
-    ).decode("ascii")
     captured = {"send_count": 0, "list_count": 0, "metadata_get_count": 0}
 
     class _Request:
