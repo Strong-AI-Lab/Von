@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import logging
-from math import sqrt
 import time
+from dataclasses import dataclass, field
+from math import sqrt
 from typing import Any, Mapping, Sequence
 
 from ..languagemodels.llm_interface import get_llm_client
 from .concept_embedding_service import build_concept_searchable_text
-from .concept_similarity_service import build_text_embedding
 from .concept_search_service import search_concepts
 from .concept_service import get_concept_by_concept_id_exact
+from .concept_similarity_service import build_text_embedding
 from .paper_recommendation_constants import (
     GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
@@ -22,6 +22,9 @@ from .paper_recommendation_constants import (
     PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_TYPE_ID,
+)
+from .paper_recommendation_delivery_service import (
+    list_paper_recommendation_delivery_subject_ids,
 )
 from .paper_recommendation_policy_authority_service import (
     PaperRecommendationPolicy,
@@ -34,14 +37,13 @@ from .paper_recommendation_vontology_service import (
     resolve_subject_ids_for_legacy_profile_concept,
     upsert_paper_recommendation_assertion,
 )
-from .paper_recommendation_delivery_service import (
-    list_paper_recommendation_delivery_subject_ids,
-)
 from .rag_backends.llamaindex_backend import LlamaIndexRAGService
 from .text_value_service import get_texts_for_concept
 from .workflow_event_integration_service import (
     EVENT_TYPE_RELATIONSHIP_ADDED,
     EVENT_TYPE_RELATIONSHIP_REMOVED,
+    EVENT_TYPE_SCOPED_ASSERTION_RETRACTED,
+    EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
     EVENT_TYPE_TEXT_RELATION_UPDATED,
     EVENT_TYPE_TEXT_RELATION_UPSERTED,
 )
@@ -271,6 +273,13 @@ def _build_subject_bundle(
             "error": profile_payload.get("error") or "subject_profile_load_failed",
             "subject_concept_id": subject_concept_id,
         }
+    if profile_payload.get("profile_conflict"):
+        return {
+            "success": False,
+            "error": "paper_matching_profile_conflict",
+            "subject_concept_id": subject_concept_id,
+            "profile_diagnostics": profile_payload.get("profile_diagnostics"),
+        }
 
     subject_doc = dict(profile_payload.get("subject_doc") or {})
     subject_name = _safe_str(subject_doc.get("name")) or subject_concept_id
@@ -357,6 +366,7 @@ def _build_subject_bundle(
         "profile_present": bool(profile_payload.get("profile_present")),
         "profile_concept_id": profile_payload.get("profile_concept_id"),
         "profile_source_predicate": profile_payload.get("profile_source_predicate"),
+        "profile_diagnostics": profile_payload.get("profile_diagnostics"),
         "research_interest_concepts": research_interest_rows,
         "organisation_concept_ids": organisation_ids,
         "related_concepts": related_rows,
@@ -1587,6 +1597,8 @@ def materialise_paper_recommendations_from_event(
     event_type = _safe_str(payload.get("event_type"))
 
     if not resolved_subject_ids and event_type in {
+        EVENT_TYPE_SCOPED_ASSERTION_RETRACTED,
+        EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
         EVENT_TYPE_TEXT_RELATION_UPSERTED,
         EVENT_TYPE_TEXT_RELATION_UPDATED,
     }:
@@ -1619,6 +1631,13 @@ def materialise_paper_recommendations_from_event(
             "triggered": False,
             "refreshed_subject_count": 0,
             "refreshed_paper_count": 0,
+            # These fields are part of the represented workflow's declared
+            # output envelope even for a successful no-op. Omitting them made
+            # the durable step fail after the tool had correctly decided that
+            # no subject was affected.
+            "reports": [],
+            "subject_concept_ids": [],
+            "candidate_paper_concept_ids": [],
             "reason": "no_impacted_subjects",
             "event_type": event_type or None,
         }

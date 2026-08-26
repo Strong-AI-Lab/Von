@@ -10,20 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from . import concept_service
-from .text_value_service import (
-    get_texts_for_concept,
-    upsert_singleton_text_relation,
-    upsert_text_for_concept,
-)
-from .workflow_capability_service import invalidate_workflow_capability_index
-from .workflow_discovery_service import (
-    invalidate_workflow_discovery_executability_caches,
-)
-from .workflow_vontology_materialisation_helpers import (
-    ensure_instance_typing,
-    suspend_event_workflow_integration,
-)
 from ..workflows import workflow_concept_authority_service as authority_service
 from ..workflows import workflow_repo_seed_export_service as seed_export_service
 from ..workflows.static_input_binding_utils import stable_static_input_bindings
@@ -40,6 +26,20 @@ from ..workflows.workflow_definition_identity_service import (
 from ..workflows.workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
 )
+from . import concept_service
+from .text_value_service import (
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+    upsert_text_for_concept,
+)
+from .workflow_capability_service import invalidate_workflow_capability_index
+from .workflow_discovery_service import (
+    invalidate_workflow_discovery_executability_caches,
+)
+from .workflow_vontology_materialisation_helpers import (
+    ensure_instance_typing,
+    suspend_event_workflow_integration,
+)
 
 _WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
 _REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT = "launch_contract"
@@ -53,6 +53,190 @@ _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_SCHEMA_VERSION = (
 _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE = (
     "workflow_support_concept_materialisation_receipt"
 )
+
+
+def _normalise_repo_seed_event_binding_specs(
+    raw_specs: Any,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate declarative event bindings carried by one workflow seed.
+
+    Event type, input projection, condition, and initial enablement are authored
+    in the repo-side release input and become durable binding metadata.  Python
+    supplies only the generic publication mechanism.
+    """
+
+    if not isinstance(raw_specs, Sequence) or isinstance(
+        raw_specs, (str, bytes, bytearray)
+    ):
+        return [], ["event_bindings_not_sequence"]
+
+    from .workflow_event_integration_service import (
+        _normalise_event_binding_condition,
+    )
+
+    specs: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen_event_types: set[str] = set()
+    for index, raw_spec in enumerate(raw_specs):
+        if not isinstance(raw_spec, Mapping):
+            errors.append(f"event_binding_{index}_not_mapping")
+            continue
+        event_type = str(raw_spec.get("event_type") or "").strip()
+        if not event_type:
+            errors.append(f"event_binding_{index}_event_type_missing")
+            continue
+        if event_type in seen_event_types:
+            errors.append(f"event_binding_{index}_event_type_duplicate:{event_type}")
+            continue
+        seen_event_types.add(event_type)
+
+        raw_mapping = raw_spec.get("input_mapping")
+        if raw_mapping is None:
+            raw_mapping = {}
+        if not isinstance(raw_mapping, Mapping):
+            errors.append(f"event_binding_{index}_input_mapping_invalid")
+            continue
+        input_mapping: dict[str, str] = {}
+        invalid_mapping = False
+        for raw_key, raw_value in raw_mapping.items():
+            key = str(raw_key or "").strip()
+            value = str(raw_value or "").strip()
+            if not key or not value:
+                invalid_mapping = True
+                break
+            input_mapping[key] = value
+        if invalid_mapping:
+            errors.append(f"event_binding_{index}_input_mapping_invalid")
+            continue
+
+        try:
+            condition = _normalise_event_binding_condition(
+                raw_spec.get("condition")
+            )
+        except ValueError as exc:
+            errors.append(f"event_binding_{index}_condition_invalid:{exc}")
+            continue
+        raw_enabled = raw_spec.get("enabled", True)
+        if not isinstance(raw_enabled, bool):
+            errors.append(f"event_binding_{index}_enabled_not_boolean")
+            continue
+        specs.append(
+            {
+                "event_type": event_type,
+                "input_mapping": input_mapping,
+                "condition": condition,
+                "enabled": raw_enabled,
+            }
+        )
+    return specs, errors
+
+
+def _apply_repo_seed_event_bindings(
+    *,
+    workflow_event_bindings: Mapping[str, Any],
+    workflow_ids: Sequence[str],
+    managed_by: str | None,
+) -> dict[str, Any]:
+    """Reconcile declarative bindings for workflows whose seed is authorised.
+
+    Missing bindings and represented condition/input drift are repairable
+    derived state. A deliberate operator disablement remains disabled, while a
+    binding removed from the authorised seed is disabled rather than deleted so
+    its history remains inspectable.
+    """
+
+    from ..workflows.durable.startup import get_instance_manager
+
+    manager = get_instance_manager()
+    actor = str(managed_by or "repo_seed_workflow_bundle").strip()
+    bindings: list[dict[str, Any]] = []
+    disabled_binding_ids: list[str] = []
+    errors_by_workflow_id: dict[str, list[str]] = {}
+    created_count = 0
+    updated_count = 0
+
+    for workflow_id in workflow_ids:
+        if workflow_id not in workflow_event_bindings:
+            continue
+        specs, errors = _normalise_repo_seed_event_binding_specs(
+            workflow_event_bindings.get(workflow_id)
+        )
+        if errors:
+            errors_by_workflow_id[workflow_id] = errors
+            continue
+
+        desired_event_types = {spec["event_type"] for spec in specs}
+        try:
+            existing_bindings = [
+                binding
+                for binding in manager.list_event_bindings(limit=500)
+                if str(getattr(binding, "workflow_id", "") or "").strip()
+                == workflow_id
+            ]
+            existing_by_event_type = {
+                str(getattr(binding, "event_type", "") or "").strip(): binding
+                for binding in existing_bindings
+            }
+            for existing in existing_bindings:
+                event_type = str(
+                    getattr(existing, "event_type", "") or ""
+                ).strip()
+                binding_id = str(
+                    getattr(existing, "binding_id", "") or ""
+                ).strip()
+                created_by = str(
+                    getattr(existing, "created_by", "") or ""
+                ).strip()
+                updated_by = str(
+                    getattr(existing, "updated_by", "") or ""
+                ).strip()
+                if (
+                    binding_id
+                    and event_type not in desired_event_types
+                    and actor in {created_by, updated_by}
+                    and bool(getattr(existing, "enabled", False))
+                    and manager.set_event_binding_enabled(
+                        binding_id,
+                        enabled=False,
+                        actor=actor,
+                    )
+                ):
+                    disabled_binding_ids.append(binding_id)
+
+            for spec in specs:
+                existing = existing_by_event_type.get(spec["event_type"])
+                enabled = spec["enabled"]
+                if (
+                    existing is not None
+                    and not bool(getattr(existing, "enabled", False))
+                    and enabled
+                ):
+                    enabled = False
+                binding, created, updated = manager.upsert_event_binding(
+                    event_type=spec["event_type"],
+                    workflow_id=workflow_id,
+                    input_mapping=spec["input_mapping"],
+                    condition=spec["condition"],
+                    enabled=enabled,
+                    actor=actor,
+                    replace_existing=True,
+                )
+                created_count += 1 if created else 0
+                updated_count += 1 if updated else 0
+                bindings.append(binding.to_status_dict())
+        except Exception as exc:
+            errors_by_workflow_id.setdefault(workflow_id, []).append(str(exc))
+
+    return {
+        "success": not errors_by_workflow_id,
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "disabled_binding_ids": disabled_binding_ids,
+        "bindings": bindings,
+        "errors_by_workflow_id": errors_by_workflow_id,
+    }
+
+
 def _normalise_support_concept_targets(raw_value: Any) -> list[str]:
     if isinstance(raw_value, str):
         raw_items: Sequence[Any] = (raw_value,)
@@ -2392,6 +2576,16 @@ def bootstrap_repo_seed_workflow_bundle(
         "skipped": True,
         "skip_reason": "no_authorised_workflow_publication",
     }
+    event_binding_report: dict[str, Any] = {
+        "success": True,
+        "created_count": 0,
+        "updated_count": 0,
+        "disabled_binding_ids": [],
+        "bindings": [],
+        "errors_by_workflow_id": {},
+        "skipped": True,
+        "skip_reason": "no_authorised_workflow_publication",
+    }
     publication_specs = dict(bundle.get("publication_specs") or {})
     publication_purposes = dict(bundle.get("publication_purposes") or {})
     workflow_type_ids = dict(bundle.get("workflow_type_ids") or {})
@@ -2401,6 +2595,7 @@ def bootstrap_repo_seed_workflow_bundle(
         or bundle.get("workflow_launch_contracts")
         or {}
     )
+    workflow_event_bindings = dict(bundle.get("workflow_event_bindings") or {})
     step_text_relations = dict(bundle.get("step_text_relations") or {})
     supported_action_ids = tuple(bundle.get("supported_action_ids") or ())
     requested_workflow_ids = tuple(
@@ -2433,6 +2628,11 @@ def bootstrap_repo_seed_workflow_bundle(
         workflow_launch_input_contracts = {
             workflow_id: contract
             for workflow_id, contract in workflow_launch_input_contracts.items()
+            if workflow_id in allowed_ids
+        }
+        workflow_event_bindings = {
+            workflow_id: specs
+            for workflow_id, specs in workflow_event_bindings.items()
             if workflow_id in allowed_ids
         }
     target_workflow_ids = tuple(publication_specs.keys())
@@ -3148,6 +3348,37 @@ def bootstrap_repo_seed_workflow_bundle(
             readback_failures_by_workflow
         )
 
+        event_binding_target_workflow_ids = tuple(
+            workflow_id
+            for workflow_id in target_workflow_ids
+            if workflow_id not in authority_blockers_by_workflow
+            and workflow_id not in readback_failures_by_workflow
+        )
+        if event_binding_target_workflow_ids:
+            event_binding_report = _apply_repo_seed_event_bindings(
+                workflow_event_bindings=workflow_event_bindings,
+                workflow_ids=event_binding_target_workflow_ids,
+                managed_by=managed_by,
+            )
+            event_binding_report["skipped"] = False
+            event_binding_report["skip_reason"] = None
+        event_binding_failures_by_workflow = dict(
+            event_binding_report.get("errors_by_workflow_id") or {}
+        )
+        if event_binding_failures_by_workflow:
+            publication_report.setdefault("errors_by_workflow_id", {}).update(
+                {
+                    workflow_id: "workflow_seed_event_binding_failed"
+                    for workflow_id in event_binding_failures_by_workflow
+                }
+            )
+            publication_report.setdefault("counts", {})["errors"] = int(
+                (publication_report.get("counts") or {}).get("errors") or 0
+            ) + len(event_binding_failures_by_workflow)
+        publication_report["event_binding_failures_by_workflow"] = (
+            event_binding_failures_by_workflow
+        )
+
         if seed_version:
             marker_update_workflow_ids = tuple(
                 dict.fromkeys(
@@ -3157,9 +3388,16 @@ def bootstrap_repo_seed_workflow_bundle(
                             workflow_id
                             for workflow_id in publication_workflow_ids_tuple
                             if workflow_id not in readback_failures_by_workflow
+                            and workflow_id
+                            not in event_binding_failures_by_workflow
                         ],
                     ]
                 )
+            )
+            marker_update_workflow_ids = tuple(
+                workflow_id
+                for workflow_id in marker_update_workflow_ids
+                if workflow_id not in event_binding_failures_by_workflow
             )
             for workflow_id in marker_update_workflow_ids:
                 update = _upsert_workflow_repo_seed_version_marker(
@@ -3199,6 +3437,7 @@ def bootstrap_repo_seed_workflow_bundle(
         "typed_workflow_ids": typed_workflow_ids,
         "typed_step_ids": typed_step_ids,
         "support_concepts": support_concept_report,
+        "event_bindings": event_binding_report,
         "validation_by_workflow_id": validation_by_workflow_id,
     }
 

@@ -223,6 +223,43 @@ def test_materialise_paper_recommendations_from_event_discovers_delivery_subject
     ]
 
 
+def test_materialise_no_impacted_subjects_preserves_declared_workflow_envelope():
+    payload = service.materialise_paper_recommendations_from_event(
+        event_payload={"event_type": "relationship.added"},
+        trigger_source="test_noop",
+    )
+
+    assert payload["success"] is True
+    assert payload["triggered"] is False
+    assert payload["reason"] == "no_impacted_subjects"
+    assert payload["reports"] == []
+    assert payload["subject_concept_ids"] == []
+    assert payload["candidate_paper_concept_ids"] == []
+
+
+def test_scoped_profile_event_refreshes_its_exact_subject(monkeypatch):
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "materialise_paper_recommendations_for_subject",
+        lambda **kwargs: captured.append(kwargs)
+        or {"success": True, "subject_concept_id": kwargs["subject_concept_id"]},
+    )
+
+    payload = service.materialise_paper_recommendations_from_event(
+        event_payload={
+            "event_type": "scoped_assertion.retracted",
+            "subject_concept_id": "#V#bin",
+            "predicate": "#V#has_paper_matching_profile_json",
+        },
+        trigger_source="test_scoped_profile",
+    )
+
+    assert payload["success"] is True
+    assert payload["subject_concept_ids"] == ["#V#bin"]
+    assert captured[0]["subject_concept_id"] == "#V#bin"
+
+
 def test_materialise_paper_recommendations_for_subject_uses_bounded_fallback_shortlist(
     monkeypatch,
 ):
