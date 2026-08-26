@@ -75,14 +75,6 @@ MESSAGE_LIST_VISIBILITY_VALUES: set[str] = {
 
 PROFILES_ENV_VAR = "VON_GMAIL_PROFILES"
 MAX_GMAIL_ATTACHMENT_MIME_PARTS = 256
-AI_AGENT_DISCLOSURE_TEXT = (
-    "AI-agent notice: This email was composed and sent by Von, an AI agent."
-)
-AI_AGENT_DISCLOSURE_HTML = (
-    '<p data-von-ai-agent-disclosure="true">'
-    f"{AI_AGENT_DISCLOSURE_TEXT}"
-    "</p>"
-)
 AI_AGENT_MACHINE_HEADER = "X-Von-AI-Agent"
 AI_AGENT_SENDER_DISPLAY_NAME = "Von AI Agent"
 DELIVERY_FINGERPRINT_HEADER = "X-Von-Delivery-Fingerprint"
@@ -1278,25 +1270,8 @@ def _build_raw_message(
     body_html: str | None = None,
     delivery_fingerprint: str | None = None,
     sender_email: str | None = None,
+    visible_disclosure_mode: str = "off",
 ) -> str:
-    disclosed_body_text = (
-        f"{body_text.rstrip()}\n\n{AI_AGENT_DISCLOSURE_TEXT}"
-    )
-    disclosed_body_html: str | None = None
-    if isinstance(body_html, str) and body_html.strip():
-        stripped_html = body_html.rstrip()
-        closing_body_index = stripped_html.lower().rfind("</body>")
-        if closing_body_index >= 0:
-            disclosed_body_html = (
-                f"{stripped_html[:closing_body_index]}"
-                f"{AI_AGENT_DISCLOSURE_HTML}\n"
-                f"{stripped_html[closing_body_index:]}"
-            )
-        else:
-            disclosed_body_html = (
-                f"{stripped_html}\n{AI_AGENT_DISCLOSURE_HTML}"
-            )
-
     message = EmailMessage()
     if isinstance(sender_email, str) and sender_email.strip():
         message["From"] = formataddr(
@@ -1304,7 +1279,7 @@ def _build_raw_message(
         )
     message["To"] = ", ".join(to)
     message["Subject"] = subject
-    message[AI_AGENT_MACHINE_HEADER] = "Von; disclosure=body"
+    message[AI_AGENT_MACHINE_HEADER] = f"Von; disclosure={visible_disclosure_mode}"
     if delivery_fingerprint:
         message[DELIVERY_FINGERPRINT_HEADER] = delivery_fingerprint
         message["Message-ID"] = _delivery_rfc822_message_id(delivery_fingerprint)
@@ -1315,9 +1290,9 @@ def _build_raw_message(
     if reply_to:
         message["Reply-To"] = ", ".join(reply_to)
 
-    message.set_content(disclosed_body_text)
-    if disclosed_body_html is not None:
-        message.add_alternative(disclosed_body_html, subtype="html")
+    message.set_content(body_text)
+    if isinstance(body_html, str) and body_html.strip():
+        message.add_alternative(body_html, subtype="html")
 
     return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
 
@@ -1364,6 +1339,9 @@ def _read_back_sent_message(
     expected_subject: str,
     expected_html: bool,
     expected_delivery_fingerprint: str,
+    expected_plain_body_sha256: str,
+    expected_disclosure_mode: str,
+    expected_disclosure_text: str | None,
 ) -> dict[str, Any]:
     """Read back one sent message and return a body-free verification receipt."""
 
@@ -1427,20 +1405,28 @@ def _read_back_sent_message(
         and observed_bcc == expected_bcc_addresses
     )
     subject_verified = observed_subject == expected_subject
+    body_sha256_verified = isinstance(plain_body, str) and (
+        _sha256_json(plain_body) == expected_plain_body_sha256
+    )
+    visible_disclosure_count = (
+        plain_body.count(expected_disclosure_text)
+        if isinstance(plain_body, str)
+        and isinstance(expected_disclosure_text, str)
+        and expected_disclosure_text
+        else 0
+    )
     text_disclosure_verified = (
-        isinstance(plain_body, str) and AI_AGENT_DISCLOSURE_TEXT in plain_body
+        visible_disclosure_count == 1
+        if expected_disclosure_mode == "required"
+        else True
     )
-    html_disclosure_verified = (
-        not expected_html
-        or (
-            isinstance(html_body, str)
-            and AI_AGENT_DISCLOSURE_TEXT in html_body
-        )
+    html_disclosure_verified = not expected_html and html_body is None
+    disclosure_verified = all(
+        (body_sha256_verified, text_disclosure_verified, html_disclosure_verified)
     )
-    disclosure_verified = (
-        text_disclosure_verified and html_disclosure_verified
+    machine_disclosure_verified = observed_agent_header == (
+        f"Von; disclosure={expected_disclosure_mode}"
     )
-    machine_disclosure_verified = observed_agent_header.startswith("Von;")
     delivery_fingerprint_verified = (
         observed_delivery_fingerprint == expected_delivery_fingerprint
     )
@@ -1468,10 +1454,14 @@ def _read_back_sent_message(
         "message_id_verified": message_id_verified,
         "sender": observed_sender,
         "sender_address": (
-            observed_sender_addresses[0] if len(observed_sender_addresses) == 1 else None
+            observed_sender_addresses[0]
+            if len(observed_sender_addresses) == 1
+            else None
         ),
         "authorised_sender_address": (
-            expected_sender_addresses[0] if len(expected_sender_addresses) == 1 else None
+            expected_sender_addresses[0]
+            if len(expected_sender_addresses) == 1
+            else None
         ),
         "sender_verified": sender_verified,
         "to": observed_to,
@@ -1481,6 +1471,9 @@ def _read_back_sent_message(
         "recipients_verified": recipients_verified,
         "subject": observed_subject,
         "subject_verified": subject_verified,
+        "resolved_disclosure_mode": expected_disclosure_mode,
+        "visible_disclosure_count": visible_disclosure_count,
+        "body_sha256_verified": body_sha256_verified,
         "text_disclosure_verified": text_disclosure_verified,
         "html_disclosure_verified": html_disclosure_verified,
         "disclosure_verified": disclosure_verified,
@@ -1503,6 +1496,9 @@ def _reconcile_sent_delivery(
     expected_bcc: list[str],
     expected_subject: str,
     expected_html: bool,
+    expected_plain_body_sha256: str,
+    expected_disclosure_mode: str,
+    expected_disclosure_text: str | None,
     search_anchor: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Find one fingerprinted Sent message and verify its canonical MIME.
@@ -1531,9 +1527,7 @@ def _reconcile_sent_delivery(
             anchor = anchor.astimezone(UTC)
         now = datetime.now(UTC)
         search_start = (anchor - timedelta(days=1)).strftime("%Y/%m/%d")
-        search_end = (max(anchor, now) + timedelta(days=2)).strftime(
-            "%Y/%m/%d"
-        )
+        search_end = (max(anchor, now) + timedelta(days=2)).strftime("%Y/%m/%d")
         query_parts = [
             "in:sent",
             f"after:{search_start}",
@@ -1592,9 +1586,7 @@ def _reconcile_sent_delivery(
         if len(matching_candidates) != 1:
             return {
                 "schema_version": "gmail_sent_delivery_reconciliation.v1",
-                "status": (
-                    "not_found" if not matching_candidates else "ambiguous"
-                ),
+                "status": ("not_found" if not matching_candidates else "ambiguous"),
                 "verified": False,
                 "body_included": False,
                 "candidate_count": len(matching_candidates),
@@ -1611,12 +1603,13 @@ def _reconcile_sent_delivery(
             expected_subject=expected_subject,
             expected_html=expected_html,
             expected_delivery_fingerprint=delivery_fingerprint,
+            expected_plain_body_sha256=expected_plain_body_sha256,
+            expected_disclosure_mode=expected_disclosure_mode,
+            expected_disclosure_text=expected_disclosure_text,
         )
         return {
             "schema_version": "gmail_sent_delivery_reconciliation.v1",
-            "status": (
-                "verified" if canonical.get("verified") is True else "mismatch"
-            ),
+            "status": ("verified" if canonical.get("verified") is True else "mismatch"),
             "verified": canonical.get("verified") is True,
             "body_included": False,
             "candidate_count": 1,
@@ -1645,6 +1638,17 @@ def _sha256_json(value: Any) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _mime_plain_body_sha256(body_text: str) -> str:
+    """Hash the canonical MIME text representation without exposing its body."""
+
+    message = EmailMessage()
+    message.set_content(body_text)
+    canonical_text = _message_part_text(message, "text/plain")
+    if not isinstance(canonical_text, str):  # pragma: no cover - stdlib invariant
+        raise ValueError("Could not construct canonical plain-text MIME body")
+    return _sha256_json(canonical_text)
 
 
 def _outbound_delivery_identity(
@@ -1719,6 +1723,9 @@ def _safe_canonical_readback(value: Any) -> dict[str, Any] | None:
                 "recipient_count",
                 "recipients_verified",
                 "subject_verified",
+                "resolved_disclosure_mode",
+                "visible_disclosure_count",
+                "body_sha256_verified",
                 "text_disclosure_verified",
                 "html_disclosure_verified",
                 "disclosure_verified",
@@ -1755,6 +1762,9 @@ def _safe_delivery_ledger_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     safe_canonical = _safe_canonical_readback(payload.get("canonical_readback"))
     if safe_canonical is not None:
         receipt["canonical_readback"] = safe_canonical
+    disclosure = payload.get("ai_agent_disclosure")
+    if isinstance(disclosure, Mapping):
+        receipt["ai_agent_disclosure"] = dict(disclosure)
     reconciliation = payload.get("delivery_reconciliation")
     if isinstance(reconciliation, Mapping):
         safe_reconciliation = {
@@ -1825,6 +1835,8 @@ def send_message(
     request_id: str | None = None,
     acting_user_concept_id: str | None = None,
     organisation_concept_id: str | None = None,
+    body_language: str | None = None,
+    body_authorship: str | None = None,
     outbound_rate_limit_settings: Any = None,
     outbound_quota_collection: Any = _DEFAULT_OUTBOUND_COLLECTION,
     outbound_delivery_collection: Any = _DEFAULT_OUTBOUND_COLLECTION,
@@ -1836,12 +1848,12 @@ def send_message(
     Gmail scope accepted by ``users.messages.send`` before invoking the API.
     The trusted caller must also provide the represented profile resource and a
     stable request id. Before provider dispatch this boundary durably claims the
-    idempotency key and atomically reserves mailbox-wide quota. A human-visible
-    AI-agent disclosure is injected into every MIME alternative. After Gmail
-    accepts the message, the helper reads it back and returns a body-free
-    verification receipt. A completed send with unavailable or mismatched
-    read-back is reported as indeterminate, rather than encouraging a blind
-    retry.
+    idempotency key and atomically reserves mailbox-wide quota. A visible
+    AI-agent disclosure is absent by default and is added only when a trusted
+    actor, organisation, or mailbox policy requires one. After Gmail accepts
+    the message, the helper reads it back and returns a body-free verification
+    receipt. A completed send with unavailable or mismatched read-back is
+    reported as indeterminate, rather than encouraging a blind retry.
     """
 
     if not allow_send:
@@ -1852,8 +1864,8 @@ def send_message(
         raise ValueError("body_text is required")
     if body_html is not None:
         raise ValueError(
-            "body_html is not supported for AI-agent outbound email; use the "
-            "plain-text body so the required disclosure cannot be visually hidden"
+            "body_html is not supported for AI-agent outbound email; use a "
+            "plain-text body so canonical delivery read-back remains exact"
         )
 
     to_addresses = _normalise_address_list(to, "to")
@@ -1883,6 +1895,53 @@ def send_message(
     if len(trusted_request_id) > 512:
         raise ValueError("request_id is too long")
 
+    from ...services.gmail_visible_disclosure_policy_service import (
+        GmailVisibleDisclosurePolicyError,
+        apply_gmail_visible_disclosure,
+        resolve_gmail_visible_disclosure_policy,
+    )
+
+    try:
+        disclosure_resolution = resolve_gmail_visible_disclosure_policy(
+            profile_resource_concept_id=resource_id,
+            acting_user_concept_id=acting_user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            body_language=body_language,
+            body_authorship=body_authorship,
+        )
+        rendered_body_text = apply_gmail_visible_disclosure(
+            body_text,
+            disclosure_resolution,
+        )
+    except GmailVisibleDisclosurePolicyError as exc:
+        return _outbound_not_started_payload(
+            error_code=exc.reason_code,
+            message=str(exc),
+        )
+
+    disclosure_receipt = disclosure_resolution.as_receipt()
+    expected_plain_body_sha256 = _mime_plain_body_sha256(rendered_body_text)
+    disclosure_audit_context = dict(audit_context or {})
+    disclosure_audit_context.update(
+        {
+            "visible_disclosure_mode": disclosure_resolution.mode,
+            "visible_disclosure_policy_id": disclosure_resolution.policy_id,
+            "visible_disclosure_policy_version": (disclosure_resolution.policy_version),
+            "visible_disclosure_authority_scope": (
+                disclosure_resolution.authority_scope
+            ),
+            "visible_disclosure_authority_concept_id": (
+                disclosure_resolution.authority_concept_id
+            ),
+            "visible_disclosure_resolved_language": (
+                disclosure_resolution.resolved_language
+            ),
+            "visible_disclosure_body_authorship": (
+                disclosure_resolution.body_authorship
+            ),
+        }
+    )
+
     recipient_count = len(to_addresses) + len(cc_addresses) + len(bcc_addresses)
     try:
         from ...services.gmail_outbound_mailbox_identity_service import (
@@ -1902,7 +1961,7 @@ def send_message(
         _log_gmail_audit(
             "send_message_canonical_mailbox_preflight_failed",
             profile_id=profile.profile_id,
-            audit_context=audit_context,
+            audit_context=disclosure_audit_context,
             allow_mutation=allow_send,
             recipient_count=recipient_count,
         )
@@ -1914,6 +1973,7 @@ def send_message(
             ),
         )
         payload["exception_type"] = type(exc).__name__
+        payload["ai_agent_disclosure"] = disclosure_receipt
         return payload
 
     (
@@ -1935,7 +1995,7 @@ def send_message(
     _log_gmail_audit(
         "send_message",
         profile_id=profile.profile_id,
-        audit_context=audit_context,
+        audit_context=disclosure_audit_context,
         allow_mutation=allow_send,
         recipient_count=recipient_count,
         delivery_fingerprint=delivery_fingerprint,
@@ -1969,7 +2029,7 @@ def send_message(
     try:
         delivery_claim = claim_gmail_outbound_delivery(**claim_kwargs)
     except GmailOutboundDeliveryConflict:
-        return _outbound_not_started_payload(
+        payload = _outbound_not_started_payload(
             error_code="gmail_outbound_idempotency_conflict",
             message=(
                 "Outbound email was not sent because this request id was already "
@@ -1977,8 +2037,10 @@ def send_message(
             ),
             delivery_fingerprint=delivery_fingerprint,
         )
+        payload["ai_agent_disclosure"] = disclosure_receipt
+        return payload
     except GmailOutboundDeliveryLedgerUnavailable:
-        return _outbound_not_started_payload(
+        payload = _outbound_not_started_payload(
             error_code="gmail_outbound_delivery_ledger_unavailable",
             message=(
                 "Outbound email was not sent because its durable delivery claim "
@@ -1986,6 +2048,8 @@ def send_message(
             ),
             delivery_fingerprint=delivery_fingerprint,
         )
+        payload["ai_agent_disclosure"] = disclosure_receipt
+        return payload
 
     def _persist_delivery(status: str, payload: dict[str, Any]) -> None:
         result_kwargs: dict[str, Any] = {
@@ -2011,11 +2075,7 @@ def send_message(
     if delivery_claim.duplicate:
         stored_projection = delivery_claim.receipt or {}
         stored_receipt = stored_projection.get("receipt")
-        payload = (
-            dict(stored_receipt)
-            if isinstance(stored_receipt, Mapping)
-            else {}
-        )
+        payload = dict(stored_receipt) if isinstance(stored_receipt, Mapping) else {}
         payload.update(
             {
                 "delivery_fingerprint": delivery_fingerprint,
@@ -2061,6 +2121,9 @@ def send_message(
                     expected_html=(
                         isinstance(body_html, str) and bool(body_html.strip())
                     ),
+                    expected_plain_body_sha256=expected_plain_body_sha256,
+                    expected_disclosure_mode=disclosure_resolution.mode,
+                    expected_disclosure_text=disclosure_resolution.visible_text,
                     search_anchor=stored_projection.get("created_at"),
                 )
             except Exception as exc:  # noqa: BLE001 - still never re-dispatch
@@ -2070,9 +2133,7 @@ def send_message(
                     "verified": False,
                     "body_included": False,
                     "delivery_fingerprint": delivery_fingerprint,
-                    "error_code": (
-                        "gmail_sent_delivery_reconciliation_unavailable"
-                    ),
+                    "error_code": ("gmail_sent_delivery_reconciliation_unavailable"),
                     "exception_type": type(exc).__name__,
                 }
             canonical = reconciliation.get("canonical_readback")
@@ -2112,6 +2173,7 @@ def send_message(
                         "Retry this same request only to re-run Gmail Sent reconciliation; Von will not re-dispatch it."
                     ],
                 )
+        payload.setdefault("ai_agent_disclosure", disclosure_receipt)
         return payload
 
     quota_kwargs: dict[str, Any] = {
@@ -2132,6 +2194,7 @@ def send_message(
             delivery_fingerprint=delivery_fingerprint,
             quota=quota_receipt,
         )
+        payload["ai_agent_disclosure"] = disclosure_receipt
         _persist_delivery("not_started", payload)
         return payload
 
@@ -2142,10 +2205,11 @@ def send_message(
             bcc=bcc_addresses,
             reply_to=reply_to_addresses,
             subject=subject.strip(),
-            body_text=body_text,
+            body_text=rendered_body_text,
             body_html=body_html,
             delivery_fingerprint=delivery_fingerprint,
             sender_email=sender_email,
+            visible_disclosure_mode=disclosure_resolution.mode,
         )
         messages_resource = service.users().messages()
         send_request = messages_resource.send(
@@ -2163,6 +2227,7 @@ def send_message(
             quota=quota_receipt,
         )
         payload["exception_type"] = type(exc).__name__
+        payload["ai_agent_disclosure"] = disclosure_receipt
         _persist_delivery("not_started", payload)
         return payload
 
@@ -2177,14 +2242,13 @@ def send_message(
             expected_cc=cc_addresses,
             expected_bcc=bcc_addresses,
             expected_subject=subject.strip(),
-            expected_html=(
-                isinstance(body_html, str) and bool(body_html.strip())
-            ),
+            expected_html=(isinstance(body_html, str) and bool(body_html.strip())),
+            expected_plain_body_sha256=expected_plain_body_sha256,
+            expected_disclosure_mode=disclosure_resolution.mode,
+            expected_disclosure_text=disclosure_resolution.visible_text,
         )
         canonical = reconciliation.get("canonical_readback")
-        if reconciliation.get("verified") is True and isinstance(
-            canonical, Mapping
-        ):
+        if reconciliation.get("verified") is True and isinstance(canonical, Mapping):
             payload = {
                 "success": True,
                 "message_id": canonical.get("message_id"),
@@ -2202,6 +2266,7 @@ def send_message(
                 "outcome_finality": "gmail_sent_reconciled_after_provider_error",
                 "provider_dispatch_attempted": True,
                 "changed": True,
+                "ai_agent_disclosure": disclosure_receipt,
             }
             _persist_delivery("succeeded", payload)
             return payload
@@ -2224,6 +2289,7 @@ def send_message(
             "recovery_affordances": [
                 "Reconcile the delivery fingerprint against Gmail Sent before any new send request."
             ],
+            "ai_agent_disclosure": disclosure_receipt,
         }
         _persist_delivery("indeterminate", payload)
         return payload
@@ -2257,13 +2323,7 @@ def send_message(
     payload.setdefault("quota", quota_receipt)
     payload.setdefault(
         "ai_agent_disclosure",
-        {
-            "schema_version": "gmail_ai_agent_disclosure.v1",
-            "visible_text": AI_AGENT_DISCLOSURE_TEXT,
-            "plain_text_part": True,
-            "html_part": isinstance(body_html, str) and bool(body_html.strip()),
-            "machine_header": AI_AGENT_MACHINE_HEADER,
-        },
+        disclosure_receipt,
     )
 
     canonical_readback: dict[str, Any]
@@ -2279,6 +2339,9 @@ def send_message(
                 expected_subject=subject.strip(),
                 expected_html=isinstance(body_html, str) and bool(body_html.strip()),
                 expected_delivery_fingerprint=delivery_fingerprint,
+                expected_plain_body_sha256=expected_plain_body_sha256,
+                expected_disclosure_mode=disclosure_resolution.mode,
+                expected_disclosure_text=disclosure_resolution.visible_text,
             )
         except Exception as exc:  # noqa: BLE001 - send already completed
             canonical_readback = {
@@ -2301,16 +2364,10 @@ def send_message(
     send_state_verified = canonical_readback.get("verified") is True
     payload["canonical_readback"] = canonical_readback
     payload["success"] = send_state_verified
-    payload["status"] = (
-        "succeeded" if send_state_verified else "indeterminate"
-    )
+    payload["status"] = "succeeded" if send_state_verified else "indeterminate"
     payload["gmail_send_state_verified"] = send_state_verified
-    payload["effect_status"] = (
-        "succeeded" if send_state_verified else "indeterminate"
-    )
-    payload["mutation_outcome"] = (
-        "completed" if send_state_verified else "unknown"
-    )
+    payload["effect_status"] = "succeeded" if send_state_verified else "indeterminate"
+    payload["mutation_outcome"] = "completed" if send_state_verified else "unknown"
     payload["outcome_finality"] = (
         "canonical_durable_readback"
         if send_state_verified

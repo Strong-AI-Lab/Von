@@ -3303,7 +3303,7 @@
         },
         {
             "name": "gmail_send_message",
-            "description": "Send an outbound Gmail message from an actor-authorised profile. Use only when the current user request, or bounded recent request context, explicitly asks Von to send email; the ordinary-turn runtime verifies that request evidence before dispatch and supplies allow_send=true. This is not a draft, read, or label-change capability. Required model inputs are to, subject, and body_text; profile is selected only from server-supplied authorised resources. Optional cc, bcc, and reply_to are supported. HTML bodies are deliberately unsupported so the mandatory AI-agent disclosure cannot be visually hidden. The profile must have a send-capable Gmail OAuth scope such as gmail.send, gmail.compose, gmail.modify, or mail.google.com. The tool returns Gmail send metadata and does not return the sent body.",
+            "description": "Send an outbound Gmail message from an actor-authorised profile. Use only when the current user request, or bounded recent request context, explicitly asks Von to send email; the ordinary-turn runtime verifies that request evidence before dispatch and supplies allow_send=true. This is not a draft, read, or label-change capability. Required model inputs are to, subject, and body_text; profile is selected only from server-supplied authorised resources. Optional cc, bcc, reply_to, body_language, and body_authorship are supported. Do not put an AI-agent notice in body_text: the Gmail boundary resolves a trusted actor, organisation, or mailbox policy and adds policy-owned text exactly once only when required. HTML bodies are deliberately unsupported so canonical delivery read-back remains exact. The profile must have a send-capable Gmail OAuth scope such as gmail.send, gmail.compose, gmail.modify, or mail.google.com. The tool returns Gmail send metadata and does not return the sent body.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3350,6 +3350,17 @@
                         ],
                         "items": {}
                     },
+                    "body_language": {
+                        "type": "string"
+                    },
+                    "body_authorship": {
+                        "type": "string",
+                        "enum": [
+                            "von_drafted",
+                            "user_supplied",
+                            "unspecified"
+                        ]
+                    },
                     "namespace": {
                         "type": [
                             "string",
@@ -3378,7 +3389,7 @@
                     "request_id"
                 ],
                 "additionalProperties": false,
-                "description": "Send an email through a configured Gmail profile. Requires allow_send=true after explicit user or workflow authorisation, and a profile with a Gmail send-capable OAuth scope.",
+                "description": "Send an email through a configured Gmail profile. Requires allow_send=true after explicit user or workflow authorisation, and a profile with a Gmail send-capable OAuth scope. Do not add an AI-agent notice to body_text: the Gmail boundary resolves any required visible disclosure from trusted policy and adds it exactly once. Supply body_language when known and classify body_authorship as von_drafted or user_supplied; omit it when provenance is uncertain.",
                 "x-von-argument-aliases": {
                     "profile_id": "profile",
                     "identity": "profile",

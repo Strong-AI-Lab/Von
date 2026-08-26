@@ -28694,6 +28694,8 @@ def _gmail_send_message(**kwargs):
             cc=kwargs.get("cc"),
             bcc=kwargs.get("bcc"),
             reply_to=kwargs.get("reply_to"),
+            body_language=kwargs.get("body_language"),
+            body_authorship=kwargs.get("body_authorship"),
             allow_send=allow_send,
             profile_resource_concept_id=profile_resource_id,
             request_id=request_id_value,
@@ -39192,6 +39194,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "cc": (str, list),
             "bcc": (str, list),
             "reply_to": (str, list),
+            "body_language": str,
+            "body_authorship": str,
             "namespace": (str, type(None)),
             "acting_user_concept_id": (str, type(None)),
             "organisation_concept_id": (str, type(None)),
@@ -39200,7 +39204,12 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         description=(
             "Send an email through a configured Gmail profile. Requires "
             "allow_send=true after explicit user or workflow authorisation, "
-            "and a profile with a Gmail send-capable OAuth scope."
+            "and a profile with a Gmail send-capable OAuth scope. Do not add "
+            "an AI-agent notice to body_text: the Gmail boundary resolves any "
+            "required visible disclosure from trusted policy and adds it "
+            "exactly once. Supply body_language when known and classify "
+            "body_authorship as von_drafted or user_supplied; omit it when "
+            "provenance is uncertain."
         ),
         aliases={
             "profile_id": "profile",
@@ -39213,6 +39222,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "allow_mutation": "allow_send",
         },
         batch_propagated_fields=("profile", "allow_send"),
+        enum_values={
+            "body_authorship": ("von_drafted", "user_supplied", "unspecified"),
+        },
     )
     gmail_get_attachment_input_schema = Schema(
         required={"profile": str, "message_id": str, "attachment_id": str},
@@ -39917,9 +39929,12 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "draft, read, or label-change capability. Required model "
                 "inputs are to, subject, and body_text; profile is selected "
                 "only from server-supplied authorised resources. Optional cc, "
-                "bcc, and reply_to are supported. HTML bodies are deliberately "
-                "unsupported so the mandatory AI-agent disclosure cannot be "
-                "visually hidden. The profile must have a "
+                "bcc, reply_to, body_language, and body_authorship are supported. "
+                "Do not put an AI-agent notice in body_text: the Gmail boundary "
+                "resolves a trusted actor, organisation, or mailbox policy and "
+                "adds policy-owned text exactly once only when required. HTML "
+                "bodies are deliberately unsupported so canonical delivery "
+                "read-back remains exact. The profile must have a "
                 "send-capable Gmail OAuth scope such as gmail.send, "
                 "gmail.compose, gmail.modify, or mail.google.com. The tool "
                 "returns Gmail send metadata and does not return the sent body."

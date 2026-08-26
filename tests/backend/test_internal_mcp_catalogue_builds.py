@@ -1961,6 +1961,8 @@ def test_gmail_send_message_registered_and_gateway_invokes(
             "recipient": "witbrock@gmail.com",
             "subject": "Hi From Von",
             "body": "An interesting body.",
+            "body_language": "en-NZ",
+            "body_authorship": "von_drafted",
             "allow_send": True,
             "request_id": "turn-send-1",
         },
@@ -1970,6 +1972,8 @@ def test_gmail_send_message_registered_and_gateway_invokes(
     assert captured["profile_id"] == "zhan-gmail"
     assert captured["to"] == ["witbrock@gmail.com"]
     assert captured["body_text"] == "An interesting body."
+    assert captured["body_language"] == "en-NZ"
+    assert captured["body_authorship"] == "von_drafted"
     assert captured["allow_send"] is True
     assert captured["request_id"] == "turn-send-1"
     assert (
@@ -2173,6 +2177,7 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
     import pytest
 
     from src.backend.integrations.google import gmail_service as gs
+    from src.backend.services import gmail_visible_disclosure_policy_service
     from src.backend.services.settings_service import (
         GmailOutboundRateLimitSettings,
     )
@@ -2226,6 +2231,11 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
 
     monkeypatch.setattr(gs, "get_service", lambda *_a, **_kw: _FakeService())
     monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    monkeypatch.setattr(
+        gmail_visible_disclosure_policy_service,
+        "load_concepts",
+        lambda _concept_ids: {},
+    )
     test_database = mongomock.MongoClient().von_test
     delivery_collection = test_database.gmail_outbound_deliveries
     delivery_collection.create_index("delivery_fingerprint", unique=True)
@@ -2254,10 +2264,11 @@ def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch
     assert message["To"] == "witbrock@gmail.com"
     assert message["Subject"] == "Hi From Von"
     assert message["From"] == "Von AI Agent <zhan@example.test>"
-    assert message.get_body(preferencelist=("plain",)).get_content().strip() == (
-        "Here is a small interesting thought.\n\n"
-        f"{gs.AI_AGENT_DISCLOSURE_TEXT}"
+    assert message.get_body(preferencelist=("plain",)).get_content() == (
+        "Here is a small interesting thought.\n"
     )
+    assert message[gs.AI_AGENT_MACHINE_HEADER] == "Von; disclosure=off"
+    assert payload["ai_agent_disclosure"]["resolved_mode"] == "off"
 
     with pytest.raises(ValueError, match="allow_send"):
         gs.send_message(
