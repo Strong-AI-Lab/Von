@@ -2,7 +2,7 @@
   "family_id": "paper_recommendation_workflow_seed_bundle",
   "managed_by": "paper_recommendation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "3",
+  "seed_version": "4",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#paper_recommendation_evaluation_workflow": {
       "1": [

@@ -22,8 +22,11 @@ Use the returned publication recommendation to choose
 `global_general`, `user`, or `organisation`; never publish private or
 actor-specific evidence globally.
 
-When `source_artifact_concept_id` is present but `source_text` is absent, read
-that exact source artefact's `hasDescription` text before judging the evidence.
+When `source_artifact_concept_id` is present but `source_text` is absent, call
+`get_text_relations` for that exact source artefact without a predicate filter,
+then use the row whose predicate is `hasDescription` (or the equivalent
+`#V#hasDescription` alias) before judging the evidence. Do not assume the
+canonical base predicate is written with a `#V#` prefix.
 For a research-summary relationship event, the profile subject is the relation
 source and the represented summary artefact is the relation target. Do not
 mistake the summary artefact for the student. For an `#V#authored_by`
