@@ -144,7 +144,10 @@ def test_paper_recommendation_prompt_support_seeds_content_from_repo_asset(
     assert "Never pass `user` or `organisation` as `selected_scope_mode`" in (
         normalised_maintenance_text
     )
-    assert "read that exact source artefact's `hasDescription` text" in (
+    assert "call `get_text_relations` for that exact source artefact without a predicate filter" in (
+        normalised_maintenance_text
+    )
+    assert "Do not assume the canonical base predicate is written with a `#V#` prefix" in (
         normalised_maintenance_text
     )
 
