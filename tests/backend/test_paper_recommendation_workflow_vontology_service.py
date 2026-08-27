@@ -258,6 +258,12 @@ def test_profile_maintenance_workflow_definition_is_executable_and_separates_wri
         "resolve_publication_scope_profile",
     ]
     assert "upsert_scoped_assertion" not in plan_action.llm_policy["allowed_tools"]
+    assert plan_action.validation_policy["json_field_defaults"] == {
+        "prior_scoped_assertion_id": ""
+    }
+    assert "prior_scoped_assertion_id" not in plan_action.validation_policy[
+        "required_json_fields"
+    ]
     assert definition.states["write_global_profile"].actions[0].action_id == (
         "workflow_mcp.invoke_tool"
     )
