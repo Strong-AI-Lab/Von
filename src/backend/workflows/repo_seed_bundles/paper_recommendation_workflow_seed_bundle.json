@@ -2,7 +2,7 @@
   "family_id": "paper_recommendation_workflow_seed_bundle",
   "managed_by": "paper_recommendation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
+  "seed_version": "3",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#paper_recommendation_evaluation_workflow": {
       "1": [
@@ -436,16 +436,16 @@
         {
           "event_type": "relationship.added",
           "input_mapping": {
-            "subject_concept_id": "event.target_id",
-            "source_artifact_concept_id": "event.source_id",
             "source_predicate": "event.predicate",
-            "source_fingerprint": "event.mutation_id",
-            "evidence_kind": "new_publication"
+            "source_fingerprint": "event.mutation_id"
           },
           "condition": {
-            "kind": "context_value_equals",
+            "kind": "context_value_in",
             "key": "event.predicate",
-            "value": "#V#authored_by"
+            "values": [
+              "#V#has_research_description",
+              "#V#authored_by"
+            ]
           },
           "enabled": true
         }
