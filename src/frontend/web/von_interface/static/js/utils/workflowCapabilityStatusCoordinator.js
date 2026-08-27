@@ -1,4 +1,4 @@
-import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
+import { ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 import { parseStoredContextValue } from './runtimeIdentityBootstrap.js';
 
 const COORDINATOR_STATE_KEY = '__vonWorkflowCapabilityIndexStatusCoordinator';
@@ -35,9 +35,10 @@ function readWindowSessionId() {
 
 function readCoordinatorNamespace(coordinatorWindow) {
   try {
+    const personalSelected = coordinatorWindow?.sessionStorage?.getItem('von_org_selection') === 'personal';
     return String(
       coordinatorWindow?.sessionStorage?.getItem('current_user_namespace')
-      || coordinatorWindow?.localStorage?.getItem('current_user_namespace')
+      || (!personalSelected && coordinatorWindow?.localStorage?.getItem('current_user_namespace'))
       || '',
     ).trim();
   } catch {
@@ -51,10 +52,19 @@ function resolveCoordinatorContext(coordinatorWindow) {
     readStoredContext(coordinatorWindow?.sessionStorage, 'von_current_user')
     || readStoredContext(coordinatorWindow?.localStorage, 'von_current_user')
   );
-  const organisation = (
-    readStoredContext(coordinatorWindow?.sessionStorage, 'von_current_org')
-    || readStoredContext(coordinatorWindow?.localStorage, 'von_current_org')
-  );
+  const personalSelected = (() => {
+    try {
+      return coordinatorWindow?.sessionStorage?.getItem('von_org_selection') === 'personal';
+    } catch {
+      return false;
+    }
+  })();
+  const organisation = personalSelected
+    ? null
+    : (
+      readStoredContext(coordinatorWindow?.sessionStorage, 'von_current_org')
+      || readStoredContext(coordinatorWindow?.localStorage, 'von_current_org')
+    );
   const userConceptId = String(user?.concept_id || user?.conceptId || '').trim();
   const organisationConceptId = String(
     organisation?.concept_id || organisation?.conceptId || '',
@@ -177,6 +187,7 @@ export async function refreshWorkflowCapabilityIndexStatus({
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_STATUS_REFRESH_TIMEOUT_MS,
 } = {}) {
+  await ensureUniqueWindowSessionId?.();
   const state = getCoordinatorState();
   const requestContextKey = state.contextKey;
   const requestGeneration = state.generation;

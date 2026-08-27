@@ -1,6 +1,7 @@
 import { getJson } from '../apiService.js';
 import {
     getSessionScopedOrgContext,
+    hasSessionOrgContext,
     setSessionScopedOrgContext,
 } from './sessionScopedStorage.js';
 
@@ -36,6 +37,7 @@ function buildStoredOrgContext(organisationConceptId, existingOrgContext = null)
 export async function hydrateStoredSelectionsFromUserPreferences(userConceptId, {
     getJsonImpl = getJson,
     getStoredOrgContext = getSessionScopedOrgContext,
+    hasStoredOrgSelection = hasSessionOrgContext,
     setStoredOrgContext = setSessionScopedOrgContext,
     localStorageImpl = typeof localStorage !== 'undefined' ? localStorage : null,
 } = {}) {
@@ -46,7 +48,13 @@ export async function hydrateStoredSelectionsFromUserPreferences(userConceptId, 
         ? getStoredOrgContext()
         : null;
 
-    if (!existingOrgContext?.concept_id && prefs.organisation_concept_id) {
+    const hasExplicitOrgSelection = Boolean(existingOrgContext?.concept_id)
+        || (
+            typeof hasStoredOrgSelection === 'function'
+            && hasStoredOrgSelection()
+        );
+
+    if (!hasExplicitOrgSelection && prefs.organisation_concept_id) {
         const orgContext = buildStoredOrgContext(
             prefs.organisation_concept_id,
             existingOrgContext,

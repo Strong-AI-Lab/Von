@@ -6,12 +6,16 @@ records, but it does not decide what Von should answer or how workflows run.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from pymongo import ReturnDocument
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
 
 from ..db.mongo_client import get_chat_prompt_queue_collection
 from .namespace_service import (
@@ -72,11 +76,52 @@ class ChatPromptQueueRecordNotFound(ChatPromptQueueError, LookupError):
         self.details = dict(details or {})
 
 
+class ConversationTurnAlreadyActive(ChatPromptQueueError):
+    """Raised when another admitted turn owns the conversation carrier."""
+
+    def __init__(self, message: str, *, queue_id: str | None = None) -> None:
+        super().__init__(message)
+        self.queue_id = queue_id
+
+
+class ChatPromptQueueCapacityReached(ChatPromptQueueError):
+    """Raised when the bounded foreground backlog has no free slot."""
+
+    def __init__(self, message: str, *, limit_kind: str) -> None:
+        super().__init__(message)
+        self.limit_kind = limit_kind
+
+
+_QUEUE_ADMISSION_LOCK = threading.RLock()
+_UNSET = object()
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _foreground_queue_limits() -> tuple[int, int]:
+    return (
+        _positive_int_env("VON_MAX_QUEUED_TURNS_GLOBAL", 500),
+        _positive_int_env("VON_MAX_QUEUED_TURNS_PER_USER", 25),
+    )
+
+
+def _queued_user_slot_key(user_concept_id: str, slot: int) -> str:
+    actor_hash = hashlib.sha256(user_concept_id.encode("utf-8")).hexdigest()
+    return f"{actor_hash}:{slot}"
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _coerce_text(value: Any, *, field: str, required: bool, max_chars: int | None = None) -> str | None:
+def _coerce_text(
+    value: Any, *, field: str, required: bool, max_chars: int | None = None
+) -> str | None:
     if value is None:
         if required:
             raise InvalidChatPromptQueueInput(f"{field} is required")
@@ -340,6 +385,12 @@ def serialise_queue_record(doc: Mapping[str, Any] | None) -> dict[str, Any] | No
         "completed_at": _serialise_datetime(doc.get("completed_at")),
         "last_error": doc.get("last_error"),
         "source": doc.get("source"),
+        "client_request_id": doc.get("client_request_id"),
+        "attempt_id": doc.get("attempt_id"),
+        "conversation_key": doc.get("conversation_key"),
+        "server_instance_id": doc.get("server_instance_id"),
+        "lease_acquired_at": _serialise_datetime(doc.get("lease_acquired_at")),
+        "lease_heartbeat_at": _serialise_datetime(doc.get("lease_heartbeat_at")),
         "stale_advisory": bool(doc.get("stale_advisory")),
         "stale_advisory_at": _serialise_datetime(doc.get("stale_advisory_at")),
         "stale_advisory_reason": doc.get("stale_advisory_reason"),
@@ -353,7 +404,9 @@ def list_active_queue_records(
     statuses: Sequence[str] = ACTIVE_STATUSES,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    allowed_statuses = [str(status) for status in statuses if str(status) in VALID_STATUSES]
+    allowed_statuses = [
+        str(status) for status in statuses if str(status) in VALID_STATUSES
+    ]
     if not allowed_statuses:
         allowed_statuses = list(ACTIVE_STATUSES)
     max_limit = max(1, min(int(limit or 100), 500))
@@ -364,7 +417,9 @@ def list_active_queue_records(
         "status": {"$in": allowed_statuses},
     }
     docs = _collection().find(query).sort([("created_at", 1)]).limit(max_limit)
-    return [record for record in (serialise_queue_record(doc) for doc in docs) if record]
+    return [
+        record for record in (serialise_queue_record(doc) for doc in docs) if record
+    ]
 
 
 def list_recent_failed_queue_records(
@@ -389,10 +444,14 @@ def list_recent_failed_queue_records(
         .sort([("completed_at", -1), ("updated_at", -1)])
         .limit(max_limit)
     )
-    return [record for record in (serialise_queue_record(doc) for doc in docs) if record]
+    return [
+        record for record in (serialise_queue_record(doc) for doc in docs) if record
+    ]
 
 
-def list_queue_visibility_records(*, scope: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def list_queue_visibility_records(
+    *, scope: Mapping[str, Any]
+) -> dict[str, list[dict[str, Any]]]:
     """Return active queue records plus bounded failed records for UI visibility."""
 
     return {
@@ -409,6 +468,9 @@ def create_queue_record(
     session_name: Any = None,
     status: str = STATUS_QUEUED,
     source: str = "queued",
+    client_request_id: Any = None,
+    attempt_id: Any = None,
+    conversation_key: Any = None,
 ) -> dict[str, Any]:
     if status not in {STATUS_QUEUED, STATUS_IN_PROGRESS}:
         raise InvalidChatPromptQueueInput("status must be queued or in_progress")
@@ -418,7 +480,9 @@ def create_queue_record(
         required=True,
         max_chars=MAX_PROMPT_RAW_CHARS,
     )
-    session_id_clean = _coerce_scope_value(session_id, field="session_id", required=False)
+    session_id_clean = _coerce_scope_value(
+        session_id, field="session_id", required=False
+    )
     session_name_clean = _coerce_text(
         session_name,
         field="session_name",
@@ -427,6 +491,21 @@ def create_queue_record(
     )
     if session_name_clean is not None:
         session_name_clean = session_name_clean.strip() or None
+    client_request_id_clean = _coerce_scope_value(
+        client_request_id,
+        field="client_request_id",
+        required=False,
+    )
+    attempt_id_clean = _coerce_scope_value(
+        attempt_id,
+        field="attempt_id",
+        required=False,
+    )
+    conversation_key_clean = _coerce_scope_value(
+        conversation_key,
+        field="conversation_key",
+        required=False,
+    )
     now = _now()
     doc = {
         "queue_id": str(uuid4()),
@@ -436,6 +515,9 @@ def create_queue_record(
         "session_id": session_id_clean,
         "session_name": session_name_clean,
         "source": source,
+        "client_request_id": client_request_id_clean,
+        "attempt_id": attempt_id_clean,
+        "conversation_key": conversation_key_clean,
         "attempt_count": 1 if status == STATUS_IN_PROGRESS else 0,
         "created_at": now,
         "updated_at": now,
@@ -444,11 +526,356 @@ def create_queue_record(
         "completed_at": None,
         "last_error": None,
     }
-    _collection().insert_one(doc)
+    coll = _collection()
+    if status == STATUS_QUEUED:
+        global_limit, per_user_limit = _foreground_queue_limits()
+        user_id = str(doc["user_concept_id"])
+        with _QUEUE_ADMISSION_LOCK:
+            legacy_global = coll.count_documents(
+                {
+                    "status": STATUS_QUEUED,
+                    "queued_global_slot": {"$exists": False},
+                }
+            )
+            legacy_user = coll.count_documents(
+                {
+                    "status": STATUS_QUEUED,
+                    "user_concept_id": user_id,
+                    "queued_user_slot": {"$exists": False},
+                }
+            )
+            available_global = max(0, global_limit - int(legacy_global))
+            available_user = max(0, per_user_limit - int(legacy_user))
+            occupied_global_slots = set(
+                coll.distinct("queued_global_slot", {"status": STATUS_QUEUED})
+            )
+            occupied_user_slots = set(
+                coll.distinct(
+                    "queued_user_slot",
+                    {"status": STATUS_QUEUED, "user_concept_id": user_id},
+                )
+            )
+            inserted = False
+            for user_slot in range(available_user):
+                user_slot_key = _queued_user_slot_key(user_id, user_slot)
+                if user_slot_key in occupied_user_slots:
+                    continue
+                for global_slot in range(available_global):
+                    if global_slot in occupied_global_slots:
+                        continue
+                    candidate = {
+                        **doc,
+                        "queued_global_slot": global_slot,
+                        "queued_user_slot": user_slot_key,
+                    }
+                    try:
+                        coll.insert_one(candidate)
+                    except DuplicateKeyError:
+                        continue
+                    doc = candidate
+                    inserted = True
+                    break
+                if inserted:
+                    break
+            if not inserted:
+                user_queued = coll.count_documents(
+                    {"status": STATUS_QUEUED, "user_concept_id": user_id}
+                )
+                if user_queued >= per_user_limit:
+                    raise ChatPromptQueueCapacityReached(
+                        "This user has reached the queued-turn backlog limit",
+                        limit_kind="user",
+                    )
+                raise ChatPromptQueueCapacityReached(
+                    "Von has reached the global queued-turn backlog limit",
+                    limit_kind="global",
+                )
+    else:
+        coll.insert_one(doc)
     record = serialise_queue_record(doc)
     if record is None:  # pragma: no cover - defensive
         raise ChatPromptQueueUnavailable("created queue record could not be serialised")
     return record
+
+
+def _requeue_with_bounded_slots(
+    *,
+    coll: Collection,
+    query: Mapping[str, Any],
+    update: Mapping[str, Any],
+    user_concept_id: str,
+) -> Mapping[str, Any] | None:
+    """Atomically re-admit one existing record to the bounded queued backlog."""
+
+    global_limit, per_user_limit = _foreground_queue_limits()
+    with _QUEUE_ADMISSION_LOCK:
+        legacy_global = coll.count_documents(
+            {"status": STATUS_QUEUED, "queued_global_slot": {"$exists": False}}
+        )
+        legacy_user = coll.count_documents(
+            {
+                "status": STATUS_QUEUED,
+                "user_concept_id": user_concept_id,
+                "queued_user_slot": {"$exists": False},
+            }
+        )
+        available_global = max(0, global_limit - int(legacy_global))
+        available_user = max(0, per_user_limit - int(legacy_user))
+        occupied_global_slots = set(
+            coll.distinct("queued_global_slot", {"status": STATUS_QUEUED})
+        )
+        occupied_user_slots = set(
+            coll.distinct(
+                "queued_user_slot",
+                {"status": STATUS_QUEUED, "user_concept_id": user_concept_id},
+            )
+        )
+        for user_slot in range(available_user):
+            user_slot_key = _queued_user_slot_key(user_concept_id, user_slot)
+            if user_slot_key in occupied_user_slots:
+                continue
+            for global_slot in range(available_global):
+                if global_slot in occupied_global_slots:
+                    continue
+                candidate_update = {
+                    key: dict(value) if isinstance(value, Mapping) else value
+                    for key, value in update.items()
+                }
+                set_fields = dict(candidate_update.get("$set") or {})
+                set_fields.update(
+                    {
+                        "queued_global_slot": global_slot,
+                        "queued_user_slot": user_slot_key,
+                    }
+                )
+                candidate_update["$set"] = set_fields
+                try:
+                    doc = coll.find_one_and_update(
+                        dict(query),
+                        candidate_update,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                except DuplicateKeyError:
+                    continue
+                if doc is not None:
+                    return doc
+                return None
+
+        user_queued = coll.count_documents(
+            {"status": STATUS_QUEUED, "user_concept_id": user_concept_id}
+        )
+        if user_queued >= per_user_limit:
+            raise ChatPromptQueueCapacityReached(
+                "This user has reached the queued-turn backlog limit",
+                limit_kind="user",
+            )
+        raise ChatPromptQueueCapacityReached(
+            "Von has reached the global queued-turn backlog limit",
+            limit_kind="global",
+        )
+
+
+def bind_queue_record_to_turn(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+    client_request_id: str,
+    conversation_key: str,
+    server_instance_id: str,
+    attempt_id: str | None = None,
+) -> dict[str, Any]:
+    """Atomically bind one queued prompt to the executing conversation turn.
+
+    ``active_conversation_key`` exists only for the admitted record. Its unique
+    partial index is the cross-thread/process single-flight fence; the stable
+    ``conversation_key`` remains afterwards for reconciliation.
+    """
+
+    queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
+    request_id_clean = _coerce_scope_value(
+        client_request_id,
+        field="client_request_id",
+    )
+    conversation_key_clean = _coerce_scope_value(
+        conversation_key,
+        field="conversation_key",
+    )
+    server_instance_id_clean = _coerce_scope_value(
+        server_instance_id,
+        field="server_instance_id",
+    )
+    attempt_id_clean = _coerce_scope_value(
+        attempt_id,
+        field="attempt_id",
+        required=False,
+    ) or str(uuid4())
+    now = _now()
+    canonical_scope = _scope_query(scope)
+    coll = _collection()
+
+    existing = coll.find_one(
+        {**_compatible_scope_query(scope), "queue_id": queue_id_clean}
+    )
+    if existing is None:
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=ACTIVE_STATUSES,
+            fallback_message="active prompt was not found",
+        )
+    existing_request_id = existing.get("client_request_id")
+    if existing_request_id and existing_request_id != request_id_clean:
+        raise InvalidChatPromptQueueInput(
+            "prompt queue record is already bound to a different request"
+        )
+    if existing.get("active_conversation_key"):
+        raise ConversationTurnAlreadyActive(
+            "prompt queue record is already executing",
+            queue_id=queue_id_clean,
+        )
+
+    persisted_conversation_key = _coerce_scope_value(
+        existing.get("conversation_key"),
+        field="conversation_key",
+        required=False,
+    )
+    if (
+        persisted_conversation_key
+        and persisted_conversation_key != conversation_key_clean
+    ):
+        raise InvalidChatPromptQueueInput(
+            "prompt queue record belongs to a different conversation"
+        )
+
+    # New records carry the server-computed canonical key from creation, so an
+    # invitee and owner share one FIFO even though their visibility scopes differ.
+    # Legacy rows retain their former same-scope session FIFO until first bound.
+    session_id = existing.get("session_id")
+    if persisted_conversation_key:
+        created_at = existing.get("created_at", now)
+        earlier = coll.find_one(
+            {
+                "conversation_key": persisted_conversation_key,
+                "status": {"$in": ACTIVE_STATUSES},
+                "queue_id": {"$ne": queue_id_clean},
+                "$or": [
+                    {"created_at": {"$lt": created_at}},
+                    {
+                        "created_at": created_at,
+                        "queue_id": {"$lt": queue_id_clean},
+                    },
+                ],
+            },
+            {
+                "queue_id": 1,
+                "user_concept_id": 1,
+                "organisation_concept_id": 1,
+                "namespace": 1,
+            },
+            sort=[("created_at", 1), ("queue_id", 1)],
+        )
+        if earlier is not None:
+            same_scope_queue_id = (
+                str(earlier.get("queue_id") or "") or None
+                if _scope_matches(earlier, scope)
+                else None
+            )
+            raise ConversationTurnAlreadyActive(
+                "an earlier prompt is waiting for this conversation",
+                queue_id=same_scope_queue_id,
+            )
+    elif session_id:
+        earlier = coll.find_one(
+            {
+                **_compatible_scope_query(scope),
+                "session_id": session_id,
+                "status": {"$in": ACTIVE_STATUSES},
+                "queue_id": {"$ne": queue_id_clean},
+                "created_at": {"$lt": existing.get("created_at", now)},
+            },
+            {"queue_id": 1},
+            sort=[("created_at", 1), ("queue_id", 1)],
+        )
+        if earlier is not None:
+            raise ConversationTurnAlreadyActive(
+                "an earlier prompt is waiting for this conversation",
+                queue_id=str(earlier.get("queue_id") or "") or None,
+            )
+
+    try:
+        doc = coll.find_one_and_update(
+            {
+                **_compatible_scope_query(scope),
+                "queue_id": queue_id_clean,
+                "status": {"$in": ACTIVE_STATUSES},
+                "$or": [
+                    {"client_request_id": None},
+                    {"client_request_id": request_id_clean},
+                    {"client_request_id": {"$exists": False}},
+                ],
+                "active_conversation_key": {"$exists": False},
+            },
+            {
+                "$set": {
+                    **canonical_scope,
+                    "status": STATUS_IN_PROGRESS,
+                    "client_request_id": request_id_clean,
+                    "attempt_id": attempt_id_clean,
+                    "conversation_key": conversation_key_clean,
+                    "active_conversation_key": conversation_key_clean,
+                    "server_instance_id": server_instance_id_clean,
+                    "claimed_at": now,
+                    "lease_acquired_at": now,
+                    "lease_heartbeat_at": now,
+                    "updated_at": now,
+                    "completed_at": None,
+                    "last_error": None,
+                },
+                "$unset": {
+                    "queued_global_slot": "",
+                    "queued_user_slot": "",
+                    "stale_advisory": "",
+                    "stale_advisory_at": "",
+                    "stale_advisory_reason": "",
+                    "reconciliation_required": "",
+                },
+                "$inc": {"attempt_count": 1},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError as exc:
+        raise ConversationTurnAlreadyActive(
+            "another turn is active for this conversation"
+        ) from exc
+
+    record = serialise_queue_record(doc)
+    if record is None:
+        raise ConversationTurnAlreadyActive(
+            "another turn acquired this prompt or conversation"
+        )
+    return record
+
+
+def heartbeat_bound_turn(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+    attempt_id: str,
+) -> bool:
+    """Refresh an exact admitted turn lease without changing its semantics."""
+
+    now = _now()
+    result = _collection().update_one(
+        {
+            **_compatible_scope_query(scope),
+            "queue_id": _coerce_scope_value(queue_id, field="queue_id"),
+            "attempt_id": _coerce_scope_value(attempt_id, field="attempt_id"),
+            "status": STATUS_IN_PROGRESS,
+            "active_conversation_key": {"$exists": True},
+        },
+        {"$set": {"lease_heartbeat_at": now, "updated_at": now}},
+    )
+    return bool(getattr(result, "modified_count", 0))
 
 
 def update_queued_record(
@@ -456,8 +883,9 @@ def update_queued_record(
     scope: Mapping[str, Any],
     queue_id: str,
     prompt_raw: str | None = None,
-    session_id: str | None = None,
+    session_id: Any = _UNSET,
     session_name: str | None = None,
+    conversation_key: Any = _UNSET,
 ) -> dict[str, Any]:
     queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
     set_fields: dict[str, Any] = {"updated_at": _now()}
@@ -468,8 +896,15 @@ def update_queued_record(
             required=True,
             max_chars=MAX_PROMPT_RAW_CHARS,
         )
-    if session_id is not None:
-        set_fields["session_id"] = _coerce_scope_value(session_id, field="session_id", required=False)
+    if session_id is not _UNSET:
+        set_fields["session_id"] = _coerce_scope_value(
+            session_id, field="session_id", required=False
+        )
+        set_fields["conversation_key"] = _coerce_scope_value(
+            None if conversation_key is _UNSET else conversation_key,
+            field="conversation_key",
+            required=False,
+        )
     if session_name is not None:
         clean_session_name = _coerce_text(
             session_name,
@@ -477,7 +912,9 @@ def update_queued_record(
             required=False,
             max_chars=MAX_SESSION_NAME_CHARS,
         )
-        set_fields["session_name"] = clean_session_name.strip() if clean_session_name else None
+        set_fields["session_name"] = (
+            clean_session_name.strip() if clean_session_name else None
+        )
 
     canonical_scope = _scope_query(scope)
     doc = _collection().find_one_and_update(
@@ -520,6 +957,8 @@ def claim_queue_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, 
                 "last_error": None,
             },
             "$unset": {
+                "queued_global_slot": "",
+                "queued_user_slot": "",
                 "stale_advisory": "",
                 "stale_advisory_at": "",
                 "stale_advisory_reason": "",
@@ -540,35 +979,104 @@ def claim_queue_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, 
     return record
 
 
-def requeue_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, Any]:
+def requeue_prompt_record(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+    current_server_instance_id: str | None = None,
+) -> dict[str, Any]:
+    """Return an interrupted record to FIFO without stealing a live lease.
+
+    Legacy claimed rows have no durable conversation fence and remain directly
+    restartable. A server-bound row may be released only after the one-server
+    runtime identity has changed, which is the bounded restart signal for this
+    architecture. The captured attempt and server identity are included in the
+    update as a compare-and-set guard against a concurrent rebind.
+    """
+
     queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
     now = _now()
     canonical_scope = _scope_query(scope)
-    doc = _collection().find_one_and_update(
+    coll = _collection()
+    existing = coll.find_one(
         {
             **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
             "status": STATUS_IN_PROGRESS,
+        }
+    )
+    if existing is None:
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=[STATUS_IN_PROGRESS],
+            fallback_message="in-progress prompt was not found",
+        )
+
+    transition_guard: dict[str, Any] = {}
+    if existing.get("active_conversation_key"):
+        current_instance = _coerce_scope_value(
+            current_server_instance_id,
+            field="current_server_instance_id",
+            required=False,
+        )
+        bound_instance = _coerce_scope_value(
+            existing.get("server_instance_id"),
+            field="server_instance_id",
+            required=False,
+        )
+        if (
+            not current_instance
+            or not bound_instance
+            or current_instance == bound_instance
+        ):
+            raise ConversationTurnAlreadyActive(
+                "the server-bound turn is still owned by its executing server",
+                queue_id=queue_id_clean,
+            )
+        transition_guard = {
+            "active_conversation_key": existing.get("active_conversation_key"),
+            "attempt_id": existing.get("attempt_id"),
+            "server_instance_id": bound_instance,
+        }
+    else:
+        transition_guard = {"active_conversation_key": {"$exists": False}}
+
+    requeue_query = {
+        **_compatible_scope_query(scope),
+        "queue_id": queue_id_clean,
+        "status": STATUS_IN_PROGRESS,
+        **transition_guard,
+    }
+    requeue_update = {
+        "$set": {
+            **canonical_scope,
+            "status": STATUS_QUEUED,
+            "queued_at": now,
+            "updated_at": now,
+            "claimed_at": None,
+            "completed_at": None,
+            "last_error": None,
+            "source": "restart",
         },
-        {
-            "$set": {
-                **canonical_scope,
-                "status": STATUS_QUEUED,
-                "queued_at": now,
-                "updated_at": now,
-                "claimed_at": None,
-                "completed_at": None,
-                "last_error": None,
-                "source": "restart",
-            },
-            "$unset": {
-                "stale_advisory": "",
-                "stale_advisory_at": "",
-                "stale_advisory_reason": "",
-                "reconciliation_required": "",
-            },
+        "$unset": {
+            "active_conversation_key": "",
+            "client_request_id": "",
+            "attempt_id": "",
+            "server_instance_id": "",
+            "lease_acquired_at": "",
+            "lease_heartbeat_at": "",
+            "stale_advisory": "",
+            "stale_advisory_at": "",
+            "stale_advisory_reason": "",
+            "reconciliation_required": "",
         },
-        return_document=ReturnDocument.AFTER,
+    }
+    doc = _requeue_with_bounded_slots(
+        coll=coll,
+        query=requeue_query,
+        update=requeue_update,
+        user_concept_id=str(canonical_scope["user_concept_id"]),
     )
     record = serialise_queue_record(doc)
     if record is None:
@@ -587,17 +1095,30 @@ def finish_prompt_record(
     queue_id: str,
     status: str = STATUS_COMPLETED,
     error: str | None = None,
+    attempt_id: str | None = None,
 ) -> dict[str, Any]:
     if status not in TERMINAL_STATUSES:
         raise InvalidChatPromptQueueInput("status must be a terminal queue status")
     queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
     now = _now()
     canonical_scope = _scope_query(scope)
-    doc = _collection().find_one_and_update(
+    attempt_id_clean = _coerce_scope_value(
+        attempt_id,
+        field="attempt_id",
+        required=False,
+    )
+    ownership_guard: dict[str, Any] = (
+        {"attempt_id": attempt_id_clean}
+        if attempt_id_clean
+        else {"active_conversation_key": {"$exists": False}}
+    )
+    coll = _collection()
+    doc = coll.find_one_and_update(
         {
             **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
             "status": {"$in": ACTIVE_STATUSES},
+            **ownership_guard,
         },
         {
             "$set": {
@@ -613,6 +1134,12 @@ def finish_prompt_record(
                 ),
             },
             "$unset": {
+                "active_conversation_key": "",
+                "queued_global_slot": "",
+                "queued_user_slot": "",
+                "server_instance_id": "",
+                "lease_acquired_at": "",
+                "lease_heartbeat_at": "",
                 "stale_advisory": "",
                 "stale_advisory_at": "",
                 "stale_advisory_reason": "",
@@ -622,6 +1149,20 @@ def finish_prompt_record(
         return_document=ReturnDocument.AFTER,
     )
     record = serialise_queue_record(doc)
+    if record is None and attempt_id_clean:
+        # A retry after an unknown Mongo acknowledgement must recognise the
+        # exact already-committed attempt instead of stranding the in-process
+        # token and its capacity reservation.
+        record = serialise_queue_record(
+            coll.find_one(
+                {
+                    **_compatible_scope_query(scope),
+                    "queue_id": queue_id_clean,
+                    "attempt_id": attempt_id_clean,
+                    "status": status,
+                }
+            )
+        )
     if record is None:
         raise _transition_not_found_error(
             scope=scope,
@@ -637,11 +1178,31 @@ def cancel_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str
     now = _now()
     canonical_scope = _scope_query(scope)
 
-    doc = _collection().find_one_and_update(
+    coll = _collection()
+    existing = coll.find_one(
+        {**_compatible_scope_query(scope), "queue_id": queue_id_clean}
+    )
+    if (
+        existing is not None
+        and existing.get("status") == STATUS_IN_PROGRESS
+        and existing.get("active_conversation_key")
+    ):
+        raise ConversationTurnAlreadyActive(
+            "an executing turn must be cancelled through its bound task",
+            queue_id=queue_id_clean,
+        )
+
+    doc = coll.find_one_and_update(
         {
             **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
-            "status": {"$in": ACTIVE_STATUSES},
+            "$or": [
+                {"status": STATUS_QUEUED},
+                {
+                    "status": STATUS_IN_PROGRESS,
+                    "active_conversation_key": {"$exists": False},
+                },
+            ],
         },
         {
             "$set": {
@@ -652,6 +1213,12 @@ def cancel_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str
                 "last_error": None,
             },
             "$unset": {
+                "active_conversation_key": "",
+                "queued_global_slot": "",
+                "queued_user_slot": "",
+                "server_instance_id": "",
+                "lease_acquired_at": "",
+                "lease_heartbeat_at": "",
                 "stale_advisory": "",
                 "stale_advisory_at": "",
                 "stale_advisory_reason": "",
@@ -663,7 +1230,7 @@ def cancel_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str
     if doc is None:
         # Failed records keep their original completion time and diagnostic
         # evidence when explicitly dismissed.
-        doc = _collection().find_one_and_update(
+        doc = coll.find_one_and_update(
             {
                 **_compatible_scope_query(scope),
                 "queue_id": queue_id_clean,

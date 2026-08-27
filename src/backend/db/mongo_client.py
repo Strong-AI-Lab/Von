@@ -990,9 +990,9 @@ def _fallback_candidate(
     )
 
 
-def _try_preferred_fallback_candidate() -> (
-    tuple[_MongoConnectionCandidate | None, bool]
-):
+def _try_preferred_fallback_candidate() -> tuple[
+    _MongoConnectionCandidate | None, bool
+]:
     """Build, but do not publish, a client for the recent fallback route."""
 
     preferred_kind = _preferred_fallback_kind
@@ -2097,6 +2097,57 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
                 ("created_at", ASCENDING),
             ],
             name="scope_session_status_created_at",
+        )
+    if "active_conversation_key_unique" not in existing_indexes:
+        coll.create_index(
+            [("active_conversation_key", ASCENDING)],
+            name="active_conversation_key_unique",
+            unique=True,
+            partialFilterExpression={
+                "active_conversation_key": {"$exists": True, "$type": "string"}
+            },
+        )
+    if "queued_global_slot_unique" not in existing_indexes:
+        coll.create_index(
+            [("queued_global_slot", ASCENDING)],
+            name="queued_global_slot_unique",
+            unique=True,
+            partialFilterExpression={"queued_global_slot": {"$exists": True}},
+        )
+    if "queued_user_slot_unique" not in existing_indexes:
+        coll.create_index(
+            [("queued_user_slot", ASCENDING)],
+            name="queued_user_slot_unique",
+            unique=True,
+            partialFilterExpression={"queued_user_slot": {"$exists": True}},
+        )
+    if "conversation_status_created_queue" not in existing_indexes:
+        coll.create_index(
+            [
+                ("conversation_key", ASCENDING),
+                ("status", ASCENDING),
+                ("created_at", ASCENDING),
+                ("queue_id", ASCENDING),
+            ],
+            name="conversation_status_created_queue",
+        )
+    if "user_status_created_at" not in existing_indexes:
+        coll.create_index(
+            [
+                ("user_concept_id", ASCENDING),
+                ("status", ASCENDING),
+                ("created_at", ASCENDING),
+            ],
+            name="user_status_created_at",
+        )
+    if "request_user_namespace" not in existing_indexes:
+        coll.create_index(
+            [
+                ("client_request_id", ASCENDING),
+                ("user_concept_id", ASCENDING),
+                ("namespace", ASCENDING),
+            ],
+            name="request_user_namespace",
         )
     if "updated_at_-1" not in existing_indexes:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")

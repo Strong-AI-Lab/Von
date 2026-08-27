@@ -1,4 +1,4 @@
-import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import { ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
   syncNamespaceFromLocalStorage,
   syncOrgContextFromLocalStorage
@@ -345,6 +345,7 @@ function buildWorkflowStudioRequestHeaders(options = {}) {
 }
 
 async function fetchJson(url, options = {}) {
+  await ensureUniqueWindowSessionId?.();
   const { headers: _ignoredHeaders, ...fetchOptions } = options || {};
   const response = await fetch(url, {
     ...fetchOptions,
@@ -1532,6 +1533,7 @@ async function initialiseWorkflowStudio() {
   // Keep the standalone studio page aligned with the main Von window-scoped context model.
   syncOrgContextFromLocalStorage();
   syncNamespaceFromLocalStorage();
+  await ensureUniqueWindowSessionId?.();
   cacheElements();
   bindEvents();
   renderAll();

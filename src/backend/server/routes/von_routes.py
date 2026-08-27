@@ -7,6 +7,7 @@ from flask import (
     session,
     send_file,
     make_response,
+    g,
 )
 import os
 import re
@@ -61,11 +62,21 @@ from ...services.adaptive_turn_service import (
 from ...services.conversation_turn_memory_context_service import (
     merge_conversation_situation_turn_projection,
 )
+from ...services.conversation_turn_admission_service import (
+    SERVER_INSTANCE_ID,
+    ConversationTurnAdmissionError,
+    build_conversation_key,
+    conversation_turn_admission_service,
+)
 from ...services.turn_resource_presentation_service import (
     annotate_turn_screen_text,
     plan_turn_resource_presentation,
 )
-from ...services.background_task_service import background_task_registry
+from ...services.background_task_service import (
+    BackgroundTaskCapacityReached,
+    BackgroundTaskScopeMismatch,
+    background_task_registry,
+)
 from ...services.workflow_payload_store import is_workflow_payload_blob_ref
 from ...services.live_request_load import (
     decrement_live_turns,
@@ -76,6 +87,7 @@ from ...services.coding_agent_identity_bootstrap_service import (
     VON_SYSTEM_ID,
 )
 from ...services.window_session_context_service import (
+    WindowSessionContextUnavailable,
     WindowSessionOwnershipError,
     set_window_organisation,
     clear_window_organisation,
@@ -150,6 +162,7 @@ from ...services.tool_progress_store_service import (
     delete_tool_progress_state,
     discard_queued_tool_progress_state,
     fetch_tool_progress_state,
+    find_tool_progress_scope_keys,
     queue_tool_progress_state_persistence,
 )
 from ...services.turn_timing_telemetry_service import (
@@ -196,6 +209,97 @@ _TEMPLATE_DIR = os.path.abspath(
     )
 )
 von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
+
+_TURN_ADMISSION_CONTEXT_KEY = "von_conversation_turn_admission"
+
+
+def _release_request_turn_admission(
+    *,
+    response: Any | None = None,
+    exception: BaseException | None = None,
+) -> None:
+    """Release the request-local durable turn fence exactly once."""
+
+    token = getattr(g, _TURN_ADMISSION_CONTEXT_KEY, None)
+    if token is None or getattr(token, "released", False):
+        return
+
+    terminal_status: str | None = None
+    error_text: str | None = None
+    if exception is not None:
+        terminal_status = (
+            chat_prompt_queue_service.STATUS_CANCELLED
+            if isinstance(exception, CancellationRequested)
+            else chat_prompt_queue_service.STATUS_FAILED
+        )
+        error_text = str(exception)[:4_000]
+    elif response is not None:
+        terminal_status = chat_prompt_queue_service.STATUS_COMPLETED
+        status_code = int(getattr(response, "status_code", 200) or 200)
+        payload = None
+        try:
+            payload = response.get_json(silent=True)
+        except Exception:
+            payload = None
+        if isinstance(payload, Mapping) and payload.get("success") is False:
+            projected_status = str(payload.get("terminal_status") or "").lower()
+            terminal_status = (
+                chat_prompt_queue_service.STATUS_CANCELLED
+                if projected_status == "cancelled"
+                else chat_prompt_queue_service.STATUS_FAILED
+            )
+            error_text = str(
+                payload.get("error") or payload.get("detail") or projected_status
+            )[:4_000]
+        elif status_code >= 400:
+            terminal_status = chat_prompt_queue_service.STATUS_FAILED
+            error_text = f"/von/generate returned HTTP {status_code}"
+    else:
+        terminal_status = getattr(token, "pending_terminal_status", None)
+        error_text = getattr(token, "pending_terminal_error", None)
+
+    # Teardown without a response is not evidence of successful completion.
+    # It may be retrying a durable finish whose first write outcome was
+    # unknown, so retain the exact disposition computed by after_request.
+    if terminal_status is None:
+        return
+    pending_terminal_status = getattr(token, "pending_terminal_status", None)
+    if pending_terminal_status is None:
+        token.pending_terminal_status = terminal_status
+        token.pending_terminal_error = error_text
+    else:
+        # The first terminal observation is final for this exact attempt. An
+        # error surfaced later during response finalisation or teardown must
+        # not rewrite a completed/cancelled/failed durable disposition.
+        terminal_status = pending_terminal_status
+        error_text = getattr(token, "pending_terminal_error", None)
+
+    try:
+        conversation_turn_admission_service.release(
+            token,
+            status=terminal_status,
+            error=error_text,
+        )
+    except Exception:
+        current_app.logger.exception(
+            "[turn_admission] Failed to release queue_id=%s request_id=%s",
+            getattr(token, "queue_id", None),
+            getattr(token, "client_request_id", None),
+        )
+
+
+@von_bp.after_request
+def _release_turn_admission_after_response(response: Any) -> Any:
+    _release_request_turn_admission(response=response)
+    token = getattr(g, _TURN_ADMISSION_CONTEXT_KEY, None)
+    if token is not None and getattr(token, "queue_id", None):
+        response.headers.setdefault("X-Von-Prompt-Queue-ID", token.queue_id)
+    return response
+
+
+@von_bp.teardown_request
+def _release_turn_admission_after_exception(exception: BaseException | None) -> None:
+    _release_request_turn_admission(exception=exception)
 
 
 def _json_safe_response_payload(value: Any, *, _seen: set[int] | None = None) -> Any:
@@ -655,9 +759,14 @@ def _append_selected_workflow_execution_event(
 
 def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any, int]:
     try:
-        from ...security.access_control import get_effective_user_concept_id
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id_with_source,
+        )
 
-        user_concept_id = get_effective_user_concept_id()
+        user_concept_id, actor_source = get_effective_user_concept_id_with_source()
+        if actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+            user_concept_id = None
     except Exception:
         user_concept_id = session.get("user_concept_id")
 
@@ -674,17 +783,30 @@ def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any,
         )
 
     window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
-    effective_context = get_effective_context(
-        window_session_id,
-        dict(session),
-        user_concept_id.strip(),
-    )
-    organisation_concept_id = (
-        effective_context.get("organisation_id")
-        or session.get("org_id")
-        or session.get("organisation_concept_id")
-    )
-    namespace = effective_context.get("namespace") or session.get("namespace")
+    try:
+        effective_context = get_effective_context(
+            window_session_id,
+            dict(session),
+            user_concept_id.strip(),
+            require_known_window=bool(window_session_id),
+        )
+    except WindowSessionContextUnavailable:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Window organisation context must be rebound",
+                    "error_code": "window_context_unavailable",
+                    "retryable": True,
+                }
+            ),
+            409,
+        )
+    # `get_effective_context` has already applied the legacy no-window fallback.
+    # Do not use truthiness fallbacks here: an explicit personal window has an
+    # authoritative null organisation and must not inherit another tab's org.
+    organisation_concept_id = effective_context.get("organisation_id")
+    namespace = effective_context.get("namespace")
     return chat_prompt_queue_service.build_queue_scope(
         user_concept_id=user_concept_id.strip(),
         organisation_concept_id=organisation_concept_id,
@@ -725,6 +847,19 @@ def _chat_prompt_queue_error_response(
     queue_id: str | None = None,
     scope: Mapping[str, Any] | None = None,
 ):
+    if isinstance(exc, chat_prompt_queue_service.ChatPromptQueueCapacityReached):
+        response = jsonify(
+            {
+                "success": False,
+                "error": str(exc),
+                "error_code": "foreground_queue_capacity_reached",
+                "limit_kind": exc.limit_kind,
+                "retryable": True,
+                "retry_after_seconds": 1,
+            }
+        )
+        response.headers["Retry-After"] = "1"
+        return response, 429
     if isinstance(exc, chat_prompt_queue_service.InvalidChatPromptQueueInput):
         return (
             jsonify(
@@ -735,6 +870,18 @@ def _chat_prompt_queue_error_response(
                 }
             ),
             400,
+        )
+    if isinstance(exc, chat_prompt_queue_service.ConversationTurnAlreadyActive):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "error_code": "conversation_turn_active",
+                    "retryable": True,
+                }
+            ),
+            409,
         )
     if isinstance(exc, chat_prompt_queue_service.ChatPromptQueueRecordNotFound):
         current_app.logger.warning(
@@ -793,7 +940,13 @@ def list_chat_prompt_queue_route():
         return scope
     try:
         records = chat_prompt_queue_service.list_queue_visibility_records(scope=scope)
-        return jsonify({"success": True, **records})
+        return jsonify(
+            {
+                "success": True,
+                **records,
+                "turn_admission": conversation_turn_admission_service.snapshot(),
+            }
+        )
     except Exception as exc:
         return _chat_prompt_queue_error_response(exc, action="list", scope=scope)
 
@@ -804,22 +957,42 @@ def create_chat_prompt_queue_route():
     if isinstance(scope, tuple):
         return scope
     payload = _chat_prompt_queue_payload()
-    status = (
-        chat_prompt_queue_service.STATUS_IN_PROGRESS
-        if payload.get("status") == chat_prompt_queue_service.STATUS_IN_PROGRESS
-        else chat_prompt_queue_service.STATUS_QUEUED
-    )
-    source = (
-        "active" if status == chat_prompt_queue_service.STATUS_IN_PROGRESS else "queued"
-    )
     try:
+        raw_session_id = payload.get("session_id")
+        session_id = (
+            raw_session_id.strip()
+            if isinstance(raw_session_id, str) and raw_session_id.strip()
+            else None
+        )
+        conversation_key = None
+        if session_id:
+            actor_user_id = str(scope.get("user_concept_id") or "")
+            owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+                user_concept_id=actor_user_id,
+                session_id=session_id,
+            )
+            history_user_id = owner_user_id or actor_user_id
+            history_namespace = _canonical_conversation_history_namespace(
+                owner_user_id=history_user_id,
+                actor_namespace=scope.get("namespace"),
+                shared_invite=shared_invite,
+            )
+            if history_user_id and history_namespace:
+                conversation_key = build_conversation_key(
+                    owner_user_id=history_user_id,
+                    history_namespace=history_namespace,
+                    conversation_session_id=session_id,
+                )
         record = chat_prompt_queue_service.create_queue_record(
             scope=scope,
             prompt_raw=payload.get("prompt_raw"),
-            session_id=payload.get("session_id"),
+            session_id=session_id,
             session_name=payload.get("session_name"),
-            status=status,
-            source=source,
+            status=chat_prompt_queue_service.STATUS_QUEUED,
+            source="queued",
+            client_request_id=payload.get("client_request_id"),
+            attempt_id=payload.get("attempt_id"),
+            conversation_key=conversation_key,
         )
         return jsonify({"success": True, "item": record}), 201
     except Exception as exc:
@@ -833,12 +1006,43 @@ def update_chat_prompt_queue_route(queue_id: str):
         return scope
     payload = _chat_prompt_queue_payload()
     try:
+        update_kwargs: dict[str, Any] = {}
+        if "session_id" in payload:
+            raw_session_id = payload.get("session_id")
+            session_id = (
+                raw_session_id.strip()
+                if isinstance(raw_session_id, str) and raw_session_id.strip()
+                else None
+            )
+            conversation_key = None
+            if session_id:
+                actor_user_id = str(scope.get("user_concept_id") or "")
+                owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+                    user_concept_id=actor_user_id,
+                    session_id=session_id,
+                )
+                history_user_id = owner_user_id or actor_user_id
+                history_namespace = _canonical_conversation_history_namespace(
+                    owner_user_id=history_user_id,
+                    actor_namespace=scope.get("namespace"),
+                    shared_invite=shared_invite,
+                )
+                if history_user_id and history_namespace:
+                    conversation_key = build_conversation_key(
+                        owner_user_id=history_user_id,
+                        history_namespace=history_namespace,
+                        conversation_session_id=session_id,
+                    )
+            update_kwargs = {
+                "session_id": session_id,
+                "conversation_key": conversation_key,
+            }
         record = chat_prompt_queue_service.update_queued_record(
             scope=scope,
             queue_id=queue_id,
             prompt_raw=payload.get("prompt_raw"),
-            session_id=payload.get("session_id"),
             session_name=payload.get("session_name"),
+            **update_kwargs,
         )
         return jsonify({"success": True, "item": record})
     except Exception as exc:
@@ -875,19 +1079,17 @@ def claim_chat_prompt_queue_route(queue_id: str):
     scope = _get_current_chat_prompt_queue_scope()
     if isinstance(scope, tuple):
         return scope
-    try:
-        record = chat_prompt_queue_service.claim_queue_record(
-            scope=scope,
-            queue_id=queue_id,
-        )
-        return jsonify({"success": True, "item": record})
-    except Exception as exc:
-        return _chat_prompt_queue_error_response(
-            exc,
-            action="claim",
-            queue_id=queue_id,
-            scope=scope,
-        )
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error": "Queue claims are owned by the server turn lifecycle",
+                "error_code": "queue_claim_route_retired",
+                "retryable": False,
+            }
+        ),
+        410,
+    )
 
 
 @von_bp.route("/api/chat_prompt_queue/<queue_id>/requeue", methods=["POST"])
@@ -899,6 +1101,7 @@ def requeue_chat_prompt_queue_route(queue_id: str):
         record = chat_prompt_queue_service.requeue_prompt_record(
             scope=scope,
             queue_id=queue_id,
+            current_server_instance_id=SERVER_INSTANCE_ID,
         )
         return jsonify({"success": True, "item": record})
     except Exception as exc:
@@ -3761,11 +3964,7 @@ def _build_turn_execution_mcp_access(
         ),
     }
 
-    if (
-        isinstance(session_id, str)
-        and session_id.strip()
-        and delegated_actor_user_id
-    ):
+    if isinstance(session_id, str) and session_id.strip() and delegated_actor_user_id:
         conversation_ref = build_conversation_scope_binding(
             chat_session_id=session_id,
             history_owner_user_id=history_owner_user_id,
@@ -3913,11 +4112,7 @@ def _build_turn_execution_diagnostics(
                 "failure_kind",
             )
             diagnostic_events = [
-                {
-                    key: entry[key]
-                    for key in neutral_event_fields
-                    if key in entry
-                }
+                {key: entry[key] for key in neutral_event_fields if key in entry}
                 for entry in raw_events
                 if isinstance(entry, dict)
             ][-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
@@ -4371,6 +4566,32 @@ def _normalise_tool_progress_window_session_id(value: Any) -> str | None:
     if not re.fullmatch(r"[A-Za-z0-9._:-]+", clean_value):
         return None
     return clean_value
+
+
+def _build_authenticated_tool_progress_scope_key(
+    *,
+    user_concept_id: str,
+    organisation_concept_id: str | None,
+    namespace: str,
+) -> str:
+    """Build a content-free key for one exact trusted actor/org namespace."""
+
+    canonical = chat_prompt_queue_service.build_queue_scope(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    canonical_namespace = _progress_str(canonical.get("namespace"))
+    if not canonical_namespace:
+        raise ValueError("exact namespace is required for live progress")
+    material = "\x1f".join(
+        (
+            str(canonical.get("user_concept_id") or ""),
+            str(canonical.get("organisation_concept_id") or ""),
+            canonical_namespace,
+        )
+    )
+    return "actor-scope:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _get_tool_progress_scope_key() -> str:
@@ -5857,39 +6078,62 @@ def get_generation_progress(request_id: str):
     ):
         return jsonify({"error": "Invalid request_id"}), 400
 
+    try:
+        from ...security.access_control import (
+            LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+            get_effective_user_concept_id_with_source,
+        )
+
+        user_concept_id, actor_source = get_effective_user_concept_id_with_source()
+        if actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+            user_concept_id = None
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "progress_authentication_required"}), 401
+
     window_session_id = _normalise_tool_progress_window_session_id(
         request.headers.get(_WINDOW_SESSION_HEADER_NAME)
     )
-    header_user_concept_id = _normalise_concept_id(
-        request.headers.get("X-User-Concept-ID")
-    ) or _progress_str(request.headers.get("X-User-Concept-ID"))
+    if not window_session_id:
+        return jsonify({"error": "progress_window_scope_required"}), 409
+    try:
+        effective = get_effective_context(
+            window_session_id,
+            dict(session),
+            user_concept_id.strip(),
+            require_known_window=True,
+        )
+        namespace = _progress_str(effective.get("namespace"))
+        if not namespace:
+            raise WindowSessionContextUnavailable("window_session_context_unavailable")
+        scope_key = _build_authenticated_tool_progress_scope_key(
+            user_concept_id=user_concept_id.strip(),
+            organisation_concept_id=_normalise_concept_id(
+                effective.get("organisation_id")
+            ),
+            namespace=namespace,
+        )
+    except WindowSessionContextUnavailable:
+        return jsonify({"error": "progress_window_scope_unavailable"}), 409
 
-    scope_key = ""
-    resolved_user_concept_id = header_user_concept_id
-    anonymous_session_id = None
-
-    # Keep live progress polling as header-first as possible so browser turns do
-    # not depend on Flask-session reads while /von/generate is still active.
-    if resolved_user_concept_id:
-        scope_key = f"user:{resolved_user_concept_id}"
-    elif window_session_id:
-        scope_key = f"{_TOOL_PROGRESS_WINDOW_SCOPE_PREFIX}{window_session_id}"
-    else:
-        scope_key = _get_tool_progress_scope_key()
-        if scope_key.startswith("user:"):
-            resolved_user_concept_id = _progress_str(scope_key[len("user:") :])
-        else:
-            resolved_user_concept_id = _progress_str(session.get("user_concept_id"))
-        anonymous_session_id = _progress_str(session.get("tool_progress_scope"))
-
-    state, resolved_scope_key = _resolve_tool_progress_state_from_scope_candidates(
-        request_id=request_id.strip(),
-        explicit_scope_key=scope_key,
-        user_concept_id=resolved_user_concept_id,
-        window_session_id=window_session_id,
-        anonymous_session_id=anonymous_session_id,
-    )
+    clean_request_id = request_id.strip()
+    state = _get_tool_progress(scope_key, clean_request_id)
     if not state:
+        with _TOOL_PROGRESS_LOCK:
+            known_scopes = {
+                candidate_scope
+                for candidate_scope, candidate_request_id in _TOOL_PROGRESS
+                if candidate_request_id == clean_request_id
+            }
+        known_scopes.update(
+            find_tool_progress_scope_keys(request_id=clean_request_id, limit=4)
+        )
+        if any(
+            candidate.startswith("actor-scope:") and candidate != scope_key
+            for candidate in known_scopes
+        ):
+            return jsonify({"error": "progress_scope_mismatch"}), 404
         try:
             show_tool_use_progress = bool(get_show_tool_use_during_thinking())
         except Exception:
@@ -5909,13 +6153,6 @@ def get_generation_progress(request_id: str):
         )
 
     serialised_state = _serialise_tool_progress_state(state)
-    if (
-        isinstance(resolved_scope_key, str)
-        and resolved_scope_key
-        and resolved_scope_key != scope_key
-    ):
-        serialised_state["resolved_scope_key"] = resolved_scope_key
-        serialised_state["progress_source"] = "alternate_scope_fallback"
     return jsonify(_json_safe_response_payload(serialised_state)), 200
 
 
@@ -6216,13 +6453,31 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
     return result_payload
 
 
-def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
+def _durable_instance_matches_task_scope(
+    instance: Any,
+    scope: Mapping[str, Any],
+) -> bool:
+    return bool(
+        getattr(instance, "user_id", None) == scope.get("user_concept_id")
+        and getattr(instance, "org_id", None) == scope.get("organisation_concept_id")
+        and getattr(instance, "namespace", None) == scope.get("namespace")
+    )
+
+
+def _find_terminal_durable_turn_instance(
+    task_id: str,
+    *,
+    scope: Mapping[str, Any],
+) -> Any | None:
     try:
         manager = get_instance_manager()
         instances = manager.list_instances(
             workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
             source_event_type="conversation_turn",
             source_event_id=task_id,
+            user_id=scope.get("user_concept_id"),
+            org_id=scope.get("organisation_concept_id"),
+            namespace=scope.get("namespace"),
             status=(
                 WorkflowInstanceStatus.COMPLETED,
                 WorkflowInstanceStatus.FAILED,
@@ -6233,6 +6488,8 @@ def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
         if not instances:
             return None
         compact_instance = instances[0]
+        if not _durable_instance_matches_task_scope(compact_instance, scope):
+            return None
         instance_id = _normalise_non_empty_text(
             getattr(compact_instance, "instance_id", None)
         )
@@ -6250,7 +6507,14 @@ def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
                 )
             else:
                 if hydrated_instance is not None:
-                    return hydrated_instance
+                    return (
+                        hydrated_instance
+                        if _durable_instance_matches_task_scope(
+                            hydrated_instance,
+                            scope,
+                        )
+                        else None
+                    )
         return compact_instance
     except Exception as exc:
         current_app.logger.warning(
@@ -6261,7 +6525,12 @@ def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
         return None
 
 
-def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> Any:
+def _reconcile_background_task_from_durable_turn(
+    task_id: str,
+    status: Any,
+    *,
+    scope: Mapping[str, Any],
+) -> Any:
     if status is not None and getattr(status, "status", None) == "completed":
         progress = getattr(status, "progress", None)
         if isinstance(progress, Mapping) and _normalise_non_empty_text(
@@ -6269,7 +6538,7 @@ def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> A
         ):
             return status
 
-    instance = _find_terminal_durable_turn_instance(task_id)
+    instance = _find_terminal_durable_turn_instance(task_id, scope=scope)
     if instance is None:
         return status
 
@@ -6302,14 +6571,60 @@ def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> A
     error = getattr(instance, "error", None) if task_status != "completed" else None
     marker = getattr(background_task_registry, "mark_terminal_external", None)
     if callable(marker):
-        return marker(
+        try:
+            reconciled = marker(
+                task_id,
+                status=task_status,
+                result=result,
+                error=error,
+                progress=progress,
+                session_id=result.get("session_id"),
+                user_id=scope.get("user_concept_id"),
+                organisation_id=scope.get("organisation_concept_id"),
+                namespace=scope.get("namespace"),
+            )
+        except BackgroundTaskScopeMismatch:
+            current_app.logger.warning(
+                "[background_task] Rejected cross-scope durable reconciliation "
+                "for task %s",
+                task_id,
+            )
+            return status
+        if not all(
+            (
+                getattr(reconciled, "user_id", None) == scope.get("user_concept_id"),
+                getattr(reconciled, "organisation_id", None)
+                == scope.get("organisation_concept_id"),
+                getattr(reconciled, "namespace", None) == scope.get("namespace"),
+            )
+        ):
+            return status
+        return reconciled
+    return status
+
+
+def _get_background_task_status_for_scope(
+    task_id: str,
+    scope: Mapping[str, Any],
+) -> Any | None:
+    getter = getattr(background_task_registry, "get_task_status_for_scope", None)
+    if callable(getter):
+        return getter(
             task_id,
-            status=task_status,
-            result=result,
-            error=error,
-            progress=progress,
-            session_id=result.get("session_id"),
+            user_id=scope.get("user_concept_id"),
+            organisation_id=scope.get("organisation_concept_id"),
+            namespace=scope.get("namespace"),
         )
+    status = background_task_registry.get_task_status(task_id)
+    if status is None:
+        return None
+    if (
+        getattr(status, "user_id", None) != scope.get("user_concept_id")
+        or getattr(status, "organisation_id", None)
+        != scope.get("organisation_concept_id")
+        or getattr(status, "namespace", None) != scope.get("namespace")
+    ):
+        return None
     return status
 
 
@@ -6325,9 +6640,16 @@ def get_task_status(task_id: str):
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
         return jsonify({"error": "Invalid task_id"}), 400
 
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
     task_id_clean = task_id.strip()
-    status = background_task_registry.get_task_status(task_id_clean)
-    status = _reconcile_background_task_from_durable_turn(task_id_clean, status)
+    status = _get_background_task_status_for_scope(task_id_clean, scope)
+    status = _reconcile_background_task_from_durable_turn(
+        task_id_clean,
+        status,
+        scope=scope,
+    )
     if status is None:
         return jsonify({"error": "Task not found", "task_id": task_id}), 404
 
@@ -6436,6 +6758,8 @@ def _mark_background_generate_completed_if_ready(
     request_id: str,
     session_id: str | None,
     user_id: str | None,
+    organisation_id: str | None,
+    namespace: str | None,
     response_text: str | None,
 ) -> None:
     """Expose a completed background generate result before slow persistence.
@@ -6474,6 +6798,8 @@ def _mark_background_generate_completed_if_ready(
             progress=_json_safe_response_payload(progress),
             session_id=session_id,
             user_id=user_id,
+            organisation_id=organisation_id,
+            namespace=namespace,
         )
     except Exception:
         current_app.logger.debug(
@@ -6606,9 +6932,16 @@ def get_task_result(task_id: str):
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
         return jsonify({"error": "Invalid task_id"}), 400
 
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
     task_id_clean = task_id.strip()
-    status = background_task_registry.get_task_status(task_id_clean)
-    status = _reconcile_background_task_from_durable_turn(task_id_clean, status)
+    status = _get_background_task_status_for_scope(task_id_clean, scope)
+    status = _reconcile_background_task_from_durable_turn(
+        task_id_clean,
+        status,
+        scope=scope,
+    )
     if status is None:
         return jsonify({"error": "Task not found", "task_id": task_id}), 404
 
@@ -6672,7 +7005,38 @@ def cancel_task(task_id: str):
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
         return jsonify({"error": "Invalid task_id"}), 400
 
-    success = background_task_registry.request_cancellation(task_id.strip())
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    task_id_clean = task_id.strip()
+    status = _get_background_task_status_for_scope(task_id_clean, scope)
+    if status is None:
+        return (
+            jsonify(
+                {
+                    "error": "Cannot cancel task",
+                    "task_id": task_id,
+                    "detail": "Task not found or already completed",
+                }
+            ),
+            404,
+        )
+    cancel_for_scope = getattr(
+        background_task_registry,
+        "request_cancellation_for_scope",
+        None,
+    )
+    if callable(cancel_for_scope):
+        success = cancel_for_scope(
+            task_id_clean,
+            user_id=scope.get("user_concept_id"),
+            organisation_id=scope.get("organisation_concept_id"),
+            namespace=scope.get("namespace"),
+        )
+    else:
+        success = bool(status) and background_task_registry.request_cancellation(
+            task_id_clean
+        )
     if not success:
         return (
             jsonify(
@@ -6684,6 +7048,22 @@ def cancel_task(task_id: str):
             ),
             404,
         )
+
+    queue_id = _normalise_non_empty_text(getattr(status, "queue_id", None))
+    if queue_id:
+        try:
+            chat_prompt_queue_service.cancel_prompt_record(
+                scope=scope,
+                queue_id=queue_id,
+            )
+        except chat_prompt_queue_service.ConversationTurnAlreadyActive:
+            # The running generate request owns this fence and observes the
+            # cancellation flag; its teardown will terminalise the exact
+            # attempt as cancelled.
+            pass
+        except chat_prompt_queue_service.ChatPromptQueueRecordNotFound:
+            # The exact attempt may already have reached a terminal state.
+            pass
 
     return (
         jsonify(
@@ -6700,7 +7080,7 @@ def list_tasks():
     Query params:
         status: Filter by status (pending, running, completed, failed, cancelled)
         session_id: Filter by session ID (Phase 4)
-        user_id: Filter by user ID (Phase 4)
+        Actor and organisation scope always come from the authenticated request.
 
     Returns:
         200: List of task status dicts
@@ -6715,15 +7095,37 @@ def list_tasks():
     ):
         return jsonify({"error": "Invalid status filter"}), 400
 
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
     session_id = request.args.get("session_id")
-    user_id = request.args.get("user_id")
 
-    tasks = background_task_registry.list_tasks(
-        status_filter=status_filter,
-        session_id=session_id,
-        user_id=user_id,
+    scoped_list = getattr(background_task_registry, "list_tasks_for_scope", None)
+    if callable(scoped_list):
+        tasks = scoped_list(
+            status_filter=status_filter,
+            session_id=session_id,
+            user_id=scope.get("user_concept_id"),
+            organisation_id=scope.get("organisation_concept_id"),
+            namespace=scope.get("namespace"),
+        )
+    else:
+        tasks = background_task_registry.list_tasks(
+            status_filter=status_filter,
+            session_id=session_id,
+            user_id=scope.get("user_concept_id"),
+            organisation_id=scope.get("organisation_concept_id"),
+            namespace=scope.get("namespace"),
+        )
+    return (
+        jsonify(
+            {
+                "tasks": tasks,
+                "turn_admission": conversation_turn_admission_service.snapshot(),
+            }
+        ),
+        200,
     )
-    return jsonify({"tasks": tasks}), 200
 
 
 # ----------------- End Background Tasks -----------------
@@ -6835,9 +7237,7 @@ def _serialise_tool_invocations_for_llm_debug(
 
         transport_metadata = raw_invocation.get("transport")
         if isinstance(transport_metadata, Mapping):
-            entry["transport"] = _sanitise_diagnostic_export_payload(
-                transport_metadata
-            )
+            entry["transport"] = _sanitise_diagnostic_export_payload(transport_metadata)
 
         serialised.append(entry)
 
@@ -6896,9 +7296,7 @@ def _serialise_tool_invocations_for_turn_execution_record(
 
         transport_metadata = raw_invocation.get("transport")
         if isinstance(transport_metadata, Mapping):
-            entry["transport"] = _sanitise_diagnostic_export_payload(
-                transport_metadata
-            )
+            entry["transport"] = _sanitise_diagnostic_export_payload(transport_metadata)
 
         evidence = raw_invocation.get("evidence")
         if isinstance(evidence, Mapping):
@@ -7457,9 +7855,10 @@ def _finalise_llm_debug_info(
         if isinstance(response_text, str)
         else str(llm_debug_info.get("response") or "")
     )
-    terminal_status = _progress_str(
-        llm_interaction_payload.get("ordinary_turn_terminal_status")
-    ) or "not_reported"
+    terminal_status = (
+        _progress_str(llm_interaction_payload.get("ordinary_turn_terminal_status"))
+        or "not_reported"
+    )
     outcome_report: Mapping[str, Any] | None = None
     outcome_report_sources: list[Any] = [*aux_llm_calls_payload]
     if isinstance(diagnostics_payload, Mapping):
@@ -7471,8 +7870,7 @@ def _finalise_llm_debug_info(
             continue
         if (
             entry.get("type") == "adaptive_turn_effect_outcome_report"
-            and entry.get("schema_version")
-            == "adaptive_turn_effect_outcome_report.v1"
+            and entry.get("schema_version") == "adaptive_turn_effect_outcome_report.v1"
         ):
             outcome_report = entry
             break
@@ -7484,9 +7882,7 @@ def _finalise_llm_debug_info(
 
     response_authority = _progress_str(llm_debug_info.get("response_authority"))
     if response_authority is None and isinstance(outcome_report, Mapping):
-        response_authority = _progress_str(
-            outcome_report.get("response_authority")
-        )
+        response_authority = _progress_str(outcome_report.get("response_authority"))
     report_facts = (
         outcome_report.get("facts")
         if isinstance(outcome_report, Mapping)
@@ -7533,9 +7929,7 @@ def _finalise_llm_debug_info(
         "record_kind": "observational",
         "request_id": llm_debug_info.get("request_id"),
         "session_id": session_id,
-        "interaction_timestamp_utc": llm_debug_info.get(
-            "interaction_timestamp_utc"
-        ),
+        "interaction_timestamp_utc": llm_debug_info.get("interaction_timestamp_utc"),
         "actor": {
             "actor_concept_id": resolved_actor_concept_id,
             "user_concept_id": user_id,
@@ -7553,7 +7947,9 @@ def _finalise_llm_debug_info(
             ),
         },
         "applied_prompt_snapshot": applied_prompt_snapshot_payload,
-        "llm_calls": [dict(item) for item in llm_calls_payload if isinstance(item, Mapping)],
+        "llm_calls": [
+            dict(item) for item in llm_calls_payload if isinstance(item, Mapping)
+        ],
         "llm_usage_cost_summary": llm_usage_cost_summary,
         "tool_invocations": [
             dict(item)
@@ -7564,12 +7960,12 @@ def _finalise_llm_debug_info(
             dict(tool_observation_ledger)
             if int(tool_observation_ledger.get("observation_count") or 0) > 0
             else None
-            ),
-            "search_evidence": list(search_evidence_payload or []),
-            "evidence_index": evidence_index,
-            "turn_execution_diagnostics": (
-                dict(diagnostics_payload)
-                if isinstance(diagnostics_payload, Mapping)
+        ),
+        "search_evidence": list(search_evidence_payload or []),
+        "evidence_index": evidence_index,
+        "turn_execution_diagnostics": (
+            dict(diagnostics_payload)
+            if isinstance(diagnostics_payload, Mapping)
             else None
         ),
         "code_version": code_version_details,
@@ -9453,19 +9849,26 @@ def _load_conversation_session_state_fail_soft(
             request_id,
             exc,
         )
-        return [], None, None, 0, [], {
-            "history_offset": 0,
-            "history_truncated": False,
-            "conversation_observation_state": {
-                "schema_version": "conversation_observation_state.v1",
-                "retained_count": 0,
-                "total_count": 0,
-                "omitted_count": 0,
-                "retention_limit": (
-                    chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
-                ),
+        return (
+            [],
+            None,
+            None,
+            0,
+            [],
+            {
+                "history_offset": 0,
+                "history_truncated": False,
+                "conversation_observation_state": {
+                    "schema_version": "conversation_observation_state.v1",
+                    "retained_count": 0,
+                    "total_count": 0,
+                    "omitted_count": 0,
+                    "retention_limit": (
+                        chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
+                    ),
+                },
             },
-        }
+        )
 
 
 def _persist_conversation_situation_fail_soft(
@@ -9567,25 +9970,19 @@ def _read_conversation_carrier_after_persistence_fail_soft(
         if not isinstance(session_state, Mapping):
             raise RuntimeError("canonical conversation session state was not found")
 
-        conversation_situation, _, _ = (
-            _normalise_conversation_situation_descriptor(
-                session_state.get("conversation_situation")
-            )
+        conversation_situation, _, _ = _normalise_conversation_situation_descriptor(
+            session_state.get("conversation_situation")
         )
         observations = (
             [
                 dict(observation)
-                for observation in session_state.get(
-                    "conversation_observations", []
-                )
+                for observation in session_state.get("conversation_observations", [])
                 if isinstance(observation, Mapping)
             ]
             if isinstance(session_state.get("conversation_observations"), list)
             else []
         )
-        raw_observation_state = session_state.get(
-            "conversation_observation_state"
-        )
+        raw_observation_state = session_state.get("conversation_observation_state")
         observation_state = (
             dict(raw_observation_state)
             if isinstance(raw_observation_state, Mapping)
@@ -10062,6 +10459,8 @@ def _submit_generate_background_request(
     request_headers: Mapping[str, Any],
     session_snapshot: Mapping[str, Any],
     request_id: str,
+    actor_scope: Mapping[str, Any],
+    conversation_session_id: str | None,
 ):
     background_payload = dict(request_data) if isinstance(request_data, Mapping) else {}
     background_payload["background"] = False
@@ -10070,29 +10469,37 @@ def _submit_generate_background_request(
     background_payload["background_progress"] = True
 
     background_headers: dict[str, str] = {}
-    for header_name in (
-        "X-Von-Window-Session",
-        "X-User-Concept-ID",
-        "X-User-Client-ID",
-    ):
-        header_value = request_headers.get(header_name)
-        if isinstance(header_value, str) and header_value.strip():
-            background_headers[header_name] = header_value.strip()
+    # Do not replay the mutable browser-window selector as task authority. The
+    # exact authenticated scope resolved at submission is frozen into the
+    # server-side session snapshot below.
+    del request_headers
 
-    background_session_id = (
-        str(session_snapshot.get("session_id")).strip()
-        if session_snapshot.get("session_id")
-        else None
+    background_session_id = conversation_session_id
+    background_queue_id = _normalise_non_empty_text(
+        background_payload.get("prompt_queue_id")
     )
-    background_user_id = (
-        str(session_snapshot.get("user_concept_id")).strip()
-        if session_snapshot.get("user_concept_id")
-        else (
-            str(session_snapshot.get("user_id")).strip()
-            if session_snapshot.get("user_id")
-            else None
-        )
+    background_attempt_id = _normalise_non_empty_text(
+        background_payload.get("attempt_id")
     )
+    background_user_id = _normalise_non_empty_text(actor_scope.get("user_concept_id"))
+    background_org_id = _normalise_non_empty_text(
+        actor_scope.get("organisation_concept_id")
+    )
+    background_namespace = _normalise_non_empty_text(actor_scope.get("namespace"))
+    background_role = _normalise_non_empty_text(actor_scope.get("role_in_org"))
+    frozen_session_snapshot = dict(session_snapshot)
+    frozen_session_snapshot["user_concept_id"] = background_user_id
+    frozen_session_snapshot["namespace"] = background_namespace
+    if background_org_id:
+        frozen_session_snapshot["organisation_concept_id"] = background_org_id
+        frozen_session_snapshot["org_id"] = background_org_id
+    else:
+        frozen_session_snapshot.pop("organisation_concept_id", None)
+        frozen_session_snapshot.pop("org_id", None)
+    if background_role:
+        frozen_session_snapshot["role_in_org"] = background_role
+    else:
+        frozen_session_snapshot.pop("role_in_org", None)
 
     def _run_generate_request_in_background() -> dict[str, Any]:
         with app.test_request_context(
@@ -10102,17 +10509,51 @@ def _submit_generate_background_request(
             headers=background_headers,
         ):
             session.clear()
-            session.update(session_snapshot)
+            session.update(frozen_session_snapshot)
             session.modified = True
-            return _normalise_background_generate_result(generate())
+            try:
+                generated = make_response(generate())
+                _release_request_turn_admission(response=generated)
+                return _normalise_background_generate_result(generated)
+            except BaseException as exc:
+                _release_request_turn_admission(exception=exc)
+                raise
 
-    task_status = background_task_registry.submit_task(
-        task_id=request_id,
-        callable=_run_generate_request_in_background,
-        progress_callback=None,
-        session_id=background_session_id,
-        user_id=background_user_id,
-    )
+    try:
+        task_status = background_task_registry.submit_task(
+            task_id=request_id,
+            callable=_run_generate_request_in_background,
+            progress_callback=None,
+            session_id=background_session_id,
+            user_id=background_user_id,
+            organisation_id=background_org_id,
+            namespace=background_namespace,
+            queue_id=background_queue_id,
+            client_request_id=request_id,
+            attempt_id=background_attempt_id,
+        )
+    except BackgroundTaskCapacityReached as exc:
+        response = jsonify(
+            {
+                "error": "background_task_capacity_reached",
+                "detail": str(exc),
+                "retryable": True,
+                "retry_after_seconds": 1,
+            }
+        )
+        response.headers["Retry-After"] = "1"
+        return response, 429
+    except ValueError:
+        return (
+            jsonify(
+                {
+                    "error": "duplicate_background_task_id",
+                    "detail": "This background request identifier is already in use.",
+                    "retryable": False,
+                }
+            ),
+            409,
+        )
 
     return (
         jsonify(
@@ -10294,11 +10735,14 @@ def _build_focal_conversation_runtime_envelope(
         item = by_id[concept_id]
         excerpts: list[str] = []
         try:
-            for text_item in get_texts_for_concept(
-                concept_id,
-                limit=8,
-                context_view="actor_effective",
-            ) or []:
+            for text_item in (
+                get_texts_for_concept(
+                    concept_id,
+                    limit=8,
+                    context_view="actor_effective",
+                )
+                or []
+            ):
                 text = text_item.get("text") if isinstance(text_item, Mapping) else None
                 if not isinstance(text, str) or not text.strip():
                     continue
@@ -10421,15 +10865,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             400,
         )
 
-    if background_mode:
-        return _submit_generate_background_request(
-            app=current_app._get_current_object(),
-            request_data=data if isinstance(data, Mapping) else None,
-            request_headers=request.headers,
-            session_snapshot=dict(session),
-            request_id=request_id,
-        )
-
     request_start_perf = time.perf_counter()
     turn_timing_recorder = TurnTimingRecorder(request_id=request_id)
     progress_heartbeat_stop_event: threading.Event | None = None
@@ -10438,7 +10873,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
 
-    progress_scope_key = _get_tool_progress_bootstrap_scope_key()
+    # Live progress is not published until authentication and the exact window
+    # organisation/namespace have been resolved below.
+    progress_scope_key = ""
     progress_mirror_scope_keys: list[str] = []
     request_window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
     show_tool_use_progress = False
@@ -10530,15 +10967,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         raise CancellationRequested(task_id=background_task_id)
 
     progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
-    if project_live_progress:
-        _register_tool_progress_scope_aliases(
-            request_id=request_id,
-            primary_scope_key=progress_scope_key,
-            mirror_scope_keys=progress_mirror_scope_keys,
-            window_session_id=request_window_session_id,
-            anonymous_session_id=_progress_str(session.get("tool_progress_scope")),
-        )
-
     if progress_updates_enabled:
         _emit_generate_progress(
             _build_request_initialising_tool_progress_payload(
@@ -10635,7 +11063,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         # JVNAUTOSCI-1011: Use window session context if available
         effective = get_effective_context(
-            request_window_session_id, dict(session), user_concept_id
+            request_window_session_id,
+            dict(session),
+            user_concept_id,
+            require_known_window=bool(request_window_session_id),
         )
         # Window-session storage uses the organisation slug in some paths.
         # Canonicalise it at the authenticated request boundary so downstream
@@ -10646,6 +11077,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # Store user_concept_id in session for history tracking
         if user_concept_id:
             session["user_concept_id"] = user_concept_id
+    except WindowSessionContextUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "window_context_unavailable",
+                    "detail": (
+                        "This tab's organisation context must be rebound before "
+                        "the turn can run."
+                    ),
+                    "retryable": True,
+                    "request_id": request_id,
+                }
+            ),
+            409,
+        )
     except Exception:
         user_concept_id = None
         org_concept_id = None
@@ -10692,9 +11138,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         explicit_resolved_profile = explicit_gmail_authority.get("profile_id")
         if not explicit_gmail_authority.get("success"):
-            reason_code = str(
-                explicit_gmail_authority.get("reason_code") or ""
-            )
+            reason_code = str(explicit_gmail_authority.get("reason_code") or "")
             unavailable = reason_code in {
                 "authorised_mail_profile_unavailable",
                 "gmail_profile_runtime_configuration_unavailable",
@@ -10727,11 +11171,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             gmail_profile_trusted_binding = dict(explicit_trusted_choice)
 
     try:
-        request_workflow_launch_inputs = (
-            _authorise_generate_file_copy_launch_input(
-                request_workflow_launch_inputs,
-                user_concept_id=user_concept_id,
-            )
+        request_workflow_launch_inputs = _authorise_generate_file_copy_launch_input(
+            request_workflow_launch_inputs,
+            user_concept_id=user_concept_id,
         )
     except ValueError as exc:
         return (
@@ -10759,16 +11201,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             403,
         )
 
-    if project_live_progress:
-        _register_tool_progress_scope_aliases(
-            request_id=request_id,
-            primary_scope_key=progress_scope_key,
-            mirror_scope_keys=progress_mirror_scope_keys,
-            user_concept_id=user_concept_id,
-            window_session_id=request_window_session_id,
-            anonymous_session_id=_progress_str(session.get("tool_progress_scope")),
-        )
-
     role_in_org = effective.get("role") if isinstance(effective, dict) else None
 
     _emit_context_setup_progress(
@@ -10782,6 +11214,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         flask_session_snapshot=dict(session),
     )
     user_namespace = namespace_resolution.get("namespace")
+    if (
+        project_live_progress
+        and user_concept_id
+        and user_namespace
+        and request_window_session_id
+        and namespace_resolution.get("effective_context_source") == "window_session"
+    ):
+        progress_scope_key = _build_authenticated_tool_progress_scope_key(
+            user_concept_id=user_concept_id,
+            organisation_concept_id=org_concept_id,
+            namespace=str(user_namespace),
+        )
+    else:
+        project_live_progress = False
     namespace_source = namespace_resolution.get("namespace_source") or "missing"
     namespace_report: dict[str, object] = {
         "authenticated": bool(user_concept_id),
@@ -10837,6 +11283,35 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_concept_id,
         )
 
+    if background_mode:
+        if not user_concept_id or not user_namespace:
+            return (
+                jsonify(
+                    {
+                        "error": "background_task_actor_scope_required",
+                        "detail": (
+                            "Background turns require an authenticated actor and "
+                            "an exact namespace."
+                        ),
+                    }
+                ),
+                401,
+            )
+        return _submit_generate_background_request(
+            app=current_app._get_current_object(),
+            request_data=data if isinstance(data, Mapping) else None,
+            request_headers=request.headers,
+            session_snapshot=dict(session),
+            request_id=request_id,
+            actor_scope={
+                "user_concept_id": user_concept_id,
+                "organisation_concept_id": org_concept_id,
+                "namespace": user_namespace,
+                "role_in_org": role_in_org,
+            },
+            conversation_session_id=request_conversation_session_id,
+        )
+
     _emit_context_setup_progress(
         subtask="conversation session",
         result_summary="Ensuring a conversation session exists for this replay turn.",
@@ -10874,6 +11349,90 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         ),
         shared_invite=shared_invite,
     )
+
+    # Admission belongs immediately before the canonical history read: two
+    # turns admitted after that point could observe the same prior transcript
+    # and append assistants in completion order. Distinct conversation keys
+    # remain free to run concurrently.
+    raw_prompt_queue_id = data.get("prompt_queue_id")
+    prompt_queue_id = (
+        raw_prompt_queue_id.strip()
+        if isinstance(raw_prompt_queue_id, str) and raw_prompt_queue_id.strip()
+        else None
+    )
+    try:
+        if user_concept_id and history_user_id and history_namespace:
+            raw_attempt_id = data.get("attempt_id")
+            attempt_id = (
+                raw_attempt_id.strip()
+                if isinstance(raw_attempt_id, str) and raw_attempt_id.strip()
+                else None
+            )
+            raw_session_name = data.get("conversation_session_name")
+            requested_session_name = (
+                raw_session_name.strip()
+                if isinstance(raw_session_name, str) and raw_session_name.strip()
+                else created_conversation_session_name
+            )
+            admission_token = conversation_turn_admission_service.acquire(
+                scope={
+                    "user_concept_id": user_concept_id,
+                    "organisation_concept_id": org_concept_id,
+                    "namespace": user_namespace,
+                },
+                prompt_raw=prompt_text or "[assistant opening]",
+                session_id=session_id,
+                session_name=requested_session_name,
+                client_request_id=request_id,
+                conversation_key=build_conversation_key(
+                    owner_user_id=history_user_id,
+                    history_namespace=history_namespace,
+                    conversation_session_id=session_id,
+                ),
+                queue_id=prompt_queue_id,
+                attempt_id=attempt_id,
+            )
+        else:
+            anonymous_admission_id = session.get("_von_anonymous_admission_id")
+            if (
+                not isinstance(anonymous_admission_id, str)
+                or not anonymous_admission_id
+            ):
+                anonymous_admission_id = str(uuid.uuid4())
+                session["_von_anonymous_admission_id"] = anonymous_admission_id
+            anonymous_fingerprint = hashlib.sha256(
+                anonymous_admission_id.encode("utf-8")
+            ).hexdigest()
+            actor_capacity_key = user_concept_id or f"anonymous:{anonymous_fingerprint}"
+            fallback_namespace = (
+                history_namespace
+                or user_namespace
+                or f"anonymous:{anonymous_fingerprint}"
+            )
+            admission_token = conversation_turn_admission_service.acquire_ephemeral(
+                actor_capacity_key=actor_capacity_key,
+                conversation_key=build_conversation_key(
+                    owner_user_id=history_user_id or actor_capacity_key,
+                    history_namespace=fallback_namespace,
+                    conversation_session_id=session_id,
+                ),
+                client_request_id=request_id,
+            )
+    except ConversationTurnAdmissionError as exc:
+        response = jsonify(
+            {
+                "error": exc.error_code,
+                "detail": str(exc),
+                "retryable": True,
+                "request_id": request_id,
+                "prompt_queue_id": exc.queue_id or prompt_queue_id,
+                "retry_after_seconds": 1,
+            }
+        )
+        response.headers["Retry-After"] = "1"
+        return response, exc.status_code
+    setattr(g, _TURN_ADMISSION_CONTEXT_KEY, admission_token)
+
     focal_context_messages: list[dict[str, Any]] = []
     focal_context_unavailable: list[str] = []
     _conversation_history_meta: dict[str, Any] = {}
@@ -10889,9 +11448,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         "retained_count": 0,
         "total_count": 0,
         "omitted_count": 0,
-        "retention_limit": (
-            chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
-        ),
+        "retention_limit": (chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS),
     }
     _check_background_cancellation("shared conversation owner")
 
@@ -10929,9 +11486,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "conversation_observation_state"
             )
             if isinstance(loaded_observation_state, Mapping):
-                conversation_observation_state = dict(
-                    loaded_observation_state
-                )
+                conversation_observation_state = dict(loaded_observation_state)
             if (
                 shared_invite
                 and history_owner_user_id
@@ -11047,11 +11602,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             build_gmail_profile_turn_scope,
         )
 
-        remembered_gmail_scope = (
-            latest_resource_scope_from_conversation_situation(
-                conversation_situation_text,
-                source_family="gmail",
-            )
+        remembered_gmail_scope = latest_resource_scope_from_conversation_situation(
+            conversation_situation_text,
+            source_family="gmail",
         )
         gmail_authority = build_gmail_profile_turn_scope(
             user_concept_id=user_concept_id,
@@ -11490,9 +12043,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # Update existing system message to include user/org context
                 existing_system = enhanced_context[0]["content"]
                 if not any(part in existing_system for part in system_message_parts):
-                    enhanced_context[0][
-                        "content"
-                    ] = f"{existing_system} | {' | '.join(system_message_parts)}"
+                    enhanced_context[0]["content"] = (
+                        f"{existing_system} | {' | '.join(system_message_parts)}"
+                    )
 
         # Represented actor-specific behaviour remains ordinary model context;
         # it is independent of the retired universal controller.
@@ -11874,7 +12427,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if progress_updates_enabled:
 
             def _progress_update(info: dict[str, Any]) -> None:
-                payload = dict(info) if isinstance(info, dict) else {"status": "unknown"}
+                payload = (
+                    dict(info) if isinstance(info, dict) else {"status": "unknown"}
+                )
                 payload.setdefault("request_id", request_id)
                 payload.setdefault("goal_label", progress_goal_label)
                 _emit_generate_progress(payload)
@@ -12014,8 +12569,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
         except Exception as exc:
             current_app.logger.warning(
-                "Turn resource presentation planning unavailable for "
-                "request_id=%s: %s",
+                "Turn resource presentation planning unavailable for request_id=%s: %s",
                 request_id,
                 exc,
             )
@@ -12751,9 +13305,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
                     speech = speech if isinstance(speech, dict) else {}
                     raw_settings = speech.get("settings")
-                    settings = (
-                        raw_settings if isinstance(raw_settings, dict) else {}
-                    )
+                    settings = raw_settings if isinstance(raw_settings, dict) else {}
 
                     preferred = settings.get("preferred_speaking_seconds")
                     maximum = settings.get("max_speaking_seconds")
@@ -12821,10 +13373,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 _record_stage_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
-                    duration_ms=(
-                        time.perf_counter() - narration_llm_started
-                    )
-                    * 1000.0,
+                    duration_ms=(time.perf_counter() - narration_llm_started) * 1000.0,
                     usage=None,
                     note="Presenter narration synthesis.",
                     stage="narration",
@@ -12887,15 +13436,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # Defensive: never fail the request just because narration generation failed.
                 spoken_backfill_error_class = type(exc).__name__
                 if narration_llm_started is not None:
-                    eligibility_denied = isinstance(
-                        exc, ModelExecutionEligibilityError
-                    )
+                    eligibility_denied = isinstance(exc, ModelExecutionEligibilityError)
                     _record_stage_llm_call(
                         call_type="llm.generate",
                         model_name=model_name,
-                        duration_ms=(
-                            time.perf_counter() - narration_llm_started
-                        )
+                        duration_ms=(time.perf_counter() - narration_llm_started)
                         * 1000.0,
                         usage=None,
                         note="Presenter narration synthesis.",
@@ -12904,12 +13449,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         status="failed",
                         success=False,
                         error_class=spoken_backfill_error_class,
-                        failure_kind=(
-                            exc.failure_kind if eligibility_denied else None
-                        ),
-                        provider_request_sent=(
-                            False if eligibility_denied else None
-                        ),
+                        failure_kind=(exc.failure_kind if eligibility_denied else None),
+                        provider_request_sent=(False if eligibility_denied else None),
                     )
         spoken_backfill_latency_ms = (
             time.perf_counter() - spoken_backfill_started_perf
@@ -13003,9 +13544,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     request_id,
                     exc,
                 )
-            if resource_annotation_applied and isinstance(
-                presenter_channels, Mapping
-            ):
+            if resource_annotation_applied and isinstance(presenter_channels, Mapping):
                 presenter_channels = {
                     **dict(presenter_channels),
                     "screen": response_text,
@@ -13037,9 +13576,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         for capsule in presentation_capsules
                         if isinstance(capsule, Mapping)
                     ]
-                    deterministic_situation_projection = (
-                        projection_with_presentation
-                    )
+                    deterministic_situation_projection = projection_with_presentation
                 auxiliary_llm_calls.append(
                     {
                         "type": "turn_resource_presentation",
@@ -13047,9 +13584,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "schema_version"
                         ),
                         "applied": True,
-                        "annotations": resource_presentation_plan.get(
-                            "annotations"
-                        ),
+                        "annotations": resource_presentation_plan.get("annotations"),
                     }
                 )
 
@@ -13330,9 +13865,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 "(workflow unavailable)."
                             ),
                             stage="buttonify",
-                            provider=(
-                                exc.provider if eligibility_denied else None
-                            ),
+                            provider=(exc.provider if eligibility_denied else None),
                             status="failed",
                             success=False,
                             error_class=buttonify_error_class,
@@ -13426,9 +13959,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # for shared conversations.
         if history_user_id:
             stored_context_for_stats = [
-                dict(message)
-                for message in context
-                if isinstance(message, Mapping)
+                dict(message) for message in context if isinstance(message, Mapping)
             ]
             if _user_message_persisted_early:
                 stored_context_for_stats.append(
@@ -13438,9 +13969,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "author_user_id": user_concept_id,
                     }
                 )
-            current_context_stats = _calculate_context_stats(
-                stored_context_for_stats
-            )
+            current_context_stats = _calculate_context_stats(stored_context_for_stats)
         else:
             current_context_stats = _calculate_context_stats(
                 current_app.config["CONTEXT"]
@@ -13869,7 +14398,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 result_body=final_success_body,
                 request_id=request_id,
                 session_id=session_id,
-                user_id=history_user_id or user_concept_id,
+                user_id=user_concept_id,
+                organisation_id=org_concept_id,
+                namespace=user_namespace,
                 response_text=response_text,
             )
         return jsonify(final_success_body)
@@ -14171,9 +14702,7 @@ def history():
             )
             owner_history = _apply_default_author(owner_history, owner_user_id)
             invitee_history = _apply_default_author(invitee_history, user_concept_id)
-            canonical_history = _merge_shared_histories(
-                owner_history, invitee_history
-            )
+            canonical_history = _merge_shared_histories(owner_history, invitee_history)
         else:
             canonical_history = owner_history
 
@@ -14198,9 +14727,7 @@ def history():
             history_offset=history_offset,
             owner_user_id=owner_user_id,
         )
-        segments = chat_history_service._chunk_history_segments(
-            segments, segment_size
-        )
+        segments = chat_history_service._chunk_history_segments(segments, segment_size)
         meta = {"history_truncated": history_truncated}
         total_segments = len(segments)
 
@@ -14742,9 +15269,7 @@ def history_turn_failure_capsule():
         return jsonify({"error": "history_index required"}), 400
 
     window_session_id = request.headers.get("X-Von-Window-Session")
-    effective = get_effective_context(
-        window_session_id, dict(session), user_concept_id
-    )
+    effective = get_effective_context(window_session_id, dict(session), user_concept_id)
     actor_namespace, organisation_concept_id = _resolve_history_request_scope_hints(
         user_concept_id=user_concept_id,
         effective_context=effective,
@@ -14864,9 +15389,7 @@ def history_turn_telemetry_access():
     requested_history_index = request.args.get("history_index", type=int)
 
     window_session_id = request.headers.get("X-Von-Window-Session")
-    effective = get_effective_context(
-        window_session_id, dict(session), user_concept_id
-    )
+    effective = get_effective_context(window_session_id, dict(session), user_concept_id)
     actor_namespace, organisation_concept_id = _resolve_history_request_scope_hints(
         user_concept_id=user_concept_id,
         effective_context=effective,
@@ -14902,12 +15425,9 @@ def history_turn_telemetry_access():
             else None
         )
         organisation_concept_id = shared_org_id or organisation_concept_id
-        owner_namespace = (
-            _derive_namespace_for_user_org(
-                owner_user_id, organisation_concept_id
-            )
-            or chat_history_service.resolve_chat_history_namespace(owner_user_id)
-        )
+        owner_namespace = _derive_namespace_for_user_org(
+            owner_user_id, organisation_concept_id
+        ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
 
     diagnostics: Mapping[str, Any] | None = None
     if requested_session_id and requested_history_index is not None:
@@ -14932,7 +15452,9 @@ def history_turn_telemetry_access():
             else None
         )
         if compact_request_id and compact_request_id != request_id:
-            return jsonify({"error": "request_id does not belong to history_index"}), 403
+            return jsonify(
+                {"error": "request_id does not belong to history_index"}
+            ), 403
         if compact_request_id == request_id:
             # The authenticated exact history location is sufficient to issue a
             # read-only descriptor. Avoid hydrating the full diagnostics body
@@ -15029,9 +15551,7 @@ def history_turn_telemetry_access():
         owner_user_id = diagnostics_owner_user_id
         if isinstance(resolved_invite, Mapping):
             organisation_concept_id = (
-                _normalise_concept_id(
-                    resolved_invite.get("organisation_concept_id")
-                )
+                _normalise_concept_id(resolved_invite.get("organisation_concept_id"))
                 or organisation_concept_id
             )
     elif diagnostics_owner_user_id:
@@ -16159,21 +16679,17 @@ def reset_context():
                 ),
                 shared_invite=shared_invite,
             )
-            reset_outcome = (
-                chat_history_service.reset_chat_history_conversation_state(
-                    user_id=owner_user_id,
-                    session_id=session_id,
-                    updated_by=user_concept_id,
-                    namespace=owner_namespace,
-                )
+            reset_outcome = chat_history_service.reset_chat_history_conversation_state(
+                user_id=owner_user_id,
+                session_id=session_id,
+                updated_by=user_concept_id,
+                namespace=owner_namespace,
             )
             if not bool(
                 isinstance(reset_outcome, Mapping)
                 and reset_outcome.get("matched") is True
             ):
-                raise RuntimeError(
-                    "Conversation session was not found during reset."
-                )
+                raise RuntimeError("Conversation session was not found during reset.")
 
         # Clear the conversation context
         current_app.config["CONTEXT"] = []
@@ -17493,8 +18009,7 @@ def search_conversations():
             cursor=request.args.get("cursor"),
             include_hidden=request.args.get("include_hidden", "false").lower()
             == "true",
-            trashed_only=request.args.get("trashed_only", "false").lower()
-            == "true",
+            trashed_only=request.args.get("trashed_only", "false").lower() == "true",
         )
         return jsonify(result)
     except WindowSessionOwnershipError:
@@ -17508,7 +18023,9 @@ def search_conversations():
             403,
         )
     except conversation_search_service.ConversationSearchError as exc:
-        return jsonify({"error": str(exc), "error_code": "conversation_search_failed"}), 400
+        return jsonify(
+            {"error": str(exc), "error_code": "conversation_search_failed"}
+        ), 400
     except Exception:
         current_app.logger.exception("Unexpected error searching conversations")
         return (
@@ -17532,10 +18049,7 @@ def delete_chat_session():
         )
 
         user_concept_id, actor_source = get_effective_user_concept_id_with_source()
-        if (
-            not user_concept_id
-            or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
-        ):
+        if not user_concept_id or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
             return jsonify({"error": "Not authenticated"}), 401
 
         data = request.get_json(silent=True) or {}
@@ -17860,9 +18374,12 @@ def chat_session_focus():
         if not isinstance(session_id, str) or not session_id.strip():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
-        if get_accepted_invite_for_user_session(
-            user_concept_id=user_concept_id, session_id=session_id
-        ) is not None:
+        if (
+            get_accepted_invite_for_user_session(
+                user_concept_id=user_concept_id, session_id=session_id
+            )
+            is not None
+        ):
             return (
                 jsonify({"error": "Only the conversation owner may change focus"}),
                 403,
@@ -18657,10 +19174,7 @@ def get_my_organisations():
         from ...services.organisation_membership_service import get_user_memberships
 
         user_concept_id, actor_source = get_effective_user_concept_id_with_source()
-        if (
-            not user_concept_id
-            or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
-        ):
+        if not user_concept_id or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
             return jsonify({"error": "Not authenticated"}), 401
 
         def _prettify_concept_id(concept_id: str) -> str:

@@ -462,6 +462,36 @@ def fetch_tool_progress_state(
     return copy.deepcopy(dict(payload))
 
 
+def find_tool_progress_scope_keys(*, request_id: str, limit: int = 4) -> list[str]:
+    """Return bounded scope identities for mismatch rejection, never payload data."""
+
+    if not isinstance(request_id, str) or not request_id.strip():
+        return []
+    coll = _get_collection()
+    if coll is None:
+        return []
+    _ensure_indexes()
+    try:
+        docs = coll.find(
+            {"request_id": request_id.strip()},
+            {"_id": 0, "scope_key": 1},
+        ).limit(max(1, min(int(limit or 4), 16)))
+        return [
+            str(doc.get("scope_key"))
+            for doc in docs
+            if isinstance(doc, Mapping)
+            and isinstance(doc.get("scope_key"), str)
+            and doc.get("scope_key")
+        ]
+    except Exception as exc:  # pragma: no cover - DB backend dependent
+        logger.debug(
+            "[tool_progress_store] Failed to resolve request scope request=%s: %s",
+            request_id,
+            exc,
+        )
+        return []
+
+
 def delete_tool_progress_state(*, scope_key: str, request_id: str) -> bool:
     coll = _get_collection()
     if coll is None:

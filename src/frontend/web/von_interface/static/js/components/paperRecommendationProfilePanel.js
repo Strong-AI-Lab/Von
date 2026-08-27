@@ -1,5 +1,6 @@
 import {
   getJsonDetailed,
+  ensureUniqueWindowSessionId,
   getWindowSessionId,
   WINDOW_SESSION_HEADER,
 } from '../apiService.js';
@@ -196,6 +197,7 @@ export async function ensureRecommendationProfilePanelForConceptTab({
       elements.saveButton.onclick = async () => {
         setStatus(elements.statusElement, 'Saving recommendation profile...');
         try {
+          await ensureUniqueWindowSessionId?.();
           const response = await fetch(
             `/api/concepts/${encodeURIComponent(conceptId)}/paper_recommendation_profile`,
             {

@@ -57,6 +57,7 @@ import {
     __testOnly_copyActiveThinkingDiagnostics,
     __testOnly_shouldAcceptThinkingProgressUpdate,
     __testOnly_applyImmediateThinkingTerminalOutcome,
+    __testOnly_getForegroundTaskResultPollInitialDelayMs,
     __testOnly_getThinkingProgressPollFetchTimeoutMs,
     __testOnly_setThinkingCardRequests,
     __testOnly_setThinkingState,
@@ -873,10 +874,9 @@ describe('workflow monitor capability-index warning cartouche', () => {
 
 describe('workflow monitor capability-index polling and global furl', () => {
     async function flushMicrotasks() {
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
+        for (let count = 0; count < 8; count += 1) {
+            await Promise.resolve();
+        }
     }
 
     beforeEach(() => {
@@ -1030,6 +1030,7 @@ describe('workflow monitor capability-index polling and global furl', () => {
         }));
 
         const refreshPromise = __testOnly_refreshWorkflowCapabilityIndexStatus();
+        await flushMicrotasks();
         jest.advanceTimersByTime(8000);
         await refreshPromise;
 
@@ -7522,7 +7523,7 @@ describe('thinking card toggle accessibility', () => {
             terminal_status: 'effect_partially_completed',
             response: 'Useful completed work, with one known-no-change failure.'
         }, 'Complete']
-    ])('terminalises a %s delivery before queue persistence finishes', async (_label, responseOk, responseData, badgeText) => {
+    ])('terminalises a %s delivery without client-side queue terminalisation', async (_label, responseOk, responseData, badgeText) => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
@@ -7532,16 +7533,10 @@ describe('thinking card toggle accessibility', () => {
         });
         document.getElementById('promptInput').value = 'Complete this bounded turn';
 
-        let resolveFinish;
-        let markFinishStarted;
-        const finishResponse = new Promise((resolve) => {
-            resolveFinish = resolve;
-        });
-        const finishStarted = new Promise((resolve) => {
-            markFinishStarted = resolve;
-        });
+        const fetchCalls = [];
 
         global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
             if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
                 return Promise.resolve({
                     ok: true,
@@ -7550,14 +7545,10 @@ describe('thinking card toggle accessibility', () => {
                             queue_id: 'queue-terminal-test',
                             session_id: 'thinking-card-test-session',
                             prompt_raw: 'Complete this bounded turn',
-                            status: 'in_progress'
+                            status: 'queued'
                         }
                     })
                 });
-            }
-            if (typeof url === 'string' && url.endsWith('/queue-terminal-test/finish')) {
-                markFinishStarted();
-                return finishResponse;
             }
             if (typeof url === 'string' && url.startsWith('/api/settings/')) {
                 return Promise.resolve({
@@ -7591,18 +7582,9 @@ describe('thinking card toggle accessibility', () => {
             return Promise.resolve({ ok: true, json: async () => ({}) });
         });
 
-        let sendSettled = false;
-        const sendPromise = sendMessage().finally(() => {
-            sendSettled = true;
-        });
-        await finishStarted;
-        await Promise.resolve();
-
-        expect(sendSettled).toBe(false);
+        await expect(sendMessage()).resolves.toBeUndefined();
         expect(document.getElementById('thinkingCardStatusBadge').textContent).toBe(badgeText);
-
-        resolveFinish({ ok: true, json: async () => ({ success: true }) });
-        await expect(sendPromise).resolves.toBeUndefined();
+        expect(fetchCalls.some(({ url }) => String(url).includes('/finish'))).toBe(false);
     });
 
     test('shows concise critic review from completed thinking card on demand', async () => {
@@ -7878,6 +7860,9 @@ describe('thinking card toggle accessibility', () => {
         expect(wrapper.classList.contains('is-collapsed')).toBe(false);
         expect(detail.getAttribute('aria-hidden')).toBe('false');
 
+        for (let flush = 0; flush < 8; flush += 1) {
+            await Promise.resolve();
+        }
         document.getElementById('abortButton').click();
         await new Promise((r) => setTimeout(r, 0));
 
@@ -8014,7 +7999,9 @@ describe('thinking card toggle accessibility', () => {
             });
 
             const sendPromise = sendMessage();
-            await Promise.resolve();
+            for (let flush = 0; flush < 8; flush += 1) {
+                await Promise.resolve();
+            }
             const progressPollTimeoutMs = __testOnly_getThinkingProgressPollFetchTimeoutMs();
 
             const indicatorText = document.querySelector('.loading-indicator-text');
@@ -8067,7 +8054,6 @@ describe('thinking card toggle accessibility', () => {
             language: 'en-NZ',
             gmail_profile: null
         });
-
         document.getElementById('promptInput').value = 'test prompt';
 
         let generateSignal = null;
@@ -8399,20 +8385,22 @@ describe('thinking card toggle accessibility', () => {
     });
 
     test('renders a completed task result while the foreground generate request is still pending', async () => {
-        const { getUserContext } = require('../apiService.js');
+        const { getUserContext, postJson } = require('../apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
             org_id: 'org',
             language: 'en-NZ',
             gmail_profile: null
         });
+        postJson.mockReset();
+        postJson.mockResolvedValue({ success: true });
 
         __testOnly_setActiveChatSession('session-task-result-bridge', 'Task Result Bridge');
         document.getElementById('promptInput').value = 'show the completed side-channel answer';
 
         let generateAbortObserved = false;
-        const taskStatusUrls = [];
-        const taskResultUrls = [];
+        const taskStatusCalls = [];
+        const taskResultCalls = [];
 
         global.fetch = jest.fn((url, options = {}) => {
             if (typeof url === 'string' && url.startsWith('/api/settings/')) {
@@ -8437,7 +8425,18 @@ describe('thinking card toggle accessibility', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
-                taskStatusUrls.push(url);
+                taskStatusCalls.push({ url, options });
+                if (taskStatusCalls.length === 1) {
+                    return Promise.resolve({
+                        ok: false,
+                        status: 409,
+                        json: async () => ({
+                            success: false,
+                            error_code: 'window_context_unavailable',
+                            retryable: true
+                        })
+                    });
+                }
                 return Promise.resolve({
                     ok: true,
                     status: 200,
@@ -8450,7 +8449,7 @@ describe('thinking card toggle accessibility', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/von/api/task/result/')) {
-                taskResultUrls.push(url);
+                taskResultCalls.push({ url, options });
                 return Promise.resolve({
                     ok: true,
                     status: 200,
@@ -8498,25 +8497,56 @@ describe('thinking card toggle accessibility', () => {
             return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
         });
 
-        await expect(sendMessage()).resolves.toBeUndefined();
-        for (let attempt = 0; attempt < 10; attempt += 1) {
-            const renderedText = document.querySelector('.message-container.assistant-turn .chat-message-text')?.textContent || '';
-            if (renderedText.includes('Rendered from completed task result')) {
-                break;
+        jest.useFakeTimers();
+        try {
+            const sendPromise = sendMessage();
+            for (let flush = 0; flush < 12; flush += 1) {
+                await Promise.resolve();
             }
-            await new Promise(resolve => setTimeout(resolve, 10));
+
+            const initialDelayMs = __testOnly_getForegroundTaskResultPollInitialDelayMs();
+            expect(initialDelayMs).toBeGreaterThanOrEqual(10_000);
+            expect(taskStatusCalls).toHaveLength(0);
+
+            jest.advanceTimersByTime(initialDelayMs - 1);
+            await Promise.resolve();
+            expect(taskStatusCalls).toHaveLength(0);
+
+            jest.advanceTimersByTime(1);
+            for (let flush = 0; flush < 20; flush += 1) {
+                await Promise.resolve();
+            }
+            expect(taskStatusCalls).toHaveLength(1);
+            expect(taskResultCalls).toHaveLength(0);
+            expect(postJson).toHaveBeenCalledWith('/von/api/session/set_organisation', {
+                organisation_concept_id: 'org'
+            });
+
+            jest.advanceTimersByTime(249);
+            await Promise.resolve();
+            expect(taskStatusCalls).toHaveLength(1);
+
+            jest.advanceTimersByTime(1);
+            for (let flush = 0; flush < 20; flush += 1) {
+                await Promise.resolve();
+            }
+            await expect(sendPromise).resolves.toBeUndefined();
+
+            const assistantMessages = Array.from(document.querySelectorAll('.message-container.assistant-turn .chat-message-text'));
+            expect(assistantMessages).toHaveLength(1);
+            expect(assistantMessages[0].textContent).toContain('Rendered from completed task result');
+            expect(taskStatusCalls.length).toBeGreaterThan(0);
+            expect(taskResultCalls.length).toBeGreaterThan(0);
+            expect(taskStatusCalls[0].options.credentials).toBe('same-origin');
+            expect(taskResultCalls[0].options.credentials).toBe('same-origin');
+            expect(generateAbortObserved).toBe(true);
+
+            const retained = getRetainedThinkingCardElements();
+            expect(retained).not.toBeNull();
+            expect(retained.detail.innerHTML).toContain('Response generated from completed task result');
+        } finally {
+            jest.useRealTimers();
         }
-
-        const assistantMessages = Array.from(document.querySelectorAll('.message-container.assistant-turn .chat-message-text'));
-        expect(assistantMessages).toHaveLength(1);
-        expect(assistantMessages[0].textContent).toContain('Rendered from completed task result');
-        expect(taskStatusUrls.length).toBeGreaterThan(0);
-        expect(taskResultUrls.length).toBeGreaterThan(0);
-        expect(generateAbortObserved).toBe(true);
-
-        const retained = getRetainedThinkingCardElements();
-        expect(retained).not.toBeNull();
-        expect(retained.detail.innerHTML).toContain('Response generated from completed task result');
     });
 
     test('retains a failed card inline when the last live progress remains non-terminal', async () => {
@@ -9155,9 +9185,38 @@ describe('chat abort behaviour', () => {
             // jsdom best-effort
         }
 
-        let generateSignal = null;
+        const fetchCalls = [];
+        let resolveQueueCreate = null;
 
         global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                return new Promise((resolve) => {
+                    resolveQueueCreate = () => resolve({
+                        ok: true,
+                        status: 201,
+                        json: async () => ({
+                            success: true,
+                            item: {
+                                queue_id: 'queue-aborted-before-dispatch',
+                                prompt_raw: "since we'\n",
+                                session_id: 'chat-abort-test-session',
+                                status: 'queued'
+                            }
+                        })
+                    });
+                });
+            }
+            if (
+                url === '/von/api/chat_prompt_queue/queue-aborted-before-dispatch'
+                && options.method === 'DELETE'
+            ) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true })
+                });
+            }
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -9166,16 +9225,7 @@ describe('chat abort behaviour', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
-                generateSignal = options.signal;
-                return new Promise((resolve, reject) => {
-                    if (generateSignal) {
-                        generateSignal.addEventListener('abort', () => {
-                            const err = new Error('aborted');
-                            err.name = 'AbortError';
-                            reject(err);
-                        });
-                    }
-                });
+                throw new Error('aborted pre-dispatch prompt must not generate');
             }
 
             return Promise.resolve({ ok: true, json: async () => ({}) });
@@ -9188,12 +9238,17 @@ describe('chat abort behaviour', () => {
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();
+        expect(resolveQueueCreate).not.toBeNull();
+        resolveQueueCreate();
 
         // Let abort propagate through promise chain
         await new Promise((r) => setTimeout(r, 0));
 
-        expect(generateSignal).not.toBeNull();
-        expect(generateSignal.aborted).toBe(true);
+        expect(fetchCalls.some(({ url }) => url === '/von/generate')).toBe(false);
+        expect(fetchCalls.some(({ url, options }) => (
+            url === '/von/api/chat_prompt_queue/queue-aborted-before-dispatch'
+            && options.method === 'DELETE'
+        ))).toBe(true);
         expect(document.getElementById('sendButton').disabled).toBe(false);
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
         expect(promptInput.value).toBe("since we'\n");
@@ -9540,12 +9595,12 @@ describe('chat session composer state', () => {
         expect(backgroundTab).not.toBeNull();
         expect(backgroundTab.classList.contains('has-background-request')).toBe(true);
         expect(abortSpy).not.toHaveBeenCalled();
-        expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
+        expect(document.getElementById('sendButton').textContent).toBe('Send Prompt');
         expect(promptInput.value).toBe('');
         expect(overlayContent.textContent).toBe('');
     });
 
-    test('queued prompts stay pinned to their originating session after switching away again', async () => {
+    test('requests in different sessions overlap and remain pinned to their originating sessions', async () => {
         const promptInput = document.getElementById('promptInput');
         initializePromptCartoucheOverlay(promptInput);
 
@@ -9638,12 +9693,15 @@ describe('chat session composer state', () => {
             expect.objectContaining({ ok: true })
         );
 
-        promptInput.value = 'queued for session 2';
+        promptInput.value = 'request for session 2';
         await expect(sendMessage()).resolves.toBeUndefined();
 
-        const queueLabels = Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
-            .map((node) => node.textContent || '');
-        expect(queueLabels).toContain('Next up • Target');
+        // Session 2 starts before Session 1 resolves; neither conversation
+        // enters the other's FIFO.
+        expect(generateBodies).toHaveLength(2);
+        expect(generateBodies[0].conversation_session_id).toBe('session-1');
+        expect(generateBodies[1].conversation_session_id).toBe('session-2');
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
 
         await expect(switchToChatSession('session-1')).resolves.toEqual(
             expect.objectContaining({ ok: true })

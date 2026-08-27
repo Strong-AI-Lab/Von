@@ -7,6 +7,7 @@ from flask import Flask, jsonify, request, session
 from typing import Any, Mapping, cast
 
 from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
+from src.backend.services.background_task_service import BackgroundTaskCapacityReached
 from src.backend.services.tool_progress_store_service import (
     reset_tool_progress_persistence_queue_for_tests,
 )
@@ -27,7 +28,9 @@ def _clear_live_progress_state():
 
 class _DummyLLM:
     def generate(self, *_args, **_kwargs):
-        raise AssertionError("LLM generate() should not be called directly in this test")
+        raise AssertionError(
+            "LLM generate() should not be called directly in this test"
+        )
 
 
 class _StubAdaptiveTurn:
@@ -60,6 +63,11 @@ class _CapturingTaskRegistry:
         progress_callback,
         session_id,
         user_id,
+        organisation_id,
+        namespace,
+        queue_id,
+        client_request_id,
+        attempt_id,
     ):
         self.calls.append(
             {
@@ -68,6 +76,11 @@ class _CapturingTaskRegistry:
                 "progress_callback": progress_callback,
                 "session_id": session_id,
                 "user_id": user_id,
+                "organisation_id": organisation_id,
+                "namespace": namespace,
+                "queue_id": queue_id,
+                "client_request_id": client_request_id,
+                "attempt_id": attempt_id,
             }
         )
         return _SubmittedTaskStatus()
@@ -128,7 +141,7 @@ def _make_app(monkeypatch, adaptive_turn, task_registry) -> Flask:
     )
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
-        lambda: None,
+        lambda: "#V#test_user",
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
@@ -145,6 +158,11 @@ def _make_app(monkeypatch, adaptive_turn, task_registry) -> Flask:
         "_resolve_shared_conversation_owner",
         lambda **_kwargs: (None, None),
     )
+    monkeypatch.setattr(
+        von_routes,
+        "_load_conversation_session_state_fail_soft",
+        lambda **_kwargs: ([], None, None, 0, [], {}),
+    )
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -153,6 +171,19 @@ def _make_app(monkeypatch, adaptive_turn, task_registry) -> Flask:
     app.config["CONTEXT"] = []
     app.config["INTERNAL_MCP_ORCHESTRATOR"] = object()
     app.config["INTERNAL_MCP_GATEWAY"] = None
+    from src.backend.services.window_session_context_service import (
+        get_window_session_store,
+        set_window_organisation,
+    )
+
+    get_window_session_store().delete("window-123")
+    set_window_organisation(
+        "window-123",
+        "#V#test_org",
+        "member",
+        "#V#test_user@test_org",
+        user_id="#V#test_user",
+    )
     return app
 
 
@@ -222,6 +253,64 @@ def test_background_generate_submits_immediately(monkeypatch):
     assert body["task_id"] == submitted["task_id"]
 
 
+def test_background_generate_returns_typed_capacity_backpressure(monkeypatch):
+    task_registry = _CapturingTaskRegistry()
+
+    def _capacity_reached(**_kwargs):
+        raise BackgroundTaskCapacityReached("user background capacity reached")
+
+    task_registry.submit_task = _capacity_reached
+    app = _make_app(
+        monkeypatch,
+        _StubAdaptiveTurn(
+            AdaptiveTurnResult(
+                response_text="must not run",
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=(),
+            )
+        ),
+        task_registry,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Run this in the background",
+            "background": True,
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "1"
+    assert response.get_json()["error"] == "background_task_capacity_reached"
+    assert response.get_json()["retryable"] is True
+
+
+def test_generate_requires_rebind_for_unknown_window_context(monkeypatch):
+    adaptive_turn = _StubAdaptiveTurn(
+        AdaptiveTurnResult(
+            response_text="must not run",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+        )
+    )
+    app = _make_app(monkeypatch, adaptive_turn, _CapturingTaskRegistry())
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Use this tab's organisation"},
+        headers={"X-Von-Window-Session": "missing-after-restart"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "window_context_unavailable"
+    assert adaptive_turn.calls == []
+
+
 def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
     monkeypatch,
 ):
@@ -271,6 +360,54 @@ def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
     assert isinstance(llm_debug.get("turn_execution_record"), dict)
 
 
+def test_background_generate_freezes_org_scope_when_tab_switches(monkeypatch):
+    from src.backend.services.window_session_context_service import (
+        set_window_organisation,
+    )
+
+    adaptive_turn = _StubAdaptiveTurn(
+        AdaptiveTurnResult(
+            response_text="ok",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+        )
+    )
+    task_registry = _CapturingTaskRegistry()
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Keep this task in its submitting organisation",
+            "background": True,
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+    assert response.status_code == 202
+
+    submitted = cast(dict[str, Any], task_registry.calls[0])
+    assert submitted["organisation_id"] == "#V#test_org"
+    assert submitted["namespace"] == "#V#test_user@test_org"
+
+    set_window_organisation(
+        "window-123",
+        "#V#other_org",
+        "member",
+        "#V#test_user@other_org",
+        user_id="#V#test_user",
+    )
+
+    task_callable = submitted["callable"]
+    assert callable(task_callable)
+    task_callable()
+
+    assert adaptive_turn.calls
+    assert adaptive_turn.calls[0]["org_concept_id"] == "#V#test_org"
+    assert adaptive_turn.calls[0]["user_namespace"] == "#V#test_user@test_org"
+
+
 def test_background_generate_preserves_adaptive_non_success(monkeypatch):
     adaptive_result = AdaptiveTurnResult(
         response_text="The model call failed.",
@@ -317,6 +454,7 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
         payload = request.get_json()
         assert isinstance(payload, dict)
         captured_payload.update(payload)
+        captured_payload["_frozen_role"] = session.get("role_in_org")
         return jsonify({"response": "ok"}), 200
 
     monkeypatch.setattr(von_routes, "generate", fake_generate)
@@ -340,6 +478,13 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
             request_headers=cast(Mapping[str, Any], request.headers),
             session_snapshot=dict(session),
             request_id="task-123",
+            actor_scope={
+                "user_concept_id": "#V#test_user",
+                "organisation_concept_id": "#V#test_org",
+                "namespace": "#V#test_user@test_org",
+                "role_in_org": "member",
+            },
+            conversation_session_id="session-123",
         )
 
     assert status_code == 202
@@ -356,9 +501,10 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
     assert captured_payload["background_task_id"] == "task-123"
     assert captured_payload["background_progress"] is True
     assert captured_payload["workflow_inputs"] == {"gmail_max_results": 1}
+    assert captured_payload["_frozen_role"] == "member"
 
 
-def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
+def test_background_generate_reentry_does_not_publish_before_exact_scope_resolution(
     monkeypatch,
 ):
     from src.backend.services.turn_execution_live_progress_service import (
@@ -406,13 +552,7 @@ def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
         request_id="task-123",
         window_session_id="window-123",
     )
-    assert live_progress is not None
-    assert live_progress["success"] is True
-    assert live_progress["request_id"] == "task-123"
-    assert live_progress["resolved_scope_key"] == "anon:window:window-123"
-    assert live_progress["progress_source"] == "tool_progress_state"
-    assert live_progress["status"] == "thinking"
-    assert live_progress["stage"] == "context_build"
+    assert live_progress is None
 
 
 def test_generate_passes_authorised_inputs_to_adaptive_turn(monkeypatch):
@@ -505,9 +645,7 @@ def test_orchestrator_projects_namespaced_workflow_launch_inputs_safely() -> Non
     assert payload["prompt"] == "original prompt"
     assert "workflow_id" not in payload
     assert "__private" not in payload
-    assert payload["namespaced_workflow_launch_inputs_applied"] == [
-        "gmail_max_results"
-    ]
+    assert payload["namespaced_workflow_launch_inputs_applied"] == ["gmail_max_results"]
 
 
 def test_normalise_background_generate_result_preserves_json_payload() -> None:
@@ -559,11 +697,13 @@ def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeyp
     )
     monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
-        {"model": "gpt-5.4-nano"},
-        user_concept_id=None,
-        org_concept_id=None,
-        configured_model=None,
+    model_name, client_type, model_parameters = (
+        von_routes._resolve_generate_requested_model(
+            {"model": "gpt-5.4-nano"},
+            user_concept_id=None,
+            org_concept_id=None,
+            configured_model=None,
+        )
     )
 
     assert model_name == "gpt-5.4-nano"
@@ -583,11 +723,13 @@ def test_resolve_generate_requested_model_ignores_browser_object_request_model(
     )
     monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
-        {"model": "openai:[object PointerEvent]"},
-        user_concept_id="#V#test_user",
-        org_concept_id=None,
-        configured_model=None,
+    model_name, client_type, model_parameters = (
+        von_routes._resolve_generate_requested_model(
+            {"model": "openai:[object PointerEvent]"},
+            user_concept_id="#V#test_user",
+            org_concept_id=None,
+            configured_model=None,
+        )
     )
 
     assert model_name == "gpt-5.4-mini"
@@ -607,11 +749,13 @@ def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit
     )
     monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
-        {"model": "ollama:llama3.1:8b"},
-        user_concept_id="#V#test_user",
-        org_concept_id=None,
-        configured_model=None,
+    model_name, client_type, model_parameters = (
+        von_routes._resolve_generate_requested_model(
+            {"model": "ollama:llama3.1:8b"},
+            user_concept_id="#V#test_user",
+            org_concept_id=None,
+            configured_model=None,
+        )
     )
 
     assert model_name == "llama3.1:8b"
@@ -631,11 +775,13 @@ def test_resolve_generate_requested_model_honours_explicit_provider_field(
     )
     monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
-        {"model": "gemma4:e4b", "model_provider": "ollama"},
-        user_concept_id="#V#test_user",
-        org_concept_id=None,
-        configured_model=None,
+    model_name, client_type, model_parameters = (
+        von_routes._resolve_generate_requested_model(
+            {"model": "gemma4:e4b", "model_provider": "ollama"},
+            user_concept_id="#V#test_user",
+            org_concept_id=None,
+            configured_model=None,
+        )
     )
 
     assert model_name == "gemma4:e4b"
@@ -667,11 +813,13 @@ def test_resolve_generate_requested_model_preserves_scoped_model_parameters(
         },
     )
 
-    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
-        {},
-        user_concept_id="#V#test_user",
-        org_concept_id=None,
-        configured_model=None,
+    model_name, client_type, model_parameters = (
+        von_routes._resolve_generate_requested_model(
+            {},
+            user_concept_id="#V#test_user",
+            org_concept_id=None,
+            configured_model=None,
+        )
     )
 
     assert model_name == "gpt-5.5"
