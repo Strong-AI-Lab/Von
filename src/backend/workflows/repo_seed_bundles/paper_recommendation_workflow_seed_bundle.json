@@ -551,12 +551,14 @@
             },
             "validation_policy": {
               "output_format": "json_value",
+              "json_field_defaults": {
+                "prior_scoped_assertion_id": ""
+              },
               "required_json_fields": [
                 "decision",
                 "subject_concept_id",
                 "scope_mode",
                 "profile",
-                "prior_scoped_assertion_id",
                 "evidence",
                 "reason"
               ]
