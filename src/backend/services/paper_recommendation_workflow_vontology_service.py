@@ -100,7 +100,9 @@ def _load_paper_matching_profile_maintenance_prompt_seed_text() -> str:
     return prompt_text
 
 
-def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
+def _ensure_paper_recommendation_prompt_support(
+    *, force_prompt_seed: bool = False
+) -> dict[str, Any]:
     report = ensure_prompt_concept_support(
         prompt_specs=(
             WorkflowPromptConceptSpec(
@@ -189,7 +191,7 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
         ),
     )
     for prompt_concept_id, prompt_loader in seed_specs:
-        if prompt_concept_has_content(prompt_concept_id):
+        if not force_prompt_seed and prompt_concept_has_content(prompt_concept_id):
             continue
         upsert_singleton_text_relation(
             subject_concept_id=prompt_concept_id,
@@ -224,7 +226,9 @@ def bootstrap_canonical_paper_recommendation_workflow(
 ) -> dict[str, Any]:
     """Publish prompt support, workflow authority, and event bindings."""
 
-    prompt_support = _ensure_paper_recommendation_prompt_support()
+    prompt_support = _ensure_paper_recommendation_prompt_support(
+        force_prompt_seed=bool(force_republish)
+    )
     policy_support = ensure_paper_recommendation_policy_authority()
     publication = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,

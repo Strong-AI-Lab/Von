@@ -130,8 +130,49 @@ def test_paper_recommendation_prompt_support_seeds_content_from_repo_asset(
         ((row or {}).get("text") for row in maintenance_rows if (row or {}).get("text")),
         "",
     )
+    normalised_maintenance_text = " ".join(maintenance_text.split())
     assert "Preserve explicit preferences" in maintenance_text
-    assert "arbitrary latest profile" in " ".join(maintenance_text.split())
+    assert "arbitrary latest profile" in normalised_maintenance_text
+    assert "actor-effective `#V#has_paper_matching_profile_json` relations with" in (
+        maintenance_text
+    )
+    assert "optional `source_context`, it must be a JSON object" in (
+        maintenance_text
+    )
+    assert "omit it instead of sending a string" in normalised_maintenance_text
+
+
+def test_forced_profile_prompt_seed_refreshes_existing_content(
+    _reset_mock_db: Any,
+) -> None:
+    _ensure_paper_recommendation_prompt_support()
+    from src.backend.services.text_value_service import upsert_singleton_text_relation
+
+    upsert_singleton_text_relation(
+        subject_concept_id=PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        text="stale profile-maintenance prompt",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+
+    report = _ensure_paper_recommendation_prompt_support(force_prompt_seed=True)
+
+    assert report.get("success") is True
+    assert PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID in report.get(
+        "seeded_prompt_ids", []
+    )
+    maintenance_rows = get_texts_for_concept(
+        PAPER_MATCHING_PROFILE_MAINTENANCE_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    maintenance_text = next(
+        ((row or {}).get("text") for row in maintenance_rows if (row or {}).get("text")),
+        "",
+    )
+    assert maintenance_text != "stale profile-maintenance prompt"
+    assert "optional `source_context`, it must be a JSON object" in maintenance_text
 
 
 def test_paper_recommendation_event_bindings_are_conditioned_by_policy(
