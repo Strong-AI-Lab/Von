@@ -2,7 +2,7 @@
   "family_id": "paper_recommendation_workflow_seed_bundle",
   "managed_by": "paper_recommendation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "5",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#paper_recommendation_evaluation_workflow": {
       "1": [
@@ -495,7 +495,6 @@
               "max_tool_invocations": 8,
               "tool_argument_defaults": {
                 "get_text_relations": {
-                  "predicate": "#V#has_paper_matching_profile_json",
                   "limit": 8
                 },
                 "resolve_publication_scope_profile": {
