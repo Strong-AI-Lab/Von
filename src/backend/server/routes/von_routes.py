@@ -88,10 +88,18 @@ from ...services.coding_agent_identity_bootstrap_service import (
 )
 from ...services.window_session_context_service import (
     WindowSessionContextUnavailable,
+    WindowSessionContextRecoveryUnavailable,
     WindowSessionOwnershipError,
     set_window_organisation,
     clear_window_organisation,
     get_effective_context,
+    set_window_chat_session,
+)
+from ...services.window_session_binding_store_service import (
+    WindowSessionBindingStoreUnavailable,
+)
+from ...services.ontology_publication_authority_service import (
+    OntologyMutationResourceBusy,
 )
 from ...services.settings_service import (
     get_show_tool_use_during_thinking,
@@ -540,6 +548,7 @@ if _TOOL_PROGRESS_WAITING_THRESHOLD_SEC >= _TOOL_PROGRESS_STALL_THRESHOLD_SEC:
 _TOOL_PROGRESS_WINDOW_SCOPE_PREFIX = "anon:window:"
 _TOOL_PROGRESS_SESSION_SCOPE_PREFIX = "anon:session:"
 _WINDOW_SESSION_HEADER_NAME = "X-Von-Window-Session"
+_LEGACY_SUBMISSION_WINDOW_SESSION_KEY = "_von_legacy_submission_window_session_id"
 
 
 def _now_utc_iso() -> str:
@@ -757,6 +766,147 @@ def _append_selected_workflow_execution_event(
     return payload
 
 
+def _recover_window_context_from_owned_conversation(
+    *,
+    window_session_id: str | None,
+    user_concept_id: str | None,
+    conversation_session_id: str | None,
+) -> bool:
+    """Recover an old tab from its exact actor-owned conversation carrier.
+
+    This compatibility path never accepts a client-supplied organisation.  The
+    session id selects only metadata owned by the authenticated actor, current
+    membership is rechecked, and the resulting binding is persisted before it
+    becomes usable.
+    """
+
+    clean_window_id = _normalise_non_empty_text(window_session_id)
+    clean_user_id = _normalise_concept_id(user_concept_id)
+    clean_session_id = _normalise_non_empty_text(conversation_session_id)
+    if not clean_window_id or not clean_user_id or not clean_session_id:
+        return False
+    try:
+        summary = chat_history_service.get_chat_history_session_summary(
+            clean_user_id,
+            clean_session_id,
+            namespace=None,
+            include_legacy=True,
+            summary_mode="light",
+        )
+    except Exception as exc:
+        current_app.logger.warning(
+            "Owned-conversation window recovery metadata read failed: %s",
+            type(exc).__name__,
+        )
+        return False
+    if not isinstance(summary, Mapping):
+        return False
+
+    represented_namespace = _progress_str(summary.get("namespace"))
+    represented_org_id = _normalise_concept_id(summary.get("organisation_concept_id"))
+    expected_namespace = _derive_namespace_for_user_org(
+        clean_user_id,
+        represented_org_id,
+    )
+    if represented_namespace and represented_namespace != expected_namespace:
+        current_app.logger.warning(
+            "Owned-conversation window recovery rejected inconsistent namespace"
+        )
+        return False
+    if not represented_org_id and represented_namespace != expected_namespace:
+        # Absence of both org and namespace in legacy metadata is ambiguous,
+        # not evidence that this was a Personal conversation.
+        return False
+
+    try:
+        from ...services.ontology_authority_membership_coordination_service import (
+            organisation_membership_scope_barrier,
+        )
+
+        if represented_org_id:
+            scope_barrier = organisation_membership_scope_barrier(
+                clean_user_id,
+                represented_org_id,
+            )
+        else:
+            from contextlib import nullcontext
+
+            scope_barrier = nullcontext()
+        with scope_barrier:
+            if represented_org_id:
+                from ...services.organisation_membership_service import (
+                    resolve_user_organisation_membership,
+                )
+
+                membership = resolve_user_organisation_membership(
+                    clean_user_id,
+                    represented_org_id,
+                )
+                if not isinstance(membership, Mapping):
+                    return False
+                role = str(membership.get("role") or "member").strip() or "member"
+                set_window_organisation(
+                    window_session_id=clean_window_id,
+                    organisation_concept_id=represented_org_id,
+                    role_in_org=role,
+                    namespace=expected_namespace,
+                    user_id=clean_user_id,
+                )
+            else:
+                clear_window_organisation(
+                    clean_window_id,
+                    expected_namespace,
+                    clean_user_id,
+                )
+            set_window_chat_session(
+                clean_window_id,
+                clean_session_id,
+                clean_user_id,
+            )
+    except WindowSessionBindingStoreUnavailable as exc:
+        raise WindowSessionContextRecoveryUnavailable(
+            "window_session_context_recovery_unavailable"
+        ) from exc
+    except OntologyMutationResourceBusy as exc:
+        raise WindowSessionContextRecoveryUnavailable(
+            "window_session_scope_coordination_busy"
+        ) from exc
+    except WindowSessionOwnershipError:
+        return False
+    return True
+
+
+def _get_effective_context_with_owned_conversation_recovery(
+    *,
+    window_session_id: str | None,
+    flask_session_snapshot: Mapping[str, Any],
+    user_concept_id: str | None,
+    conversation_session_id: str | None,
+) -> dict[str, Any]:
+    try:
+        return get_effective_context(
+            window_session_id,
+            dict(flask_session_snapshot),
+            user_concept_id,
+            require_known_window=bool(window_session_id),
+        )
+    except WindowSessionContextRecoveryUnavailable:
+        raise
+    except WindowSessionContextUnavailable:
+        if not _recover_window_context_from_owned_conversation(
+            window_session_id=window_session_id,
+            user_concept_id=user_concept_id,
+            conversation_session_id=conversation_session_id,
+        ):
+            raise
+        return get_effective_context(
+            window_session_id,
+            dict(flask_session_snapshot),
+            user_concept_id,
+            require_known_window=True,
+        )
+
+
 def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any, int]:
     try:
         from ...security.access_control import (
@@ -784,11 +934,16 @@ def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any,
 
     window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
     try:
-        effective_context = get_effective_context(
-            window_session_id,
-            dict(session),
-            user_concept_id.strip(),
-            require_known_window=bool(window_session_id),
+        queue_payload = _chat_prompt_queue_payload()
+        effective_context = _get_effective_context_with_owned_conversation_recovery(
+            window_session_id=window_session_id,
+            flask_session_snapshot=dict(session),
+            user_concept_id=user_concept_id.strip(),
+            conversation_session_id=(
+                queue_payload.get("session_id")
+                if isinstance(queue_payload.get("session_id"), str)
+                else None
+            ),
         )
     except WindowSessionContextUnavailable:
         return (
@@ -993,6 +1148,17 @@ def create_chat_prompt_queue_route():
             client_request_id=payload.get("client_request_id"),
             attempt_id=payload.get("attempt_id"),
             conversation_key=conversation_key,
+            legacy_submission_role=(
+                chat_prompt_queue_service.LEGACY_SUBMISSION_ROLE_QUEUE
+                if (
+                    _normalise_non_empty_text(payload.get("status"))
+                    == chat_prompt_queue_service.STATUS_IN_PROGRESS
+                    and not _normalise_non_empty_text(payload.get("client_request_id"))
+                    and not _normalise_non_empty_text(payload.get("attempt_id"))
+                )
+                else None
+            ),
+            window_session_id=request.headers.get(_WINDOW_SESSION_HEADER_NAME),
         )
         return jsonify({"success": True, "item": record}), 201
     except Exception as exc:
@@ -10472,6 +10638,9 @@ def _submit_generate_background_request(
     # Do not replay the mutable browser-window selector as task authority. The
     # exact authenticated scope resolved at submission is frozen into the
     # server-side session snapshot below.
+    background_window_session_id = _normalise_tool_progress_window_session_id(
+        request_headers.get(_WINDOW_SESSION_HEADER_NAME)
+    )
     del request_headers
 
     background_session_id = conversation_session_id
@@ -10500,6 +10669,12 @@ def _submit_generate_background_request(
         frozen_session_snapshot["role_in_org"] = background_role
     else:
         frozen_session_snapshot.pop("role_in_org", None)
+    if background_window_session_id:
+        frozen_session_snapshot[_LEGACY_SUBMISSION_WINDOW_SESSION_KEY] = (
+            background_window_session_id
+        )
+    else:
+        frozen_session_snapshot.pop(_LEGACY_SUBMISSION_WINDOW_SESSION_KEY, None)
 
     def _run_generate_request_in_background() -> dict[str, Any]:
         with app.test_request_context(
@@ -10878,6 +11053,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     progress_scope_key = ""
     progress_mirror_scope_keys: list[str] = []
     request_window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    legacy_submission_window_session_id = _normalise_tool_progress_window_session_id(
+        request_window_session_id
+    ) or (
+        _normalise_tool_progress_window_session_id(
+            session.get(_LEGACY_SUBMISSION_WINDOW_SESSION_KEY)
+        )
+        if background_task_id is not None
+        else None
+    )
     show_tool_use_progress = False
     try:
         show_tool_use_progress = bool(get_show_tool_use_during_thinking())
@@ -11062,11 +11246,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
 
         # JVNAUTOSCI-1011: Use window session context if available
-        effective = get_effective_context(
-            request_window_session_id,
-            dict(session),
-            user_concept_id,
-            require_known_window=bool(request_window_session_id),
+        effective = _get_effective_context_with_owned_conversation_recovery(
+            window_session_id=request_window_session_id,
+            flask_session_snapshot=dict(session),
+            user_concept_id=user_concept_id,
+            conversation_session_id=request_conversation_session_id,
         )
         # Window-session storage uses the organisation slug in some paths.
         # Canonicalise it at the authenticated request boundary so downstream
@@ -11391,6 +11575,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 ),
                 queue_id=prompt_queue_id,
                 attempt_id=attempt_id,
+                window_session_id=legacy_submission_window_session_id,
             )
         else:
             anonymous_admission_id = session.get("_von_anonymous_admission_id")
@@ -15389,10 +15574,47 @@ def history_turn_telemetry_access():
     requested_history_index = request.args.get("history_index", type=int)
 
     window_session_id = request.headers.get("X-Von-Window-Session")
-    effective = get_effective_context(window_session_id, dict(session), user_concept_id)
+    try:
+        effective = _get_effective_context_with_owned_conversation_recovery(
+            window_session_id=window_session_id,
+            flask_session_snapshot=dict(session),
+            user_concept_id=user_concept_id,
+            conversation_session_id=requested_session_id,
+        )
+    except WindowSessionContextRecoveryUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "window_context_recovery_unavailable",
+                    "error_code": "window_context_recovery_unavailable",
+                    "retryable": True,
+                }
+            ),
+            503,
+        )
+    except WindowSessionContextUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "window_context_unavailable",
+                    "error_code": "window_context_unavailable",
+                    "retryable": True,
+                }
+            ),
+            409,
+        )
     actor_namespace, organisation_concept_id = _resolve_history_request_scope_hints(
         user_concept_id=user_concept_id,
         effective_context=effective,
+    )
+    actor_progress_scope_key = (
+        _build_authenticated_tool_progress_scope_key(
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            namespace=actor_namespace,
+        )
+        if actor_namespace
+        else None
     )
 
     owner_user_id = user_concept_id
@@ -15567,6 +15789,7 @@ def history_turn_telemetry_access():
             namespace=actor_namespace,
             user_concept_id=user_concept_id,
             window_session_id=window_session_id,
+            scope_key=actor_progress_scope_key,
         )
         if not isinstance(live_progress, Mapping) and not diagnostics_available:
             return jsonify({"error": "Turn telemetry not found"}), 404
@@ -16861,6 +17084,17 @@ def set_user_concept():
             ),
             200,
         )
+    except WindowSessionBindingStoreUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_binding_store_unavailable",
+                    "error_code": "window_session_binding_store_unavailable",
+                    "retryable": True,
+                }
+            ),
+            503,
+        )
     except WindowSessionOwnershipError:
         return (
             jsonify(
@@ -16917,6 +17151,11 @@ def set_organisation():
         if "+" in user_slug:
             user_slug = user_slug.split("+", 1)[0]
         user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
+        user_concept_id = (
+            str(user_id).strip()
+            if str(user_id).strip().startswith("#")
+            else f"#V#{user_slug}"
+        )
 
         # Check if this is a clear request (empty dict or explicit null/empty string)
         is_clear_request = "organisation_concept_id" in data and not org_id
@@ -16927,7 +17166,11 @@ def set_organisation():
 
             # JVNAUTOSCI-1011: Use window session if header present
             if window_session_id:
-                clear_window_organisation(window_session_id, namespace, user_id)
+                clear_window_organisation(
+                    window_session_id,
+                    namespace,
+                    user_concept_id,
+                )
             else:
                 # Fallback: update Flask session
                 session.pop("organisation_concept_id", None)
@@ -16964,68 +17207,74 @@ def set_organisation():
         from ...services.organisation_membership_service import (
             resolve_user_organisation_membership,
         )
-
-        user_concept_id = (
-            str(user_id).strip()
-            if str(user_id).strip().startswith("#")
-            else f"#V#{user_slug}"
+        from ...services.ontology_authority_membership_coordination_service import (
+            organisation_membership_scope_barrier,
         )
+
         organisation_concept_id = f"#V#{org_slug}"
-        try:
-            membership = resolve_user_organisation_membership(
-                user_concept_id,
-                organisation_concept_id,
-            )
-        except ValueError:
-            membership = None
-        except Exception as exc:
-            current_app.logger.warning(
-                "Organisation membership resolution failed for session scope",
-                extra={"exception_type": type(exc).__name__},
-            )
-            return (
-                jsonify(
-                    {
-                        "error": "organisation_membership_unavailable",
-                        "error_code": "organisation_membership_unavailable",
-                    }
-                ),
-                503,
-            )
-        if membership is None:
-            return (
-                jsonify(
-                    {
-                        "error": "organisation_membership_required",
-                        "error_code": "organisation_membership_required",
-                    }
-                ),
-                403,
-            )
+        # Make the membership read and derived browser-scope publication one
+        # operation with respect to canonical membership mutations.  This
+        # prevents a restart recovery or explicit selection from recreating a
+        # binding between revocation invalidation and the represented write.
+        with organisation_membership_scope_barrier(
+            user_concept_id,
+            organisation_concept_id,
+        ):
+            try:
+                membership = resolve_user_organisation_membership(
+                    user_concept_id,
+                    organisation_concept_id,
+                )
+            except ValueError:
+                membership = None
+            except Exception as exc:
+                current_app.logger.warning(
+                    "Organisation membership resolution failed for session scope",
+                    extra={"exception_type": type(exc).__name__},
+                )
+                return (
+                    jsonify(
+                        {
+                            "error": "organisation_membership_unavailable",
+                            "error_code": "organisation_membership_unavailable",
+                        }
+                    ),
+                    503,
+                )
+            if membership is None:
+                return (
+                    jsonify(
+                        {
+                            "error": "organisation_membership_required",
+                            "error_code": "organisation_membership_required",
+                        }
+                    ),
+                    403,
+                )
 
-        role_in_org = str(membership.get("role") or "member").strip() or "member"
+            role_in_org = str(membership.get("role") or "member").strip() or "member"
 
-        # Derive composite namespace using slug values
-        namespace = derive_namespace(user_slug, org_slug)
+            # Derive composite namespace using slug values
+            namespace = derive_namespace(user_slug, org_slug)
 
-        # JVNAUTOSCI-1011: Use window session if header present
-        if window_session_id:
-            set_window_organisation(
-                window_session_id=window_session_id,
-                organisation_concept_id=org_slug,
-                role_in_org=role_in_org,
-                namespace=namespace,
-                user_id=user_id,
-            )
-        else:
-            # Fallback: update Flask session (for clients without window session support)
-            session["organisation_concept_id"] = org_slug
-            session["role_in_org"] = role_in_org
-            session["namespace"] = namespace
-            # JVNAUTOSCI-1004: Clear chat session_id when org changes to avoid
-            # showing conversation from previous org context
-            session.pop("session_id", None)
-            session.modified = True
+            # JVNAUTOSCI-1011: Use window session if header present
+            if window_session_id:
+                set_window_organisation(
+                    window_session_id=window_session_id,
+                    organisation_concept_id=org_slug,
+                    role_in_org=role_in_org,
+                    namespace=namespace,
+                    user_id=user_concept_id,
+                )
+            else:
+                # Fallback: update Flask session (for clients without window session support)
+                session["organisation_concept_id"] = org_slug
+                session["role_in_org"] = role_in_org
+                session["namespace"] = namespace
+                # JVNAUTOSCI-1004: Clear chat session_id when org changes to avoid
+                # showing conversation from previous org context
+                session.pop("session_id", None)
+                session.modified = True
 
         # Return concept ID form in API response (with #V# prefix)
         concept_id_response = (
@@ -17046,6 +17295,28 @@ def set_organisation():
             200,
         )
 
+    except WindowSessionBindingStoreUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_binding_store_unavailable",
+                    "error_code": "window_session_binding_store_unavailable",
+                    "retryable": True,
+                }
+            ),
+            503,
+        )
+    except OntologyMutationResourceBusy:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_scope_coordination_busy",
+                    "error_code": "window_session_scope_coordination_busy",
+                    "retryable": True,
+                }
+            ),
+            409,
+        )
     except WindowSessionOwnershipError:
         return (
             jsonify(
@@ -17096,11 +17367,29 @@ def get_session_context():
                 200,
             )
 
+        user_slug = str(user_id)
+        if user_slug.startswith("#V#"):
+            user_slug = user_slug[3:]
+        if "@" in user_slug:
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
+        user_concept_id = (
+            str(user_id).strip()
+            if str(user_id).strip().startswith("#")
+            else f"#V#{user_slug}"
+        )
+
         # JVNAUTOSCI-1011: Check for window session header
         window_session_id = request.headers.get("X-Von-Window-Session")
 
         # Get effective context from window session or Flask session
-        effective = get_effective_context(window_session_id, dict(session), user_id)
+        effective = get_effective_context(
+            window_session_id,
+            dict(session),
+            user_concept_id,
+        )
 
         org_id = effective.get("organisation_id")
         role_in_org = effective.get("role")
@@ -17108,14 +17397,6 @@ def get_session_context():
 
         # If no namespace resolved, derive it
         if not namespace:
-            user_slug = str(user_id)
-            if user_slug.startswith("#V#"):
-                user_slug = user_slug[3:]
-            if "@" in user_slug:
-                user_slug = user_slug.split("@", 1)[0]
-            if "+" in user_slug:
-                user_slug = user_slug.split("+", 1)[0]
-            user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
             if org_id:
                 # Get role if not in session
                 if not role_in_org:

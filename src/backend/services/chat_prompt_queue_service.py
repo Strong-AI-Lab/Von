@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -47,6 +48,14 @@ STALE_IN_PROGRESS_ADVISORY_REASON = (
 STALE_IN_PROGRESS_LAST_ERROR = (
     "Prompt queue record expired after being in progress for more than 24 hours."
 )
+LEGACY_SUBMISSION_ROLE_QUEUE = "queue"
+LEGACY_SUBMISSION_ROLE_GENERATE = "generate"
+LEGACY_SUBMISSION_ROLES = {
+    LEGACY_SUBMISSION_ROLE_QUEUE,
+    LEGACY_SUBMISSION_ROLE_GENERATE,
+}
+LEGACY_SUBMISSION_RENDEZVOUS_SECONDS = 5 * 60
+_LEGACY_VONTOLOGY_NON_TRIGGER_PREFIX_RE = re.compile(r"#([Vv])\u200B#")
 
 
 class ChatPromptQueueError(RuntimeError):
@@ -273,6 +282,193 @@ def build_queue_scope(
     )
 
 
+def _build_active_legacy_submission_key(
+    *,
+    scope: Mapping[str, Any],
+    conversation_key: str | None,
+    prompt_raw: str,
+    window_session_id: str | None,
+) -> str | None:
+    """Build a content-free idempotency key for one old-client active send."""
+
+    conversation_key_clean = _coerce_scope_value(
+        conversation_key,
+        field="conversation_key",
+        required=False,
+    )
+    window_session_id_clean = _coerce_scope_value(
+        window_session_id,
+        field="window_session_id",
+        required=False,
+    )
+    if not conversation_key_clean or not window_session_id_clean:
+        return None
+    canonical_scope = _scope_query(scope)
+    canonical_prompt = _LEGACY_VONTOLOGY_NON_TRIGGER_PREFIX_RE.sub(
+        r"#\1#",
+        prompt_raw,
+    ).strip()
+    prompt_digest = hashlib.sha256(canonical_prompt.encode("utf-8")).hexdigest()
+    window_session_digest = hashlib.sha256(
+        window_session_id_clean.encode("utf-8")
+    ).hexdigest()
+    material = "\x1f".join(
+        (
+            "active_legacy_submission.v1",
+            str(canonical_scope.get("user_concept_id") or ""),
+            str(canonical_scope.get("organisation_concept_id") or ""),
+            str(canonical_scope.get("namespace") or ""),
+            conversation_key_clean,
+            window_session_digest,
+            prompt_digest,
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _expire_unpaired_legacy_submissions(
+    *,
+    coll: Collection,
+    now: datetime,
+) -> int:
+    """Remove bounded rendezvous state without changing queue lifecycle truth."""
+
+    result = coll.update_many(
+        {
+            "active_legacy_submission_key": {"$exists": True},
+            "legacy_submission_expires_at": {"$lte": now},
+        },
+        {
+            "$unset": {
+                "active_legacy_submission_key": "",
+                "legacy_submission_queue_seen": "",
+                "legacy_submission_generate_seen": "",
+                "legacy_submission_expires_at": "",
+            }
+        },
+    )
+    return int(getattr(result, "modified_count", 0) or 0)
+
+
+def _find_or_join_legacy_submission(
+    *,
+    coll: Collection,
+    scope: Mapping[str, Any],
+    active_legacy_submission_key: str,
+    role: str,
+    client_request_id: str | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Reuse the same half or atomically join the complementary old-client half."""
+
+    existing = coll.find_one(
+        {
+            **_scope_query(scope),
+            "active_legacy_submission_key": active_legacy_submission_key,
+            "legacy_submission_expires_at": {"$gt": now},
+        }
+    )
+    if not isinstance(existing, Mapping):
+        return None
+
+    role_field = f"legacy_submission_{role}_seen"
+    other_role = (
+        LEGACY_SUBMISSION_ROLE_GENERATE
+        if role == LEGACY_SUBMISSION_ROLE_QUEUE
+        else LEGACY_SUBMISSION_ROLE_QUEUE
+    )
+    other_role_field = f"legacy_submission_{other_role}_seen"
+    if existing.get(role_field) is True:
+        if role == LEGACY_SUBMISSION_ROLE_GENERATE:
+            existing_request_id = _coerce_scope_value(
+                existing.get("client_request_id"),
+                field="client_request_id",
+                required=False,
+            )
+            if (
+                existing_request_id
+                and client_request_id
+                and existing_request_id != client_request_id
+            ):
+                if (
+                    existing.get("status") in TERMINAL_STATUSES
+                    and existing.get(other_role_field) is not True
+                ):
+                    retired = coll.find_one_and_update(
+                        {
+                            **_scope_query(scope),
+                            "queue_id": str(existing.get("queue_id") or ""),
+                            "active_legacy_submission_key": (
+                                active_legacy_submission_key
+                            ),
+                            "status": {"$in": list(TERMINAL_STATUSES)},
+                            role_field: True,
+                            other_role_field: {"$ne": True},
+                        },
+                        {
+                            "$set": {"legacy_submission_closed_at": now},
+                            "$unset": {
+                                "active_legacy_submission_key": "",
+                                "legacy_submission_queue_seen": "",
+                                "legacy_submission_generate_seen": "",
+                                "legacy_submission_expires_at": "",
+                            },
+                        },
+                        return_document=ReturnDocument.AFTER,
+                    )
+                    if retired is not None:
+                        return None
+                    if (
+                        coll.find_one(
+                            {
+                                **_scope_query(scope),
+                                "active_legacy_submission_key": (
+                                    active_legacy_submission_key
+                                ),
+                            },
+                            {"_id": 1},
+                        )
+                        is None
+                    ):
+                        return None
+                raise ConversationTurnAlreadyActive(
+                    "another matching turn is active for this conversation",
+                    queue_id=str(existing.get("queue_id") or "") or None,
+                )
+        return serialise_queue_record(existing)
+
+    set_fields: dict[str, Any] = {role_field: True}
+    update: dict[str, Any] = {"$set": set_fields}
+    if existing.get(other_role_field) is True:
+        set_fields["legacy_submission_closed_at"] = now
+        update["$unset"] = {
+            "active_legacy_submission_key": "",
+            "legacy_submission_expires_at": "",
+        }
+    queue_id = str(existing.get("queue_id") or "")
+    joined = coll.find_one_and_update(
+        {
+            **_scope_query(scope),
+            "queue_id": queue_id,
+            "active_legacy_submission_key": active_legacy_submission_key,
+            role_field: {"$ne": True},
+        },
+        update,
+        return_document=ReturnDocument.AFTER,
+    )
+    if joined is None:
+        # A same-role retry can race the complementary join that closed the
+        # unique key. Re-read only the exact row already selected above.
+        joined = coll.find_one(
+            {
+                **_scope_query(scope),
+                "queue_id": queue_id,
+                role_field: True,
+            }
+        )
+    return serialise_queue_record(joined)
+
+
 def _scope_query(scope: Mapping[str, Any]) -> dict[str, Any]:
     return _queue_scope_values(scope)
 
@@ -471,6 +667,8 @@ def create_queue_record(
     client_request_id: Any = None,
     attempt_id: Any = None,
     conversation_key: Any = None,
+    legacy_submission_role: str | None = None,
+    window_session_id: Any = None,
 ) -> dict[str, Any]:
     if status not in {STATUS_QUEUED, STATUS_IN_PROGRESS}:
         raise InvalidChatPromptQueueInput("status must be queued or in_progress")
@@ -506,6 +704,25 @@ def create_queue_record(
         field="conversation_key",
         required=False,
     )
+    legacy_role_clean = _coerce_scope_value(
+        legacy_submission_role,
+        field="legacy_submission_role",
+        required=False,
+    )
+    if legacy_role_clean and legacy_role_clean not in LEGACY_SUBMISSION_ROLES:
+        raise InvalidChatPromptQueueInput(
+            "legacy_submission_role must be queue or generate"
+        )
+    active_legacy_submission_key = (
+        _build_active_legacy_submission_key(
+            scope=scope,
+            conversation_key=conversation_key_clean,
+            prompt_raw=prompt,
+            window_session_id=window_session_id,
+        )
+        if legacy_role_clean
+        else None
+    )
     now = _now()
     doc = {
         "queue_id": str(uuid4()),
@@ -526,7 +743,30 @@ def create_queue_record(
         "completed_at": None,
         "last_error": None,
     }
+    if active_legacy_submission_key:
+        doc["active_legacy_submission_key"] = active_legacy_submission_key
+        doc["legacy_submission_queue_seen"] = (
+            legacy_role_clean == LEGACY_SUBMISSION_ROLE_QUEUE
+        )
+        doc["legacy_submission_generate_seen"] = (
+            legacy_role_clean == LEGACY_SUBMISSION_ROLE_GENERATE
+        )
+        doc["legacy_submission_expires_at"] = now + timedelta(
+            seconds=LEGACY_SUBMISSION_RENDEZVOUS_SECONDS
+        )
     coll = _collection()
+    if active_legacy_submission_key:
+        _expire_unpaired_legacy_submissions(coll=coll, now=now)
+        reusable = _find_or_join_legacy_submission(
+            coll=coll,
+            scope=scope,
+            active_legacy_submission_key=active_legacy_submission_key,
+            role=str(legacy_role_clean),
+            client_request_id=client_request_id_clean,
+            now=now,
+        )
+        if reusable is not None:
+            return reusable
     if status == STATUS_QUEUED:
         global_limit, per_user_limit = _foreground_queue_limits()
         user_id = str(doc["user_concept_id"])
@@ -571,6 +811,17 @@ def create_queue_record(
                     try:
                         coll.insert_one(candidate)
                     except DuplicateKeyError:
+                        if active_legacy_submission_key:
+                            reusable = _find_or_join_legacy_submission(
+                                coll=coll,
+                                scope=scope,
+                                active_legacy_submission_key=active_legacy_submission_key,
+                                role=str(legacy_role_clean),
+                                client_request_id=client_request_id_clean,
+                                now=now,
+                            )
+                            if reusable is not None:
+                                return reusable
                         continue
                     doc = candidate
                     inserted = True
@@ -591,7 +842,21 @@ def create_queue_record(
                     limit_kind="global",
                 )
     else:
-        coll.insert_one(doc)
+        try:
+            coll.insert_one(doc)
+        except DuplicateKeyError:
+            if active_legacy_submission_key:
+                reusable = _find_or_join_legacy_submission(
+                    coll=coll,
+                    scope=scope,
+                    active_legacy_submission_key=active_legacy_submission_key,
+                    role=str(legacy_role_clean),
+                    client_request_id=client_request_id_clean,
+                    now=now,
+                )
+                if reusable is not None:
+                    return reusable
+            raise
     record = serialise_queue_record(doc)
     if record is None:  # pragma: no cover - defensive
         raise ChatPromptQueueUnavailable("created queue record could not be serialised")
@@ -1160,6 +1425,21 @@ def finish_prompt_record(
                     "queue_id": queue_id_clean,
                     "attempt_id": attempt_id_clean,
                     "status": status,
+                }
+            )
+        )
+    if record is None and not attempt_id_clean:
+        # Pre-#473 clients terminalise the record in a finally block after the
+        # server-owned generate lifecycle has already done so.  Limit this
+        # idempotent acknowledgement to an exact, fully joined legacy pair.
+        record = serialise_queue_record(
+            coll.find_one(
+                {
+                    **_compatible_scope_query(scope),
+                    "queue_id": queue_id_clean,
+                    "status": status,
+                    "legacy_submission_queue_seen": True,
+                    "legacy_submission_generate_seen": True,
                 }
             )
         )

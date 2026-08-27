@@ -476,6 +476,43 @@ def test_relationship_extent_index_ensure_does_not_replace_named_unique_drift():
     assert index.get("unique") is not True
 
 
+def test_chat_prompt_queue_indexes_include_active_legacy_submission_fence() -> None:
+    coll = mongomock.MongoClient().db.chat_prompt_queue_indexes
+
+    mc._ensure_chat_prompt_queue_indexes(coll)
+
+    indexes = {index["name"]: index for index in coll.list_indexes()}
+    active_legacy = indexes["active_legacy_submission_key_unique"]
+    assert list(active_legacy["key"].items()) == [
+        ("active_legacy_submission_key", mc.ASCENDING)
+    ]
+    assert active_legacy["unique"] is True
+    assert active_legacy["partialFilterExpression"] == {
+        "active_legacy_submission_key": {
+            "$exists": True,
+            "$type": "string",
+        }
+    }
+    assert list(indexes["legacy_submission_expires_at"]["key"].items()) == [
+        ("legacy_submission_expires_at", mc.ASCENDING)
+    ]
+
+
+def test_window_session_binding_indexes_support_owner_cleanup_and_expiry() -> None:
+    coll = mongomock.MongoClient().db.window_session_binding_indexes
+
+    mc._ensure_window_session_binding_indexes(coll)
+
+    indexes = {index["name"]: index for index in coll.list_indexes()}
+    assert list(indexes["user_id_1"]["key"].items()) == [
+        ("user_id", mc.ASCENDING)
+    ]
+    assert list(indexes["expires_at_ttl"]["key"].items()) == [
+        ("expires_at", mc.ASCENDING)
+    ]
+    assert indexes["expires_at_ttl"]["expireAfterSeconds"] == 0
+
+
 def test_workflow_instance_indexes_include_atlas_claim_and_lookup_indexes(monkeypatch):
     from src.backend.workflows.durable import instance_manager
 

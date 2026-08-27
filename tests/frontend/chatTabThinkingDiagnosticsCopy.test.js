@@ -144,6 +144,38 @@ describe('chat thinking diagnostics copy control', () => {
         expect(payload.stage_diagnostics).toBeUndefined();
     });
 
+    test('reports an exact missing or unauthorised turn instead of a delegation outage', async () => {
+        const chatTab = require(chatTabModulePath);
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const button = document.getElementById('copyThinkingDiagnosticsButton');
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: false,
+            status: 404,
+            json: async () => ({ error: 'not_available_in_test' })
+        });
+        fetchWithTimeout.mockResolvedValue({
+            ok: false,
+            status: 404,
+            json: async () => ({ error: 'turn_not_found_or_not_authorised' })
+        });
+        chatTab.__testOnly_setActiveChatSession('session-missing-turn', 'Missing Turn');
+
+        const copied = await chatTab.__testOnly_copyActiveThinkingDiagnostics(button, {
+            clientRequestId: 'request-with-no-server-row',
+            latestProgress: {
+                status: 'error',
+                stage: 'error',
+                phase: 'error',
+                elapsed_ms: 172
+            }
+        });
+
+        expect(copied).toBe(true);
+        const payload = JSON.parse(navigator.clipboard.writeText.mock.calls[0][0]);
+        expect(payload.mcp_access).toEqual({});
+        expect(payload.retrieval_status).toBe('not_found_or_not_authorised');
+    });
+
     test('does not fall back to copying a snapshot when no request reference exists', async () => {
         const chatTab = require(chatTabModulePath);
         const { showToast } = require('../../src/frontend/web/von_interface/static/js/utils/toast.js');

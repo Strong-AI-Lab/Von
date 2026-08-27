@@ -7,6 +7,8 @@ role resolution for the organisation switching endpoints exposed via the
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 
 
@@ -177,6 +179,47 @@ def test_set_organisation_updates_session_and_namespace(app_client):
         )
 
 
+def test_legacy_session_user_id_owns_durable_window_binding_canonically(
+    monkeypatch,
+    app_client,
+):
+    from src.backend.services import window_session_context_service as window_context
+
+    _, client = app_client
+    window_session_id = "legacy-session-owner-window"
+    with client.session_transaction() as sess:
+        sess["user_id"] = "michael_witbrock"
+
+    selected = client.post(
+        "/von/api/session/set_organisation",
+        json={"organisation_concept_id": "university_of_auckland_strong_ai_lab"},
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert selected.status_code == 200
+
+    repository = window_context.get_window_session_binding_repository()
+    binding = repository.load_owned(window_session_id, "#V#michael_witbrock")
+    assert binding is not None
+    assert binding.user_id == "#V#michael_witbrock"
+    assert repository.load_owned(window_session_id, "michael_witbrock") is None
+
+    monkeypatch.setattr(
+        window_context,
+        "_window_session_store",
+        window_context.WindowSessionStore(binding_repository=repository),
+    )
+    recovered = client.get(
+        "/von/api/session/context",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.get_json()["context_source"] == "window_session"
+    assert recovered.get_json()["organisation_id"] == (
+        "#V#university_of_auckland_strong_ai_lab"
+    )
+
+
 def test_set_organisation_rejects_non_member_without_changing_session(
     monkeypatch, app_client
 ):
@@ -214,6 +257,44 @@ def test_set_organisation_validates_body(app_client):
 
     assert resp.status_code == 400
     assert resp.get_json()["error"] == "organisation_concept_id required"
+
+
+def test_set_organisation_reports_scope_coordination_contention_as_retryable(
+    monkeypatch,
+    app_client,
+):
+    from src.backend.services import (
+        ontology_authority_membership_coordination_service as coordination,
+    )
+    from src.backend.services.ontology_publication_authority_service import (
+        OntologyMutationResourceBusy,
+    )
+
+    @contextmanager
+    def busy_scope(*_args, **_kwargs):
+        raise OntologyMutationResourceBusy("ontology_mutation_resource_busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        coordination,
+        "organisation_membership_scope_barrier",
+        busy_scope,
+    )
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_id"] = "michael_witbrock"
+
+    response = client.post(
+        "/von/api/session/set_organisation",
+        json={"organisation_concept_id": "university_of_auckland_strong_ai_lab"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": "window_session_scope_coordination_busy",
+        "error_code": "window_session_scope_coordination_busy",
+        "retryable": True,
+    }
 
 
 def test_get_session_context_derives_namespace_without_org(app_client):

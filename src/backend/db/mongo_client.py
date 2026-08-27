@@ -772,6 +772,9 @@ ROOM_DEVICES_COLLECTION_NAME = "room_devices"
 # Server-side persistence for prompts waiting behind active chat turns.
 CHAT_PROMPT_QUEUE_COLLECTION_NAME = "chat_prompt_queue"
 
+# Restart-safe, actor-bound per-window organisation selections.
+WINDOW_SESSION_BINDINGS_COLLECTION_NAME = "window_session_bindings"
+
 # --- Client Initialization ---
 # REFACTORING_NOTE: We maintain separate clients for real MongoDB vs mongomock.
 # This prevents test suites from “poisoning” the process by enabling VON_USE_MOCK_DB
@@ -2107,6 +2110,23 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
                 "active_conversation_key": {"$exists": True, "$type": "string"}
             },
         )
+    if "active_legacy_submission_key_unique" not in existing_indexes:
+        coll.create_index(
+            [("active_legacy_submission_key", ASCENDING)],
+            name="active_legacy_submission_key_unique",
+            unique=True,
+            partialFilterExpression={
+                "active_legacy_submission_key": {
+                    "$exists": True,
+                    "$type": "string",
+                }
+            },
+        )
+    if "legacy_submission_expires_at" not in existing_indexes:
+        coll.create_index(
+            [("legacy_submission_expires_at", ASCENDING)],
+            name="legacy_submission_expires_at",
+        )
     if "queued_global_slot_unique" not in existing_indexes:
         coll.create_index(
             [("queued_global_slot", ASCENDING)],
@@ -2151,6 +2171,18 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
         )
     if "updated_at_-1" not in existing_indexes:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+
+
+def _ensure_window_session_binding_indexes(coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "user_id_1" not in existing_indexes:
+        coll.create_index([("user_id", ASCENDING)], name="user_id_1")
+    if "expires_at_ttl" not in existing_indexes:
+        coll.create_index(
+            [("expires_at", ASCENDING)],
+            name="expires_at_ttl",
+            expireAfterSeconds=0,
+        )
 
 
 def _ensure_gmail_outbound_quota_indexes(coll: Collection) -> None:
@@ -2449,6 +2481,19 @@ def get_chat_prompt_queue_collection() -> Collection | None:
             db,
             CHAT_PROMPT_QUEUE_COLLECTION_NAME,
             _ensure_chat_prompt_queue_indexes,
+        )
+    return None
+
+
+def get_window_session_binding_collection() -> Collection | None:
+    """Return durable actor-owned browser-window organisation selections."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            WINDOW_SESSION_BINDINGS_COLLECTION_NAME,
+            _ensure_window_session_binding_indexes,
         )
     return None
 

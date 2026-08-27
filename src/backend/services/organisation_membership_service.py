@@ -14,6 +14,7 @@ from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import bypass_access_control, can_access_concept
 from ..services.text_value_service import upsert_text_for_concept
 from .ontology_authority_membership_coordination_service import (
+    organisation_membership_scope_barrier,
     ontology_authority_membership_mutation_barrier,
 )
 
@@ -31,10 +32,58 @@ def _coordinated_membership_mutation(function):
 
     @wraps(function)
     def coordinated(*args, **kwargs):
-        with ontology_authority_membership_mutation_barrier():
+        missing = object()
+        user_concept_id = (
+            kwargs.get("user_concept_id")
+            if "user_concept_id" in kwargs
+            else (args[0] if len(args) > 0 else missing)
+        )
+        organisation_concept_id = (
+            kwargs.get("organisation_concept_id")
+            if "organisation_concept_id" in kwargs
+            else (args[1] if len(args) > 1 else missing)
+        )
+        if (
+            user_concept_id is missing
+            or organisation_concept_id is missing
+            or not isinstance(user_concept_id, str)
+            or not user_concept_id
+            or not isinstance(organisation_concept_id, str)
+            or not organisation_concept_id
+        ):
+            # Preserve each public function's established argument-validation
+            # contract (including Python's missing-argument TypeError) before
+            # deriving an internal coordination key.
             return function(*args, **kwargs)
+        with ontology_authority_membership_mutation_barrier():
+            with organisation_membership_scope_barrier(
+                user_concept_id,
+                organisation_concept_id,
+            ):
+                return function(*args, **kwargs)
 
     return coordinated
+
+
+def _invalidate_user_window_authority(
+    user_concept_id: str,
+    organisation_concept_id: str,
+) -> None:
+    """Remove derived tab authority before a role-reducing mutation.
+
+    The durable deletion is shared by every web worker.  A still-authorised
+    tab can reconstruct its selection from its actor-owned conversation on the
+    next request; a revoked tab cannot.
+    """
+
+    from .window_session_context_service import (
+        delete_window_contexts_owned_by_user_for_organisation,
+    )
+
+    delete_window_contexts_owned_by_user_for_organisation(
+        user_concept_id,
+        organisation_concept_id,
+    )
 
 
 def _normalise_concept_id(value: Any) -> str | None:
@@ -202,6 +251,14 @@ def create_organisation_membership(
         relationship_created = False
         logger.info(
             f"memberOf relationship already exists: {user_concept_id} --memberOf--> {organisation_concept_id}"
+        )
+
+    if relationship_exists:
+        # This API also acts as an idempotent role upsert for an existing
+        # membership, so invalidate the exact org's derived role first.
+        _invalidate_user_window_authority(
+            user_concept_id,
+            organisation_concept_id,
         )
 
     # Store the role via text relation (hasRole predicate with context)
@@ -487,7 +544,14 @@ def update_user_role(
 
             tv = TextValuesRepository.find_one_by_id(text_value_id)
             if tv:
-                old_role = tv.get("text", "member")
+                parsed_role, _stored_org = parse_organisation_role_storage_text(
+                    tv.get("text"),
+                    current_role_rel.get("context")
+                    if isinstance(current_role_rel.get("context"), dict)
+                    else {},
+                )
+                if parsed_role:
+                    old_role = parsed_role
 
     # If role is the same, no update needed
     if old_role == new_role:
@@ -497,6 +561,10 @@ def update_user_role(
             "new_role": new_role,
             "role_updated": False,
         }
+
+    # Invalidate before the represented write so a durable-store failure cannot
+    # leave a completed role reduction hidden behind another worker's cache.
+    _invalidate_user_window_authority(user_concept_id, organisation_concept_id)
 
     # Update role via upsert
     upsert_text_for_concept(
@@ -572,6 +640,10 @@ def remove_organisation_membership(
         )
     if semantic_authority_revoked and authority_read_back.get("active") is not False:
         raise RuntimeError("organisation_ontology_authority_revocation_not_verified")
+
+    # See update_user_role: clearing the shared binding before the authoritative
+    # mutation makes cross-worker revocation fail closed.
+    _invalidate_user_window_authority(user_concept_id, organisation_concept_id)
 
     # Remove the memberOf relationship
     ConceptsRepository.mutate_relationship_edge(

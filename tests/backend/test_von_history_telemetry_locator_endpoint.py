@@ -183,6 +183,235 @@ def test_history_turn_telemetry_access_requires_authenticated_actor(monkeypatch)
     assert response.get_json()["error"] == "Not authenticated"
 
 
+def test_history_turn_telemetry_access_rejects_unknown_explicit_window_before_lookup(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#actor_a",
+    )
+
+    def fail_closed_context(**kwargs):
+        captured.update(kwargs)
+        raise von_routes.WindowSessionContextUnavailable(
+            "window_session_context_unavailable"
+        )
+
+    monkeypatch.setattr(
+        von_routes,
+        "_get_effective_context_with_owned_conversation_recovery",
+        fail_closed_context,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_diagnostics_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scope denial must happen before telemetry lookup")
+        ),
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history/turn_telemetry_access",
+        query_string={
+            "request_id": "req-unknown-window",
+            "session_id": "session-owned-by-actor-a",
+        },
+        headers={"X-Von-Window-Session": "unknown-window"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": "window_context_unavailable",
+        "error_code": "window_context_unavailable",
+        "retryable": True,
+    }
+    assert captured["window_session_id"] == "unknown-window"
+    assert captured["user_concept_id"] == "#V#actor_a"
+    assert captured["conversation_session_id"] == "session-owned-by-actor-a"
+
+
+def test_history_turn_telemetry_access_reports_transient_scope_recovery_failure(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#actor_a",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_get_effective_context_with_owned_conversation_recovery",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            von_routes.WindowSessionContextRecoveryUnavailable(
+                "window_session_context_recovery_unavailable"
+            )
+        ),
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history/turn_telemetry_access",
+        query_string={"request_id": "req-store-outage"},
+        headers={"X-Von-Window-Session": "known-window"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": "window_context_recovery_unavailable",
+        "error_code": "window_context_recovery_unavailable",
+        "retryable": True,
+    }
+
+
+def test_history_turn_telemetry_access_reads_exact_actor_scope_live_progress(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    actor_user_id = "#V#actor_a"
+    actor_org_id = "#V#org_a"
+    actor_namespace = "#V#actor_a@org_a"
+    request_id = "req-live-progress-actor-org-a"
+    actor_scope_key = von_routes._build_authenticated_tool_progress_scope_key(
+        user_concept_id=actor_user_id,
+        organisation_concept_id=actor_org_id,
+        namespace=actor_namespace,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: actor_user_id,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *_args, **_kwargs: {
+            "namespace": actor_namespace,
+            "organisation_id": actor_org_id,
+        },
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_history_request_scope_hints",
+        lambda **_kwargs: (actor_namespace, actor_org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_diagnostics_payload",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "fetch_tool_progress_state",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setitem(
+        von_routes._TOOL_PROGRESS,
+        (actor_scope_key, request_id),
+        {
+            "request_id": request_id,
+            "session_id": "session-live-progress-org-a",
+            "status": "thinking",
+            "stage": "tool_execution",
+            "phase": "tool_execution",
+            "updated_at_epoch": 9_999_999_999.0,
+            "request_started_epoch": 9_999_999_998.0,
+            "elapsed_ms": 1_000,
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history/turn_telemetry_access",
+        query_string={"request_id": request_id},
+        headers={"X-Von-Window-Session": "window-org-a"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["schema_version"] == "turn_telemetry_mcp_access.v1"
+    assert "turn_execution_get_live_progress" in body["mcp_access"]
+
+
+def test_history_turn_telemetry_access_does_not_cross_actor_org_scope(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    actor_user_id = "#V#actor_a"
+    org_a_scope_key = von_routes._build_authenticated_tool_progress_scope_key(
+        user_concept_id=actor_user_id,
+        organisation_concept_id="#V#org_a",
+        namespace="#V#actor_a@org_a",
+    )
+    org_b_scope_key = von_routes._build_authenticated_tool_progress_scope_key(
+        user_concept_id=actor_user_id,
+        organisation_concept_id="#V#org_b",
+        namespace="#V#actor_a@org_b",
+    )
+    request_id = "req-live-progress-private-to-org-a"
+    assert org_a_scope_key != org_b_scope_key
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: actor_user_id,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *_args, **_kwargs: {
+            "namespace": "#V#actor_a@org_b",
+            "organisation_id": "#V#org_b",
+        },
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_history_request_scope_hints",
+        lambda **_kwargs: ("#V#actor_a@org_b", "#V#org_b"),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_diagnostics_payload",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "fetch_tool_progress_state",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setitem(
+        von_routes._TOOL_PROGRESS,
+        (org_a_scope_key, request_id),
+        {
+            "request_id": request_id,
+            "status": "thinking",
+            "stage": "tool_execution",
+            "phase": "tool_execution",
+            "updated_at_epoch": 9_999_999_999.0,
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history/turn_telemetry_access",
+        query_string={"request_id": request_id},
+        headers={"X-Von-Window-Session": "window-org-b"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Turn telemetry not found"}
+
+
 def _stored_failure_capsule(request_id: str) -> dict:
     return {
         "schema_version": "turn_failure_capsule.v1",

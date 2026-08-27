@@ -1,4 +1,4 @@
-from flask import Blueprint, request, redirect, session, url_for, jsonify
+from flask import Blueprint, current_app, request, redirect, session, url_for, jsonify
 
 from ...auth_service import GoogleAuthService
 from ...services.settings_service import (
@@ -539,18 +539,39 @@ def logout():
     from ...services.window_session_context_service import (
         delete_window_context_if_owned,
     )
-
-    delete_window_context_if_owned(
-        request.headers.get("X-Von-Window-Session"),
-        user_id,
+    from ...services.window_session_binding_store_service import (
+        WindowSessionBindingStoreUnavailable,
     )
+
+    cleanup_deferred = False
+    try:
+        delete_window_context_if_owned(
+            request.headers.get("X-Von-Window-Session"),
+            user_id,
+        )
+    except WindowSessionBindingStoreUnavailable:
+        # Authentication must still end if derived binding storage is down.
+        # The selector carries no authority without a newly authenticated
+        # matching actor and expires independently.
+        cleanup_deferred = True
+        current_app.logger.warning(
+            "Logout completed while window-session binding cleanup was unavailable"
+        )
 
     # Clear the entire session to ensure a clean logout
     session.clear()
 
     print(f"[auth_logout] User {user_email} logged out successfully")
 
-    return jsonify({"success": True, "message": "Logged out successfully"})
+    return jsonify(
+        {
+            "success": True,
+            "message": "Logged out successfully",
+            "window_context_cleanup": (
+                "deferred" if cleanup_deferred else "completed"
+            ),
+        }
+    )
 
 
 @auth_bp.route("/test-popup")

@@ -420,7 +420,7 @@ class TestCreateChatSessionUsesWindowContext:
         )
         assert (
             created_sessions[0].get("organisation_concept_id")
-            == "university_of_auckland_strong_ai_lab"
+            == "#V#university_of_auckland_strong_ai_lab"
         )
         assert created_sessions[0].get("is_agent_created") is None
         window_ctx = wscs.get_window_context(window_a)
@@ -728,21 +728,17 @@ class TestWindowSessionStoreIsolation:
         """get_effective_context should prefer window session over Flask session."""
         from src.backend.services.window_session_context_service import (
             get_effective_context,
-            get_window_session_store,
-            WindowSessionContext,
+            set_window_organisation,
         )
-
-        store = get_window_session_store()
 
         # Set up window context
-        ctx = WindowSessionContext(
-            window_session_id="test_window",
-            user_id="user_1",
-            organisation_concept_id="window_org",
-            namespace="#V#user_1@window_org",
-            role_in_org="admin",
+        set_window_organisation(
+            "test_window",
+            "window_org",
+            "admin",
+            "#V#user_1@window_org",
+            "user_1",
         )
-        store.set(ctx)
 
         # Flask session has different org
         flask_session = {
@@ -754,7 +750,7 @@ class TestWindowSessionStoreIsolation:
         # get_effective_context should return window context
         effective = get_effective_context("test_window", flask_session, "user_1")
 
-        assert effective["organisation_id"] == "window_org"
+        assert effective["organisation_id"] == "#V#window_org"
         assert effective["namespace"] == "#V#user_1@window_org"
         assert effective["role"] == "admin"
         assert effective["source"] == "window_session"
@@ -846,7 +842,7 @@ def test_cross_user_window_token_cannot_read_or_replace_org_scope(app_client):
     preserved = wscs.get_window_context(window_session_id)
     assert preserved is not None
     assert preserved.user_id == "#V#owner"
-    assert preserved.organisation_concept_id == "secret_org"
+    assert preserved.organisation_concept_id == "#V#secret_org"
 
 
 def test_get_effective_context_falls_back_to_flask():

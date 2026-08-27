@@ -8245,7 +8245,7 @@ describe('thinking card toggle accessibility', () => {
             schema_version: 'turn_live_progress_locator.v1',
             request_id: expect.any(String),
             mcp_access: {},
-            retrieval_status: 'server_delegation_unavailable'
+            retrieval_status: 'invalid_server_response'
         }));
 
         retained.toggleButton.click();
