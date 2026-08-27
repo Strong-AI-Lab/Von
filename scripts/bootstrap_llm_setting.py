@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 
-SUPPORTED_PROVIDERS = {"openai", "gemini", "ollama"}
+SUPPORTED_PROVIDERS = {"openai", "openrouter", "gemini", "ollama"}
 
 
 def _normalise_concept_id(raw: str | None) -> str | None:

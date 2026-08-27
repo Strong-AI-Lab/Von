@@ -46,12 +46,18 @@ from ..types import (
 )
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 from ....services.model_parameter_service import (
-    openai_chat_completions_kwargs_from_model_parameters,
+    chat_completions_kwargs_from_model_parameters,
     openai_responses_kwargs_from_model_parameters,
 )
 
 
 logger = logging.getLogger(__name__)
+
+_OPENROUTER_REQUIRED_PROVIDER_PREFERENCES: dict[str, Any] = {
+    "zdr": True,
+    "data_collection": "deny",
+    "require_parameters": True,
+}
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
@@ -186,6 +192,9 @@ class OpenAIClient(LLMClient):
             allow_advertised_surface_override=continuation is not None,
         )
         decision_telemetry = decision.to_telemetry()
+        provider_label = (
+            "OpenRouter" if decision.provider == "openrouter" else "OpenAI"
+        )
         if decision.status != "compatible":
             raise UnsupportedStructuredToolTransportError(
                 "No represented API profile supports structured tools for "
@@ -229,7 +238,7 @@ class OpenAIClient(LLMClient):
                     request_client=request_client,
                 )
             observe_request_advisory(
-                provider="openai",
+                provider=decision.provider,
                 advisory_seconds=request_advisory_seconds,
                 started_monotonic=request_started_monotonic,
                 event_logger=self.logger,
@@ -242,10 +251,12 @@ class OpenAIClient(LLMClient):
             raise
         except Exception as exc:
             safe_error = self._sanitise_provider_error(exc)
-            self.logger.error("OpenAI structured-tool API error: %s", safe_error)
+            self.logger.error(
+                "%s structured-tool API error: %s", provider_label, safe_error
+            )
             if self._has_exact_context_length_exceeded_code(exc):
                 raise StructuredToolContextLimitError(
-                    "OpenAI rejected the structured-tool request because its "
+                    f"{provider_label} rejected the structured-tool request because its "
                     f"context exceeded the model limit: {safe_error}",
                     decision={
                         **decision.to_telemetry(),
@@ -255,7 +266,7 @@ class OpenAIClient(LLMClient):
                 ) from exc
             if self._looks_like_tool_call_lineage_rejection(exc):
                 raise StructuredToolProtocolError(
-                    "OpenAI rejected a function-call output whose provider call "
+                    f"{provider_label} rejected a function-call output whose provider call "
                     "lineage was unavailable; refusing an uncorrelated retry: "
                     f"{safe_error}",
                     decision={
@@ -283,7 +294,7 @@ class OpenAIClient(LLMClient):
                         ),
                     }
                     raise StructuredToolCapabilityRejectedError(
-                        "OpenAI rejected the represented continuation surface; "
+                        f"{provider_label} rejected the represented continuation surface; "
                         "cross-surface fallback is not valid mid-continuation: "
                         f"{safe_error}",
                         decision=continuation_rejection,
@@ -327,7 +338,7 @@ class OpenAIClient(LLMClient):
                             alternate_exc
                         ):
                             raise StructuredToolContextLimitError(
-                                "OpenAI rejected the advertised alternate "
+                                f"{provider_label} rejected the advertised alternate "
                                 "structured-tool surface because its context "
                                 f"exceeded the model limit: {alternate_safe_error}",
                                 decision={
@@ -344,7 +355,7 @@ class OpenAIClient(LLMClient):
                             ) from alternate_exc
                         if self._looks_like_tool_call_lineage_rejection(alternate_exc):
                             raise StructuredToolProtocolError(
-                                "OpenAI rejected a function-call output whose "
+                                f"{provider_label} rejected a function-call output whose "
                                 "provider call lineage was unavailable on the "
                                 "advertised alternate surface; refusing an "
                                 "uncorrelated retry: "
@@ -379,7 +390,7 @@ class OpenAIClient(LLMClient):
                                 ],
                             }
                             raise StructuredToolCapabilityRejectedError(
-                                "OpenAI rejected structured tools on both represented "
+                                f"{provider_label} rejected structured tools on both represented "
                                 f"surfaces; final surface {alternate_surface}: "
                                 f"{alternate_safe_error}",
                                 decision=rejection_telemetry,
@@ -430,11 +441,11 @@ class OpenAIClient(LLMClient):
                     **self._provider_error_metadata(exc),
                 }
                 raise StructuredToolCapabilityRejectedError(
-                    f"OpenAI rejected structured tools on "
+                    f"{provider_label} rejected structured tools on "
                     f"{decision.effective_api_surface}: {safe_error}",
                     decision=rejection_telemetry,
                 ) from exc
-            raise ToolCallError(f"OpenAI call failed: {safe_error}") from exc
+            raise ToolCallError(f"{provider_label} call failed: {safe_error}") from exc
 
     def _resolved_connection_id(self) -> str:
         configured = str(self.config.connection_id or "").strip()
@@ -474,6 +485,28 @@ class OpenAIClient(LLMClient):
             tool_results=tool_results,
         )
         tools = [self._tool_definition_to_dict(tool) for tool in available_tools]
+        if decision.provider == "openrouter":
+            raw_extra_body = request_kwargs.get("extra_body")
+            extra_body = (
+                dict(raw_extra_body) if isinstance(raw_extra_body, Mapping) else {}
+            )
+            raw_provider_preferences = extra_body.get("provider")
+            provider_preferences = (
+                dict(raw_provider_preferences)
+                if isinstance(raw_provider_preferences, Mapping)
+                else {}
+            )
+            provider_preferences.update(_OPENROUTER_REQUIRED_PROVIDER_PREFERENCES)
+            extra_body["provider"] = provider_preferences
+            request_kwargs["extra_body"] = extra_body
+            raw_extra_headers = request_kwargs.get("extra_headers")
+            extra_headers = (
+                dict(raw_extra_headers)
+                if isinstance(raw_extra_headers, Mapping)
+                else {}
+            )
+            extra_headers["X-OpenRouter-Metadata"] = "enabled"
+            request_kwargs["extra_headers"] = extra_headers
         requested_parameters = (
             dict(llm_params) if isinstance(llm_params, Mapping) else {}
         )
@@ -486,8 +519,9 @@ class OpenAIClient(LLMClient):
             requested_parameters["reasoning_effort"] = direct_reasoning_effort
             _merge_provider_parameter_kwargs(
                 effective_parameters,
-                openai_chat_completions_kwargs_from_model_parameters(
+                chat_completions_kwargs_from_model_parameters(
                     {"reasoning_effort": direct_reasoning_effort},
+                    provider=decision.provider,
                     model=request_model,
                     profile_concept_id=decision.profile_concept_id,
                 ),
@@ -498,8 +532,9 @@ class OpenAIClient(LLMClient):
         if isinstance(llm_params, Mapping) and llm_params:
             _merge_provider_parameter_kwargs(
                 effective_parameters,
-                openai_chat_completions_kwargs_from_model_parameters(
+                chat_completions_kwargs_from_model_parameters(
                     llm_params,
+                    provider=decision.provider,
                     model=request_model,
                     profile_concept_id=decision.profile_concept_id,
                 ),
@@ -555,6 +590,13 @@ class OpenAIClient(LLMClient):
                 continuation=continuation,
             )
         )
+        if decision.provider == "openrouter":
+            parsed.transport_metadata["provider_routing_preferences"] = (
+                sanitise_transport_telemetry_value(
+                    request_kwargs["extra_body"]["provider"]
+                )
+            )
+            parsed.transport_metadata["router_metadata_requested"] = True
         if continuation is not None:
             retained_count = (
                 len(continuation.input_items)
@@ -1351,6 +1393,20 @@ class OpenAIClient(LLMClient):
                         }
                     )
         transport_metadata = decision.to_telemetry()
+        if decision.provider == "openrouter":
+            generation_id = _value(response, "id")
+            if generation_id:
+                transport_metadata["generation_id"] = (
+                    sanitise_transport_telemetry_value(generation_id)
+                )
+            router_metadata = _value(response, "openrouter_metadata")
+            if router_metadata is not None:
+                transport_metadata["openrouter_metadata"] = (
+                    sanitise_transport_telemetry_value(
+                        _provider_item_mapping(router_metadata) or router_metadata,
+                        max_depth=6,
+                    )
+                )
         service_tier = _value(response, "service_tier")
         if isinstance(service_tier, str) and service_tier.strip():
             transport_metadata["effective_service_tier"] = service_tier.strip().lower()
@@ -1744,6 +1800,16 @@ class OpenAIClient(LLMClient):
         cache_write_input_tokens = _value(input_details, "cache_write_tokens")
         if cache_write_input_tokens is not None:
             usage_payload["cache_write_input_tokens"] = cache_write_input_tokens
+        provider_cost = _value(usage, "cost")
+        if provider_cost is not None:
+            usage_payload["provider_reported_cost"] = provider_cost
+        cost_details = _value(usage, "cost_details")
+        if cost_details is not None:
+            usage_payload["provider_reported_cost_details"] = (
+                sanitise_transport_telemetry_value(
+                    _provider_item_mapping(cost_details) or cost_details
+                )
+            )
         return usage_payload
 
     @staticmethod

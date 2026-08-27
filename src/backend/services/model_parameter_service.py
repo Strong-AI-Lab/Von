@@ -507,6 +507,25 @@ def openai_chat_completions_kwargs_from_model_parameters(
     )
 
 
+def chat_completions_kwargs_from_model_parameters(
+    raw: Any,
+    *,
+    provider: str,
+    model: str | None,
+    profile_concept_id: str | None = None,
+) -> dict[str, Any]:
+    """Project neutral parameters onto an OpenAI-compatible Chat surface."""
+
+    return provider_kwargs_from_model_parameters(
+        raw,
+        provider=provider,
+        model=model,
+        api_surface="chat_completions",
+        include_registry=True,
+        profile_concept_id=profile_concept_id,
+    )
+
+
 def gemini_kwargs_from_model_parameters(
     raw: Any,
     *,

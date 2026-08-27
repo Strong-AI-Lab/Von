@@ -95,6 +95,10 @@ bootstrap_openai_api_key_file = "/etc/von/secrets/openai_api_key"
 # Leave bootstrap_gemini_api_key unset when using TF_VAR_bootstrap_gemini_api_key.
 # bootstrap_gemini_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
 bootstrap_gemini_api_key_file = "/etc/von/secrets/gemini_api_key"
+# Leave bootstrap_openrouter_api_key unset when using TF_VAR_bootstrap_openrouter_api_key.
+# OpenRouter remains opt-in; do not make it the default without an explicit scoped model.
+# bootstrap_openrouter_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
+bootstrap_openrouter_api_key_file = "/etc/von/secrets/openrouter_api_key"
 
 # Optional: seed a scoped model setting after first deploy.
 # Set all three values together to seed the organisation default.

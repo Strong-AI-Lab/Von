@@ -654,7 +654,7 @@ function normaliseModelNameForComparison(name) {
   if (!name || typeof name !== 'string') return '';
   return name
     .trim()
-    .replace(/^(?:openai|ollama|gemini)[/:]/i, '')
+    .replace(/^(?:openai|openrouter|ollama|gemini)[/:]/i, '')
     .replace(/-\d{4}-\d{2}-\d{2}$/, '')
     .toLowerCase();
 }

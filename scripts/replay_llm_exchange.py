@@ -460,6 +460,10 @@ def _client_for_provider(
         from src.backend.languagemodels.llm_interface import OpenAIClient
 
         return OpenAIClient()
+    if provider_key == "openrouter":
+        from src.backend.languagemodels.llm_interface import OpenRouterClient
+
+        return OpenRouterClient()
     if provider_key == "gemini":
         from src.backend.languagemodels.llm_interface import GeminiClient
 
@@ -744,7 +748,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--call-type", help="Filter by call type.")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--inspect-only", action="store_true")
-    parser.add_argument("--provider", choices=["ollama", "openai", "gemini", "mock"])
+    parser.add_argument(
+        "--provider",
+        choices=["ollama", "openai", "openrouter", "gemini", "mock"],
+    )
     parser.add_argument("--model")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--repeat", type=int, default=1)

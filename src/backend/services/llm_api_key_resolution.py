@@ -27,3 +27,9 @@ def get_gemini_api_key() -> str | None:
     """
 
     return _first_nonempty_env_value(_GEMINI_API_KEY_ENV_VARS)
+
+
+def get_openrouter_api_key() -> str | None:
+    """Return the configured OpenRouter key from env or an env-selected file."""
+
+    return _first_nonempty_env_value(("OPENROUTER_API_KEY",))

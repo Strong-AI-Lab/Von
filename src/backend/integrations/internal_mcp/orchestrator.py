@@ -356,6 +356,8 @@ def _provider_from_llm_client(llm_client: Any) -> str | None:
     class_name = type(llm_client).__name__.lower()
     if "ollama" in class_name:
         return "ollama"
+    if "openrouter" in class_name:
+        return "openrouter"
     if "openai" in class_name:
         return "openai"
     if "gemini" in class_name:
@@ -381,7 +383,7 @@ def _model_identifier_looks_local_ollama(model: Any) -> bool:
         return False
     if cleaned.startswith("ollama:"):
         return True
-    if cleaned.startswith(("openai:", "anthropic:", "gemini:", "azure_openai:")):
+    if cleaned.startswith(("openai:", "openrouter:", "anthropic:", "gemini:", "azure_openai:")):
         return False
     if cleaned.startswith(("gpt-", "o1-", "claude", "gemini")):
         return False
@@ -13582,7 +13584,7 @@ class InternalMCPChatOrchestrator:
 
         candidate_tail = candidate
         lowered_candidate = candidate.lower()
-        for provider_prefix in ("openai:", "ollama:", "gemini:"):
+        for provider_prefix in ("openai:", "openrouter:", "ollama:", "gemini:"):
             if lowered_candidate.startswith(provider_prefix):
                 candidate_tail = candidate.split(":", 1)[1].strip()
                 break
@@ -13694,7 +13696,7 @@ class InternalMCPChatOrchestrator:
         elif ":" in candidate:
             provider_prefix, _, model_suffix = candidate.partition(":")
             provider_prefix = provider_prefix.strip().lower()
-            if provider_prefix in {"openai", "ollama", "gemini"}:
+            if provider_prefix in {"openai", "openrouter", "ollama", "gemini"}:
                 provider = provider_prefix
                 model = model_suffix.strip()
             elif candidate.lower().startswith("ft:"):
@@ -13950,7 +13952,7 @@ class InternalMCPChatOrchestrator:
         if ":" in raw and not raw.startswith("#V#"):
             provider, _, _model = raw.partition(":")
             provider_text = provider.strip().lower()
-            if provider_text in {"openai", "ollama", "gemini"}:
+            if provider_text in {"openai", "openrouter", "ollama", "gemini"}:
                 return provider_text
             if raw.lower().startswith("ft:"):
                 return "openai"
@@ -14984,7 +14986,7 @@ class InternalMCPChatOrchestrator:
                 if (
                     model_implied_provider
                     and model_implied_provider != default_provider
-                    and model_implied_provider in {"openai", "ollama", "gemini"}
+                    and model_implied_provider in {"openai", "openrouter", "ollama", "gemini"}
                 ):
                     requested_provider_client = model_implied_provider
                     client = get_llm_client(
@@ -15079,7 +15081,7 @@ class InternalMCPChatOrchestrator:
         if model:
             telemetry["model"] = model
 
-        if provider in {None, "", "openai", "ollama", "gemini"}:
+        if provider in {None, "", "openai", "openrouter", "ollama", "gemini"}:
             pass
         else:
             telemetry["error"] = "unsupported_provider"

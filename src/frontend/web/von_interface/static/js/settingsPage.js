@@ -17,8 +17,10 @@ import {
   loadOllamaHosts,
   populateModelDropdown,
   populateGeminiModelDropdown,
+  populateOpenRouterModelDropdown,
   populateOpenAIModelDropdown,
   renderGeminiModelOptions,
+  renderOpenRouterModelOptions,
   renderOpenAIModelOptions,
   populateOrganisationsDropdown,
   populatePeopleDropdown,
@@ -63,6 +65,8 @@ import {
   getEffectiveLocalModelPreference,
   getStoredOpenAiModelParameters,
   getStoredOpenAiSelectedModel,
+  getStoredOpenRouterModelParameters,
+  getStoredOpenRouterSelectedModel,
   normaliseModelParameters,
   normaliseLocalModelName,
   setLocalPremiumModelUseEnabled,
@@ -71,6 +75,8 @@ import {
   setStoredOllamaSelection,
   setStoredOpenAiModelParameters,
   setStoredOpenAiSelectedModel,
+  setStoredOpenRouterModelParameters,
+  setStoredOpenRouterSelectedModel,
   setStoredPremiumModelProvider,
 } from './utils/localModelPreferences.js';
 import {
@@ -147,6 +153,8 @@ let latestOpenAiModelProbe = null;
 let latestOpenAiModelParameterCapability = null;
 let latestGeminiModelProbe = null;
 let latestGeminiModelParameterCapability = null;
+let latestOpenRouterModelProbe = null;
+let latestOpenRouterModelParameterCapability = null;
 let openAiModelCostSummaryGeneration = 0;
 let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
@@ -366,6 +374,22 @@ const PREMIUM_PROVIDER_CONFIG = Object.freeze({
     testEndpoint: '/api/settings/gemini/test_model',
     apiSurface: 'interactions',
   }),
+  openrouter: Object.freeze({
+    label: 'OpenRouter',
+    envInputId: 'openrouterApiKeyEnvVar',
+    verifyButtonId: 'verifyOpenRouterApiKeyButton',
+    providerContainerId: 'openrouterProviderSettings',
+    modelsContainerId: 'openrouterModelsContainer',
+    modelSelectId: 'openrouterModelSelect',
+    testButtonId: 'testOpenRouterModelButton',
+    addButtonId: 'addOpenRouterToWorkflowPoolButton',
+    eligibilityStatusId: 'openrouterModelEligibilityStatus',
+    modelStatusId: 'openrouterModelStatusMessage',
+    providerStatusId: 'openrouterStatusMessage',
+    verifyEndpoint: '/api/settings/openrouter/verify',
+    testEndpoint: '/api/settings/openrouter/test_model',
+    apiSurface: 'chat_completions',
+  }),
 });
 
 function normalisePremiumProvider(value) {
@@ -382,12 +406,42 @@ function selectedPremiumProvider() {
     || 'openai';
 }
 
+function getStoredPremiumSelectedModel(provider) {
+  if (provider === 'gemini') return getStoredGeminiSelectedModel();
+  if (provider === 'openrouter') return getStoredOpenRouterSelectedModel();
+  return getStoredOpenAiSelectedModel();
+}
+
+function setStoredPremiumSelectedModel(provider, model) {
+  if (provider === 'gemini') setStoredGeminiSelectedModel(model);
+  else if (provider === 'openrouter') setStoredOpenRouterSelectedModel(model);
+  else setStoredOpenAiSelectedModel(model);
+}
+
+function renderPremiumModelOptions(provider, selectId, models, selectedModel) {
+  if (provider === 'gemini') {
+    renderGeminiModelOptions(selectId, models, selectedModel);
+  } else if (provider === 'openrouter') {
+    renderOpenRouterModelOptions(selectId, models, selectedModel);
+  } else {
+    renderOpenAIModelOptions(selectId, models, selectedModel);
+  }
+}
+
+async function populatePremiumModelDropdown(provider, selectId, selectedModel) {
+  if (provider === 'gemini') {
+    return populateGeminiModelDropdown(selectId, selectedModel);
+  }
+  if (provider === 'openrouter') {
+    return populateOpenRouterModelDropdown(selectId, selectedModel);
+  }
+  return populateOpenAIModelDropdown(selectId, selectedModel);
+}
+
 function selectedPremiumModelName(provider = selectedPremiumProvider()) {
   const config = PREMIUM_PROVIDER_CONFIG[provider];
   if (!config) return '';
-  const storedModel = provider === 'gemini'
-    ? getStoredGeminiSelectedModel()
-    : getStoredOpenAiSelectedModel();
+  const storedModel = getStoredPremiumSelectedModel(provider);
   return String(document.getElementById(config.modelSelectId)?.value || storedModel || '').trim();
 }
 
@@ -396,7 +450,7 @@ function getSettingsConcernModelSnapshot() {
   const premiumToggle = document.getElementById('enableOpenAiPremiumToggle');
   const premiumEnabled = premiumToggle
     ? !!premiumToggle.checked
-    : ['openai', 'gemini'].includes(localModelPreference.activeSource);
+    : ['openai', 'openrouter', 'gemini'].includes(localModelPreference.activeSource);
   const premiumProvider = selectedPremiumProvider();
   const premiumModel = selectedPremiumModelName(premiumProvider);
   const ollamaSelection = resolveOllamaSelection(false) || localModelPreference.ollamaSelection || null;
@@ -460,7 +514,7 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         description: 'Review language and concept-display preferences here, then move on to the model surface this browser should prefer.',
         actionLabel: 'Review model setup',
         actionTarget: 'premium-model-settings',
-        focusSelector: '#globalModelSelect, #premiumProviderSelect, #openaiModelSelect, #geminiModelSelect',
+        focusSelector: '#globalModelSelect, #premiumProviderSelect, #openaiModelSelect, #openrouterModelSelect, #geminiModelSelect',
         source: 'temporary-placeholder',
       };
     }
@@ -925,6 +979,7 @@ function resolveDisplayedProviderModels(settings) {
   const enabledLlms = Array.isArray(settings?.enabled_llms) ? settings.enabled_llms : [];
   let currentOllamaModel = null;
   let currentOpenAIModel = null;
+  let currentOpenRouterModel = null;
   let currentGeminiModel = null;
 
   for (const entry of enabledLlms) {
@@ -933,6 +988,8 @@ function resolveDisplayedProviderModels(settings) {
       currentOllamaModel = entry.model;
     } else if (entry.provider === 'openai' && entry.model && !currentOpenAIModel) {
       currentOpenAIModel = entry.model;
+    } else if (entry.provider === 'openrouter' && entry.model && !currentOpenRouterModel) {
+      currentOpenRouterModel = entry.model;
     } else if (entry.provider === 'gemini' && entry.model && !currentGeminiModel) {
       currentGeminiModel = entry.model;
     }
@@ -942,6 +999,8 @@ function resolveDisplayedProviderModels(settings) {
     currentOllamaModel = effectiveLlm.model;
   } else if (effectiveLlm?.provider === 'openai' && effectiveLlm.model) {
     currentOpenAIModel = effectiveLlm.model;
+  } else if (effectiveLlm?.provider === 'openrouter' && effectiveLlm.model) {
+    currentOpenRouterModel = effectiveLlm.model;
   } else if (effectiveLlm?.provider === 'gemini' && effectiveLlm.model) {
     currentGeminiModel = effectiveLlm.model;
   }
@@ -950,6 +1009,7 @@ function resolveDisplayedProviderModels(settings) {
     effectiveLlm,
     currentOllamaModel,
     currentOpenAIModel,
+    currentOpenRouterModel,
     currentGeminiModel,
   };
 }
@@ -1141,28 +1201,32 @@ function setInlineStatusMessage(element, text, tone = null) {
 }
 
 function getStoredPremiumModelParameters(provider) {
-  return provider === 'gemini'
-    ? getStoredGeminiModelParameters()
-    : getStoredOpenAiModelParameters();
+  if (provider === 'gemini') return getStoredGeminiModelParameters();
+  if (provider === 'openrouter') return getStoredOpenRouterModelParameters();
+  return getStoredOpenAiModelParameters();
 }
 
 function setStoredPremiumModelParameters(provider, parameters) {
   if (provider === 'gemini') {
     setStoredGeminiModelParameters(parameters);
+  } else if (provider === 'openrouter') {
+    setStoredOpenRouterModelParameters(parameters);
   } else {
     setStoredOpenAiModelParameters(parameters);
   }
 }
 
 function getLatestPremiumModelParameterCapability(provider) {
-  return provider === 'gemini'
-    ? latestGeminiModelParameterCapability
-    : latestOpenAiModelParameterCapability;
+  if (provider === 'gemini') return latestGeminiModelParameterCapability;
+  if (provider === 'openrouter') return latestOpenRouterModelParameterCapability;
+  return latestOpenAiModelParameterCapability;
 }
 
 function setLatestPremiumModelParameterCapability(provider, capability) {
   if (provider === 'gemini') {
     latestGeminiModelParameterCapability = capability;
+  } else if (provider === 'openrouter') {
+    latestOpenRouterModelParameterCapability = capability;
   } else {
     latestOpenAiModelParameterCapability = capability;
   }
@@ -1252,12 +1316,16 @@ async function refreshOpenAiReasoningEffortControls() {
 }
 
 function latestPremiumModelProbe(provider) {
-  return provider === 'gemini' ? latestGeminiModelProbe : latestOpenAiModelProbe;
+  if (provider === 'gemini') return latestGeminiModelProbe;
+  if (provider === 'openrouter') return latestOpenRouterModelProbe;
+  return latestOpenAiModelProbe;
 }
 
 function setLatestPremiumModelProbe(provider, probe) {
   if (provider === 'gemini') {
     latestGeminiModelProbe = probe;
+  } else if (provider === 'openrouter') {
+    latestOpenRouterModelProbe = probe;
   } else {
     latestOpenAiModelProbe = probe;
   }
@@ -1336,8 +1404,9 @@ function updatePremiumModelStatusMessageForProvider(provider) {
 
 function updatePremiumModelStatusMessages() {
   updateSelectedPremiumEligibilityControls();
-  updatePremiumModelStatusMessageForProvider('openai');
-  updatePremiumModelStatusMessageForProvider('gemini');
+  for (const provider of Object.keys(PREMIUM_PROVIDER_CONFIG)) {
+    updatePremiumModelStatusMessageForProvider(provider);
+  }
 }
 
 function updateOpenAiModelStatusMessage() {
@@ -1424,11 +1493,7 @@ async function handlePremiumModelSelectionChange(provider) {
   const model = normaliseLocalModelName(
     document.getElementById(config?.modelSelectId)?.value,
   ) || '';
-  if (provider === 'gemini') {
-    setStoredGeminiSelectedModel(model);
-  } else {
-    setStoredOpenAiSelectedModel(model);
-  }
+  setStoredPremiumSelectedModel(provider, model);
   invalidateSelectedOpenAiCostSummary();
   if (selectedPremiumProvider() === provider) {
     await refreshPremiumReasoningEffortControls(provider);
@@ -1494,11 +1559,7 @@ async function testSelectedPremiumModel(provider) {
     };
   }
 
-  if (provider === 'gemini') {
-    setStoredGeminiSelectedModel(selectedModel);
-  } else {
-    setStoredOpenAiSelectedModel(selectedModel);
-  }
+  setStoredPremiumSelectedModel(provider, selectedModel);
   setStoredPremiumModelParameters(provider, modelParameters);
   setInlineStatusMessage(statusEl, `Testing ${config.label} ${selectedModel}...`, null);
 
@@ -1544,6 +1605,10 @@ async function testSelectedOpenAiModel() {
 
 async function testSelectedGeminiModel() {
   return testSelectedPremiumModel('gemini');
+}
+
+async function testSelectedOpenRouterModel() {
+  return testSelectedPremiumModel('openrouter');
 }
 
 async function testSelectedOllamaModel() {
@@ -1946,6 +2011,10 @@ function selectedGeminiPoolEntry() {
   return selectedPremiumPoolEntry('gemini');
 }
 
+function selectedOpenRouterPoolEntry() {
+  return selectedPremiumPoolEntry('openrouter');
+}
+
 function isPersistedEffectiveModelAllowed(entry) {
   const canonical = buildCanonicalLlmEntry(entry);
   return Boolean(
@@ -2259,6 +2328,7 @@ function renderWorkflowModelPool() {
       loading.textContent = 'Scoped model settings are loading. Saving is unavailable until they are ready.';
       listEl.appendChild(loading);
       updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
+      updatePoolActionButton('addOpenRouterToWorkflowPoolButton', selectedOpenRouterPoolEntry());
       updatePoolActionButton('addGeminiToWorkflowPoolButton', selectedGeminiPoolEntry());
       updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
       updateScopedPrimaryActionButtons();
@@ -2324,6 +2394,7 @@ function renderWorkflowModelPool() {
   }
 
   updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
+  updatePoolActionButton('addOpenRouterToWorkflowPoolButton', selectedOpenRouterPoolEntry());
   updatePoolActionButton('addGeminiToWorkflowPoolButton', selectedGeminiPoolEntry());
   updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
   updateScopedPrimaryActionButtons();
@@ -4899,6 +4970,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('geminiModelSelect')?.addEventListener('change', () => {
     void handlePremiumModelSelectionChange('gemini');
   });
+  document.getElementById('openrouterModelSelect')?.addEventListener('change', () => {
+    void handlePremiumModelSelectionChange('openrouter');
+  });
   document.getElementById('openaiReasoningEffortSelect')?.addEventListener('change', async () => {
     const provider = selectedPremiumProvider();
     setStoredPremiumModelParameters(provider, readPremiumModelParametersFromUi(provider));
@@ -5042,14 +5116,21 @@ document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', (
 document.getElementById('verifyGeminiApiKeyButton')?.addEventListener('click', () => {
   verifyGeminiApiKey();
 });
+document.getElementById('verifyOpenRouterApiKeyButton')?.addEventListener('click', () => {
+  verifyOpenRouterApiKey();
+});
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
 document.getElementById('testGeminiModelButton')?.addEventListener('click', testSelectedGeminiModel);
+document.getElementById('testOpenRouterModelButton')?.addEventListener('click', testSelectedOpenRouterModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 document.getElementById('addOpenAiToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOpenAiPoolEntry());
 });
 document.getElementById('addGeminiToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedGeminiPoolEntry());
+});
+document.getElementById('addOpenRouterToWorkflowPoolButton')?.addEventListener('click', () => {
+  addOrUpdateWorkflowPoolEntry(selectedOpenRouterPoolEntry());
 });
 document.getElementById('addOllamaToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOllamaPoolEntry());
@@ -5370,6 +5451,7 @@ async function loadAndDisplaySettings() {
     const {
       effectiveLlm: displayedEffectiveLlm,
       currentOpenAIModel,
+      currentOpenRouterModel,
       currentGeminiModel,
     } = resolveDisplayedProviderModels(settings);
     currentEffectiveLlm = settings.effective_llm || settings.resolved_llm || null;
@@ -5381,13 +5463,16 @@ async function loadAndDisplaySettings() {
     const localModelPreference = getEffectiveLocalModelPreference();
     const currentOllamaModel = resolveOllamaDropdownSelectionValue(localModelPreference);
     const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
+    const preferredOpenRouterModel = currentOpenRouterModel || localModelPreference.openrouterModel || null;
     const preferredGeminiModel = currentGeminiModel || localModelPreference.geminiModel || null;
-    const premiumEnabled = ['openai', 'gemini'].includes(localModelPreference.activeSource);
+    const premiumEnabled = ['openai', 'openrouter', 'gemini'].includes(localModelPreference.activeSource);
     const preferredPremiumProvider = normalisePremiumProvider(
       localModelPreference.premiumProvider || localModelPreference.activeSource,
     )
       || normalisePremiumProvider(displayedEffectiveLlm?.provider)
-      || (currentGeminiModel && !currentOpenAIModel ? 'gemini' : 'openai');
+      || (currentOpenRouterModel && !currentOpenAIModel
+        ? 'openrouter'
+        : currentGeminiModel && !currentOpenAIModel ? 'gemini' : 'openai');
     const premiumProviderSelect = document.getElementById('premiumProviderSelect');
     if (premiumProviderSelect) premiumProviderSelect.value = preferredPremiumProvider;
     syncPremiumProviderPanels();
@@ -5425,6 +5510,15 @@ async function loadAndDisplaySettings() {
         await refreshPremiumReasoningEffortControls('gemini');
       } catch (error) {
         console.log('Could not directly load Gemini models, will need verification:', error.message);
+      }
+    } else if (preferredPremiumProvider === 'openrouter' && preferredOpenRouterModel) {
+      try {
+        await populateOpenRouterModelDropdown('openrouterModelSelect', preferredOpenRouterModel);
+        const container = document.getElementById('openrouterModelsContainer');
+        if (container) { container.style.display = 'block'; container.classList.remove('hidden'); }
+        await refreshPremiumReasoningEffortControls('openrouter');
+      } catch (error) {
+        console.log('Could not directly load OpenRouter models, will need verification:', error.message);
       }
     }
 
@@ -5575,6 +5669,10 @@ async function loadAndDisplaySettings() {
     if (geminiEnvVarInput && settings.gemini_api_key_env_var) {
       geminiEnvVarInput.value = settings.gemini_api_key_env_var;
     }
+    const openrouterEnvVarInput = document.getElementById('openrouterApiKeyEnvVar');
+    if (openrouterEnvVarInput && settings.openrouter_api_key_env_var) {
+      openrouterEnvVarInput.value = settings.openrouter_api_key_env_var;
+    }
     const openAiPremiumToggle = document.getElementById('enableOpenAiPremiumToggle');
     if (openAiPremiumToggle) {
       openAiPremiumToggle.checked = premiumEnabled;
@@ -5585,9 +5683,13 @@ async function loadAndDisplaySettings() {
     if (preferredGeminiModel) {
       setStoredGeminiSelectedModel(preferredGeminiModel);
     }
+    if (preferredOpenRouterModel) {
+      setStoredOpenRouterSelectedModel(preferredOpenRouterModel);
+    }
     setStoredPremiumModelProvider(preferredPremiumProvider);
     latestOpenAiModelProbe = null;
     latestGeminiModelProbe = null;
+    latestOpenRouterModelProbe = null;
     latestOllamaModelProbe = null;
     updateOpenAiModelStatusMessage();
     updateOllamaModelStatusMessage();
@@ -5770,7 +5872,11 @@ async function loadAndDisplaySettings() {
     if (await checkPremiumProviderEnvVar(preferredPremiumProvider)) {
       await verifyPremiumApiKey(
         preferredPremiumProvider,
-        preferredPremiumProvider === 'gemini' ? preferredGeminiModel : preferredOpenAiModel,
+        preferredPremiumProvider === 'gemini'
+          ? preferredGeminiModel
+          : preferredPremiumProvider === 'openrouter'
+            ? preferredOpenRouterModel
+            : preferredOpenAiModel,
       );
     }
 
@@ -6205,6 +6311,10 @@ export async function checkGeminiEnvVar() {
   return checkPremiumProviderEnvVar('gemini');
 }
 
+export async function checkOpenRouterEnvVar() {
+  return checkPremiumProviderEnvVar('openrouter');
+}
+
 async function verifyPremiumApiKey(providerName, savedModel = null) {
   const provider = normalisePremiumProvider(providerName) || 'openai';
   const config = PREMIUM_PROVIDER_CONFIG[provider];
@@ -6212,7 +6322,7 @@ async function verifyPremiumApiKey(providerName, savedModel = null) {
   const statusMessage = document.getElementById(config.providerStatusId);
   const modelsContainer = document.getElementById(config.modelsContainerId);
   const preferredModel = normaliseLocalModelName(savedModel)
-    || (provider === 'gemini' ? getStoredGeminiSelectedModel() : getStoredOpenAiSelectedModel())
+    || getStoredPremiumSelectedModel(provider)
     || null;
 
   setInlineStatusMessage(
@@ -6235,20 +6345,17 @@ async function verifyPremiumApiKey(providerName, savedModel = null) {
         modelsContainer.classList.remove('hidden');
       }
 
-      if (provider === 'gemini') {
-        renderGeminiModelOptions(config.modelSelectId, response.models || [], preferredModel);
-      } else {
-        renderOpenAIModelOptions(config.modelSelectId, response.models || [], preferredModel);
-      }
+      renderPremiumModelOptions(
+        provider,
+        config.modelSelectId,
+        response.models || [],
+        preferredModel,
+      );
       const selectedModel = normaliseLocalModelName(
         document.getElementById(config.modelSelectId)?.value,
       );
       if (selectedModel) {
-        if (provider === 'gemini') {
-          setStoredGeminiSelectedModel(selectedModel);
-        } else {
-          setStoredOpenAiSelectedModel(selectedModel);
-        }
+        setStoredPremiumSelectedModel(provider, selectedModel);
       }
       if (selectedPremiumProvider() === provider) {
         await refreshPremiumReasoningEffortControls(provider);
@@ -6262,11 +6369,11 @@ async function verifyPremiumApiKey(providerName, savedModel = null) {
   } catch (error) {
     // Fall back to the provider's direct model-list endpoint.
     try {
-      if (provider === 'gemini') {
-        await populateGeminiModelDropdown(config.modelSelectId, preferredModel);
-      } else {
-        await populateOpenAIModelDropdown(config.modelSelectId, preferredModel);
-      }
+      await populatePremiumModelDropdown(
+        provider,
+        config.modelSelectId,
+        preferredModel,
+      );
       setInlineStatusMessage(
         statusMessage,
         `Loaded the ${config.label} model list, but live verification failed. Test the selected model before enabling premium use.`,
@@ -6297,6 +6404,10 @@ async function verifyOpenAiApiKey(savedModel = null) {
 
 async function verifyGeminiApiKey(savedModel = null) {
   return verifyPremiumApiKey('gemini', savedModel);
+}
+
+async function verifyOpenRouterApiKey(savedModel = null) {
+  return verifyPremiumApiKey('openrouter', savedModel);
 }
 
 // Remove the old, separate save functions (saveGlobalModel, saveCurrentUser, saveOpenAISettings)

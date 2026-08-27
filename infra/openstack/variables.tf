@@ -562,14 +562,37 @@ variable "bootstrap_gemini_api_key_file" {
   }
 }
 
+variable "bootstrap_openrouter_api_key" {
+  type        = string
+  description = "Optional inline OpenRouter API key for managed bootstrap secret-file injection."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_openrouter_api_key == null || trimspace(var.bootstrap_openrouter_api_key) != ""
+    error_message = "bootstrap_openrouter_api_key must be null or non-empty."
+  }
+}
+
+variable "bootstrap_openrouter_api_key_file" {
+  type        = string
+  description = "Path used by runtime OPENROUTER_API_KEY_FILE."
+  default     = "/etc/von/secrets/openrouter_api_key"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_openrouter_api_key_file))
+    error_message = "bootstrap_openrouter_api_key_file must be an absolute Linux path."
+  }
+}
+
 variable "bootstrap_default_llm_provider" {
   type        = string
   description = "Optional provider to seed as the scoped cloud default LLM setting."
   default     = null
 
   validation {
-    condition     = var.bootstrap_default_llm_provider == null || contains(["openai", "gemini", "ollama"], lower(trimspace(var.bootstrap_default_llm_provider)))
-    error_message = "bootstrap_default_llm_provider must be null, openai, gemini, or ollama."
+    condition     = var.bootstrap_default_llm_provider == null || contains(["openai", "openrouter", "gemini", "ollama"], lower(trimspace(var.bootstrap_default_llm_provider)))
+    error_message = "bootstrap_default_llm_provider must be null, openai, openrouter, gemini, or ollama."
   }
 }
 
