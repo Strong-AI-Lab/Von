@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import builtins
+import os
 from typing import Any
 
 import pytest
 
 from src.backend.db.mongo_client import close_connection, get_db
 from src.backend.services import concept_service
+from src.backend.services.feature_flags import (
+    get_event_workflow_integration_enabled,
+    get_workflow_discovery_cache_invalidation_enabled,
+)
 from src.backend.services.workflow_vontology_materialisation_helpers import (
     suspend_event_workflow_integration,
 )
@@ -81,3 +86,27 @@ def test_bulk_materialisation_skips_event_and_discovery_imports(
     assert created["concept_id"] == "#V#bulk_materialisation_guard_concept"
     assert (updated.get("attributes") or {}).get("guard_checked") is True
     assert blocked_attempts == []
+
+
+def test_bulk_materialisation_suppression_is_context_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", raising=False)
+    monkeypatch.delenv(
+        "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE",
+        raising=False,
+    )
+    before = dict(os.environ)
+
+    assert get_event_workflow_integration_enabled(default=True) is True
+    assert get_workflow_discovery_cache_invalidation_enabled(default=True) is True
+    with suspend_event_workflow_integration():
+        assert get_event_workflow_integration_enabled(default=True) is False
+        assert get_workflow_discovery_cache_invalidation_enabled(default=True) is False
+        with suspend_event_workflow_integration():
+            assert get_event_workflow_integration_enabled(default=True) is False
+        assert get_event_workflow_integration_enabled(default=True) is False
+
+    assert get_event_workflow_integration_enabled(default=True) is True
+    assert get_workflow_discovery_cache_invalidation_enabled(default=True) is True
+    assert dict(os.environ) == before

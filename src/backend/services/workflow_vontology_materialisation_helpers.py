@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from collections.abc import Mapping, Sequence
-from collections.abc import Iterator
 from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 from . import concept_service
+from .feature_flags import suppress_event_workflow_launches
 
 _WORKFLOW_PARENT_ID_SANITISER = re.compile(r"[^a-z0-9]+")
 
@@ -131,30 +130,15 @@ def suspend_event_workflow_integration() -> Iterator[None]:
     authoritative invalidation after publication completes.
     """
 
-    prior_event = os.environ.get("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE")
-    prior_discovery = os.environ.get(
-        "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"
+    from .relationship_extent_index_service import (
+        defer_relationship_extent_index_sync,
     )
-    os.environ["VON_EVENT_WORKFLOW_INTEGRATION_ENABLE"] = "0"
-    os.environ["VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"] = "0"
-    try:
-        from .relationship_extent_index_service import (
-            defer_relationship_extent_index_sync,
-        )
 
-        with defer_relationship_extent_index_sync():
-            yield
-    finally:
-        if prior_event is None:
-            os.environ.pop("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", None)
-        else:
-            os.environ["VON_EVENT_WORKFLOW_INTEGRATION_ENABLE"] = prior_event
-        if prior_discovery is None:
-            os.environ.pop("VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE", None)
-        else:
-            os.environ["VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"] = (
-                prior_discovery
-            )
+    with (
+        suppress_event_workflow_launches("workflow_vontology_materialisation"),
+        defer_relationship_extent_index_sync(),
+    ):
+        yield
 
 
 __all__ = [
