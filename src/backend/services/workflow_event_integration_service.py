@@ -10,11 +10,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from contextlib import contextmanager
-from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
-from typing import Any, Iterator, Mapping
+from typing import Any, Mapping
 
 from ..workflows.durable.models import EventWorkflowBinding
 from ..workflows.durable.startup import get_instance_manager
@@ -35,8 +33,12 @@ from .episode_evaluation_workflow_contracts import (
     EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
 )
 from .feature_flags import (
+    current_event_workflow_launch_suppression_reason,
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
+)
+from .feature_flags import (
+    suppress_event_workflow_launches as suppress_event_workflow_launches,
 )
 from .namespace_service import (
     coerce_namespace,
@@ -72,43 +74,6 @@ FILE_COPY_UPLOAD_EVENT_BINDING_MANAGED_BY = (
 )
 
 _DEFAULT_BINDINGS_ENSURED = False
-_EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS: ContextVar[tuple[str, ...]] = ContextVar(
-    "event_workflow_launch_suppression_reasons",
-    default=(),
-)
-
-
-def current_event_workflow_launch_suppression_reason() -> str | None:
-    """Return the innermost request-local event-launch suppression reason."""
-
-    reasons = _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.get()
-    return reasons[-1] if reasons else None
-
-
-def event_workflow_launches_suppressed() -> bool:
-    """Return whether event-driven workflow launch is suppressed in this context."""
-
-    return bool(_EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.get())
-
-
-@contextmanager
-def suppress_event_workflow_launches(reason: str) -> Iterator[None]:
-    """Suppress event-workflow fan-out within one nested execution context.
-
-    The context is copied into internal MCP handler workers by the bounded
-    transport, while independent threads retain their own default. Resetting
-    the token preserves an outer suppression reason when scopes are nested.
-    """
-
-    cleaned_reason = str(reason or "").strip() or "unspecified"
-    current_reasons = _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.get()
-    token = _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.set(
-        (*current_reasons, cleaned_reason)
-    )
-    try:
-        yield
-    finally:
-        _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.reset(token)
 
 
 def _clean_text(value: Any) -> str | None:

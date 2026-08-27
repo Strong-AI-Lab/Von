@@ -1,8 +1,43 @@
 import os
-
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 _TRUTHY = {"1", "true", "yes", "y", "on"}
 _FALSY = {"0", "false", "no", "n", "off"}
+
+_EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS: ContextVar[tuple[str, ...]] = ContextVar(
+    "event_workflow_launch_suppression_reasons",
+    default=(),
+)
+
+
+def current_event_workflow_launch_suppression_reason() -> str | None:
+    """Return the innermost request-local event-launch suppression reason."""
+
+    reasons = _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.get()
+    return reasons[-1] if reasons else None
+
+
+def event_workflow_launches_suppressed() -> bool:
+    """Return whether event-driven workflow launch is suppressed in this context."""
+
+    return bool(_EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.get())
+
+
+@contextmanager
+def suppress_event_workflow_launches(reason: str) -> Iterator[None]:
+    """Suppress event-workflow fan-out within one nested execution context."""
+
+    cleaned_reason = str(reason or "").strip() or "unspecified"
+    current_reasons = _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.get()
+    token = _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.set(
+        (*current_reasons, cleaned_reason)
+    )
+    try:
+        yield
+    finally:
+        _EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REASONS.reset(token)
 
 
 def _read_env_flag(name: str, *, default: bool) -> bool:
@@ -40,6 +75,8 @@ def get_durable_workflows_enabled(*, default: bool = False) -> bool:
 def get_event_workflow_integration_enabled(*, default: bool = True) -> bool:
     """Return whether event -> workflow integration is enabled."""
 
+    if event_workflow_launches_suppressed():
+        return False
     return _read_env_flag("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", default=default)
 
 
@@ -54,15 +91,8 @@ def get_workflow_discovery_cache_invalidation_enabled(
     avoid coupling ordinary feature-flag reads to workflow service start-up.
     """
 
-    try:
-        from .workflow_event_integration_service import (
-            event_workflow_launches_suppressed,
-        )
-
-        if event_workflow_launches_suppressed():
-            return False
-    except ImportError:
-        pass
+    if event_workflow_launches_suppressed():
+        return False
 
     return _read_env_flag(
         "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE",
