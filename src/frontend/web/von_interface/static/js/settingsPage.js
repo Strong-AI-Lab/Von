@@ -1,4 +1,4 @@
-import { getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
+import { ensureUniqueWindowSessionId, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
   clearBackgroundTaskHistory,
   formatBackgroundTaskSummary,
@@ -45,6 +45,8 @@ import {
 import {
   getSessionScopedOrgContext,
   getSessionScopedNamespace,
+  hasSessionPersonalOrgContext,
+  setSessionScopedOrgContext,
   setSessionScopedNamespace,
 } from './utils/sessionScopedStorage.js';
 import {
@@ -88,7 +90,8 @@ import {
 } from './utils/workflowCapabilityStatusCoordinator.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
-function buildSettingsFetchHeaders(extraHeaders = {}) {
+async function buildSettingsFetchHeaders(extraHeaders = {}) {
+  await ensureUniqueWindowSessionId?.();
   return {
     [WINDOW_SESSION_HEADER]: getWindowSessionId(),
     ...extraHeaders
@@ -1951,7 +1954,7 @@ async function reloadScopedModelSettings({
   try {
     const response = await fetchFn(settingsUrl, {
       cache: 'no-store',
-      headers: buildSettingsFetchHeaders(),
+      headers: await buildSettingsFetchHeaders(),
     });
     if (!response.ok) {
       throw new Error(`Failed to fetch scoped model settings: ${response.statusText || response.status}`);
@@ -2115,7 +2118,7 @@ async function refreshSelectedOpenAiCostSummary() {
   try {
     const response = await fetch(url, {
       cache: 'no-store',
-      headers: buildSettingsFetchHeaders(),
+      headers: await buildSettingsFetchHeaders(),
     });
     if (response.ok) summary = await response.json();
   } catch (_) { /* unavailable */ }
@@ -2927,7 +2930,7 @@ async function _fetchSessionContextForRole() {
   try {
     const resp = await fetch('/von/api/session/context', {
       cache: 'no-cache',
-      headers: buildSettingsFetchHeaders()
+      headers: await buildSettingsFetchHeaders()
     });
     if (!resp.ok) return null;
     return await resp.json();
@@ -2940,7 +2943,7 @@ async function fetchSettingsAuthStatus() {
   try {
     const resp = await fetch('/von/api/auth/status', {
       cache: 'no-cache',
-      headers: buildSettingsFetchHeaders()
+      headers: await buildSettingsFetchHeaders()
     });
     if (!resp.ok) return null;
     return await resp.json();
@@ -4598,6 +4601,9 @@ window.addEventListener('beforeunload', () => {
 });
 
 function getStoredJson(key) {
+  if (key === LS_ORG_KEY) {
+    return getSessionScopedOrgContext();
+  }
   // JVNAUTOSCI-1011: sessionStorage (per-window) first, localStorage fallback
   try {
     const sessionVal = sessionStorage.getItem(key);
@@ -4606,6 +4612,10 @@ function getStoredJson(key) {
   } catch { return null; }
 }
 function setStoredJson(key, value) {
+  if (key === LS_ORG_KEY) {
+    setSessionScopedOrgContext(value);
+    return;
+  }
   // JVNAUTOSCI-1011: Write to both sessionStorage (window-scoped) and localStorage (persistent)
   try {
     if (value == null) {
@@ -5388,7 +5398,7 @@ async function loadAndDisplaySettings() {
 
     const response = await fetch(settingsUrl, {
       cache: 'no-store',
-      headers: buildSettingsFetchHeaders(),
+      headers: await buildSettingsFetchHeaders(),
     });
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
@@ -5409,7 +5419,8 @@ async function loadAndDisplaySettings() {
     const bootstrapOrg = resolveBrowserBootstrapOrganisationContext({
       settings,
       sessionContext,
-      storedOrganisation: storedOrg
+      storedOrganisation: storedOrg,
+      explicitPersonal: hasSessionPersonalOrgContext(),
     });
     if (bootstrapOrg) {
       setStoredJson(LS_ORG_KEY, bootstrapOrg);
@@ -5419,7 +5430,8 @@ async function loadAndDisplaySettings() {
       settings,
       sessionContext,
       userContext: bootstrapUser,
-      organisationContext: bootstrapOrg
+      organisationContext: bootstrapOrg,
+      explicitPersonal: hasSessionPersonalOrgContext(),
     });
     try {
       if (bootstrapNamespace) {
@@ -5587,10 +5599,10 @@ async function loadAndDisplaySettings() {
             const orgData = { id: null, concept_id: orgId, name: resolvedName };
             // Update both storages so footer reads correct value immediately
             setStoredJson(LS_ORG_KEY, orgData);
-            try { window.parent?.sessionStorage?.setItem('von_current_org', JSON.stringify(orgData)); } catch { }
+            setSessionScopedOrgContext(orgData);
           } else {
             setStoredJson(LS_ORG_KEY, null);
-            try { window.parent?.sessionStorage?.removeItem('von_current_org'); } catch { }
+            setSessionScopedOrgContext(null);
           }
         } catch { }
         if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
@@ -6087,7 +6099,7 @@ async function saveAllSettings({
 
     const response = await fetch('/api/settings/', {
       method: 'POST',
-      headers: buildSettingsFetchHeaders({ 'Content-Type': 'application/json' }),
+      headers: await buildSettingsFetchHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(settings),
     });
     const payload = await response.json().catch(() => ({}));
@@ -6417,7 +6429,7 @@ export async function loadSettings() {
   try {
     const response = await fetch('/api/settings/', {
       cache: 'no-store',
-      headers: buildSettingsFetchHeaders(),
+      headers: await buildSettingsFetchHeaders(),
     });
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
@@ -6433,7 +6445,7 @@ export async function saveSettings(settings) {
   try {
     const response = await fetch('/api/settings/', {
       method: 'POST',
-      headers: buildSettingsFetchHeaders({
+      headers: await buildSettingsFetchHeaders({
         'Content-Type': 'application/json'
       }),
       body: JSON.stringify(settings)

@@ -16,7 +16,19 @@ const KEYS = {
     NAMESPACE: 'current_user_namespace',
     NAMESPACE_LEGACY: 'von_namespace',
     ORG_SWITCHING: 'von_org_switching',
+    ORG_SELECTION: 'von_org_selection',
 };
+
+const ORG_SELECTION_PERSONAL = 'personal';
+const ORG_SELECTION_ORGANISATION = 'organisation';
+
+export function hasSessionPersonalOrgContext() {
+    try {
+        return sessionStorage.getItem(KEYS.ORG_SELECTION) === ORG_SELECTION_PERSONAL;
+    } catch {
+        return false;
+    }
+}
 
 function readJsonFromStorage(storage, key) {
     try {
@@ -63,11 +75,14 @@ export function deriveNamespaceFromStoredContext() {
     const userSlug = conceptIdToNamespaceSlug(storedUser?.concept_id);
     if (!userSlug) return '';
 
-    const storedOrg =
-        readJsonFromStorage(session, KEYS.CURRENT_ORG)
-        || readJsonFromStorage(local, KEYS.CURRENT_ORG)
-        || readJsonFromStorage(session, KEYS.ORG_CONTEXT)
-        || readJsonFromStorage(local, KEYS.ORG_CONTEXT);
+    const storedOrg = hasSessionPersonalOrgContext()
+        ? null
+        : (
+            readJsonFromStorage(session, KEYS.CURRENT_ORG)
+            || readJsonFromStorage(local, KEYS.CURRENT_ORG)
+            || readJsonFromStorage(session, KEYS.ORG_CONTEXT)
+            || readJsonFromStorage(local, KEYS.ORG_CONTEXT)
+        );
     const orgSlug = conceptIdToNamespaceSlug(storedOrg?.concept_id);
 
     return orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
@@ -81,6 +96,17 @@ function resolvePreferredNamespaceFromStorage() {
     const sessionLegacyNamespace = readTrimmedStorageValue(session, KEYS.NAMESPACE_LEGACY);
     const localLegacyNamespace = readTrimmedStorageValue(local, KEYS.NAMESPACE_LEGACY);
     const derivedNamespace = deriveNamespaceFromStoredContext();
+    if (hasSessionPersonalOrgContext()) {
+        // An explicit Personal selection is a per-tab value, not absence of a
+        // value. Never inherit another tab's organisation-scoped namespace
+        // from shared localStorage.
+        if (derivedNamespace) {
+            return derivedNamespace;
+        }
+        return [sessionNamespace, sessionLegacyNamespace]
+            .find((candidate) => candidate && !isOrgScopedNamespace(candidate))
+            || '';
+    }
     const storedCandidates = [
         sessionNamespace,
         localNamespace,
@@ -133,6 +159,10 @@ function repairPrimaryNamespaceStorage(namespace) {
  * @returns {Object|null} Parsed org object with id, concept_id, name, namespace, or null
  */
 export function getSessionScopedOrgContext() {
+    if (hasSessionPersonalOrgContext()) {
+        return null;
+    }
+
     // Try von_current_org from sessionStorage first
     try {
         const sessionOrg = sessionStorage.getItem(KEYS.CURRENT_ORG);
@@ -206,10 +236,17 @@ export function buildNamespaceScopedStorageKey(prefix, namespace = null) {
 export function setSessionScopedOrgContext(orgData) {
     try {
         if (orgData == null) {
+            // Preserve Personal as an explicit per-tab choice. Without this
+            // tombstone, a later organisation selection in another tab would
+            // leak back through the shared localStorage compatibility path.
+            sessionStorage.setItem(KEYS.ORG_SELECTION, ORG_SELECTION_PERSONAL);
             sessionStorage.removeItem(KEYS.CURRENT_ORG);
+            sessionStorage.removeItem(KEYS.ORG_CONTEXT);
             localStorage.removeItem(KEYS.CURRENT_ORG);
+            localStorage.removeItem(KEYS.ORG_CONTEXT);
         } else {
             const json = JSON.stringify(orgData);
+            sessionStorage.setItem(KEYS.ORG_SELECTION, ORG_SELECTION_ORGANISATION);
             sessionStorage.setItem(KEYS.CURRENT_ORG, json);
             localStorage.setItem(KEYS.CURRENT_ORG, json);
         }
@@ -238,7 +275,8 @@ export function setSessionScopedNamespace(namespace) {
  */
 export function hasSessionOrgContext() {
     try {
-        return !!(sessionStorage.getItem(KEYS.CURRENT_ORG) || sessionStorage.getItem(KEYS.ORG_CONTEXT));
+        return hasSessionPersonalOrgContext()
+            || !!(sessionStorage.getItem(KEYS.CURRENT_ORG) || sessionStorage.getItem(KEYS.ORG_CONTEXT));
     } catch {
         return false;
     }
@@ -265,12 +303,18 @@ export function syncOrgContextFromLocalStorage() {
 
     try {
         const lsOrg = localStorage.getItem(KEYS.CURRENT_ORG);
-        if (lsOrg) sessionStorage.setItem(KEYS.CURRENT_ORG, lsOrg);
+        if (lsOrg) {
+            sessionStorage.setItem(KEYS.CURRENT_ORG, lsOrg);
+            sessionStorage.setItem(KEYS.ORG_SELECTION, ORG_SELECTION_ORGANISATION);
+        }
     } catch { /* ignore */ }
 
     try {
         const lsCtx = localStorage.getItem(KEYS.ORG_CONTEXT);
-        if (lsCtx) sessionStorage.setItem(KEYS.ORG_CONTEXT, lsCtx);
+        if (lsCtx) {
+            sessionStorage.setItem(KEYS.ORG_CONTEXT, lsCtx);
+            sessionStorage.setItem(KEYS.ORG_SELECTION, ORG_SELECTION_ORGANISATION);
+        }
     } catch { /* ignore */ }
 }
 
@@ -292,6 +336,7 @@ export function clearAllOrgContext() {
         sessionStorage.removeItem(KEYS.NAMESPACE);
         sessionStorage.removeItem(KEYS.NAMESPACE_LEGACY);
         sessionStorage.removeItem(KEYS.ORG_SWITCHING);
+        sessionStorage.removeItem(KEYS.ORG_SELECTION);
         localStorage.removeItem(KEYS.CURRENT_ORG);
         localStorage.removeItem(KEYS.ORG_CONTEXT);
         localStorage.removeItem(KEYS.NAMESPACE);
@@ -301,4 +346,3 @@ export function clearAllOrgContext() {
 
 // Export keys for direct access if needed (e.g., for specific checks)
 export { KEYS as STORAGE_KEYS };
-

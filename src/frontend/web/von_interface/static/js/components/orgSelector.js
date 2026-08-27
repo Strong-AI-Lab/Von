@@ -15,6 +15,11 @@ import {
     clearRetryableLoadState,
     describeRetryableLoadFailure,
 } from '../utils/retryableLoadState.js';
+import {
+    getSessionScopedOrgContext,
+    hasSessionPersonalOrgContext,
+    setSessionScopedOrgContext,
+} from '../utils/sessionScopedStorage.js';
 
 // JVNAUTOSCI-1011: Switch to sessionStorage for window-scoped org context
 const SS_ORG_CONTEXT = 'von_org_context';
@@ -114,19 +119,17 @@ export async function switchOrganisation(orgConceptId, orgName = null) {
                 // JVNAUTOSCI-1011: Store in sessionStorage for window-scoped context
                 sessionStorage.setItem(SS_ORG_CONTEXT, JSON.stringify(orgData));
                 sessionStorage.setItem(SS_ORG_ROLE, response.role || 'member');
-                sessionStorage.setItem(SS_CURRENT_ORG, JSON.stringify(currentOrgData));
+                setSessionScopedOrgContext(currentOrgData);
 
                 // Also store in localStorage for persistence across restarts/new windows
                 localStorage.setItem(LS_ORG_CONTEXT, JSON.stringify(orgData));
                 localStorage.setItem(LS_ORG_ROLE, response.role || 'member');
-                localStorage.setItem(SS_CURRENT_ORG, JSON.stringify(currentOrgData));
             } else {
                 sessionStorage.removeItem(SS_ORG_CONTEXT);
                 sessionStorage.removeItem(SS_ORG_ROLE);
-                sessionStorage.removeItem(SS_CURRENT_ORG);
                 localStorage.removeItem(LS_ORG_CONTEXT);
                 localStorage.removeItem(LS_ORG_ROLE);
-                localStorage.removeItem(SS_CURRENT_ORG);
+                setSessionScopedOrgContext(null);
             }
 
             if (response.namespace) {
@@ -259,22 +262,7 @@ export async function renderOrgSelector(containerId) {
  * falling back to localStorage for backward compatibility
  */
 export function getStoredOrgContext() {
-    // Try sessionStorage first (window-scoped)
-    try {
-        const sessionStored = sessionStorage.getItem(SS_ORG_CONTEXT);
-        if (sessionStored) {
-            return JSON.parse(sessionStored);
-        }
-    } catch {
-        // Fall through to localStorage
-    }
-    // Fallback to localStorage for backward compatibility
-    try {
-        const stored = localStorage.getItem(LS_ORG_CONTEXT);
-        return stored ? JSON.parse(stored) : null;
-    } catch {
-        return null;
-    }
+    return getSessionScopedOrgContext();
 }
 
 /**
@@ -282,6 +270,9 @@ export function getStoredOrgContext() {
  * JVNAUTOSCI-1011: Now reads from sessionStorage first
  */
 export function getStoredOrgRole() {
+    if (hasSessionPersonalOrgContext()) {
+        return null;
+    }
     // Try sessionStorage first
     const sessionRole = sessionStorage.getItem(SS_ORG_ROLE);
     if (sessionRole) {

@@ -89,8 +89,7 @@ def app_client(monkeypatch):
             "organisation_concept_id": organisation_concept_id,
             "role": (
                 "admin"
-                if organisation_concept_id
-                == "#V#university_of_auckland_strong_ai_lab"
+                if organisation_concept_id == "#V#university_of_auckland_strong_ai_lab"
                 else "member"
             ),
         },
@@ -360,12 +359,12 @@ class TestSetChatSessionUsesWindowContext:
         assert resp_home.status_code == 200
 
         # Verify each window queried its own namespace
-        assert any(
-            "strong_ai_lab" in ns for ns in lab_namespaces
-        ), f"Lab should query lab namespace: {lab_namespaces}"
-        assert any(
-            "household" in ns for ns in home_namespaces
-        ), f"Home should query household namespace: {home_namespaces}"
+        assert any("strong_ai_lab" in ns for ns in lab_namespaces), (
+            f"Lab should query lab namespace: {lab_namespaces}"
+        )
+        assert any("household" in ns for ns in home_namespaces), (
+            f"Home should query household namespace: {home_namespaces}"
+        )
 
 
 class TestCreateChatSessionUsesWindowContext:
@@ -459,8 +458,9 @@ class TestCreateChatSessionUsesWindowContext:
         monkeypatch.setattr(
             chat_history_service,
             "has_chat_history_session",
-            lambda user_id, session_id, namespace=None: session_id
-            == payload["session_id"],
+            lambda user_id, session_id, namespace=None: (
+                session_id == payload["session_id"]
+            ),
         )
 
         import src.backend.services.shared_conversation_service as shared_conversation_service
@@ -848,67 +848,106 @@ def test_cross_user_window_token_cannot_read_or_replace_org_scope(app_client):
     assert preserved.user_id == "#V#owner"
     assert preserved.organisation_concept_id == "secret_org"
 
-    def test_get_effective_context_falls_back_to_flask(self):
-        """get_effective_context should fall back to Flask session when no window session."""
-        from src.backend.services.window_session_context_service import (
-            get_effective_context,
+
+def test_get_effective_context_falls_back_to_flask():
+    """No window selector retains the legacy Flask-session compatibility path."""
+    from src.backend.services.window_session_context_service import (
+        get_effective_context,
+    )
+
+    flask_session = {
+        "organisation_concept_id": "flask_org",
+        "namespace": "#V#user_1@flask_org",
+        "role_in_org": "member",
+    }
+
+    effective = get_effective_context(None, flask_session, "user_1")
+
+    assert effective["organisation_id"] == "flask_org"
+    assert effective["namespace"] == "#V#user_1@flask_org"
+    assert effective["role"] == "member"
+    assert effective["source"] == "flask_session"
+
+
+def test_get_effective_context_unknown_window_falls_back_in_compatibility_mode():
+    from src.backend.services.window_session_context_service import (
+        get_effective_context,
+    )
+
+    flask_session = {
+        "organisation_concept_id": "flask_org",
+        "namespace": "#V#user_1@flask_org",
+        "role_in_org": "member",
+    }
+
+    effective = get_effective_context("unknown_window_id", flask_session, "user_1")
+
+    assert effective["organisation_id"] == "flask_org"
+    assert effective["source"] == "flask_session"
+
+
+def test_get_effective_context_unknown_window_fails_closed_in_strict_mode():
+    from src.backend.services.window_session_context_service import (
+        WindowSessionContextUnavailable,
+        get_effective_context,
+    )
+
+    with pytest.raises(WindowSessionContextUnavailable):
+        get_effective_context(
+            "unknown_strict_window",
+            {
+                "organisation_concept_id": "wrong_flask_org",
+                "namespace": "#V#user_1@wrong_flask_org",
+            },
+            "user_1",
+            require_known_window=True,
         )
 
-        flask_session = {
-            "organisation_concept_id": "flask_org",
-            "namespace": "#V#user_1@flask_org",
-            "role_in_org": "member",
-        }
 
-        # No window session
-        effective = get_effective_context(None, flask_session, "user_1")
+def test_get_effective_context_ignores_partial_window_scope_in_compatibility_mode():
+    """A partial window entry should not erase richer Flask org scope."""
+    from src.backend.services.window_session_context_service import (
+        get_effective_context,
+        get_window_session_store,
+    )
 
-        assert effective["organisation_id"] == "flask_org"
-        assert effective["namespace"] == "#V#user_1@flask_org"
-        assert effective["role"] == "member"
-        assert effective["source"] == "flask_session"
+    store = get_window_session_store()
+    store.delete("partial_window")
+    partial_ctx = store.get_or_create("partial_window", user_id="user_1")
+    partial_ctx.chat_session_id = "chat_123"
+    store.set(partial_ctx)
 
-    def test_get_effective_context_unknown_window_falls_back(self):
-        """get_effective_context should fall back when window session ID is unknown."""
-        from src.backend.services.window_session_context_service import (
-            get_effective_context,
+    flask_session = {
+        "organisation_concept_id": "flask_org",
+        "namespace": "#V#user_1@flask_org",
+        "role_in_org": "member",
+        "session_id": "flask_chat",
+    }
+
+    effective = get_effective_context("partial_window", flask_session, "user_1")
+
+    assert effective["organisation_id"] == "flask_org"
+    assert effective["namespace"] == "#V#user_1@flask_org"
+    assert effective["role"] == "member"
+    assert effective["chat_session_id"] == "chat_123"
+    assert effective["source"] == "flask_session"
+
+
+def test_get_effective_context_partial_window_fails_closed_in_strict_mode():
+    from src.backend.services.window_session_context_service import (
+        WindowSessionContextUnavailable,
+        get_effective_context,
+        get_window_session_store,
+    )
+
+    store = get_window_session_store()
+    store.delete("strict_partial_window")
+    store.get_or_create("strict_partial_window", user_id="user_1")
+
+    with pytest.raises(WindowSessionContextUnavailable):
+        get_effective_context(
+            "strict_partial_window",
+            {"namespace": "#V#user_1@wrong_org"},
+            "user_1",
+            require_known_window=True,
         )
-
-        flask_session = {
-            "organisation_concept_id": "flask_org",
-            "namespace": "#V#user_1@flask_org",
-            "role_in_org": "member",
-        }
-
-        # Unknown window session ID
-        effective = get_effective_context("unknown_window_id", flask_session, "user_1")
-
-        assert effective["organisation_id"] == "flask_org"
-        assert effective["source"] == "flask_session"
-
-    def test_get_effective_context_ignores_partial_window_scope(self):
-        """A partial window entry should not erase richer Flask org scope."""
-        from src.backend.services.window_session_context_service import (
-            get_effective_context,
-            get_window_session_store,
-        )
-
-        store = get_window_session_store()
-        partial_ctx = store.get_or_create("partial_window", user_id="user_1")
-        partial_ctx.chat_session_id = "chat_123"
-        store.set(partial_ctx)
-
-        flask_session = {
-            "organisation_concept_id": "flask_org",
-            "namespace": "#V#user_1@flask_org",
-            "role_in_org": "member",
-            "session_id": "flask_chat",
-        }
-
-        effective = get_effective_context("partial_window", flask_session, "user_1")
-
-        assert effective["organisation_id"] == "flask_org"
-        assert effective["namespace"] == "#V#user_1@flask_org"
-        assert effective["role"] == "member"
-        assert effective["chat_session_id"] == "chat_123"
-        assert effective["source"] == "flask_session"

@@ -5,45 +5,54 @@
 // This allows different windows to have different organisation contexts without
 // interfering with each other.
 
-const WINDOW_SESSION_KEY = 'von_window_session_id';
 const WINDOW_SESSION_HEADER = 'X-Von-Window-Session';
 
 import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
 import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
+import {
+  createWindowSessionIdentityCoordinator,
+  WINDOW_SESSION_KEY
+} from './utils/windowSessionIdentity.js';
+
+const windowSessionIdentityCoordinator = createWindowSessionIdentityCoordinator();
 
 /**
  * Get or generate a unique window session ID.
  * This ID is stored in sessionStorage (window-scoped, not shared across tabs).
  */
 function getWindowSessionId() {
-  let sessionId = sessionStorage.getItem(WINDOW_SESSION_KEY);
-  if (!sessionId) {
-    // Generate a new UUID-like session ID
-    const randomId =
-      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-        ? crypto.randomUUID().replace(/-/g, '')
-        : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-    sessionId = 'ws_' + randomId;
-    sessionStorage.setItem(WINDOW_SESSION_KEY, sessionId);
-    console.debug('[windowSession] Generated new window session:', sessionId);
-  }
-  return sessionId;
+  return windowSessionIdentityCoordinator.getWindowSessionId();
+}
+
+/**
+ * Resolve copied sessionStorage IDs before the tab's first actor-scoped call.
+ * Existing tabs retain their ID; only a newly probing colliding document
+ * rotates to a fresh server window context.
+ */
+async function ensureUniqueWindowSessionId() {
+  return windowSessionIdentityCoordinator.ensureUniqueWindowSessionId();
 }
 
 /**
  * Builds the standard headers object for fetch requests.
  * Includes Content-Type and the window session header.
  */
-function buildHeaders(extraHeaders = {}) {
+async function buildHeaders(extraHeaders = {}) {
+  const windowSessionId = await ensureUniqueWindowSessionId();
   return {
     'Content-Type': 'application/json',
-    [WINDOW_SESSION_HEADER]: getWindowSessionId(),
+    [WINDOW_SESSION_HEADER]: windowSessionId,
     ...extraHeaders
   };
 }
 
 // Expose for debugging/testing
-export { getWindowSessionId, WINDOW_SESSION_HEADER, WINDOW_SESSION_KEY };
+export {
+  ensureUniqueWindowSessionId,
+  getWindowSessionId,
+  WINDOW_SESSION_HEADER,
+  WINDOW_SESSION_KEY
+};
 
 // ============================================================================
 // Standard HTTP Helpers with Window Session Support
@@ -52,7 +61,7 @@ export { getWindowSessionId, WINDOW_SESSION_HEADER, WINDOW_SESSION_KEY };
 export async function getJson(url) {
   const res = await fetch(url, {
     method: 'GET',
-    headers: buildHeaders()
+    headers: await buildHeaders()
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -67,7 +76,7 @@ export async function getJsonDetailed(url, options = {}) {
 
   const res = await fetch(url, {
     method,
-    headers: buildHeaders(extraHeaders),
+    headers: await buildHeaders(extraHeaders),
     ...fetchOptions
   });
 
@@ -104,7 +113,7 @@ export async function getJsonDetailed(url, options = {}) {
 export async function postJson(url, data) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: buildHeaders(),
+    headers: await buildHeaders(),
     body: data ? JSON.stringify(data) : '{}'
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -120,7 +129,7 @@ export async function postJsonDetailed(url, data, options = {}) {
 
   const res = await fetch(url, {
     method,
-    headers: buildHeaders(extraHeaders),
+    headers: await buildHeaders(extraHeaders),
     body: JSON.stringify(data || {}),
     ...fetchOptions
   });
@@ -219,7 +228,7 @@ export async function putJson(url, data, opts = {}) {
   const extraHeaders = opts.headers || {};
   const res = await fetch(url, {
     method: 'PUT',
-    headers: buildHeaders(extraHeaders),
+    headers: await buildHeaders(extraHeaders),
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -231,7 +240,7 @@ export async function patchJson(url, data, opts = {}) {
   const extraHeaders = opts.headers || {};
   const res = await fetch(url, {
     method: 'PATCH',
-    headers: buildHeaders(extraHeaders),
+    headers: await buildHeaders(extraHeaders),
     body: JSON.stringify(data || {})
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -241,7 +250,7 @@ export async function patchJson(url, data, opts = {}) {
 export async function deleteJson(url, data) {
   const options = {
     method: 'DELETE',
-    headers: buildHeaders()
+    headers: await buildHeaders()
   };
   if (data !== undefined) {
     options.body = JSON.stringify(data);
@@ -309,7 +318,7 @@ export async function annotateTurn(payload) {
     console.info('[annotations] annotateTurn request', payload);
     const res = await fetch('/api/annotations/turn', {
       method: 'POST',
-      headers: buildHeaders(),
+      headers: await buildHeaders(),
       body: JSON.stringify(payload)
     });
     const text = await res.text();
@@ -340,7 +349,7 @@ export async function acceptAnnotation(payload) {
 
     const res = await fetch('/api/annotations/accept', {
       method: 'POST',
-      headers: buildHeaders(),
+      headers: await buildHeaders(),
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -356,7 +365,7 @@ export async function revokeAnnotation(payload) {
   try {
     const res = await fetch('/api/annotations/revoke', {
       method: 'POST',
-      headers: buildHeaders(),
+      headers: await buildHeaders(),
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -36,6 +36,10 @@ class WindowSessionOwnershipError(PermissionError):
     """Raised when a live window-session ID is used by a different actor."""
 
 
+class WindowSessionContextUnavailable(PermissionError):
+    """Raised when an actor-bound tab selector has no usable server binding."""
+
+
 def _normalise_owner_id(value: Optional[str]) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -338,6 +342,8 @@ def get_effective_context(
     window_session_id: Optional[str],
     flask_session: dict,
     user_id: Optional[str],
+    *,
+    require_known_window: bool = False,
 ) -> Dict[str, Any]:
     """
     Get the effective context combining window session (if present) and Flask session.
@@ -351,6 +357,7 @@ def get_effective_context(
 
     Returns dict with: user_id, organisation_id, role, namespace, chat_session_id
     """
+
     def _window_context_has_authoritative_scope(ctx: WindowSessionContext) -> bool:
         return bool(
             (
@@ -384,6 +391,11 @@ def get_effective_context(
                     "source": "window_session",
                 }
 
+            if require_known_window:
+                raise WindowSessionContextUnavailable(
+                    "window_session_context_unavailable"
+                )
+
             flask_org = flask_session.get("organisation_concept_id")
             flask_role = flask_session.get("role_in_org")
             flask_namespace = flask_session.get("namespace")
@@ -407,7 +419,14 @@ def get_effective_context(
                 "source": "window_session",
             }
 
-    # Fall back to Flask session
+    if window_session_id and require_known_window:
+        # Missing, expired and other-actor window selectors are intentionally
+        # indistinguishable. Falling through to the browser-wide Flask org
+        # could execute an authorised action in the wrong tab's organisation.
+        raise WindowSessionContextUnavailable("window_session_context_unavailable")
+
+    # Fall back to Flask session only for compatibility callers that did not
+    # present a window selector (or explicitly opted into non-strict lookup).
     return {
         "user_id": user_id,
         "organisation_id": flask_session.get("organisation_concept_id"),
@@ -425,7 +444,9 @@ def delete_window_context_if_owned(
     """Invalidate the current actor's per-window context, if one exists."""
     if not isinstance(window_session_id, str) or not window_session_id.strip():
         return False
-    return get_window_session_store().delete_if_owned(window_session_id.strip(), user_id)
+    return get_window_session_store().delete_if_owned(
+        window_session_id.strip(), user_id
+    )
 
 
 def delete_all_window_contexts_owned_by(user_id: Optional[str]) -> int:

@@ -1,4 +1,4 @@
-import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
+import { ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 
 const CHANGE_REASON = 'concept_tab_publication_scope_change';
 const USER_PREDICATE = '#V#specific_to_user';
@@ -239,7 +239,8 @@ function requestId(phase) {
     return `concept-scope-${phase}-${token}`;
 }
 
-function headers(json = false) {
+async function headers(json = false) {
+    await ensureUniqueWindowSessionId?.();
     return {
         ...(json ? { 'Content-Type': 'application/json' } : {}),
         [WINDOW_SESSION_HEADER]: getWindowSessionId()
@@ -361,7 +362,7 @@ export async function executeGovernedScopeControlChange({
     const endpoint = `/api/ontology-authority/concepts/${encodeURIComponent(conceptId)}/scope`;
     const read = await responseJson(await fetchImpl(endpoint, {
         credentials: 'same-origin',
-        headers: headers()
+        headers: await headers()
     }), 'Could not read the current publication scope.');
     const fingerprint = String(read.scope_fingerprint || '').trim();
     if (!fingerprint) {
@@ -380,7 +381,7 @@ export async function executeGovernedScopeControlChange({
     const preview = await responseJson(await fetchImpl(endpoint, {
         method: 'POST',
         credentials: 'same-origin',
-        headers: headers(true),
+        headers: await headers(true),
         body: JSON.stringify({
             scope_edit: requestedScopeEdit,
             expected_scope_fingerprint: fingerprint,
@@ -402,7 +403,7 @@ export async function executeGovernedScopeControlChange({
     const result = await responseJson(await fetchImpl(endpoint, {
         method: 'POST',
         credentials: 'same-origin',
-        headers: headers(true),
+        headers: await headers(true),
         body: JSON.stringify({
             scope_edit: validated.resolvedScopeEdit,
             expected_scope_fingerprint: fingerprint,

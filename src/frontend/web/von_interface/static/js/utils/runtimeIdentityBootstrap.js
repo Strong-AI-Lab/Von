@@ -82,7 +82,11 @@ export function resolveBrowserBootstrapOrganisationContext({
     settings = null,
     sessionContext = null,
     storedOrganisation = null,
+    explicitPersonal = false,
 } = {}) {
+    if (explicitPersonal) {
+        return null;
+    }
     const conceptId = trimString(
         settings?.current_organisation_concept_id
         || sessionContext?.organisation_id
@@ -110,14 +114,17 @@ export function resolveBrowserBootstrapNamespace({
     sessionContext = null,
     userContext = null,
     organisationContext = null,
+    explicitPersonal = false,
 } = {}) {
     const sessionNamespace = trimString(sessionContext?.namespace);
-    if (sessionNamespace) {
+    if (sessionNamespace && (!explicitPersonal || !sessionNamespace.includes('@'))) {
         return sessionNamespace;
     }
 
     return buildNamespaceFromConcepts(
         settings?.current_user_person_concept_id || userContext?.concept_id || null,
-        settings?.current_organisation_concept_id || organisationContext?.concept_id || null
+        explicitPersonal
+            ? null
+            : (settings?.current_organisation_concept_id || organisationContext?.concept_id || null)
     );
 }

@@ -42,9 +42,19 @@ _DEFAULT_RESULT_TTL_SEC = 10 * 60
 
 # Maximum concurrent background tasks
 _MAX_WORKERS = 4
+_MAX_PENDING_TASKS = 32
+_MAX_ACTIVE_TASKS_PER_USER = 2
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _PROGRESS_HISTORY_LIMIT = 200
+
+
+class BackgroundTaskScopeMismatch(ValueError):
+    """A terminal observation conflicts with the task's bound actor scope."""
+
+
+class BackgroundTaskCapacityReached(RuntimeError):
+    """Bounded background admission is full for this server or actor."""
 
 
 def _is_active_status(status: str) -> bool:
@@ -84,6 +94,11 @@ class TaskStatus:
     # For result retrieval filtering (Phase 4)
     session_id: str | None = None
     user_id: str | None = None
+    organisation_id: str | None = None
+    namespace: str | None = None
+    queue_id: str | None = None
+    client_request_id: str | None = None
+    attempt_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise status to a dict suitable for JSON response."""
@@ -102,6 +117,11 @@ class TaskStatus:
             "cancellation_requested": self.cancellation_requested,
             "session_id": self.session_id,
             "user_id": self.user_id,
+            "organisation_id": self.organisation_id,
+            "namespace": self.namespace,
+            "queue_id": self.queue_id,
+            "client_request_id": self.client_request_id,
+            "attempt_id": self.attempt_id,
         }
 
 
@@ -117,12 +137,20 @@ class BackgroundTaskRegistry:
         *,
         max_workers: int = _MAX_WORKERS,
         result_ttl_sec: float = _DEFAULT_RESULT_TTL_SEC,
+        max_pending_tasks: int = _MAX_PENDING_TASKS,
+        max_active_tasks_per_user: int = _MAX_ACTIVE_TASKS_PER_USER,
     ) -> None:
         self._lock = threading.Lock()
         self._tasks: dict[str, TaskStatus] = {}
         self._futures: dict[str, Future[Any]] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="bg_task_"
+        )
+        self._max_workers = max(1, int(max_workers))
+        self._max_pending_tasks = max(0, int(max_pending_tasks))
+        self._max_active_tasks_per_user = max(
+            1,
+            min(int(max_active_tasks_per_user), self._max_workers),
         )
         self._result_ttl_sec = result_ttl_sec
         self._cleanup_interval_sec = 60.0
@@ -138,6 +166,11 @@ class BackgroundTaskRegistry:
         progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
+        organisation_id: str | None = None,
+        namespace: str | None = None,
+        queue_id: str | None = None,
+        client_request_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> TaskStatus:
         """Submit a callable to run in the background.
 
@@ -149,6 +182,11 @@ class BackgroundTaskRegistry:
             progress_callback: Optional callback for progress updates.
             session_id: Optional session ID for filtering (Phase 4).
             user_id: Optional user ID for filtering (Phase 4).
+            organisation_id: Optional organisation ID for actor-scope filtering.
+            namespace: Optional namespace for actor-scope filtering.
+            queue_id: Optional persisted prompt queue correlation.
+            client_request_id: Optional browser request correlation.
+            attempt_id: Optional exact prompt execution attempt.
 
         Returns:
             Initial TaskStatus with status="pending".
@@ -162,10 +200,27 @@ class BackgroundTaskRegistry:
 
         with self._lock:
             existing = self._tasks.get(task_id)
-            if existing and existing.status in ("pending", "running"):
+            if existing:
+                # Client request IDs are correlation, never overwrite authority.
+                # Keep every task ID single-use until normal TTL cleanup removes
+                # the terminal record; a replay can then receive a fresh task ID.
                 raise ValueError(
                     f"Task {task_id} already exists and is {existing.status}"
                 )
+
+            active_tasks = [
+                task for task in self._tasks.values() if _is_active_status(task.status)
+            ]
+            if len(active_tasks) >= self._max_workers + self._max_pending_tasks:
+                raise BackgroundTaskCapacityReached(
+                    "Von is at its bounded background-task capacity"
+                )
+            if user_id is not None:
+                user_active = sum(task.user_id == user_id for task in active_tasks)
+                if user_active >= self._max_active_tasks_per_user:
+                    raise BackgroundTaskCapacityReached(
+                        "This user is at the background-task capacity"
+                    )
 
             status = TaskStatus(
                 task_id=task_id,
@@ -173,6 +228,11 @@ class BackgroundTaskRegistry:
                 created_at=now,
                 session_id=session_id,
                 user_id=user_id,
+                organisation_id=organisation_id,
+                namespace=namespace,
+                queue_id=queue_id,
+                client_request_id=client_request_id,
+                attempt_id=attempt_id,
             )
             self._tasks[task_id] = status
 
@@ -180,7 +240,11 @@ class BackgroundTaskRegistry:
                 # Mark as running
                 with self._lock:
                     task_status = self._tasks.get(task_id)
-                    if task_status and _is_active_status(task_status.status):
+                    if (
+                        task_status
+                        and _is_active_status(task_status.status)
+                        and not task_status.cancellation_requested
+                    ):
                         task_status.status = "running"
                         task_status.started_at = datetime.now(timezone.utc)
 
@@ -199,11 +263,7 @@ class BackgroundTaskRegistry:
                 try:
                     with self._lock:
                         task_status = self._tasks.get(task_id)
-                        if (
-                            task_status
-                            and task_status.status == "cancelled"
-                            and task_status.cancellation_requested
-                        ):
+                        if task_status and task_status.cancellation_requested:
                             raise CancellationRequested(task_id=task_id)
 
                     # Inject progress callback if supported
@@ -231,26 +291,49 @@ class BackgroundTaskRegistry:
                     with self._lock:
                         task_status = self._tasks.get(task_id)
                         if task_status and _is_active_status(task_status.status):
-                            task_status.status = "cancelled"
-                            task_status.completed_at = datetime.now(timezone.utc)
-                            task_status.error = str(exc)
-                            task_status.progress["status"] = "cancelled"
-                            _append_progress_history(task_status, task_status.progress)
+                            self._terminalise_cancelled_locked(
+                                task_id,
+                                task_status,
+                                error=str(exc),
+                            )
                     raise
 
                 except Exception as exc:
-                    _logger.exception(
-                        "[background_task] Task %s failed: %s", task_id, exc
-                    )
+                    cancellation_won = False
                     with self._lock:
                         task_status = self._tasks.get(task_id)
                         if task_status and _is_active_status(task_status.status):
-                            task_status.status = "failed"
-                            task_status.completed_at = datetime.now(timezone.utc)
-                            task_status.error = str(exc)
-                            task_status.progress["status"] = "failed"
-                            task_status.progress["error"] = str(exc)
-                            _append_progress_history(task_status, task_status.progress)
+                            if task_status.cancellation_requested:
+                                # Cancellation can win immediately before a
+                                # queue/admission operation raises. The work did
+                                # not complete, so acknowledge the user's prior
+                                # cancellation instead of publishing a spurious
+                                # failed task.
+                                self._terminalise_cancelled_locked(
+                                    task_id,
+                                    task_status,
+                                    error=str(exc),
+                                )
+                                cancellation_won = True
+                            else:
+                                task_status.status = "failed"
+                                task_status.completed_at = datetime.now(timezone.utc)
+                                task_status.error = str(exc)
+                                task_status.progress["status"] = "failed"
+                                task_status.progress["error"] = str(exc)
+                                _append_progress_history(
+                                    task_status,
+                                    task_status.progress,
+                                )
+                    if cancellation_won:
+                        _logger.info(
+                            "[background_task] Task %s acknowledged cancellation "
+                            "after its callable stopped with %s",
+                            task_id,
+                            exc,
+                        )
+                    else:
+                        _logger.exception("[background_task] Task %s failed", task_id)
                     raise
 
             future = self._executor.submit(_run_task)
@@ -269,6 +352,8 @@ class BackgroundTaskRegistry:
         progress: Mapping[str, Any] | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
+        organisation_id: str | None = None,
+        namespace: str | None = None,
     ) -> TaskStatus:
         """Record an externally observed terminal task state.
 
@@ -299,10 +384,28 @@ class BackgroundTaskRegistry:
                     progress=progress_payload,
                     session_id=session_id,
                     user_id=user_id,
+                    organisation_id=organisation_id,
+                    namespace=namespace,
                 )
                 _append_progress_history(task_status, progress_payload)
                 self._tasks[task_id] = task_status
                 return task_status
+
+            incoming_scope = {
+                "user_id": user_id,
+                "organisation_id": organisation_id,
+                "namespace": namespace,
+            }
+            for field_name, incoming_value in incoming_scope.items():
+                bound_value = getattr(task_status, field_name)
+                if (
+                    bound_value is not None
+                    and incoming_value is not None
+                    and bound_value != incoming_value
+                ):
+                    raise BackgroundTaskScopeMismatch(
+                        "Terminal task observation does not match the bound actor scope"
+                    )
 
             if task_status.status in _TERMINAL_STATUSES:
                 # The first terminal observation is final. A worker, durable
@@ -322,6 +425,10 @@ class BackgroundTaskRegistry:
                 task_status.session_id = session_id
             if task_status.user_id is None and user_id is not None:
                 task_status.user_id = user_id
+            if task_status.organisation_id is None and organisation_id is not None:
+                task_status.organisation_id = organisation_id
+            if task_status.namespace is None and namespace is not None:
+                task_status.namespace = namespace
             return task_status
 
     def get_task_status(self, task_id: str) -> TaskStatus | None:
@@ -335,6 +442,42 @@ class BackgroundTaskRegistry:
         """
         with self._lock:
             return self._tasks.get(task_id)
+
+    @staticmethod
+    def _status_matches_scope(
+        status: TaskStatus,
+        *,
+        user_id: str,
+        organisation_id: str | None,
+        namespace: str | None,
+    ) -> bool:
+        return bool(
+            status.user_id == user_id
+            and status.organisation_id == organisation_id
+            and status.namespace == namespace
+        )
+
+    def get_task_status_for_scope(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        organisation_id: str | None,
+        namespace: str | None,
+    ) -> TaskStatus | None:
+        """Return a task only inside its immutable actor/organisation scope."""
+
+        self._maybe_cleanup()
+        with self._lock:
+            status = self._tasks.get(task_id)
+            if status is None or not self._status_matches_scope(
+                status,
+                user_id=user_id,
+                organisation_id=organisation_id,
+                namespace=namespace,
+            ):
+                return None
+            return status
 
     def update_progress(self, task_id: str, progress: Mapping[str, Any]) -> bool:
         """Update progress for an active task.
@@ -393,31 +536,86 @@ class BackgroundTaskRegistry:
         """
         with self._lock:
             status = self._tasks.get(task_id)
-            if status is None:
-                return False
-            if status.status not in ("pending", "running"):
-                return False
-            status.cancellation_requested = True
-            status.status = "cancelled"
-            if status.started_at is None:
-                status.started_at = datetime.now(timezone.utc)
-            status.completed_at = datetime.now(timezone.utc)
-            status.error = f"Cancellation requested for task {task_id}"
-            progress_payload = dict(status.progress)
-            progress_payload.update(
-                {
-                    "status": "cancelled",
-                    "phase": "cancelled",
-                    "phase_label": "Cancelled",
-                    "result_summary": (
-                        "Cancellation requested for the background generate task."
-                    ),
-                }
+            return self._request_cancellation_locked(task_id, status)
+
+    def _request_cancellation_locked(
+        self,
+        task_id: str,
+        status: TaskStatus | None,
+    ) -> bool:
+        if status is None or status.status not in ("pending", "running"):
+            return False
+        status.cancellation_requested = True
+        future = self._futures.get(task_id)
+        if status.status == "pending" and future is not None and future.cancel():
+            self._terminalise_cancelled_locked(
+                task_id,
+                status,
+                error=f"Cancellation acknowledged before task {task_id} started",
             )
-            status.progress = progress_payload
-            _append_progress_history(status, progress_payload)
-            _logger.info("[background_task] Task %s marked cancelled", task_id)
             return True
+
+        progress_payload = dict(status.progress)
+        progress_payload.update(
+            {
+                "status": "cancelling",
+                "phase": "cancelling",
+                "phase_label": "Cancelling",
+                "result_summary": (
+                    "Cancellation requested; waiting for the running task to stop."
+                ),
+            }
+        )
+        status.progress = progress_payload
+        _append_progress_history(status, progress_payload)
+        _logger.info("[background_task] Cancellation requested for task %s", task_id)
+        return True
+
+    @staticmethod
+    def _terminalise_cancelled_locked(
+        task_id: str,
+        status: TaskStatus,
+        *,
+        error: str,
+    ) -> None:
+        status.status = "cancelled"
+        if status.started_at is None:
+            status.started_at = datetime.now(timezone.utc)
+        status.completed_at = datetime.now(timezone.utc)
+        status.error = error
+        progress_payload = dict(status.progress)
+        progress_payload.update(
+            {
+                "status": "cancelled",
+                "phase": "cancelled",
+                "phase_label": "Cancelled",
+                "result_summary": "The background task stopped after cancellation.",
+            }
+        )
+        status.progress = progress_payload
+        _append_progress_history(status, progress_payload)
+        _logger.info("[background_task] Task %s acknowledged cancellation", task_id)
+
+    def request_cancellation_for_scope(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        organisation_id: str | None,
+        namespace: str | None,
+    ) -> bool:
+        """Request cancellation only for the exact bound actor scope."""
+
+        with self._lock:
+            status = self._tasks.get(task_id)
+            if status is None or not self._status_matches_scope(
+                status,
+                user_id=user_id,
+                organisation_id=organisation_id,
+                namespace=namespace,
+            ):
+                return False
+            return self._request_cancellation_locked(task_id, status)
 
     def is_cancellation_requested(self, task_id: str) -> bool:
         """Check if cancellation was requested for a task.
@@ -456,13 +654,17 @@ class BackgroundTaskRegistry:
         status_filter: str | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
+        organisation_id: str | None = None,
+        namespace: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List all tasks, optionally filtered by status, session, or user.
+        """List all tasks, optionally filtered by status or actor scope.
 
         Args:
             status_filter: If provided, only return tasks with this status.
             session_id: If provided, only return tasks for this session (Phase 4).
             user_id: If provided, only return tasks for this user (Phase 4).
+            organisation_id: If provided, only return tasks for this organisation.
+            namespace: If provided, only return tasks for this namespace.
 
         Returns:
             List of task status dicts.
@@ -476,8 +678,41 @@ class BackgroundTaskRegistry:
             tasks = [t for t in tasks if t.session_id == session_id]
         if user_id:
             tasks = [t for t in tasks if t.user_id == user_id]
+        if organisation_id:
+            tasks = [t for t in tasks if t.organisation_id == organisation_id]
+        if namespace:
+            tasks = [t for t in tasks if t.namespace == namespace]
 
         return [t.to_dict() for t in tasks]
+
+    def list_tasks_for_scope(
+        self,
+        *,
+        user_id: str,
+        organisation_id: str | None,
+        namespace: str | None,
+        status_filter: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List tasks only when every bound actor-scope component matches."""
+
+        self._maybe_cleanup()
+        with self._lock:
+            tasks = [
+                task
+                for task in self._tasks.values()
+                if self._status_matches_scope(
+                    task,
+                    user_id=user_id,
+                    organisation_id=organisation_id,
+                    namespace=namespace,
+                )
+            ]
+        if status_filter:
+            tasks = [task for task in tasks if task.status == status_filter]
+        if session_id:
+            tasks = [task for task in tasks if task.session_id == session_id]
+        return [task.to_dict() for task in tasks]
 
     def _maybe_cleanup(self) -> None:
         """Clean up old completed/failed tasks if cleanup interval has passed."""

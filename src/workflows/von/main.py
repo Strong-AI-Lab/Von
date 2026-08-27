@@ -19,15 +19,27 @@ src_root = os.path.join(project_root_str, "src")
 if src_root not in sys.path:
     sys.path.insert(0, src_root)
 
+_runtime_env = importlib.import_module("src.backend.utils.runtime_env")
+apply_repo_dotenv_overrides = _runtime_env.apply_repo_dotenv_overrides
+
+# The Flask route import constructs the process-wide foreground admission
+# service. Load its capacity inputs first so direct main.py launches preserve
+# the same HTTP-thread headroom as run.sh launches, which already load .env.
+apply_repo_dotenv_overrides(
+    {
+        "VON_WAITRESS_THREADS",
+        "VON_TURN_HTTP_HEADROOM_THREADS",
+        "VON_MAX_ACTIVE_TURNS_GLOBAL",
+        "VON_MAX_ACTIVE_TURNS_PER_USER",
+    }
+)
+
 _utils_flask = importlib.import_module("src.backend.server.utils_flask")
 create_flask_app = _utils_flask.create_flask_app
 build_browser_entry_url = _utils_flask.build_browser_entry_url
 get_expert_tabs_enabled = importlib.import_module(
     "src.backend.services.feature_flags"
 ).get_expert_tabs_enabled
-apply_repo_dotenv_overrides = importlib.import_module(
-    "src.backend.utils.runtime_env"
-).apply_repo_dotenv_overrides
 
 
 # Add src directory to Python path FIRST, before any backend imports
@@ -150,6 +162,11 @@ _apply_dotenv_overrides(
         # deferral, hot-poller caching, and chat-workflow warm. The launcher and
         # VS Code hosts do not reliably inherit them, so resolve from .env.
         "VON_WAITRESS_THREADS",
+        "VON_TURN_HTTP_HEADROOM_THREADS",
+        "VON_MAX_ACTIVE_TURNS_GLOBAL",
+        "VON_MAX_ACTIVE_TURNS_PER_USER",
+        "VON_MAX_QUEUED_TURNS_GLOBAL",
+        "VON_MAX_QUEUED_TURNS_PER_USER",
         "VON_DURABLE_WORKER_POLL_INTERVAL",
         "VON_DURABLE_WORKER_PRIORITY_RESERVED_SLOTS",
         "VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD",

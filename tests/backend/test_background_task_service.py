@@ -6,8 +6,8 @@ and result retrieval.
 
 from __future__ import annotations
 
-import time
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -15,7 +15,9 @@ import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import CancellationRequested
 from src.backend.services.background_task_service import (
+    BackgroundTaskCapacityReached,
     BackgroundTaskRegistry,
+    BackgroundTaskScopeMismatch,
     TaskStatus,
 )
 
@@ -33,6 +35,13 @@ class TestTaskStatus:
             started_at=now,
             progress={"phase": "tool_execute"},
             progress_history=[{"phase": "tool_execute"}],
+            session_id="session-123",
+            user_id="user-123",
+            organisation_id="organisation-123",
+            namespace="#V#user-123@organisation-123",
+            queue_id="queue-123",
+            client_request_id="request-123",
+            attempt_id="attempt-123",
         )
 
         result = status.to_dict()
@@ -47,6 +56,13 @@ class TestTaskStatus:
         assert result["progress"] == {"phase": "tool_execute"}
         assert result["progress_history"] == [{"phase": "tool_execute"}]
         assert result["cancellation_requested"] is False
+        assert result["session_id"] == "session-123"
+        assert result["user_id"] == "user-123"
+        assert result["organisation_id"] == "organisation-123"
+        assert result["namespace"] == "#V#user-123@organisation-123"
+        assert result["queue_id"] == "queue-123"
+        assert result["client_request_id"] == "request-123"
+        assert result["attempt_id"] == "attempt-123"
 
     def test_to_dict_with_completed_task(self) -> None:
         """to_dict() should handle completed tasks with results."""
@@ -199,15 +215,21 @@ class TestBackgroundTaskRegistry:
 
         registry.shutdown(wait=True)
 
-    def test_request_cancellation_sets_flag(self) -> None:
-        """request_cancellation() should terminally mark the task cancelled."""
+    def test_request_cancellation_stays_nonterminal_until_worker_acknowledges(
+        self,
+    ) -> None:
+        """Running work is cancelling, not cancelled, until it actually stops."""
         registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
 
         def _slow_task() -> str:
-            time.sleep(10)
+            started.set()
+            release.wait(timeout=2)
             return "done"
 
         registry.submit_task(task_id="task-cancel", callable=_slow_task)
+        assert started.wait(timeout=2)
 
         # Request cancellation
         success = registry.request_cancellation("task-cancel")
@@ -219,14 +241,15 @@ class TestBackgroundTaskRegistry:
         status = registry.get_task_status("task-cancel")
         assert status is not None
         assert status.cancellation_requested is True
-        assert status.status == "cancelled"
-        assert status.completed_at is not None
-        assert status.progress.get("status") == "cancelled"
+        assert status.status == "running"
+        assert status.completed_at is None
+        assert status.progress.get("status") == "cancelling"
 
-        registry.shutdown(wait=False)
+        release.set()
+        registry.shutdown(wait=True)
 
-    def test_request_cancellation_resists_late_worker_completion(self) -> None:
-        """A cancelled task should not be overwritten by a late worker result."""
+    def test_noncooperative_worker_reports_its_actual_late_completion(self) -> None:
+        """A cancellation request is not a false terminal cancellation receipt."""
         registry = BackgroundTaskRegistry(max_workers=1)
         started = threading.Event()
         release = threading.Event()
@@ -251,10 +274,70 @@ class TestBackgroundTaskRegistry:
 
         status = registry.get_task_status("late-cancel")
         assert status is not None
-        assert status.status == "cancelled"
-        assert status.result is None
-        assert status.error == "Cancellation requested for task late-cancel"
+        assert status.status == "completed"
+        assert status.result == "done"
+        assert status.error is None
+        assert status.cancellation_requested is True
 
+        registry.shutdown(wait=True)
+
+    def test_exception_after_cancellation_request_acknowledges_cancellation(
+        self,
+    ) -> None:
+        """A cancel-before-bind race is cancelled rather than failed."""
+
+        registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def _admission_race() -> None:
+            started.set()
+            release.wait(timeout=2)
+            raise RuntimeError("queue row was cancelled before turn admission")
+
+        registry.submit_task(task_id="cancel-before-bind", callable=_admission_race)
+        assert started.wait(timeout=2)
+        assert registry.request_cancellation("cancel-before-bind") is True
+
+        release.set()
+        for _ in range(50):
+            status = registry.get_task_status("cancel-before-bind")
+            if status and status.completed_at is not None:
+                break
+            time.sleep(0.05)
+
+        status = registry.get_task_status("cancel-before-bind")
+        assert status is not None
+        assert status.status == "cancelled"
+        assert status.cancellation_requested is True
+        assert status.completed_at is not None
+        assert status.progress.get("status") == "cancelled"
+        assert status.error == "queue row was cancelled before turn admission"
+
+        registry.shutdown(wait=True)
+
+    def test_pending_future_can_acknowledge_cancellation_immediately(self) -> None:
+        registry = BackgroundTaskRegistry(max_workers=1, max_pending_tasks=2)
+        blocker_started = threading.Event()
+        release_blocker = threading.Event()
+
+        def _blocker() -> str:
+            blocker_started.set()
+            release_blocker.wait(timeout=2)
+            return "blocker done"
+
+        registry.submit_task(task_id="blocker", callable=_blocker)
+        assert blocker_started.wait(timeout=2)
+        registry.submit_task(task_id="pending-cancel", callable=lambda: "must not run")
+
+        assert registry.request_cancellation("pending-cancel") is True
+        status = registry.get_task_status("pending-cancel")
+        assert status is not None
+        assert status.status == "cancelled"
+        assert status.completed_at is not None
+        assert status.progress.get("status") == "cancelled"
+
+        release_blocker.set()
         registry.shutdown(wait=True)
 
     def test_request_cancellation_returns_false_for_completed(self) -> None:
@@ -341,6 +424,107 @@ class TestBackgroundTaskRegistry:
             registry.submit_task(task_id="dup-task", callable=_slow_task)
 
         registry.shutdown(wait=False)
+
+    def test_submit_cannot_overwrite_terminal_task_scope(self) -> None:
+        """A replayed client request ID cannot replace a terminal task record."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        registry.mark_terminal_external(
+            "terminal-id",
+            status="completed",
+            result={"answer": "first"},
+            user_id="#V#first_user",
+            organisation_id="#V#first_org",
+            namespace="#V#first_user@first_org",
+        )
+
+        with pytest.raises(ValueError, match="already exists"):
+            registry.submit_task(
+                task_id="terminal-id",
+                callable=lambda: "second",
+                user_id="#V#second_user",
+                organisation_id="#V#second_org",
+                namespace="#V#second_user@second_org",
+            )
+
+        retained = registry.get_task_status("terminal-id")
+        assert retained is not None
+        assert retained.user_id == "#V#first_user"
+        assert retained.result == {"answer": "first"}
+        registry.shutdown(wait=True)
+
+    def test_background_capacity_is_bounded_and_fair_across_users(self) -> None:
+        registry = BackgroundTaskRegistry(
+            max_workers=4,
+            max_pending_tasks=2,
+            max_active_tasks_per_user=2,
+        )
+        release = threading.Event()
+
+        def _blocking_task() -> str:
+            release.wait(timeout=2)
+            return "done"
+
+        registry.submit_task(
+            task_id="user-a-org-1",
+            callable=_blocking_task,
+            user_id="#V#user_a",
+            organisation_id="#V#org_1",
+            namespace="#V#user_a@org_1",
+        )
+        registry.submit_task(
+            task_id="user-a-org-2",
+            callable=_blocking_task,
+            user_id="#V#user_a",
+            organisation_id="#V#org_2",
+            namespace="#V#user_a@org_2",
+        )
+
+        with pytest.raises(BackgroundTaskCapacityReached):
+            registry.submit_task(
+                task_id="user-a-third",
+                callable=_blocking_task,
+                user_id="#V#user_a",
+                organisation_id="#V#org_3",
+                namespace="#V#user_a@org_3",
+            )
+
+        other = registry.submit_task(
+            task_id="user-b-first",
+            callable=_blocking_task,
+            user_id="#V#user_b",
+            organisation_id="#V#org_1",
+            namespace="#V#user_b@org_1",
+        )
+        assert other.user_id == "#V#user_b"
+
+        release.set()
+        registry.shutdown(wait=True)
+
+    def test_background_pending_queue_has_a_global_bound(self) -> None:
+        registry = BackgroundTaskRegistry(
+            max_workers=1,
+            max_pending_tasks=1,
+            max_active_tasks_per_user=1,
+        )
+        release = threading.Event()
+
+        registry.submit_task(
+            task_id="global-running",
+            callable=lambda: release.wait(timeout=2),
+        )
+        registry.submit_task(
+            task_id="global-pending",
+            callable=lambda: release.wait(timeout=2),
+        )
+
+        with pytest.raises(BackgroundTaskCapacityReached):
+            registry.submit_task(
+                task_id="global-overflow",
+                callable=lambda: None,
+            )
+
+        release.set()
+        registry.shutdown(wait=True)
 
     def test_remove_task(self) -> None:
         """remove_task() should remove a task from the registry."""
@@ -499,8 +683,8 @@ class TestBackgroundTaskRegistry:
 
         registry.shutdown(wait=True)
 
-    def test_submit_task_with_session_and_user_id(self) -> None:
-        """submit_task() should store session_id and user_id (Phase 4)."""
+    def test_submit_task_with_actor_scope(self) -> None:
+        """submit_task() should retain conversation and actor scope metadata."""
         registry = BackgroundTaskRegistry(max_workers=1)
 
         def _task() -> str:
@@ -511,6 +695,11 @@ class TestBackgroundTaskRegistry:
             callable=_task,
             session_id="sess-123",
             user_id="user-456",
+            organisation_id="organisation-789",
+            namespace="#V#user-456@organisation-789",
+            queue_id="queue-456",
+            client_request_id="request-456",
+            attempt_id="attempt-456",
         )
 
         # Wait for completion
@@ -524,11 +713,21 @@ class TestBackgroundTaskRegistry:
         assert status is not None
         assert status.session_id == "sess-123"
         assert status.user_id == "user-456"
+        assert status.organisation_id == "organisation-789"
+        assert status.namespace == "#V#user-456@organisation-789"
+        assert status.queue_id == "queue-456"
+        assert status.client_request_id == "request-456"
+        assert status.attempt_id == "attempt-456"
 
         # Check to_dict includes the fields
         status_dict = status.to_dict()
         assert status_dict["session_id"] == "sess-123"
         assert status_dict["user_id"] == "user-456"
+        assert status_dict["organisation_id"] == "organisation-789"
+        assert status_dict["namespace"] == "#V#user-456@organisation-789"
+        assert status_dict["queue_id"] == "queue-456"
+        assert status_dict["client_request_id"] == "request-456"
+        assert status_dict["attempt_id"] == "attempt-456"
 
         registry.shutdown(wait=True)
 
@@ -543,6 +742,8 @@ class TestBackgroundTaskRegistry:
             progress={"source": "durable_conversation_turn_instance"},
             session_id="session-123",
             user_id="user-456",
+            organisation_id="organisation-789",
+            namespace="#V#user-456@organisation-789",
         )
 
         assert status.status == "completed"
@@ -555,6 +756,8 @@ class TestBackgroundTaskRegistry:
         assert restored is not None
         assert restored.session_id == "session-123"
         assert restored.user_id == "user-456"
+        assert restored.organisation_id == "organisation-789"
+        assert restored.namespace == "#V#user-456@organisation-789"
 
         registry.shutdown(wait=True)
 
@@ -593,6 +796,49 @@ class TestBackgroundTaskRegistry:
         assert status.error is None
         assert registry.get_task_result("late-worker") == {"source": "durable"}
 
+        registry.shutdown(wait=True)
+
+    def test_mark_terminal_external_rejects_conflicting_actor_scope(self) -> None:
+        """Terminal reconciliation cannot cross scope bound at submission."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def _task() -> str:
+            started.set()
+            release.wait(timeout=2)
+            return "done"
+
+        registry.submit_task(
+            task_id="scope-bound",
+            callable=_task,
+            session_id="session-original",
+            user_id="user-original",
+            organisation_id="organisation-original",
+            namespace="#V#user-original@organisation-original",
+        )
+        assert started.wait(timeout=2)
+
+        with pytest.raises(BackgroundTaskScopeMismatch):
+            registry.mark_terminal_external(
+                "scope-bound",
+                status="completed",
+                result={"source": "durable"},
+                session_id="session-late",
+                user_id="user-late",
+                organisation_id="organisation-late",
+                namespace="#V#user-late@organisation-late",
+            )
+
+        status = registry.get_task_status("scope-bound")
+        assert status is not None
+        assert status.status == "running"
+        assert status.session_id == "session-original"
+        assert status.user_id == "user-original"
+        assert status.organisation_id == "organisation-original"
+        assert status.namespace == "#V#user-original@organisation-original"
+
+        release.set()
         registry.shutdown(wait=True)
 
     def test_mark_terminal_external_completed_cannot_override_failed_status(
@@ -642,7 +888,7 @@ class TestBackgroundTaskRegistry:
             result={"source": "final_payload", "llm_debug": {"request_id": "req-1"}},
             progress={"source": "final_generate_payload"},
             session_id="session-final",
-            user_id="user-final",
+            user_id="user-early",
         )
 
         assert unchanged.status == "completed"
@@ -747,4 +993,109 @@ class TestBackgroundTaskRegistry:
         assert len(user_2_tasks) == 1
         assert user_2_tasks[0]["task_id"] == "user-2-task"
 
+        registry.shutdown(wait=True)
+
+    def test_list_tasks_filters_by_organisation_and_namespace(self) -> None:
+        """Organisation and namespace filters should isolate actor scopes."""
+        registry = BackgroundTaskRegistry(max_workers=2)
+
+        def _task() -> str:
+            return "done"
+
+        registry.submit_task(
+            task_id="org-a-task",
+            callable=_task,
+            user_id="same-user",
+            organisation_id="organisation-A",
+            namespace="#V#same-user@organisation-A",
+        )
+        registry.submit_task(
+            task_id="org-b-task",
+            callable=_task,
+            user_id="same-user",
+            organisation_id="organisation-B",
+            namespace="#V#same-user@organisation-B",
+        )
+
+        time.sleep(0.1)
+
+        organisation_a_tasks = registry.list_tasks(
+            user_id="same-user",
+            organisation_id="organisation-A",
+        )
+        namespace_b_tasks = registry.list_tasks(
+            user_id="same-user",
+            namespace="#V#same-user@organisation-B",
+        )
+
+        assert [task["task_id"] for task in organisation_a_tasks] == ["org-a-task"]
+        assert [task["task_id"] for task in namespace_b_tasks] == ["org-b-task"]
+
+        registry.shutdown(wait=True)
+
+    def test_exact_scope_controls_status_and_cancellation(self) -> None:
+        """A guessed task ID must not cross user or organisation scope."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def _task() -> str:
+            started.set()
+            release.wait(timeout=2)
+            return "done"
+
+        registry.submit_task(
+            task_id="scoped-task",
+            callable=_task,
+            user_id="#V#same_user",
+            organisation_id="#V#org_a",
+            namespace="#V#same_user@org_a",
+        )
+        assert started.wait(timeout=2)
+
+        assert (
+            registry.get_task_status_for_scope(
+                "scoped-task",
+                user_id="#V#same_user",
+                organisation_id="#V#org_b",
+                namespace="#V#same_user@org_b",
+            )
+            is None
+        )
+        assert (
+            registry.list_tasks_for_scope(
+                user_id="#V#same_user",
+                organisation_id="#V#org_b",
+                namespace="#V#same_user@org_b",
+            )
+            == []
+        )
+        assert [
+            task["task_id"]
+            for task in registry.list_tasks_for_scope(
+                user_id="#V#same_user",
+                organisation_id="#V#org_a",
+                namespace="#V#same_user@org_a",
+            )
+        ] == ["scoped-task"]
+        assert not registry.request_cancellation_for_scope(
+            "scoped-task",
+            user_id="#V#other_user",
+            organisation_id="#V#org_a",
+            namespace="#V#other_user@org_a",
+        )
+        assert registry.get_task_status_for_scope(
+            "scoped-task",
+            user_id="#V#same_user",
+            organisation_id="#V#org_a",
+            namespace="#V#same_user@org_a",
+        )
+        assert registry.request_cancellation_for_scope(
+            "scoped-task",
+            user_id="#V#same_user",
+            organisation_id="#V#org_a",
+            namespace="#V#same_user@org_a",
+        )
+
+        release.set()
         registry.shutdown(wait=True)

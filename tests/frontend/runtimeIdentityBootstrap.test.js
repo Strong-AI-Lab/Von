@@ -63,4 +63,33 @@ describe('runtimeIdentityBootstrap', () => {
             }
         })).toBe('#V#codex_browser_fixture@university_of_auckland_strong_ai_lab');
     });
+
+    test('keeps an explicit Personal tab out of settings and shared organisation fallback', () => {
+        const {
+            resolveBrowserBootstrapNamespace,
+            resolveBrowserBootstrapOrganisationContext,
+        } = require(modulePath);
+        const settings = {
+            current_user_person_concept_id: '#V#user_a',
+            current_organisation_concept_id: '#V#shared_org',
+            current_organisation_name: 'Shared org',
+        };
+
+        expect(resolveBrowserBootstrapOrganisationContext({
+            settings,
+            sessionContext: { organisation_id: null },
+            storedOrganisation: { concept_id: '#V#other_tab_org' },
+            explicitPersonal: true,
+        })).toBeNull();
+        expect(resolveBrowserBootstrapNamespace({
+            settings,
+            sessionContext: {
+                organisation_id: null,
+                namespace: '#V#user_a@stale_org',
+            },
+            userContext: { concept_id: '#V#user_a' },
+            organisationContext: null,
+            explicitPersonal: true,
+        })).toBe('#V#user_a');
+    });
 });

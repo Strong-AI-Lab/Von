@@ -32,7 +32,10 @@ def test_queue_record_lifecycle_restores_active_items_only() -> None:
     )
 
     assert queued["status"] == queue_service.STATUS_QUEUED
-    assert queue_service.list_active_queue_records(scope=scope)[0]["prompt_raw"] == "Second task"
+    assert (
+        queue_service.list_active_queue_records(scope=scope)[0]["prompt_raw"]
+        == "Second task"
+    )
 
     updated = queue_service.update_queued_record(
         scope=scope,
@@ -45,10 +48,14 @@ def test_queue_record_lifecycle_restores_active_items_only() -> None:
     assert claimed["status"] == queue_service.STATUS_IN_PROGRESS
     assert claimed["attempt_count"] == 1
 
-    requeued = queue_service.requeue_prompt_record(scope=scope, queue_id=queued["queue_id"])
+    requeued = queue_service.requeue_prompt_record(
+        scope=scope, queue_id=queued["queue_id"]
+    )
     assert requeued["status"] == queue_service.STATUS_QUEUED
 
-    reclaimed = queue_service.claim_queue_record(scope=scope, queue_id=queued["queue_id"])
+    reclaimed = queue_service.claim_queue_record(
+        scope=scope, queue_id=queued["queue_id"]
+    )
     assert reclaimed["attempt_count"] == 2
 
     finished = queue_service.finish_prompt_record(
@@ -58,6 +65,253 @@ def test_queue_record_lifecycle_restores_active_items_only() -> None:
     )
     assert finished["status"] == queue_service.STATUS_COMPLETED
     assert queue_service.list_active_queue_records(scope=scope) == []
+
+
+def test_turn_binding_correlates_attempt_and_serialises_one_conversation() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    first = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="First",
+        session_id="session-a",
+        client_request_id="request-a",
+        attempt_id="attempt-a",
+    )
+    second = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Second",
+        session_id="session-b",
+    )
+
+    bound = queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=first["queue_id"],
+        client_request_id="request-a",
+        attempt_id="attempt-a",
+        conversation_key="conversation-key-a",
+        server_instance_id="server-a",
+    )
+    parallel = queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=second["queue_id"],
+        client_request_id="request-b",
+        attempt_id="attempt-b",
+        conversation_key="conversation-key-b",
+        server_instance_id="server-a",
+    )
+
+    assert bound["status"] == queue_service.STATUS_IN_PROGRESS
+    assert bound["client_request_id"] == "request-a"
+    assert bound["attempt_id"] == "attempt-a"
+    assert bound["conversation_key"] == "conversation-key-a"
+    assert bound["server_instance_id"] == "server-a"
+    assert bound["lease_acquired_at"] is not None
+    assert parallel["conversation_key"] == "conversation-key-b"
+
+    with pytest.raises(queue_service.ChatPromptQueueRecordNotFound):
+        queue_service.finish_prompt_record(
+            scope=scope,
+            queue_id=first["queue_id"],
+            status=queue_service.STATUS_COMPLETED,
+        )
+    with pytest.raises(queue_service.ChatPromptQueueRecordNotFound):
+        queue_service.finish_prompt_record(
+            scope=scope,
+            queue_id=first["queue_id"],
+            status=queue_service.STATUS_COMPLETED,
+            attempt_id="wrong-attempt",
+        )
+
+    finished = queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=first["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+        attempt_id="attempt-a",
+    )
+    repeated_finish = queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=first["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+        attempt_id="attempt-a",
+    )
+    assert repeated_finish["completed_at"] == finished["completed_at"]
+    persisted = mongo_client.get_chat_prompt_queue_collection().find_one(
+        {"queue_id": first["queue_id"]}
+    )
+    assert persisted is not None
+    assert "active_conversation_key" not in persisted
+    assert "lease_heartbeat_at" not in persisted
+
+
+def test_shared_conversation_fifo_crosses_scopes_and_orders_timestamp_ties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_now = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(queue_service, "_now", lambda: fixed_now)
+    owner_scope = queue_service.build_queue_scope(
+        user_concept_id="#V#owner",
+        organisation_concept_id="#V#org",
+        namespace="#V#owner@org",
+    )
+    invitee_scope = queue_service.build_queue_scope(
+        user_concept_id="#V#invitee",
+        organisation_concept_id="#V#org",
+        namespace="#V#invitee@org",
+    )
+    records = [
+        queue_service.create_queue_record(
+            scope=owner_scope,
+            prompt_raw="Owner prompt",
+            session_id="shared-session",
+            conversation_key="canonical-shared-key",
+        ),
+        queue_service.create_queue_record(
+            scope=invitee_scope,
+            prompt_raw="Invitee prompt",
+            session_id="shared-session",
+            conversation_key="canonical-shared-key",
+        ),
+    ]
+    earlier, later = sorted(records, key=lambda item: item["queue_id"])
+    scope_by_queue_id = {
+        records[0]["queue_id"]: owner_scope,
+        records[1]["queue_id"]: invitee_scope,
+    }
+
+    with pytest.raises(queue_service.ConversationTurnAlreadyActive) as exc_info:
+        queue_service.bind_queue_record_to_turn(
+            scope=scope_by_queue_id[later["queue_id"]],
+            queue_id=later["queue_id"],
+            client_request_id="request-later",
+            conversation_key="canonical-shared-key",
+            server_instance_id="server-a",
+        )
+
+    assert exc_info.value.queue_id is None
+    bound = queue_service.bind_queue_record_to_turn(
+        scope=scope_by_queue_id[earlier["queue_id"]],
+        queue_id=earlier["queue_id"],
+        client_request_id="request-earlier",
+        conversation_key="canonical-shared-key",
+        server_instance_id="server-a",
+    )
+    queue_service.finish_prompt_record(
+        scope=scope_by_queue_id[earlier["queue_id"]],
+        queue_id=earlier["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+        attempt_id=bound["attempt_id"],
+    )
+    assert (
+        queue_service.bind_queue_record_to_turn(
+            scope=scope_by_queue_id[later["queue_id"]],
+            queue_id=later["queue_id"],
+            client_request_id="request-later",
+            conversation_key="canonical-shared-key",
+            server_instance_id="server-a",
+        )["status"]
+        == queue_service.STATUS_IN_PROGRESS
+    )
+
+
+def test_queued_backlog_is_bounded_per_user_across_organisations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_MAX_QUEUED_TURNS_GLOBAL", "10")
+    monkeypatch.setenv("VON_MAX_QUEUED_TURNS_PER_USER", "2")
+    scopes = [
+        queue_service.build_queue_scope(
+            user_concept_id="#V#user",
+            organisation_concept_id=f"#V#org_{index}",
+            namespace=f"#V#user@org_{index}",
+        )
+        for index in range(3)
+    ]
+    for index in range(2):
+        queue_service.create_queue_record(
+            scope=scopes[index], prompt_raw=f"Accepted {index}"
+        )
+
+    with pytest.raises(queue_service.ChatPromptQueueCapacityReached) as exc_info:
+        queue_service.create_queue_record(scope=scopes[2], prompt_raw="Rejected")
+
+    assert exc_info.value.limit_kind == "user"
+    assert len(queue_service.list_active_queue_records(scope=scopes[0])) == 1
+    assert len(queue_service.list_active_queue_records(scope=scopes[1])) == 1
+
+
+def test_queued_backlog_is_bounded_globally(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VON_MAX_QUEUED_TURNS_GLOBAL", "2")
+    monkeypatch.setenv("VON_MAX_QUEUED_TURNS_PER_USER", "2")
+    for index in range(2):
+        scope = queue_service.build_queue_scope(user_concept_id=f"#V#user_{index}")
+        queue_service.create_queue_record(scope=scope, prompt_raw=f"Accepted {index}")
+
+    with pytest.raises(queue_service.ChatPromptQueueCapacityReached) as exc_info:
+        queue_service.create_queue_record(
+            scope=queue_service.build_queue_scope(user_concept_id="#V#user_3"),
+            prompt_raw="Rejected",
+        )
+
+    assert exc_info.value.limit_kind == "global"
+
+
+def test_requeue_releases_conversation_fence_and_request_correlation() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    queued = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Retry me",
+        session_id="session-a",
+    )
+
+    queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        client_request_id="request-a",
+        attempt_id="attempt-a",
+        conversation_key="conversation-key-a",
+        server_instance_id="server-a",
+    )
+
+    with pytest.raises(queue_service.ConversationTurnAlreadyActive):
+        queue_service.requeue_prompt_record(
+            scope=scope,
+            queue_id=queued["queue_id"],
+            current_server_instance_id="server-a",
+        )
+    with pytest.raises(queue_service.ConversationTurnAlreadyActive):
+        queue_service.cancel_prompt_record(
+            scope=scope,
+            queue_id=queued["queue_id"],
+        )
+
+    requeued = queue_service.requeue_prompt_record(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        current_server_instance_id="server-b",
+    )
+    assert requeued["status"] == queue_service.STATUS_QUEUED
+    assert requeued["client_request_id"] is None
+    assert requeued["attempt_id"] is None
+
+    rebound = queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        client_request_id="request-b",
+        attempt_id="attempt-b",
+        conversation_key="conversation-key-a",
+        server_instance_id="server-b",
+    )
+    assert rebound["status"] == queue_service.STATUS_IN_PROGRESS
+    assert rebound["client_request_id"] == "request-b"
+    assert rebound["attempt_id"] == "attempt-b"
+    assert rebound["server_instance_id"] == "server-b"
 
 
 def test_queue_scope_isolation() -> None:
@@ -190,7 +444,9 @@ def test_legacy_scope_terminal_record_reports_wrong_state() -> None:
     )
 
     with pytest.raises(queue_service.ChatPromptQueueRecordNotFound) as exc_info:
-        queue_service.claim_queue_record(scope=scope, queue_id="legacy-terminal-queue-1")
+        queue_service.claim_queue_record(
+            scope=scope, queue_id="legacy-terminal-queue-1"
+        )
 
     assert exc_info.value.error_code == "wrong_state"
     assert exc_info.value.details["scope_match"] is True
@@ -292,7 +548,9 @@ def test_list_recent_failed_queue_records_is_bounded_and_scoped() -> None:
         error="The final response did not return from Von.",
     )
 
-    completed = queue_service.create_queue_record(scope=scope, prompt_raw="Completed task")
+    completed = queue_service.create_queue_record(
+        scope=scope, prompt_raw="Completed task"
+    )
     queue_service.finish_prompt_record(
         scope=scope,
         queue_id=completed["queue_id"],
@@ -313,7 +571,9 @@ def test_list_recent_failed_queue_records_is_bounded_and_scoped() -> None:
     coll = mongo_client.get_chat_prompt_queue_collection()
     assert coll is not None
     old_completed_at = datetime.now(timezone.utc) - timedelta(days=3)
-    stale_failed = queue_service.create_queue_record(scope=scope, prompt_raw="Old failed task")
+    stale_failed = queue_service.create_queue_record(
+        scope=scope, prompt_raw="Old failed task"
+    )
     queue_service.finish_prompt_record(
         scope=scope,
         queue_id=stale_failed["queue_id"],
@@ -332,7 +592,9 @@ def test_list_recent_failed_queue_records_is_bounded_and_scoped() -> None:
     assert recent[0]["last_error"] == "The final response did not return from Von."
 
 
-def test_cancel_failed_record_is_scoped_durable_and_preserves_failure_evidence() -> None:
+def test_cancel_failed_record_is_scoped_durable_and_preserves_failure_evidence() -> (
+    None
+):
     scope = queue_service.build_queue_scope(
         user_concept_id="#V#user",
         organisation_concept_id="#V#org",

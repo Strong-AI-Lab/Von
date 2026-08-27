@@ -16,6 +16,10 @@ from src.backend.services.tool_progress_store_service import (
     queued_tool_progress_state_count,
     reset_tool_progress_persistence_queue_for_tests,
 )
+from src.backend.services.window_session_context_service import (
+    WindowSessionContext,
+    get_window_session_store,
+)
 
 _ORIGINAL_USE_MOCK_DB = os.environ.get("VON_USE_MOCK_DB")
 _ORIGINAL_DB_NAME = os.environ.get("VON_DB_NAME")
@@ -39,6 +43,33 @@ def _progress_app() -> Flask:
     app.secret_key = "test-secret"
     app.register_blueprint(von_routes.von_bp, url_prefix="/von")
     return app
+
+
+def _bind_authenticated_progress_scope(
+    app: Flask,
+    *,
+    user_id: str = "#V#test_user",
+    organisation_id: str = "#V#test_org",
+    namespace: str = "#V#test_user@test_org",
+    window_session_id: str = "ws_exact_progress",
+):
+    get_window_session_store().set(
+        WindowSessionContext(
+            window_session_id=window_session_id,
+            user_id=user_id,
+            organisation_concept_id=organisation_id,
+            namespace=namespace,
+        )
+    )
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = user_id
+    scope_key = von_routes._build_authenticated_tool_progress_scope_key(
+        user_concept_id=user_id,
+        organisation_concept_id=organisation_id,
+        namespace=namespace,
+    )
+    return client, scope_key, window_session_id
 
 
 def _relation_semantic_operation(
@@ -292,15 +323,11 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
 ) -> None:
     app = _progress_app()
     monkeypatch.setattr(
-        "src.backend.security.access_control.get_effective_user_concept_id",
-        lambda: "#V#test_user",
-    )
-    monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
         lambda: True,
     )
 
-    scope_key = "user:#V#test_user"
+    client, scope_key, window_session_id = _bind_authenticated_progress_scope(app)
     semantic_operation = _relation_semantic_operation(lifecycle_status="running")
     von_routes._set_tool_progress(
         scope_key,
@@ -318,7 +345,10 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
 
-    response = app.test_client().get("/von/progress/req-persisted")
+    response = client.get(
+        "/von/progress/req-persisted",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
     assert response.status_code == 200
     body = response.get_json()
     assert isinstance(body, dict)
@@ -557,12 +587,10 @@ def test_progress_endpoint_returns_explanatory_pending_payload(monkeypatch) -> N
     )
 
     response = app.test_client().get("/von/progress/req-pending")
-    assert response.status_code == 202
+    assert response.status_code == 401
     body = response.get_json()
     assert isinstance(body, dict)
-    assert body.get("status") == "pending"
-    assert body.get("pending_reason") == "no_visible_progress_state"
-    assert "No live progress state is visible yet" in str(body.get("result_summary"))
+    assert body.get("error") == "progress_authentication_required"
 
 
 def test_progress_endpoint_uses_window_scope_for_anonymous_requests(
@@ -604,11 +632,8 @@ def test_progress_endpoint_uses_window_scope_for_anonymous_requests(
         "/von/progress/req-window-scope",
         headers={"X-Von-Window-Session": window_session_id},
     )
-    assert response.status_code == 200
-    body = response.get_json()
-    assert isinstance(body, dict)
-    assert body.get("stage") == "evidence_read"
-    assert body.get("phase_label") == "Reading evidence"
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "progress_authentication_required"
 
 
 def test_progress_endpoint_uses_header_user_scope_without_session_lookup(
@@ -641,11 +666,8 @@ def test_progress_endpoint_uses_header_user_scope_without_session_lookup(
         f"/von/progress/{request_id}",
         headers={"X-User-Concept-ID": "#V#test_user"},
     )
-    assert response.status_code == 200
-    body = response.get_json()
-    assert isinstance(body, dict)
-    assert body.get("stage") == "model_call"
-    assert body.get("phase_label") == "Generating response"
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "progress_authentication_required"
 
 
 def test_progress_endpoint_uses_window_header_without_session_lookup(
@@ -682,10 +704,8 @@ def test_progress_endpoint_uses_window_header_without_session_lookup(
             "X-User-Concept-ID": "#V#test_user",
         },
     )
-    assert response.status_code == 200
-    body = response.get_json()
-    assert isinstance(body, dict)
-    assert body.get("stage") == "evidence_read"
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "progress_authentication_required"
 
 
 def test_progress_endpoint_recovers_window_scope_after_auth_scope_shift(
@@ -723,12 +743,57 @@ def test_progress_endpoint_recovers_window_scope_after_auth_scope_shift(
             "X-User-Concept-ID": "#V#test_user",
         },
     )
-    assert response.status_code == 200
-    body = response.get_json()
-    assert isinstance(body, dict)
-    assert body.get("stage") == "model_call"
-    assert body.get("resolved_scope_key") == f"anon:window:{window_session_id}"
-    assert body.get("progress_source") == "alternate_scope_fallback"
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "progress_authentication_required"
+
+
+def test_progress_endpoint_rejects_unknown_and_wrong_exact_window_scope(
+    monkeypatch,
+) -> None:
+    app = _progress_app()
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    client, scope_key, window_session_id = _bind_authenticated_progress_scope(app)
+    request_id = "req-exact-scope"
+    von_routes._set_tool_progress(
+        scope_key,
+        request_id,
+        {
+            "status": "thinking",
+            "phase": "model_call",
+            "request_id": request_id,
+        },
+    )
+    get_window_session_store().set(
+        WindowSessionContext(
+            window_session_id="ws-other-org",
+            user_id="#V#test_user",
+            organisation_concept_id="#V#other_org",
+            namespace="#V#test_user@other_org",
+        )
+    )
+
+    visible = client.get(
+        f"/von/progress/{request_id}",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    wrong_scope = client.get(
+        f"/von/progress/{request_id}",
+        headers={"X-Von-Window-Session": "ws-other-org"},
+    )
+    unknown_window = client.get(
+        f"/von/progress/{request_id}",
+        headers={"X-Von-Window-Session": "ws-unknown"},
+    )
+
+    assert visible.status_code == 200
+    assert visible.get_json()["stage"] == "model_call"
+    assert wrong_scope.status_code == 404
+    assert wrong_scope.get_json() == {"error": "progress_scope_mismatch"}
+    assert unknown_window.status_code == 409
+    assert unknown_window.get_json() == {"error": "progress_window_scope_unavailable"}
 
 
 def test_scope_alias_registration_copies_current_state(monkeypatch) -> None:

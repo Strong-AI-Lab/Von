@@ -82,6 +82,7 @@ describe('formatChatTimestamp', () => {
 
 describe('chat abort behaviour', () => {
     beforeEach(() => {
+        __testOnly_resetChatRequestState();
         document.body.innerHTML = `
             <div id="scrollableField"></div>
             <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
@@ -124,9 +125,38 @@ describe('chat abort behaviour', () => {
             // jsdom best-effort
         }
 
-        let generateSignal = null;
+        const fetchCalls = [];
+        let resolveQueueCreate = null;
 
         global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                return new Promise((resolve) => {
+                    resolveQueueCreate = () => resolve({
+                        ok: true,
+                        status: 201,
+                        json: async () => ({
+                            success: true,
+                            item: {
+                                queue_id: 'queue-aborted-before-dispatch',
+                                prompt_raw: "since we'\n",
+                                session_id: 'session-abort-test',
+                                status: 'queued'
+                            }
+                        })
+                    });
+                });
+            }
+            if (
+                url === '/von/api/chat_prompt_queue/queue-aborted-before-dispatch'
+                && options.method === 'DELETE'
+            ) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true })
+                });
+            }
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -135,16 +165,7 @@ describe('chat abort behaviour', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
-                generateSignal = options.signal;
-                return new Promise((resolve, reject) => {
-                    if (generateSignal) {
-                        generateSignal.addEventListener('abort', () => {
-                            const err = new Error('aborted');
-                            err.name = 'AbortError';
-                            reject(err);
-                        });
-                    }
-                });
+                throw new Error('aborted pre-dispatch prompt must not generate');
             }
 
             return Promise.resolve({ ok: true, json: async () => ({}) });
@@ -156,11 +177,16 @@ describe('chat abort behaviour', () => {
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();
+        expect(resolveQueueCreate).not.toBeNull();
+        resolveQueueCreate();
 
         await new Promise((r) => setTimeout(r, 0));
 
-        expect(generateSignal).not.toBeNull();
-        expect(generateSignal.aborted).toBe(true);
+        expect(fetchCalls.some(({ url }) => url === '/von/generate')).toBe(false);
+        expect(fetchCalls.some(({ url, options }) => (
+            url === '/von/api/chat_prompt_queue/queue-aborted-before-dispatch'
+            && options.method === 'DELETE'
+        ))).toBe(true);
         expect(document.getElementById('sendButton').disabled).toBe(false);
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
         expect(promptInput.value).toBe("since we'\n");
@@ -292,7 +318,8 @@ describe('thinking progress polling', () => {
             ([url]) => typeof url === 'string' && url.startsWith('/von/progress/')
         );
         expect(progressCall).toBeDefined();
-        expect(progressCall[1]?.credentials).toBe('omit');
+        expect(progressCall[1]?.credentials).toBe('same-origin');
+        expect(progressCall[1]?.headers?.['X-User-Concept-ID']).toBeUndefined();
 
         document.getElementById('abortButton').click();
         await expect(sendPromise).resolves.toBeUndefined();

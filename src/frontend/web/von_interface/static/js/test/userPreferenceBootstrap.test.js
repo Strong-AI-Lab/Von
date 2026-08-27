@@ -60,4 +60,20 @@ describe('userPreferenceBootstrap', () => {
         expect(setStoredOrgContext).not.toHaveBeenCalled();
         expect(localStorage.getItem('von_preferred_language')).toBe('en-NZ');
     });
+
+    test('preserves an explicit Personal selection instead of restoring a preferred organisation', async () => {
+        const setStoredOrgContext = jest.fn();
+
+        await hydrateStoredSelectionsFromUserPreferences('#V#michael_witbrock', {
+            getJsonImpl: jest.fn().mockResolvedValue({
+                organisation_concept_id: '#V#university_of_auckland_strong_ai_lab',
+            }),
+            getStoredOrgContext: () => null,
+            hasStoredOrgSelection: () => true,
+            setStoredOrgContext,
+            localStorageImpl: localStorage,
+        });
+
+        expect(setStoredOrgContext).not.toHaveBeenCalled();
+    });
 });

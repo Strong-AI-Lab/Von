@@ -409,7 +409,7 @@ variable "bootstrap_healthcheck_path" {
 variable "bootstrap_waitress_threads" {
   type        = number
   description = "VON_WAITRESS_THREADS value written to the managed environment file."
-  default     = 16
+  default     = 32
 
   validation {
     condition     = var.bootstrap_waitress_threads >= 4 && var.bootstrap_waitress_threads <= 256

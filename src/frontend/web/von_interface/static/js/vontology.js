@@ -1,7 +1,7 @@
 import { fetchConceptList, resetConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { clearContainer, elements, getCurrentUserConceptId } from './domUtils.js';
 import { handleVontologyNodeSelection } from './dynamicTabs.js';
-import { createConcept, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import { createConcept, ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
 import { createPredicateBadge, getPredicateType } from './predicateUtils.js';
 import { ProgressManager, ProgressPhase } from './progress.js';
 import {
@@ -49,7 +49,8 @@ function debugLog(...args) {
   }
 }
 
-function vontologyFetch(url, options = {}) {
+async function vontologyFetch(url, options = {}) {
+  await ensureUniqueWindowSessionId?.();
   // Keep identity context consistent across Vontology endpoints.
   // Access control can fall back to X-User-Concept-ID when session state is absent.
   const userConceptId = getCurrentUserConceptId();

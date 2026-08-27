@@ -20,7 +20,9 @@ import {
 } from './utils/copyJsonButtonState.js';
 import {
   getSessionScopedNamespace,
+  getSessionScopedOrgContext,
   hasSessionOrgContext,
+  hasSessionPersonalOrgContext,
   setSessionScopedNamespace,
   setSessionScopedOrgContext,
   syncNamespaceFromLocalStorage,
@@ -55,9 +57,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Dynamic positioning: calculate header height and position tabs accordingly
   setupDynamicLayout();
 
+  // Resolve duplicate-tab identity and bind this tab's explicit organisation
+  // (including Personal) before any child frame or actor-scoped bootstrap read.
+  await initialiseWindowActorContext();
+
   // Ensure user context is loaded BEFORE initializing chat to prevent race condition
   // where conversation history loads with null user_id
   await ensureUserContext();
+  loadDeferredSettingsFrame();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
   import('./clientCapabilitiesReporter.js').then(module => {
@@ -186,6 +193,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   console.log("Initial data loads complete.");
 });
 
+function loadDeferredSettingsFrame() {
+  const settingsFrame = document.getElementById('settingsFrame');
+  if (!(settingsFrame instanceof HTMLIFrameElement)) return;
+  const deferredSrc = String(settingsFrame.dataset.src || '').trim();
+  if (!deferredSrc || settingsFrame.dataset.actorContextReady === 'true') return;
+  settingsFrame.dataset.actorContextReady = 'true';
+  settingsFrame.src = deferredSrc;
+}
+
+async function initialiseWindowActorContext() {
+  try {
+    initSessionStorageFromLocalStorage();
+    const { ensureUniqueWindowSessionId } = await import('./apiService.js');
+    await ensureUniqueWindowSessionId();
+    await syncFlaskSessionOrg();
+  } catch (error) {
+    // Keep the outer page usable, but do not eagerly load the Settings frame
+    // until the bounded identity attempt has completed.
+    console.warn('[main] Failed to initialise the window actor context:', error);
+  }
+}
+
+window.addEventListener('von:windowSessionIdentityChanged', () => {
+  // A late same-origin collision response can rotate the provisional ID after
+  // startup. Rebind the retained per-tab organisation to the replacement ID.
+  void syncFlaskSessionOrg();
+});
+
 function applyExpertTabGuards() {
   if (isExpertTabsEnabled()) return;
 
@@ -299,9 +334,10 @@ function initSessionStorageFromLocalStorage() {
 async function syncFlaskSessionOrg() {
   try {
     // Import to ensure window session ID is generated
-    const { getJson, postJson, getWindowSessionId } = await import('./apiService.js');
-    // Ensure window session ID exists
-    getWindowSessionId();
+    const { getJson, postJson, ensureUniqueWindowSessionId } = await import('./apiService.js');
+    // Resolve a copied duplicate-tab ID before reading or mutating the
+    // server-side window organisation context.
+    await ensureUniqueWindowSessionId();
 
     // First, check if window session already has an org
     const context = await getJson('/von/api/session/context');
@@ -332,15 +368,18 @@ async function syncFlaskSessionOrg() {
 
     // Window session store is empty (or context came from Flask session fallback).
     // Sync from localStorage to window session store - this is the user's INTENDED org.
-    let storedOrg = sessionStorage.getItem('von_current_org');
-    if (!storedOrg) {
-      // Fallback to localStorage for backward compatibility
-      storedOrg = localStorage.getItem('von_current_org');
-    }
+    const storedOrg = getSessionScopedOrgContext();
     if (!storedOrg) {
       console.log('[main] No org in sessionStorage/localStorage, proceeding without org');
-      // If Flask session had an org but storage doesn't, clear window session to match
-      if (context.organisation_id && !isWindowSessionSource) {
+      // Personal is an explicit per-tab binding. Materialise it even when the
+      // cookie fallback also happens to be null, so later calls cannot drift to
+      // another tab's organisation through a non-window fallback.
+      if (!isWindowSessionSource && hasSessionPersonalOrgContext()) {
+        console.log('[main] Binding explicit Personal context to this window session');
+        await postJson('/von/api/session/set_organisation', {
+          organisation_concept_id: null
+        });
+      } else if (context.organisation_id && !isWindowSessionSource) {
         console.log('[main] Clearing stale Flask session org - no org in storage');
         await postJson('/von/api/session/set_organisation', {
           organisation_concept_id: null
@@ -348,8 +387,7 @@ async function syncFlaskSessionOrg() {
       }
       return;
     }
-    const org = parseStoredContextValue(storedOrg);
-    const orgConceptId = org?.concept_id;
+    const orgConceptId = storedOrg?.concept_id;
     if (!orgConceptId) {
       console.log('[main] No org concept_id in storage, proceeding without org');
       return;
@@ -403,9 +441,9 @@ async function ensureUserContext() {
     initSessionStorageFromLocalStorage();
 
     // Import to ensure window session ID is generated
-    const { getJson, getWindowSessionId } = await import('./apiService.js');
-    // Ensure window session ID exists
-    getWindowSessionId();
+    const { getJson, ensureUniqueWindowSessionId } = await import('./apiService.js');
+    // Resolve a copied duplicate-tab ID before any actor-scoped bootstrap call.
+    await ensureUniqueWindowSessionId();
 
     const storedUser = parseStoredContextValue(localStorage.getItem('von_current_user'));
     if (storedUser?.concept_id) {
@@ -422,6 +460,11 @@ async function ensureUserContext() {
         // Ignore storage cleanup failures and continue with settings fetch.
       }
     }
+
+    // Preference hydration may have supplied an organisation for an otherwise
+    // unset tab. Bind that explicit tab selection before settings can observe
+    // a cookie-global fallback through the newly unique window ID.
+    await syncFlaskSessionOrg();
 
     console.log('[main] Fetching settings to populate user context...');
     const settings = await getJson('/api/settings/');
@@ -446,12 +489,14 @@ async function ensureUserContext() {
       console.log('[main] Populated von_current_user from browser bootstrap context');
     }
 
-    const resolvedOrg = resolveBrowserBootstrapOrganisationContext({
-      settings,
-      sessionContext,
-      storedOrganisation: parseStoredContextValue(sessionStorage.getItem('von_current_org'))
-        || parseStoredContextValue(localStorage.getItem('von_current_org'))
-    });
+    const personalContextSelected = hasSessionPersonalOrgContext();
+    const resolvedOrg = personalContextSelected
+      ? null
+      : resolveBrowserBootstrapOrganisationContext({
+        settings,
+        sessionContext,
+        storedOrganisation: getSessionScopedOrgContext()
+      });
 
     if (resolvedOrg) {
       setSessionScopedOrgContext(resolvedOrg);
@@ -459,8 +504,15 @@ async function ensureUserContext() {
     }
 
     const resolvedNamespace = resolveBrowserBootstrapNamespace({
-      settings,
-      sessionContext,
+      settings: personalContextSelected
+        ? {
+          ...settings,
+          current_organisation_id: null,
+          current_organisation_concept_id: null,
+          current_organisation_name: null
+        }
+        : settings,
+      sessionContext: personalContextSelected ? null : sessionContext,
       userContext: resolvedUser,
       organisationContext: resolvedOrg
     });
@@ -526,17 +578,17 @@ document.addEventListener('orgSwitched', (event) => {
 
   try {
     if (orgId) {
-      // Sync org to parent's sessionStorage so footer reads correct value
-      const existing = sessionStorage.getItem('von_current_org');
-      const parsed = existing ? JSON.parse(existing) : {};
-      sessionStorage.setItem('von_current_org', JSON.stringify({
+      // Sync org to this tab so footer and request context update together.
+      const parsed = getSessionScopedOrgContext() || {};
+      setSessionScopedOrgContext({
         id: parsed.id || null,
         concept_id: orgId,
         name: orgName || parsed.name || null
-      }));
+      });
     } else {
-      // Switching to personal (no org) - clear sessionStorage entry
-      sessionStorage.removeItem('von_current_org');
+      // Personal is an explicit per-tab selection, not permission to fall
+      // through to another tab's shared localStorage organisation.
+      setSessionScopedOrgContext(null);
     }
     if (namespace) {
       sessionStorage.setItem('current_user_namespace', namespace);

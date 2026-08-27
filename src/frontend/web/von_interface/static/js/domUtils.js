@@ -1,7 +1,11 @@
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
 import { applyLocalModelPreferenceOverlay, getEffectiveLocalModelPreference } from './utils/localModelPreferences.js';
-import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import { ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import {
+  getSessionScopedOrgContext,
+  hasSessionPersonalOrgContext,
+} from './utils/sessionScopedStorage.js';
 import { formatConversationRuntimeCostFooter } from './utils/conversationRuntimeCost.js';
 import {
   getLatestWorkflowCapabilityIndexStatus,
@@ -142,21 +146,7 @@ export function updateHeaderOrgName() {
   if (!headerOrgNameEl) return;
 
   // Read current org from session-scoped storage
-  let orgName = null;
-  try {
-    const sessionOrg = sessionStorage.getItem('von_current_org');
-    if (sessionOrg) {
-      const parsed = parseStoredContextValue(sessionOrg);
-      orgName = parsed?.name || null;
-    }
-    if (!orgName) {
-      const localOrg = localStorage.getItem('von_current_org');
-      if (localOrg) {
-        const parsed = parseStoredContextValue(localOrg);
-        orgName = parsed?.name || null;
-      }
-    }
-  } catch { /* ignore */ }
+  const orgName = getSessionScopedOrgContext()?.name || null;
 
   const displayName = orgName || 'Personal';
   headerOrgNameEl.textContent = displayName;
@@ -171,21 +161,7 @@ async function loadInfoPopupContent() {
   if (!contentEl) return;
 
   // Get current org concept ID
-  let orgConceptId = null;
-  try {
-    const sessionOrg = sessionStorage.getItem('von_current_org');
-    if (sessionOrg) {
-      const parsed = parseStoredContextValue(sessionOrg);
-      orgConceptId = parsed?.concept_id || null;
-    }
-    if (!orgConceptId) {
-      const localOrg = localStorage.getItem('von_current_org');
-      if (localOrg) {
-        const parsed = parseStoredContextValue(localOrg);
-        orgConceptId = parsed?.concept_id || null;
-      }
-    }
-  } catch { /* ignore */ }
+  const orgConceptId = getSessionScopedOrgContext()?.concept_id || null;
 
   // Clear cache when loading new org
   if (orgConceptId !== _orgDescriptionCacheId) {
@@ -271,7 +247,8 @@ export function getCurrentUserConceptId() {
   return stored?.concept_id || null;
 }
 
-function buildFooterActorHeaders(extraHeaders = {}) {
+async function buildFooterActorHeaders(extraHeaders = {}) {
+  await ensureUniqueWindowSessionId?.();
   const userConceptId = getCurrentUserConceptId();
   return {
     [WINDOW_SESSION_HEADER]: getWindowSessionId(),
@@ -285,7 +262,7 @@ async function fetchJsonWithTimeout(url, options = {}) {
   const { timeoutMs = 6000, ...fetchOptions } = options || {};
   const init = {
     ...fetchOptions,
-    headers: buildFooterActorHeaders(fetchOptions.headers || {}),
+    headers: await buildFooterActorHeaders(fetchOptions.headers || {}),
   };
   let timeoutId = null;
 
@@ -336,6 +313,9 @@ async function getSettings() {
 // Helpers to access current user / organisation with both name and concept id.
 // JVNAUTOSCI-1011: For window-scoped values, check sessionStorage first (per-window), then localStorage (shared fallback)
 function readSessionScopedJson(key) {
+  if (key === 'von_current_org' || key === 'von_org_context') {
+    return getSessionScopedOrgContext();
+  }
   try {
     const sessionVal = sessionStorage.getItem(key);
     if (sessionVal) return parseStoredContextValue(sessionVal);
@@ -357,6 +337,9 @@ async function getCurrentOrganisationInfo(settingsOverride = null) {
   if (switching) {
     const name = switching.name ? `${switching.name} (switching…)` : 'Switching…';
     return { id: null, conceptId: switching.concept_id || null, name };
+  }
+  if (hasSessionPersonalOrgContext()) {
+    return { id: null, conceptId: null, name: null };
   }
   const stored = readSessionScopedJson('von_current_org');
   if (stored) {

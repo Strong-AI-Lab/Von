@@ -7,6 +7,7 @@ from typing import Any
 from flask import Flask
 
 from src.backend.services.background_task_service import TaskStatus
+from src.backend.services.chat_prompt_queue_service import build_queue_scope
 from src.backend.workflows.durable.models import WorkflowInstanceStatus
 
 
@@ -31,6 +32,8 @@ class _RouteRegistry:
             progress=dict(kwargs.get("progress") or {}),
             session_id=kwargs.get("session_id"),
             user_id=kwargs.get("user_id"),
+            organisation_id=kwargs.get("organisation_id"),
+            namespace=kwargs.get("namespace"),
         )
         return self.status
 
@@ -63,6 +66,22 @@ def _make_app(
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_instance_manager",
         lambda: manager,
+    )
+    scope = build_queue_scope(user_concept_id="#V#task_test_user")
+    if registry.status is not None:
+        registry.status.user_id = scope["user_concept_id"]
+        registry.status.organisation_id = scope["organisation_concept_id"]
+        registry.status.namespace = scope["namespace"]
+    for instance in {
+        id(manager.instance): manager.instance,
+        id(manager.hydrated_instance): manager.hydrated_instance,
+    }.values():
+        instance.user_id = scope["user_concept_id"]
+        instance.org_id = scope["organisation_concept_id"]
+        instance.namespace = scope["namespace"]
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#task_test_user", "authenticated_session"),
     )
 
     app = Flask(__name__)
@@ -111,6 +130,70 @@ def test_background_status_reconciles_terminal_durable_turn(monkeypatch) -> None
     )
     assert registry.mark_calls[0]["task_id"] == "turn-123"
     assert manager.calls[0]["source_event_id"] == "turn-123"
+
+
+def test_background_task_id_is_not_visible_to_another_actor(monkeypatch) -> None:
+    status = TaskStatus(
+        task_id="private-turn",
+        status="running",
+        created_at=datetime.now(timezone.utc),
+        user_id="#V#task_test_user",
+        namespace="#V#task_test_user",
+    )
+    instance = SimpleNamespace(
+        instance_id="private-instance",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="responded",
+        error=None,
+        source_event_id="private-turn",
+        inputs={"conversation_session_id": "private-session"},
+        outputs={"response": "private"},
+    )
+    app = _make_app(
+        monkeypatch,
+        _RouteRegistry(status),
+        _TerminalTurnManager(instance),
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#other_user", "authenticated_session"),
+    )
+
+    response = app.test_client().get("/von/api/task/status/private-turn")
+
+    assert response.status_code == 404
+
+
+def test_background_task_id_is_not_visible_in_another_organisation(
+    monkeypatch,
+) -> None:
+    status = TaskStatus(
+        task_id="org-private-turn",
+        status="running",
+        created_at=datetime.now(timezone.utc),
+    )
+    instance = SimpleNamespace(
+        instance_id="org-private-instance",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="responded",
+        error=None,
+        source_event_id="org-private-turn",
+        inputs={"conversation_session_id": "private-session"},
+        outputs={"response": "private"},
+    )
+    app = _make_app(
+        monkeypatch,
+        _RouteRegistry(status),
+        _TerminalTurnManager(instance),
+    )
+    client = app.test_client()
+    with client.session_transaction() as flask_session:
+        flask_session["organisation_concept_id"] = "#V#other_org"
+        flask_session["namespace"] = "#V#task_test_user@other_org"
+
+    response = client.get("/von/api/task/result/org-private-turn")
+
+    assert response.status_code == 404
 
 
 def test_background_status_does_not_call_lifecycle_completion_user_success(
@@ -367,8 +450,7 @@ def test_background_result_prefers_user_answer_over_machine_json_response(
             "request_id": "turn-json",
             "session_id": "session-json",
             "response": (
-                '{"confidence": 1.0, "workflow_id": '
-                '"#V#turn_completion_gate_workflow"}'
+                '{"confidence": 1.0, "workflow_id": "#V#turn_completion_gate_workflow"}'
             ),
             "selected_workflow_user_response": "Grounded Jira answer.",
             "final_response": "Grounded Jira answer.",
@@ -418,12 +500,10 @@ def test_background_result_uses_completion_report_before_machine_json(
             "request_id": "turn-report",
             "session_id": "session-report",
             "response": (
-                '{"confidence": 1.0, "workflow_id": '
-                '"#V#turn_completion_gate_workflow"}'
+                '{"confidence": 1.0, "workflow_id": "#V#turn_completion_gate_workflow"}'
             ),
             "final_response": (
-                '{"confidence": 1.0, "workflow_id": '
-                '"#V#turn_completion_gate_workflow"}'
+                '{"confidence": 1.0, "workflow_id": "#V#turn_completion_gate_workflow"}'
             ),
             "completion_report": {
                 "response_text": "Here is the grounded completion report answer."
@@ -505,6 +585,8 @@ def test_background_generate_success_body_marks_task_completed_before_persistenc
         request_id="turn-ready",
         session_id="session-ready",
         user_id="#V#michael_witbrock",
+        organisation_id="#V#von_org",
+        namespace="#V#michael_witbrock@von_org",
         response_text="Ready answer",
     )
 
@@ -512,6 +594,8 @@ def test_background_generate_success_body_marks_task_completed_before_persistenc
     assert registry.status.status == "completed"
     assert registry.status.session_id == "session-ready"
     assert registry.status.user_id == "#V#michael_witbrock"
+    assert registry.status.organisation_id == "#V#von_org"
+    assert registry.status.namespace == "#V#michael_witbrock@von_org"
     assert registry.status.result == {
         "response": "Ready answer",
         "request_id": "turn-ready",
