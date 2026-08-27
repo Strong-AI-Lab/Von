@@ -151,6 +151,22 @@ def test_paper_recommendation_prompt_support_seeds_content_from_repo_asset(
         normalised_maintenance_text
     )
 
+    bundle = json.loads(_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    profile_workflow = next(
+        workflow
+        for workflow in bundle["workflows"]
+        if workflow["workflow_id"] == PAPER_MATCHING_PROFILE_MAINTENANCE_WORKFLOW_ID
+    )
+    maintenance_step = next(
+        step
+        for step in profile_workflow["publication_spec"]["steps"]
+        if step["state_id"] == "plan_profile_maintenance"
+    )
+    text_relation_defaults = maintenance_step["llm_policy"]["tool_argument_defaults"][
+        "get_text_relations"
+    ]
+    assert text_relation_defaults == {"limit": 8}
+
 
 def test_forced_profile_prompt_seed_refreshes_existing_content(
     _reset_mock_db: Any,
