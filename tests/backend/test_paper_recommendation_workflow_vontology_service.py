@@ -140,6 +140,13 @@ def test_paper_recommendation_prompt_support_seeds_content_from_repo_asset(
         maintenance_text
     )
     assert "omit it instead of sending a string" in normalised_maintenance_text
+    assert "use `user_only_default` for output scope" in normalised_maintenance_text
+    assert "Never pass `user` or `organisation` as `selected_scope_mode`" in (
+        normalised_maintenance_text
+    )
+    assert "read that exact source artefact's `hasDescription` text" in (
+        normalised_maintenance_text
+    )
 
 
 def test_forced_profile_prompt_seed_refreshes_existing_content(
@@ -219,17 +226,33 @@ def test_paper_recommendation_event_bindings_are_conditioned_by_policy(
         EVENT_TYPE_SCOPED_ASSERTION_UPSERTED
     ]["condition"]
 
-    maintenance_bindings = {
+    maintenance_bindings = represented[
+        PAPER_MATCHING_PROFILE_MAINTENANCE_WORKFLOW_ID
+    ]
+    maintenance_bindings_by_event = {
         item["event_type"]: item
-        for item in represented[PAPER_MATCHING_PROFILE_MAINTENANCE_WORKFLOW_ID]
+        for item in maintenance_bindings
+        if item["event_type"] != EVENT_TYPE_RELATIONSHIP_ADDED
     }
-    assert maintenance_bindings[EVENT_TYPE_TEXT_RELATION_UPSERTED]["input_mapping"][
-        "evidence_kind"
-    ] == "research_summary"
-    assert maintenance_bindings[EVENT_TYPE_RELATIONSHIP_ADDED]["condition"] == {
-        "kind": "context_value_equals",
+    assert (
+        maintenance_bindings_by_event[EVENT_TYPE_TEXT_RELATION_UPSERTED][
+            "input_mapping"
+        ]["evidence_kind"]
+        == "research_summary"
+    )
+    relationship_binding = next(
+        item
+        for item in maintenance_bindings
+        if item["event_type"] == EVENT_TYPE_RELATIONSHIP_ADDED
+    )
+    assert relationship_binding["input_mapping"] == {
+        "source_predicate": "event.predicate",
+        "source_fingerprint": "event.mutation_id",
+    }
+    assert relationship_binding["condition"] == {
+        "kind": "context_value_in",
         "key": "event.predicate",
-        "value": "#V#authored_by",
+        "values": ["#V#has_research_description", "#V#authored_by"],
     }
 
 

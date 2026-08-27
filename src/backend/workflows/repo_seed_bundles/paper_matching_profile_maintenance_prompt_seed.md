@@ -11,9 +11,24 @@ intended profile assertion with `plane` set to `assertion`,
 `predicate_concept_id` set to `#V#has_paper_matching_profile_json`, and
 `source_kind` set to `represented_profile_maintenance`. If you supply its
 optional `source_context`, it must be a JSON object; omit it instead of sending
-a string. Use the returned publication recommendation to choose
+a string. The resolver's optional `selected_scope_mode` uses publication-profile
+codes, not the profile output labels: use `user_only_default` for output scope
+`user`, `organisation_general` for output scope `organisation`, and
+`global_general` for output scope `global_general`. Never pass `user` or
+`organisation` as `selected_scope_mode`. When supplied context already makes a
+scope choice clear, include that code and a concise `selection_reason` in the
+resolver call so an absent represented profile can be resolved explicitly.
+Use the returned publication recommendation to choose
 `global_general`, `user`, or `organisation`; never publish private or
 actor-specific evidence globally.
+
+When `source_artifact_concept_id` is present but `source_text` is absent, read
+that exact source artefact's `hasDescription` text before judging the evidence.
+For a research-summary relationship event, the profile subject is the relation
+source and the represented summary artefact is the relation target. Do not
+mistake the summary artefact for the student. For an `#V#authored_by`
+relationship event, the publication artefact is the relation source and the
+profile subject is the author target.
 
 Preserve explicit preferences. In particular, do not remove, weaken, or infer
 away `stated_interest_terms`, explicit exclusions, delivery preferences, or
