@@ -33031,7 +33031,8 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
         includeLiveProgress: true
     });
     const payload = buildThinkingDiagnosticsLocatorPayload(request, {
-        mcpAccess: turnAccess?.mcp_access || null
+        mcpAccess: turnAccess?.mcp_access || null,
+        retrievalStatus: turnAccess?.retrieval_status || null
     });
     if (!payload) {
         showToast('No diagnostic reference is available yet.', 'info');
@@ -36655,7 +36656,11 @@ async function buildLlmDebugDeepInspectionJsonForTurn(turnId) {
             : null,
         includeLiveProgress: false
     });
-    if (turnAccess?.mcp_access && typeof turnAccess.mcp_access === 'object') {
+    if (
+        turnAccess?.mcp_access
+        && typeof turnAccess.mcp_access === 'object'
+        && Object.keys(turnAccess.mcp_access).length > 0
+    ) {
         debugData = {
             ...debugData,
             telemetry_locator_mcp_access: turnAccess.mcp_access,
@@ -37334,7 +37339,10 @@ function buildChatHistoryAccessArgs({ sessionId, historyIndex = undefined } = {}
     };
 }
 
-function buildThinkingDiagnosticsLocatorPayload(request, { mcpAccess = null } = {}) {
+function buildThinkingDiagnosticsLocatorPayload(
+    request,
+    { mcpAccess = null, retrievalStatus = null } = {}
+) {
     if (!request || typeof request !== 'object') {
         return null;
     }
@@ -37366,6 +37374,17 @@ function buildThinkingDiagnosticsLocatorPayload(request, { mcpAccess = null } = 
         )
         : {};
 
+    const cleanRetrievalStatus = typeof retrievalStatus === 'string'
+        ? retrievalStatus.trim()
+        : '';
+    const resolvedRetrievalStatus = Object.keys(executableMcpAccess).length > 0
+        ? 'server_delegation_available'
+        : (
+            cleanRetrievalStatus === 'server_delegation_available'
+                ? 'server_delegation_empty'
+                : cleanRetrievalStatus || 'server_delegation_unavailable'
+        );
+
     return {
         schema_version: TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION,
         generated_at_utc: new Date().toISOString(),
@@ -37381,9 +37400,7 @@ function buildThinkingDiagnosticsLocatorPayload(request, { mcpAccess = null } = 
                 : null
         } : null,
         mcp_access: executableMcpAccess,
-        retrieval_status: Object.keys(executableMcpAccess).length > 0
-            ? 'server_delegation_available'
-            : 'server_delegation_unavailable'
+        retrieval_status: resolvedRetrievalStatus
     };
 }
 
@@ -37776,17 +37793,47 @@ async function fetchTurnTelemetryMcpAccess({
                 timeoutMs: CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS
             }
         );
-        const body = await response.json();
-        if (!response.ok || !body || typeof body !== 'object') {
-            return null;
+        if (!response || response.ok !== true) {
+            const status = Number(response?.status);
+            let retrievalStatus = 'server_request_rejected';
+            if (status === 401) {
+                retrievalStatus = 'authentication_required';
+            } else if (status === 403 || status === 404) {
+                // Deliberately keep absence and non-authorisation
+                // indistinguishable while explaining what the server actually
+                // reported.  "Unavailable" previously implied a delegation
+                // service outage even when this exact turn simply had no row.
+                retrievalStatus = 'not_found_or_not_authorised';
+            } else if (status === 409) {
+                retrievalStatus = 'window_scope_unavailable';
+            } else if (status === 429) {
+                retrievalStatus = 'server_rate_limited';
+            } else if (status >= 500) {
+                retrievalStatus = 'server_temporarily_unavailable';
+            }
+            return { mcp_access: {}, retrieval_status: retrievalStatus };
+        }
+        let body;
+        try {
+            body = await response.json();
+        } catch (_error) {
+            return { mcp_access: {}, retrieval_status: 'invalid_server_response' };
+        }
+        if (!body || typeof body !== 'object') {
+            return { mcp_access: {}, retrieval_status: 'invalid_server_response' };
         }
         if (body.schema_version !== TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION) {
-            return null;
+            return { mcp_access: {}, retrieval_status: 'invalid_server_response' };
         }
-        return body;
+        return { ...body, retrieval_status: 'server_delegation_available' };
     } catch (error) {
         console.warn('[chatTab] Failed to fetch server turn telemetry delegation:', error);
-        return null;
+        return {
+            mcp_access: {},
+            retrieval_status: error?.vonTimeout === true
+                ? 'server_timeout'
+                : 'server_unreachable'
+        };
     }
 }
 

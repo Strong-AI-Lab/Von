@@ -307,6 +307,7 @@ class ConversationTurnAdmissionService:
         conversation_key: str,
         queue_id: str | None = None,
         attempt_id: str | None = None,
+        window_session_id: str | None = None,
     ) -> ConversationTurnAdmissionToken:
         """Acquire capacity and the durable conversation fence without waiting."""
 
@@ -331,9 +332,20 @@ class ConversationTurnAdmissionService:
                         client_request_id=client_request_id,
                         attempt_id=attempt_id,
                         conversation_key=conversation_key,
+                        legacy_submission_role=(
+                            chat_prompt_queue_service.LEGACY_SUBMISSION_ROLE_GENERATE
+                            if not isinstance(attempt_id, str) or not attempt_id.strip()
+                            else None
+                        ),
+                        window_session_id=window_session_id,
                     )
                 except chat_prompt_queue_service.ChatPromptQueueCapacityReached as exc:
                     raise ConversationTurnCapacityReached(str(exc)) from exc
+                except chat_prompt_queue_service.ConversationTurnAlreadyActive as exc:
+                    raise ConversationTurnActive(
+                        str(exc),
+                        queue_id=exc.queue_id,
+                    ) from exc
                 bound_queue_id = str(record["queue_id"])
             try:
                 bound = chat_prompt_queue_service.bind_queue_record_to_turn(

@@ -35,6 +35,24 @@ def mock_membership_authority_barrier(monkeypatch):
         "ontology_authority_membership_mutation_barrier",
         nullcontext,
     )
+    monkeypatch.setattr(
+        "src.backend.services.organisation_membership_service."
+        "organisation_membership_scope_barrier",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def mock_window_authority_invalidation(monkeypatch):
+    """Keep membership unit tests off window-session persistence."""
+
+    invalidated_users = []
+    monkeypatch.setattr(
+        "src.backend.services.organisation_membership_service."
+        "_invalidate_user_window_authority",
+        lambda user_id, org_id: invalidated_users.append((user_id, org_id)),
+    )
+    return invalidated_users
 
 
 @pytest.fixture
@@ -98,6 +116,7 @@ class TestCreateOrganisationMembership:
         mock_text_value_service,
         mock_access_control,
         mock_text_repos,
+        mock_window_authority_invalidation,
     ):
         """Test successful creation of a membership relationship."""
         # Setup
@@ -147,9 +166,14 @@ class TestCreateOrganisationMembership:
         # Predicate is stored as namespaced concept identifier
         assert call_args[1]["predicate"] == "#V#hasRole"
         assert call_args[1]["text"] == f"{role}::{org_id}"
+        assert mock_window_authority_invalidation == []
 
     def test_create_membership_already_exists(
-        self, mock_concepts_repo, mock_text_value_service, mock_access_control
+        self,
+        mock_concepts_repo,
+        mock_text_value_service,
+        mock_access_control,
+        mock_window_authority_invalidation,
     ):
         """Test creating a membership that already exists."""
         user_id = "#V#michael_witbrock"
@@ -179,6 +203,7 @@ class TestCreateOrganisationMembership:
         # Assert
         assert result["relationship_created"] is False
         mock_concepts_repo.mutate_relationship_edge.assert_not_called()
+        assert mock_window_authority_invalidation == [(user_id, org_id)]
 
     def test_create_membership_invalid_user_id(self, mock_access_control):
         """Test creation with invalid user_id."""
@@ -501,6 +526,7 @@ class TestUpdateUserRole:
         mock_access_control,
         mock_text_value_service,
         mock_text_repos,
+        mock_window_authority_invalidation,
     ):
         """Test successful role update."""
         user_id = "#V#michael_witbrock"
@@ -534,6 +560,7 @@ class TestUpdateUserRole:
         assert result["new_role"] == "admin"
         assert result["role_updated"] is True
         assert result["previous_role"] == "member"
+        assert mock_window_authority_invalidation == [(user_id, org_id)]
 
     def test_update_role_not_member(
         self, mock_concepts_repo, mock_access_control, mock_text_repos
@@ -555,7 +582,11 @@ class TestUpdateUserRole:
             update_user_role(user_id, org_id, "admin")
 
     def test_update_role_no_change(
-        self, mock_concepts_repo, mock_access_control, mock_text_repos
+        self,
+        mock_concepts_repo,
+        mock_access_control,
+        mock_text_repos,
+        mock_window_authority_invalidation,
     ):
         """Test role update when role hasn't changed."""
         user_id = "#V#michael_witbrock"
@@ -572,13 +603,14 @@ class TestUpdateUserRole:
             "object_text_id": "tv_1",
             "context": {"organisation_id": org_id},
         }
-        text_vals.find_one.return_value = {"text": "admin"}
+        text_vals.find_one.return_value = {"text": f"admin::{org_id}"}
 
         # Execute
         result = update_user_role(user_id, org_id, "admin")
 
         # Assert
         assert result["role_updated"] is False
+        assert mock_window_authority_invalidation == []
 
 
 # --- Tests for remove_organisation_membership ---
@@ -588,7 +620,12 @@ class TestRemoveOrganisationMembership:
     """Tests for removing memberships."""
 
     def test_remove_membership_success(
-        self, mock_concepts_repo, mock_access_control, mock_text_repos, monkeypatch
+        self,
+        mock_concepts_repo,
+        mock_access_control,
+        mock_text_repos,
+        mock_window_authority_invalidation,
+        monkeypatch,
     ):
         """Test successful removal of membership."""
         user_id = "#V#michael_witbrock"
@@ -618,6 +655,7 @@ class TestRemoveOrganisationMembership:
 
         # Verify mutate_relationship_edge was called
         mock_concepts_repo.mutate_relationship_edge.assert_called_once()
+        assert mock_window_authority_invalidation == [(user_id, org_id)]
 
     def test_remove_membership_requires_semantic_authority_revocation_first(
         self, mock_concepts_repo, mock_access_control, mock_text_repos, monkeypatch

@@ -106,6 +106,107 @@ def test_distinct_conversations_run_concurrently_and_release_exactly() -> None:
     assert service.snapshot()["active_global"] == 0
 
 
+def test_legacy_queue_first_converges_with_generate_admission() -> None:
+    scope = _scope()
+    conversation_key = _key("legacy-queue-first")
+    queue_first = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="queue first",
+        session_id="legacy-queue-first",
+        conversation_key=conversation_key,
+        legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+        window_session_id="window-queue-first",
+    )
+    service = ConversationTurnAdmissionService(per_user_limit=2, global_limit=2)
+
+    token = service.acquire(
+        scope=scope,
+        prompt_raw="queue first",
+        session_id="legacy-queue-first",
+        session_name=None,
+        client_request_id="request-queue-first",
+        conversation_key=conversation_key,
+        window_session_id="window-queue-first",
+    )
+
+    assert token.queue_id == queue_first["queue_id"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert coll.count_documents({}) == 1
+    service.release(token, status=queue_service.STATUS_COMPLETED)
+    persisted = coll.find_one({"queue_id": token.queue_id})
+    assert persisted is not None
+    assert "active_legacy_submission_key" not in persisted
+
+
+def test_legacy_generate_first_converges_with_queue_create() -> None:
+    scope = _scope()
+    conversation_key = _key("legacy-generate-first")
+    service = ConversationTurnAdmissionService(per_user_limit=2, global_limit=2)
+
+    token = service.acquire(
+        scope=scope,
+        prompt_raw="generate first",
+        session_id="legacy-generate-first",
+        session_name=None,
+        client_request_id="request-generate-first",
+        conversation_key=conversation_key,
+        window_session_id="window-generate-first",
+    )
+    service.release(token, status=queue_service.STATUS_COMPLETED)
+    queue_second = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="generate first",
+        session_id="legacy-generate-first",
+        conversation_key=conversation_key,
+        legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+        window_session_id="window-generate-first",
+    )
+
+    assert queue_second["queue_id"] == token.queue_id
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert coll.count_documents({}) == 1
+    persisted = coll.find_one({"queue_id": token.queue_id})
+    assert persisted is not None
+    assert persisted["status"] == queue_service.STATUS_COMPLETED
+    assert "active_legacy_submission_key" not in persisted
+
+
+def test_terminal_unpaired_generate_does_not_block_new_request_id() -> None:
+    scope = _scope()
+    conversation_key = _key("legacy-generate-repeat")
+    service = ConversationTurnAdmissionService(per_user_limit=2, global_limit=2)
+    acquire_kwargs = {
+        "scope": scope,
+        "prompt_raw": "send the same prompt again",
+        "session_id": "legacy-generate-repeat",
+        "session_name": None,
+        "conversation_key": conversation_key,
+        "window_session_id": "window-generate-repeat",
+    }
+
+    first = service.acquire(
+        **acquire_kwargs,
+        client_request_id="request-generate-first",
+    )
+    service.release(first, status=queue_service.STATUS_COMPLETED)
+    second = service.acquire(
+        **acquire_kwargs,
+        client_request_id="request-generate-second",
+    )
+
+    assert second.queue_id != first.queue_id
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert coll.count_documents({}) == 2
+    old_record = coll.find_one({"queue_id": first.queue_id})
+    assert old_record is not None
+    assert old_record["status"] == queue_service.STATUS_COMPLETED
+    assert "active_legacy_submission_key" not in old_record
+    service.release(second, status=queue_service.STATUS_COMPLETED)
+
+
 def test_release_retries_durable_terminalisation_before_freeing_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

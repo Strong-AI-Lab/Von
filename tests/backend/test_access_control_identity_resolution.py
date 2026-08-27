@@ -427,21 +427,17 @@ def test_window_session_organisation_context_controls_visibility(monkeypatch) ->
     import src.backend.security.access_control as access_control
     import src.backend.services.window_session_context_service as window_context
     from src.backend.services.window_session_context_service import (
-        WindowSessionContext,
-        get_window_session_store,
+        set_window_organisation,
     )
     from flask import session
 
     window_context._window_session_store = None
-    store = get_window_session_store()
-    store.set(
-        WindowSessionContext(
-            window_session_id="ws_sail",
-            user_id="#V#michael_witbrock",
-            organisation_concept_id="university_of_auckland_strong_ai_lab",
-            namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
-            role_in_org="member",
-        )
+    set_window_organisation(
+        "ws_sail",
+        "university_of_auckland_strong_ai_lab",
+        "member",
+        "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+        "#V#michael_witbrock",
     )
 
     client = mongomock.MongoClient()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -330,6 +332,334 @@ def test_queue_scope_isolation() -> None:
 
     assert len(queue_service.list_active_queue_records(scope=first_scope)) == 1
     assert queue_service.list_active_queue_records(scope=second_scope) == []
+
+
+def test_active_legacy_submission_reuses_same_half_and_joins_after_terminal() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    create_kwargs = {
+        "scope": scope,
+        "prompt_raw": "Run the same active prompt",
+        "session_id": "session-a",
+        "conversation_key": "canonical-conversation-a",
+        "window_session_id": "window-a",
+    }
+
+    queue_first = queue_service.create_queue_record(
+        **create_kwargs,
+        legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+    )
+    queue_retry = queue_service.create_queue_record(
+        **create_kwargs,
+        legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+    )
+
+    assert queue_retry["queue_id"] == queue_first["queue_id"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert coll.count_documents({}) == 1
+    persisted = coll.find_one({"queue_id": queue_first["queue_id"]})
+    assert persisted is not None
+    active_key = persisted["active_legacy_submission_key"]
+    assert len(active_key) == 64
+    assert "Run the same active prompt" not in active_key
+
+    queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=queue_first["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+    )
+    terminal = coll.find_one({"queue_id": queue_first["queue_id"]})
+    assert terminal is not None
+    assert "active_legacy_submission_key" in terminal
+    assert terminal["legacy_submission_queue_seen"] is True
+    assert terminal["legacy_submission_generate_seen"] is False
+
+    generate_second = queue_service.create_queue_record(
+        **create_kwargs,
+        client_request_id="request-a",
+        legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_GENERATE,
+    )
+    assert generate_second["queue_id"] == queue_first["queue_id"]
+    joined = coll.find_one({"queue_id": queue_first["queue_id"]})
+    assert joined is not None
+    assert "active_legacy_submission_key" not in joined
+    assert "legacy_submission_expires_at" not in joined
+    assert joined["legacy_submission_queue_seen"] is True
+    assert joined["legacy_submission_generate_seen"] is True
+
+    repeated_finish = queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=queue_first["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+    )
+    assert repeated_finish["queue_id"] == queue_first["queue_id"]
+    with pytest.raises(queue_service.ChatPromptQueueRecordNotFound):
+        queue_service.finish_prompt_record(
+            scope=scope,
+            queue_id=queue_first["queue_id"],
+            status=queue_service.STATUS_FAILED,
+        )
+
+    next_submission = queue_service.create_queue_record(
+        **create_kwargs,
+        legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+    )
+    assert next_submission["queue_id"] != queue_first["queue_id"]
+    assert coll.count_documents({}) == 2
+
+
+def test_legacy_queue_and_generate_duplicate_key_race_converges_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    original_insert_one = coll.insert_one
+    insert_barrier = threading.Barrier(2)
+
+    def racing_insert(document, *args, **kwargs):
+        insert_barrier.wait(timeout=2)
+        return original_insert_one(document, *args, **kwargs)
+
+    monkeypatch.setattr(coll, "insert_one", racing_insert)
+    common = {
+        "scope": scope,
+        "session_id": "legacy-race-session",
+        "conversation_key": "canonical-legacy-race-conversation",
+        "window_session_id": "legacy-race-window",
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        queue_future = executor.submit(
+            queue_service.create_queue_record,
+            **common,
+            prompt_raw="  Race #V\u200b#prompt  ",
+            legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+        )
+        generate_future = executor.submit(
+            queue_service.create_queue_record,
+            **common,
+            prompt_raw="Race #V#prompt",
+            status=queue_service.STATUS_IN_PROGRESS,
+            client_request_id="legacy-race-request",
+            legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_GENERATE,
+        )
+        queue_record = queue_future.result(timeout=3)
+        generate_record = generate_future.result(timeout=3)
+
+    assert queue_record["queue_id"] == generate_record["queue_id"]
+    assert coll.count_documents({}) == 1
+    persisted = coll.find_one({"queue_id": queue_record["queue_id"]})
+    assert persisted is not None
+    assert persisted["legacy_submission_queue_seen"] is True
+    assert persisted["legacy_submission_generate_seen"] is True
+    assert "active_legacy_submission_key" not in persisted
+
+
+def test_unpaired_legacy_submission_rendezvous_expires_without_deleting_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    clock = [datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(queue_service, "_now", lambda: clock[0])
+    create_kwargs = {
+        "scope": scope,
+        "prompt_raw": "Retry after a lost generate half",
+        "session_id": "session-expiry",
+        "conversation_key": "canonical-conversation-expiry",
+        "legacy_submission_role": queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+        "window_session_id": "window-expiry",
+    }
+
+    expired = queue_service.create_queue_record(**create_kwargs)
+    clock[0] += timedelta(
+        seconds=queue_service.LEGACY_SUBMISSION_RENDEZVOUS_SECONDS + 1
+    )
+    replacement = queue_service.create_queue_record(**create_kwargs)
+
+    assert replacement["queue_id"] != expired["queue_id"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    expired_doc = coll.find_one({"queue_id": expired["queue_id"]})
+    replacement_doc = coll.find_one({"queue_id": replacement["queue_id"]})
+    assert expired_doc is not None
+    assert expired_doc["status"] == queue_service.STATUS_QUEUED
+    assert "active_legacy_submission_key" not in expired_doc
+    assert "legacy_submission_queue_seen" not in expired_doc
+    assert "legacy_submission_generate_seen" not in expired_doc
+    assert "legacy_submission_expires_at" not in expired_doc
+    assert replacement_doc is not None
+    assert "active_legacy_submission_key" in replacement_doc
+
+
+def test_terminal_unpaired_generate_allows_new_client_request() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    create_kwargs = {
+        "scope": scope,
+        "prompt_raw": "Legitimately send this prompt again",
+        "session_id": "session-new-generate",
+        "conversation_key": "canonical-conversation-new-generate",
+        "legacy_submission_role": queue_service.LEGACY_SUBMISSION_ROLE_GENERATE,
+        "window_session_id": "window-new-generate",
+    }
+    first = queue_service.create_queue_record(
+        **create_kwargs,
+        client_request_id="request-a",
+    )
+
+    with pytest.raises(queue_service.ConversationTurnAlreadyActive):
+        queue_service.create_queue_record(
+            **create_kwargs,
+            client_request_id="request-b",
+        )
+
+    queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=first["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+    )
+    second = queue_service.create_queue_record(
+        **create_kwargs,
+        client_request_id="request-b",
+    )
+
+    assert second["queue_id"] != first["queue_id"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    old_doc = coll.find_one({"queue_id": first["queue_id"]})
+    new_doc = coll.find_one({"queue_id": second["queue_id"]})
+    assert old_doc is not None
+    assert "active_legacy_submission_key" not in old_doc
+    assert "legacy_submission_queue_seen" not in old_doc
+    assert "legacy_submission_generate_seen" not in old_doc
+    assert new_doc is not None
+    assert new_doc["legacy_submission_generate_seen"] is True
+    assert new_doc["legacy_submission_queue_seen"] is False
+    assert "active_legacy_submission_key" in new_doc
+
+
+def test_active_legacy_submission_key_isolates_actor_org_conversation_and_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_MAX_QUEUED_TURNS_PER_USER", "20")
+    cases = [
+        (
+            queue_service.build_queue_scope(
+                user_concept_id="#V#actor_a",
+                organisation_concept_id="#V#org_a",
+                namespace="#V#actor_a@org_a",
+            ),
+            "conversation-a",
+            "same prompt",
+            "window-a",
+        ),
+        (
+            queue_service.build_queue_scope(
+                user_concept_id="#V#actor_b",
+                organisation_concept_id="#V#org_a",
+                namespace="#V#actor_b@org_a",
+            ),
+            "conversation-a",
+            "same prompt",
+            "window-a",
+        ),
+        (
+            queue_service.build_queue_scope(
+                user_concept_id="#V#actor_a",
+                organisation_concept_id="#V#org_b",
+                namespace="#V#actor_a@org_b",
+            ),
+            "conversation-a",
+            "same prompt",
+            "window-a",
+        ),
+        (
+            queue_service.build_queue_scope(
+                user_concept_id="#V#actor_a",
+                organisation_concept_id="#V#org_a",
+                namespace="#V#actor_a@org_a",
+            ),
+            "conversation-b",
+            "same prompt",
+            "window-a",
+        ),
+        (
+            queue_service.build_queue_scope(
+                user_concept_id="#V#actor_a",
+                organisation_concept_id="#V#org_a",
+                namespace="#V#actor_a@org_a",
+            ),
+            "conversation-a",
+            "different prompt",
+            "window-a",
+        ),
+        (
+            queue_service.build_queue_scope(
+                user_concept_id="#V#actor_a",
+                organisation_concept_id="#V#org_a",
+                namespace="#V#actor_a@org_a",
+            ),
+            "conversation-a",
+            "same prompt",
+            "window-b",
+        ),
+    ]
+
+    records = [
+        queue_service.create_queue_record(
+            scope=scope,
+            prompt_raw=prompt,
+            session_id=conversation_key,
+            conversation_key=conversation_key,
+            legacy_submission_role=queue_service.LEGACY_SUBMISSION_ROLE_QUEUE,
+            window_session_id=window_session_id,
+        )
+        for scope, conversation_key, prompt, window_session_id in cases
+    ]
+
+    assert len({record["queue_id"] for record in records}) == len(cases)
+
+
+def test_explicit_attempts_do_not_use_legacy_submission_correlation() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    records = [
+        queue_service.create_queue_record(
+            scope=scope,
+            prompt_raw="Repeat explicitly",
+            session_id="session-a",
+            conversation_key="canonical-conversation-a",
+            client_request_id=f"request-{index}",
+            attempt_id=f"attempt-{index}",
+        )
+        for index in range(2)
+    ]
+
+    assert records[0]["queue_id"] != records[1]["queue_id"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert (
+        coll.count_documents({"active_legacy_submission_key": {"$exists": True}}) == 0
+    )
 
 
 def test_queue_scope_canonicalises_org_and_namespace_components() -> None:

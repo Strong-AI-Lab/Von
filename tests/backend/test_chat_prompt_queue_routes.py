@@ -117,6 +117,108 @@ def test_chat_prompt_queue_create_returns_typed_backpressure(
     }
 
 
+def test_legacy_active_create_is_idempotent_but_explicit_attempts_are_not(
+    client,
+) -> None:
+    from src.backend.services.window_session_context_service import (
+        set_window_organisation,
+    )
+
+    set_window_organisation(
+        "legacy-window",
+        "#V#test_org",
+        "member",
+        "#V#test_user@test_org",
+        user_id="#V#test_user",
+    )
+    headers = {"X-Von-Window-Session": "legacy-window"}
+    legacy_payload = {
+        "prompt_raw": "legacy active prompt",
+        "session_id": "legacy-session",
+        "status": "in_progress",
+    }
+    legacy_first = client.post(
+        "/von/api/chat_prompt_queue",
+        json=legacy_payload,
+        headers=headers,
+    )
+    legacy_second = client.post(
+        "/von/api/chat_prompt_queue",
+        json=legacy_payload,
+        headers=headers,
+    )
+
+    assert legacy_first.status_code == 201
+    assert legacy_second.status_code == 201
+    legacy_item = legacy_first.get_json()["item"]
+    legacy_queue_id = legacy_item["queue_id"]
+    assert legacy_second.get_json()["item"]["queue_id"] == legacy_queue_id
+    assert "active_legacy_submission_key" not in legacy_item
+    assert "legacy_submission_queue_seen" not in legacy_item
+    assert "legacy_submission_generate_seen" not in legacy_item
+    assert "legacy_submission_expires_at" not in legacy_item
+
+    explicit_queue_ids = []
+    for index in range(2):
+        response = client.post(
+            "/von/api/chat_prompt_queue",
+            json={
+                **legacy_payload,
+                "client_request_id": f"request-{index}",
+                "attempt_id": f"attempt-{index}",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 201
+        explicit_queue_ids.append(response.get_json()["item"]["queue_id"])
+
+    assert explicit_queue_ids[0] != explicit_queue_ids[1]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert coll.count_documents({}) == 3
+    assert (
+        coll.count_documents({"active_legacy_submission_key": {"$exists": True}}) == 1
+    )
+
+
+def test_legacy_active_create_isolated_by_trusted_window_session(client) -> None:
+    from src.backend.services.window_session_context_service import (
+        set_window_organisation,
+    )
+
+    for window_session_id in ("legacy-window-a", "legacy-window-b"):
+        set_window_organisation(
+            window_session_id,
+            "#V#test_org",
+            "member",
+            "#V#test_user@test_org",
+            user_id="#V#test_user",
+        )
+
+    payload = {
+        "prompt_raw": "same prompt in two tabs",
+        "session_id": "same-conversation",
+        "status": "in_progress",
+    }
+    first = client.post(
+        "/von/api/chat_prompt_queue",
+        json=payload,
+        headers={"X-Von-Window-Session": "legacy-window-a"},
+    )
+    second = client.post(
+        "/von/api/chat_prompt_queue",
+        json=payload,
+        headers={"X-Von-Window-Session": "legacy-window-b"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.get_json()["item"]["queue_id"] != second.get_json()["item"]["queue_id"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    assert coll.count_documents({}) == 2
+
+
 def test_queue_session_update_recomputes_and_clears_canonical_conversation_key(
     client,
 ) -> None:

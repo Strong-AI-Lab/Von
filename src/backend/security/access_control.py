@@ -457,7 +457,10 @@ def get_effective_organisation_concept_id() -> Optional[str]:
     try:
         window_session_id = request.headers.get("X-Von-Window-Session")
         if window_session_id:
-            from ..services.window_session_context_service import get_effective_context
+            from ..services.window_session_context_service import (
+                WindowSessionContextUnavailable,
+                get_effective_context,
+            )
 
             user_for_context = get_effective_user_concept_id() or session.get(
                 "user_concept_id"
@@ -466,10 +469,15 @@ def get_effective_organisation_concept_id() -> Optional[str]:
                 window_session_id,
                 dict(session),
                 user_for_context,
+                require_known_window=True,
             )
             org_id = _normalise_stored_org_concept_id(effective.get("organisation_id"))
             if org_id:
                 return org_id
+    except WindowSessionContextUnavailable:
+        # An explicit unknown/expired/other-actor selector must never inherit
+        # the browser-wide organisation selected by another tab.
+        return None
     except Exception:
         pass
     for key in ("organisation_concept_id", "org_concept_id", "org_id"):

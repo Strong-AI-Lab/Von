@@ -211,3 +211,45 @@ def test_logout_invalidates_owned_window_context(monkeypatch, app_client):
 
     assert response.status_code == 200
     assert store.get("owned_window") is None
+
+
+def test_logout_clears_auth_when_durable_window_cleanup_is_unavailable(
+    monkeypatch, app_client
+):
+    _, client = app_client
+    from src.backend.services import window_session_context_service as window_service
+    from src.backend.services.window_session_binding_store_service import (
+        WindowSessionBindingStoreUnavailable,
+    )
+
+    class UnavailableDeleteRepository:
+        def delete_owned(self, *_args, **_kwargs):
+            raise WindowSessionBindingStoreUnavailable("unavailable")
+
+    store = window_service.WindowSessionStore(
+        binding_repository=UnavailableDeleteRepository()  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(window_service, "_window_session_store", store)
+    store.set(
+        window_service.WindowSessionContext(
+            window_session_id="owned_window_store_down",
+            user_id="#V#user_a",
+            organisation_concept_id="#V#secret_org_a",
+            namespace="#V#user_a@secret_org_a",
+        )
+    )
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user_a"
+        sess["user_email"] = "user-a@example.test"
+
+    response = client.post(
+        "/von/api/auth/logout",
+        headers={"X-Von-Window-Session": "owned_window_store_down"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["window_context_cleanup"] == "deferred"
+    with client.session_transaction() as sess:
+        assert "user_concept_id" not in sess
+        assert "user_email" not in sess
+    assert store.get("owned_window_store_down") is None
