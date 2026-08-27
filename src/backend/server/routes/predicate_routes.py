@@ -6,12 +6,15 @@ following a knowledge-driven approach where predicate properties are stored
 as facts in the Vontology itself rather than in hard-coded schemas.
 """
 
+from bson import ObjectId
 from flask import Blueprint, jsonify, request, current_app
 from typing import Dict, List, Any, Optional
-from bson import ObjectId
 
 from ...db.mongo_client import get_text_relations_collection, get_concepts_collection
 from ...db.repositories.text_value_repository import TextValuesRepository
+from ...services.concept_predicate_metadata_service import (
+    resolve_structural_predicate_storage_key,
+)
 from ...services.relationship_extent_index_service import (
     query_relationship_extent_index,
 )
@@ -373,6 +376,9 @@ def _query_structured_relations_extent(
         concepts_coll = get_concepts_collection()
         if concepts_coll is None:
             return [], 0
+        predicate_storage_key = resolve_structural_predicate_storage_key(
+            predicate_concept_id
+        )
 
         object_ids: Optional[set[str]] = None
         if object_type:
@@ -382,7 +388,8 @@ def _query_structured_relations_extent(
 
         if subject_type is None:
             indexed_items, indexed_count = _query_structured_relations_extent_index(
-                predicate_concept_id=predicate_concept_id,
+                predicate_concept_id=predicate_storage_key,
+                response_predicate_id=predicate_concept_id,
                 object_ids=object_ids,
                 limit=limit,
                 offset=offset,
@@ -395,11 +402,11 @@ def _query_structured_relations_extent(
         # Build query to find concepts with this predicate in their relationships
         # Note: This queries for the predicate as a key in the relationships object
         query_filter: Dict[str, Any] = {
-            f"relationships.{predicate_concept_id}": {"$exists": True, "$ne": None}
+            f"relationships.{predicate_storage_key}": {"$exists": True, "$ne": None}
         }
 
         if object_type:
-            query_filter[f"relationships.{predicate_concept_id}"] = {
+            query_filter[f"relationships.{predicate_storage_key}"] = {
                 "$in": list(object_ids)
             }
 
@@ -416,7 +423,7 @@ def _query_structured_relations_extent(
         object_name_ids = []
         for concept in concepts:
             relationships = concept.get("relationships", {})
-            object_values = relationships.get(predicate_concept_id)
+            object_values = relationships.get(predicate_storage_key)
             if not isinstance(object_values, list):
                 object_values = [object_values] if object_values else []
             object_name_ids.extend(
@@ -431,7 +438,7 @@ def _query_structured_relations_extent(
 
             # Get the object(s) for this predicate
             relationships = concept.get("relationships", {})
-            object_values = relationships.get(predicate_concept_id)
+            object_values = relationships.get(predicate_storage_key)
 
             # Handle both single values and arrays
             if not isinstance(object_values, list):
@@ -541,9 +548,12 @@ def _sample_structured_relations_extent(
         concepts_coll = get_concepts_collection()
         if concepts_coll is None:
             return [], 0
+        predicate_storage_key = resolve_structural_predicate_storage_key(
+            predicate_concept_id
+        )
 
         query_filter: Dict[str, Any] = {
-            f"relationships.{predicate_concept_id}": {"$exists": True, "$ne": None}
+            f"relationships.{predicate_storage_key}": {"$exists": True, "$ne": None}
         }
 
         object_ids: Optional[set[str]] = None
@@ -551,7 +561,7 @@ def _sample_structured_relations_extent(
             object_ids = _resolve_object_type_ids(object_type, concepts_coll)
             if not object_ids:
                 return [], 0
-            query_filter[f"relationships.{predicate_concept_id}"] = {
+            query_filter[f"relationships.{predicate_storage_key}"] = {
                 "$in": list(object_ids)
             }
         if subject_type:
@@ -568,7 +578,7 @@ def _sample_structured_relations_extent(
         object_name_ids = []
         for concept in concepts:
             relationships = concept.get("relationships", {})
-            object_values = relationships.get(predicate_concept_id)
+            object_values = relationships.get(predicate_storage_key)
             if not isinstance(object_values, list):
                 object_values = [object_values] if object_values else []
             object_name_ids.extend(
@@ -582,7 +592,7 @@ def _sample_structured_relations_extent(
             subject_name = concept.get("name") or subject_id
 
             relationships = concept.get("relationships", {})
-            object_values = relationships.get(predicate_concept_id)
+            object_values = relationships.get(predicate_storage_key)
             if not isinstance(object_values, list):
                 object_values = [object_values] if object_values else []
 
@@ -693,6 +703,7 @@ def _relationship_index_sort(sort_by: str, sort_order: str) -> List[tuple[str, i
 def _query_structured_relations_extent_index(
     *,
     predicate_concept_id: str,
+    response_predicate_id: str,
     object_ids: Optional[set[str]],
     limit: int,
     offset: int,
@@ -726,7 +737,7 @@ def _query_structured_relations_extent_index(
             {
                 "subject": subject_id,
                 "subject_name": concept_names.get(subject_id) or subject_id,
-                "predicate": predicate_concept_id,
+                "predicate": response_predicate_id,
                 "object": obj_value,
                 "object_name": concept_names.get(obj_value)
                 if isinstance(obj_value, str)

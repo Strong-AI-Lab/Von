@@ -155,20 +155,58 @@ def test_relationship_extent_readiness_requires_explicit_complete_state(
     assert service.relationship_extent_index_ready() is True
 
 
-def test_relationship_extent_query_batches_exact_predicates() -> None:
+def test_relationship_extent_query_batches_exact_predicates(monkeypatch) -> None:
     from src.backend.services import relationship_extent_index_service as service
 
+    monkeypatch.setattr(
+        service,
+        "resolve_structural_predicate_storage_key",
+        lambda predicate: {
+            "#V#is_an_instance_of": "is_an_instance_of",
+        }.get(predicate, predicate),
+    )
     query, should_query = service._build_relationship_extent_index_query(
-        predicate_ids=["#V#supervises", "#V#co_supervises", "#V#supervises"],
+        predicate_ids=[
+            "#V#is_an_instance_of",
+            "#V#supervises",
+            "#V#is_an_instance_of",
+        ],
         target_value="#V#person",
     )
 
     assert should_query is True
     assert query == {
         "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
-        "predicate_id": {"$in": ["#V#supervises", "#V#co_supervises"]},
+        "predicate_id": {"$in": ["is_an_instance_of", "#V#supervises"]},
         "target_value": "#V#person",
     }
+
+
+def test_structural_predicate_storage_key_resolution_preserves_other_predicates(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_predicate_metadata_service as service
+
+    monkeypatch.setattr(
+        service,
+        "get_structural_predicate_aliases",
+        lambda: {"#V#is_an_instance_of": "is_an_instance_of"},
+    )
+
+    assert (
+        service.resolve_structural_predicate_storage_key(
+            "#V#is_an_instance_of"
+        )
+        == "is_an_instance_of"
+    )
+    assert (
+        service.resolve_structural_predicate_storage_key("is_an_instance_of")
+        == "is_an_instance_of"
+    )
+    assert (
+        service.resolve_structural_predicate_storage_key("#V#attended_event")
+        == "#V#attended_event"
+    )
 
 
 def test_relationship_extent_rebuild_enforces_batch_size_for_dense_source(
@@ -905,10 +943,11 @@ def test_predicate_structured_extent_uses_relationship_extent_index(monkeypatch)
     )
 
     monkeypatch.setattr(predicate_routes, "get_concepts_collection", lambda: concepts)
-    monkeypatch.setattr(
-        predicate_routes,
-        "query_relationship_extent_index",
-        lambda **kwargs: (
+    index_queries: list[dict] = []
+
+    def query_index(**kwargs):
+        index_queries.append(kwargs)
+        return (
             [
                 {
                     "source_concept_id": "#V#source",
@@ -918,7 +957,12 @@ def test_predicate_structured_extent_uses_relationship_extent_index(monkeypatch)
                 }
             ],
             1,
-        ),
+        )
+
+    monkeypatch.setattr(
+        predicate_routes,
+        "query_relationship_extent_index",
+        query_index,
     )
 
     items, total = predicate_routes._query_structured_relations_extent(
@@ -932,6 +976,7 @@ def test_predicate_structured_extent_uses_relationship_extent_index(monkeypatch)
     )
 
     assert total == 1
+    assert index_queries[0]["predicate_id"] == "#V#attended_event"
     assert items == [
         {
             "subject": "#V#source",
@@ -942,4 +987,63 @@ def test_predicate_structured_extent_uses_relationship_extent_index(monkeypatch)
             "source": "structured",
             "updated_at": None,
         }
+    ]
+
+
+def test_predicate_extent_route_accepts_structural_predicate_concept_id(
+    monkeypatch,
+):
+    from src.backend.server.routes import predicate_routes
+
+    client = mongomock.MongoClient()
+    concepts = client.db.concepts
+    concepts.insert_many(
+        [
+            {"concept_id": "#V#source", "name": "Source concept"},
+            {"concept_id": "#V#target", "name": "Target concept"},
+        ]
+    )
+    index_predicates: list[str | None] = []
+
+    def query_index(**kwargs):
+        index_predicates.append(kwargs.get("predicate_id"))
+        if kwargs.get("predicate_id") != "is_an_instance_of":
+            return [], 0
+        return (
+            [
+                {
+                    "source_concept_id": "#V#source",
+                    "predicate_id": "is_an_instance_of",
+                    "target_value": "#V#target",
+                    "target_index": 0,
+                }
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(predicate_routes, "get_concepts_collection", lambda: concepts)
+    monkeypatch.setattr(predicate_routes, "query_relationship_extent_index", query_index)
+
+    app = Flask(__name__)
+    app.register_blueprint(predicate_routes.predicate_bp)
+    client_app = app.test_client()
+    responses = [
+        client_app.get(
+            f"/api/predicates/{predicate}/extent?source=structured&limit=20"
+        )
+        for predicate in ("%23V%23is_an_instance_of", "is_an_instance_of")
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert index_predicates == ["is_an_instance_of", "is_an_instance_of"]
+    assert [response.get_json()["total_count"] for response in responses] == [1, 1]
+    assert [
+        [
+            (item["subject"], item["object"])
+            for item in response.get_json()["extent"]
+        ]
+        for response in responses
+    ] == [
+        [("#V#source", "#V#target")],
+        [("#V#source", "#V#target")],
     ]

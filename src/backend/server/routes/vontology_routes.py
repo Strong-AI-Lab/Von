@@ -44,7 +44,10 @@ from ...vontology.utils_vontology import (
     build_pure_instance_query,
 )
 from ...db.repositories.concepts_repository import ConceptsRepository
-from ...services.concept_predicate_metadata_service import get_relationship_kinds_set
+from ...services.concept_predicate_metadata_service import (
+    get_relationship_kinds_set,
+    resolve_structural_predicate_storage_key,
+)
 from ...services.concept_service import (
     get_concept_by_id,
     ConceptNotFoundError,
@@ -232,7 +235,8 @@ def _canonicalise_relationship_predicate(raw_predicate: Any) -> str | None:
     predicate = raw_predicate.strip()
     if not predicate:
         return None
-    return _RELATIONSHIP_ALIAS_TO_CANONICAL.get(predicate, predicate)
+    predicate = _RELATIONSHIP_ALIAS_TO_CANONICAL.get(predicate, predicate)
+    return resolve_structural_predicate_storage_key(predicate)
 
 
 def _coerce_relationship_extent_limit(raw_value: Any) -> int:

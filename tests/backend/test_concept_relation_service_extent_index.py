@@ -370,6 +370,94 @@ def test_relation_hits_include_source_previews_for_both_directions(
     ]
 
 
+def test_structural_predicate_concept_ids_match_storage_keys_in_both_directions(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    focal_id = "#V#zhenyun_deng"
+    index_queries: list[dict[str, Any]] = []
+    aliases = {
+        "#V#has_instance": "has_instance",
+        "#V#is_an_instance_of": "is_an_instance_of",
+    }
+    monkeypatch.setattr(
+        service,
+        "resolve_structural_predicate_storage_key",
+        lambda predicate: aliases.get(predicate, predicate),
+    )
+    monkeypatch.setattr(
+        service,
+        "get_relationship_kinds_set",
+        lambda: frozenset({"has_instance", "is_an_instance_of"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: {
+            "concept_id": focal_id,
+            "relationships": {
+                "is_an_instance_of": ["#V#person", "#V#student"],
+            },
+        },
+    )
+
+    def query_index(**kwargs: Any):
+        index_queries.append(kwargs)
+        return (
+            [
+                {
+                    "source_concept_id": "#V#person",
+                    "predicate_id": "has_instance",
+                    "target_value": focal_id,
+                    "target_index": 0,
+                    "source_updated_at": None,
+                }
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(service, "query_relationship_extent_index", query_index)
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+
+    def relation_tuples(predicate_filter: list[str]) -> list[tuple[str, str, str]]:
+        payload = service.find_relations_with_argument(
+            focal_id,
+            argument_index="any",
+            predicate_filter=predicate_filter,
+            relation_kind="binary",
+            include_concept_preview=False,
+            limit=10,
+        )
+        return sorted(
+            (
+                hit["source_concept_id"],
+                hit["predicate_concept_id"],
+                hit["target_value"],
+            )
+            for hit in payload["hits"]
+        )
+
+    namespaced = relation_tuples(
+        ["#V#has_instance", "#V#is_an_instance_of"]
+    )
+    storage_keys = relation_tuples(["has_instance", "is_an_instance_of"])
+
+    assert namespaced == storage_keys == [
+        ("#V#person", "has_instance", focal_id),
+        (focal_id, "is_an_instance_of", "#V#person"),
+        (focal_id, "is_an_instance_of", "#V#student"),
+    ]
+    assert [query["predicate_ids"] for query in index_queries] == [
+        ["has_instance", "is_an_instance_of"],
+        ["has_instance", "is_an_instance_of"],
+    ]
+
+
 def test_outgoing_relation_previews_batch_uncached_targets(monkeypatch) -> None:
     from src.backend.services import concept_relation_service as service
 

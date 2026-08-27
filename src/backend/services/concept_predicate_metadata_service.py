@@ -218,6 +218,19 @@ def get_structural_predicate_aliases() -> Dict[str, str]:
     return dict(_ensure_cache()["structural_predicate_aliases"])
 
 
+def resolve_structural_predicate_storage_key(predicate: str) -> str:
+    """Resolve a structural predicate concept ID to its stored relationship key.
+
+    Non-structural predicates are returned unchanged so callers can safely use
+    this at read boundaries without stripping ordinary namespaced predicate IDs.
+    """
+
+    if not isinstance(predicate, str):
+        return predicate
+    cleaned = predicate.strip()
+    return get_structural_predicate_aliases().get(cleaned, cleaned)
+
+
 def get_structural_inverse_map() -> Dict[str, str]:
     """Return mapping of structural field names to their inverse field names.
 
