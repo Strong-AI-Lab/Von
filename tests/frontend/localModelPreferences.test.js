@@ -6,6 +6,34 @@ describe('local model preferences', () => {
         localStorage.clear();
     });
 
+    test('keeps an OpenRouter slug and provider distinct from OpenAI and Ollama', async () => {
+        const {
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setLocalPremiumModelUseEnabled,
+            setStoredOpenRouterSelectedModel,
+            setStoredPremiumModelProvider,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOpenRouterSelectedModel('anthropic/claude-test');
+        setStoredPremiumModelProvider('openrouter');
+        setLocalPremiumModelUseEnabled(true, 'openrouter');
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openrouter',
+            premiumProvider: 'openrouter',
+            openaiModel: null,
+            openrouterModel: 'anthropic/claude-test',
+            ollamaSelection: null,
+        });
+        expect(resolveLocalRequestedLlm()).toEqual({
+            provider: 'openrouter',
+            model: 'anthropic/claude-test',
+            requestModel: 'openrouter:anthropic/claude-test',
+        });
+    });
+
     test('prefers the selected premium model when premium use is enabled locally', async () => {
         const {
             getStoredLocalModelPreference,

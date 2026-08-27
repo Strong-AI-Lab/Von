@@ -28,10 +28,15 @@ def get_llm_client(config: LLMClientConfig) -> LLMClient:
 
     if provider == "openai":
         return OpenAIClient(config)
+    if provider == "openrouter":
+        return OpenAIClient(config)
     if provider == "gemini":
         return GeminiClient(config)
     if provider == "ollama":
         return OllamaClient(config)
+
+    if provider:
+        raise ValueError(f"Unknown provider '{provider}'")
 
     # gpt-oss models are local (Ollama) despite the "gpt-" prefix
     if "gpt-oss" in model_lower:

@@ -333,13 +333,13 @@ function normaliseLlmExecutionContextString(value) {
 function normaliseLlmExecutionContextModel(value) {
     const clean = normaliseLlmExecutionContextString(value);
     if (!clean) return null;
-    return clean.replace(/^(?:openai|ollama|gemini)[/:]/i, '');
+    return clean.replace(/^(?:openai|openrouter|ollama|gemini)[/:]/i, '');
 }
 
 function inferLlmProviderFromModelReference(value) {
     const clean = normaliseLlmExecutionContextString(value);
     if (!clean) return null;
-    const matched = clean.match(/^(openai|ollama|gemini)[/:]/i);
+    const matched = clean.match(/^(openai|openrouter|ollama|gemini)[/:]/i);
     return matched ? matched[1].toLowerCase() : null;
 }
 

@@ -91,8 +91,15 @@ export async function loadAvailableGeminiModels() {
   return data;
 }
 
+export async function loadAvailableOpenRouterModels() {
+  const { data } = await getJsonDetailed('/api/settings/models/openrouter');
+  return data;
+}
+
 function premiumProviderLabel(provider) {
-  return provider === 'gemini' ? 'Gemini' : 'OpenAI';
+  if (provider === 'gemini') return 'Gemini';
+  if (provider === 'openrouter') return 'OpenRouter';
+  return 'OpenAI';
 }
 
 function renderPremiumModelSelect(select, provider, models = [], selectedModel = null) {
@@ -139,6 +146,12 @@ export function renderGeminiModelOptions(selectElementId, models = [], selectedM
   const select = document.getElementById(selectElementId);
   if (!select) return;
   renderPremiumModelSelect(select, 'gemini', models, selectedModel);
+}
+
+export function renderOpenRouterModelOptions(selectElementId, models = [], selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+  renderPremiumModelSelect(select, 'openrouter', models, selectedModel);
 }
 
 export async function loadAvailablePeople() {
@@ -337,6 +350,24 @@ export async function populateGeminiModelDropdown(selectElementId, selectedModel
       error: err,
       fallbackMessage: 'Gemini models are temporarily unavailable.',
       retryAction: () => populateGeminiModelDropdown(selectElementId, selectedModel)
+    });
+  }
+}
+
+export async function populateOpenRouterModelDropdown(selectElementId, selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+
+  try {
+    const models = await loadAvailableOpenRouterModels();
+    renderPremiumModelSelect(select, 'openrouter', models, selectedModel);
+    clearSelectRetryState(select);
+  } catch (err) {
+    console.error('Error populating OpenRouter model dropdown:', err);
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'OpenRouter models are temporarily unavailable.',
+      retryAction: () => populateOpenRouterModelDropdown(selectElementId, selectedModel)
     });
   }
 }

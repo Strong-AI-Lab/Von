@@ -308,6 +308,7 @@
                 <label for="premiumProviderSelect">Provider:</label>
                 <select id="premiumProviderSelect" name="premium_provider">
                     <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
                     <option value="gemini">Google Gemini</option>
                 </select>
             </div>
@@ -360,6 +361,28 @@
                     <div id="geminiModelStatusMessage" class="status-message" role="alert"></div>
                 </div>
                 <div id="geminiStatusMessage" class="status-message" role="alert"></div>
+            </div>
+
+            <div id="openrouterProviderSettings" class="hidden">
+                <label for="openrouterApiKeyEnvVar">OpenRouter API key source:</label>
+                <input type="text" id="openrouterApiKeyEnvVar" name="openrouter_api_key_env_var" value="OPENROUTER_API_KEY" readonly aria-readonly="true">
+                <button id="verifyOpenRouterApiKeyButton" class="hidden">Verify key and load models</button>
+                <div id="openrouterModelsContainer" class="hidden">
+                    <label for="openrouterModelSelect">Select OpenRouter model:</label>
+                    <select id="openrouterModelSelect" name="openrouter_model">
+                        <!-- OpenRouter catalogue models will be populated here -->
+                    </select>
+                    <div class="inline-form inline-form-tight mt-2">
+                        <button id="testOpenRouterModelButton" class="btn-secondary" type="button" disabled>Test this model</button>
+                        <button id="addOpenRouterToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
+                    </div>
+                    <div id="openrouterModelEligibilityStatus" class="status-message" role="status">
+                        Select an OpenRouter model to check whether it is allowed for this scope.
+                    </div>
+                    <div id="openrouterModelStatusMessage" class="status-message" role="alert"></div>
+                </div>
+                <small class="settings-note">OpenRouter is opt-in. Von requires zero data retention, denies data-collection endpoints, requires parameter-compatible upstreams, and records routing metadata. The catalogue does not allow a model.</small>
+                <div id="openrouterStatusMessage" class="status-message" role="alert"></div>
             </div>
 
             <div id="openaiReasoningEffortContainer" class="inline-form inline-form-tight mt-2 hidden">
@@ -493,6 +516,7 @@
                             <option value="">Keep saved shared default</option>
                             <option value="ollama">Ollama</option>
                             <option value="openai">OpenAI</option>
+                            <option value="openrouter">OpenRouter</option>
                             <option value="gemini">Gemini</option>
                         </select>
 
@@ -549,6 +573,7 @@
                             <option value="">Choose provider</option>
                             <option value="ollama">Ollama</option>
                             <option value="openai">OpenAI</option>
+                            <option value="openrouter">OpenRouter</option>
                             <option value="gemini">Gemini</option>
                         </select>
 

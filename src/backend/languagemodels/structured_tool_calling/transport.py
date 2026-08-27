@@ -77,11 +77,11 @@ def sanitise_transport_telemetry_text(value: str) -> str:
 
 
 def sanitise_transport_telemetry_value(
-    value: Any, *, key: str = "", depth: int = 0
+    value: Any, *, key: str = "", depth: int = 0, max_depth: int = 3
 ) -> Any:
     if _SENSITIVE_TELEMETRY_KEY_RE.search(key):
         return "[redacted]"
-    if depth >= 3:
+    if depth >= max_depth:
         return "[bounded]"
     if isinstance(value, Mapping):
         return {
@@ -89,12 +89,18 @@ def sanitise_transport_telemetry_value(
                 item_value,
                 key=str(item_key),
                 depth=depth + 1,
+                max_depth=max_depth,
             )
             for item_key, item_value in list(value.items())[:40]
         }
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [
-            sanitise_transport_telemetry_value(item, key=key, depth=depth + 1)
+            sanitise_transport_telemetry_value(
+                item,
+                key=key,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
             for item in list(value)[:40]
         ]
     if isinstance(value, str):
@@ -334,7 +340,7 @@ def resolve_structured_tool_transport(
     requested_surface = _normalise(requested_api_surface) or "auto"
     projection = dict(parameter_projection or {})
 
-    if provider_key != "openai":
+    if provider_key not in {"openai", "openrouter"}:
         return StructuredToolTransportDecision(
             provider=provider_key,
             model=model_name,
@@ -491,6 +497,30 @@ def resolve_structured_tool_transport(
         None,
     )
     required_surfaces = {item[1] for item in advertised if item[2] == "required"}
+
+    if provider_key == "openrouter":
+        non_chat_required_surfaces = required_surfaces - {
+            API_SURFACE_CHAT_COMPLETIONS
+        }
+        if non_chat_required_surfaces:
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=sorted(non_chat_required_surfaces)[0],
+                status="unsupported",
+                reason="openrouter_chat_completions_only",
+                capability_class="provider_surface_not_enabled",
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                advertised_alternatives=(),
+            )
+        # OpenRouter's Responses-compatible beta is outside this bounded
+        # release. Non-required advertisements must not opt a call into it.
+        advertised = [
+            item
+            for item in advertised
+            if item[1] == API_SURFACE_CHAT_COMPLETIONS
+        ]
 
     # Contradictory represented authority is invalid independently of whether
     # this particular request carries tools.  Answer-only traffic must not

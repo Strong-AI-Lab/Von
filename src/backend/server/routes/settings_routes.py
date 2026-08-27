@@ -104,6 +104,7 @@ from ...languagemodels.llm_interface import (
     GeminiClient,
     ModelExecutionEligibilityError,
     OpenAIClient,
+    OpenRouterClient,
     assert_model_execution_allowed,
     get_ollama_auto_pull_state_snapshot,
     resolve_openai_responses_max_output_tokens,
@@ -804,7 +805,7 @@ def get_llm_info():
         # overrides the DB-stored setting (e.g. premium disabled, Ollama selected locally).
         # Only known providers are accepted; any other value is ignored.
         effective_provider_override = request.args.get("effective_provider")
-        if effective_provider_override in ("openai", "gemini", "ollama"):
+        if effective_provider_override in ("openai", "openrouter", "gemini", "ollama"):
             provider = effective_provider_override
             effective_model_override = str(
                 request.args.get("effective_model") or ""
@@ -845,6 +846,24 @@ def get_llm_info():
                 except Exception as e:
                     status = "error"
                     error_message = str(e)
+
+        elif provider == "openrouter":
+            api_key = _resolve_settings_api_key("OPENROUTER_API_KEY")
+            if not api_key:
+                status = "missing_key"
+                error_message = "OpenRouter API key not set"
+            else:
+                try:
+                    OpenRouterClient(api_key=api_key).list_models()
+                    status = "ready"
+                    ping_ok = True
+                except Exception as e:
+                    status = "error"
+                    error_message = "OpenRouter status check failed."
+                    current_app.logger.warning(
+                        "OpenRouter LLM status check failed (error_type=%s)",
+                        type(e).__name__,
+                    )
 
         elif provider == "gemini":
             api_key = _resolve_settings_api_key(
@@ -1039,6 +1058,7 @@ def get_all_settings_data():
         return {
             **db_settings,  # active_llm, openai_api_key_env_var, fetch_counts_on_load, etc.
             "gemini_api_key_env_var": "GEMINI_API_KEY",
+            "openrouter_api_key_env_var": "OPENROUTER_API_KEY",
             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
             "buttonify_prompt_active": (
                 BUTTONIFY_PROMPT_IDS[0] if BUTTONIFY_PROMPT_IDS else None
@@ -1918,6 +1938,8 @@ def _normalise_settings_key_check_env_var(value: object) -> str | None:
     """Accept only key names selected by server-side model configuration."""
 
     name = str(value or "").strip()
+    if name == "OPENROUTER_API_KEY":
+        return name
     if name in _GEMINI_SETTINGS_KEY_ENV_VARS:
         return name
     try:
@@ -2077,6 +2099,36 @@ def get_gemini_models():
         )
         return _jsonify_no_store(
             {"error": "Could not retrieve Gemini models with the configured key."},
+            400,
+        )
+
+
+@settings_bp.route("/models/openrouter", methods=["GET"])
+def get_openrouter_models():
+    """Return the current OpenRouter catalogue without changing eligibility."""
+
+    api_key = _resolve_settings_api_key("OPENROUTER_API_KEY")
+    if not api_key:
+        return _jsonify_no_store(
+            {"error": "OpenRouter API key was not found in OPENROUTER_API_KEY."},
+            400,
+        )
+    try:
+        models = OpenRouterClient(api_key=api_key).list_models()
+        if not models:
+            return _jsonify_no_store(
+                {"error": "OpenRouter returned no models for the configured key."},
+                400,
+            )
+        current_app.logger.info("Retrieved %s OpenRouter models", len(models))
+        return _jsonify_no_store(models, 200)
+    except Exception as exc:
+        current_app.logger.warning(
+            "Could not list OpenRouter models (error_type=%s)",
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {"error": "Could not retrieve OpenRouter models with the configured key."},
             400,
         )
 
@@ -2536,6 +2588,47 @@ def verify_gemini_api_key():
             {
                 "success": False,
                 "error": "Gemini API verification failed with the configured key.",
+            },
+            400,
+        )
+
+
+@settings_bp.route("/openrouter/verify", methods=["POST"])
+def verify_openrouter_api_key():
+    """Verify the fixed OpenRouter key source by listing its current catalogue."""
+
+    payload = request.get_json(silent=True) or {}
+    if str(payload.get("api_key_env_var") or "OPENROUTER_API_KEY").strip() != "OPENROUTER_API_KEY":
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "OpenRouter key source must be OPENROUTER_API_KEY.",
+            },
+            400,
+        )
+    api_key = _resolve_settings_api_key("OPENROUTER_API_KEY")
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "OpenRouter API key was not found in OPENROUTER_API_KEY.",
+            },
+            400,
+        )
+    try:
+        models = OpenRouterClient(api_key=api_key).list_models()
+        if not models:
+            raise RuntimeError("empty model catalogue")
+        return _jsonify_no_store({"success": True, "models": models}, 200)
+    except Exception as exc:
+        current_app.logger.warning(
+            "OpenRouter API key verification failed (error_type=%s)",
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "OpenRouter API verification failed with the configured key.",
             },
             400,
         )
@@ -4141,6 +4234,150 @@ def test_gemini_model():
         failure_kind, reason = _classify_gemini_probe_exception(exc)
         current_app.logger.warning(
             "[gemini_test_model] Probe failed for %s (error_type=%s)",
+            requested_model,
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": False,
+                "model": requested_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
+                "failure_kind": failure_kind,
+                "reason": reason,
+            }
+        )
+
+
+@settings_bp.route("/openrouter/test_model", methods=["POST"])
+def test_openrouter_model():
+    """Probe an already-allowed OpenRouter model with the conservative profile."""
+
+    payload = request.get_json(silent=True) or {}
+    api_key_env_var = str(
+        payload.get("api_key_env_var") or "OPENROUTER_API_KEY"
+    ).strip()
+    requested_model = str(payload.get("model") or "").strip()
+    if api_key_env_var != "OPENROUTER_API_KEY":
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "invalid_key_env_var",
+                "reason": "OpenRouter key source must be OPENROUTER_API_KEY.",
+            },
+            400,
+        )
+    if not requested_model:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "missing_model",
+                "reason": "No OpenRouter model is selected.",
+            },
+            400,
+        )
+    try:
+        assert_model_execution_allowed(provider="openrouter", model=requested_model)
+    except ModelExecutionEligibilityError as exc:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": exc.model or requested_model,
+                "failure_kind": exc.failure_kind,
+                "reason": str(exc),
+            },
+            403,
+        )
+
+    api_key = _resolve_settings_api_key("OPENROUTER_API_KEY")
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": requested_model,
+                "failure_kind": "missing_api_key",
+                "reason": "OpenRouter API key was not found in OPENROUTER_API_KEY.",
+            },
+            400,
+        )
+    model_parameters = normalise_model_parameters_for_storage(
+        payload.get(MODEL_PARAMETERS_KEY) or payload.get("modelParameters"),
+        provider="openrouter",
+        model=requested_model,
+        api_surface="chat_completions",
+        include_registry=True,
+    )
+    parameter_capabilities = build_model_parameter_capabilities(
+        provider="openrouter",
+        model=requested_model,
+        api_surface="chat_completions",
+        include_registry=True,
+    )
+    try:
+        client = OpenRouterClient(api_key=api_key)
+        available_models = client.list_models()
+        if available_models and requested_model not in available_models:
+            return _jsonify_no_store(
+                {
+                    "success": True,
+                    "usable": False,
+                    "model": requested_model,
+                    MODEL_PARAMETERS_KEY: model_parameters,
+                    "model_parameter_capabilities": parameter_capabilities,
+                    "failure_kind": "model_unavailable",
+                    "reason": (
+                        f"{requested_model} is not present in the current "
+                        "OpenRouter model catalogue."
+                    ),
+                }
+            )
+        client.generate(
+            "Reply exactly with OK.",
+            model=requested_model,
+            llm_params=model_parameters or None,
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": True,
+                "model": requested_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
+                "failure_kind": None,
+                "reason": (
+                    "The selected OpenRouter model completed a live "
+                    "privacy-constrained probe successfully."
+                ),
+                "api_surface": "chat_completions",
+                "privacy_profile": {
+                    "zdr": True,
+                    "data_collection": "deny",
+                    "require_parameters": True,
+                },
+            }
+        )
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        lowered = str(exc).lower()
+        failure_kind = "unexpected_error"
+        reason = "Unexpected OpenRouter model probe failure."
+        if status_code == 401 or "auth" in lowered or "api key" in lowered:
+            failure_kind, reason = "authentication_error", "OpenRouter authentication failed."
+        elif status_code == 403 or "permission" in lowered:
+            failure_kind, reason = "permission_denied", "OpenRouter access was denied for this model."
+        elif status_code == 404 or "not found" in lowered:
+            failure_kind, reason = "model_not_found", "The selected OpenRouter model was not found."
+        elif status_code == 429 or "rate limit" in lowered or "quota" in lowered:
+            failure_kind, reason = "rate_limited", "OpenRouter rate or quota limit was reached."
+        elif "connect" in lowered or "network" in lowered:
+            failure_kind, reason = "connection_error", "Could not reach OpenRouter."
+        current_app.logger.warning(
+            "[openrouter_test_model] Probe failed for %s (error_type=%s)",
             requested_model,
             type(exc).__name__,
         )

@@ -6480,7 +6480,7 @@ def execute_adaptive_turn(
         configured_provider = next(
             (
                 provider_name
-                for provider_name in ("openai", "gemini", "ollama")
+                for provider_name in ("openai", "openrouter", "gemini", "ollama")
                 if provider_name in client_name
             ),
             "",

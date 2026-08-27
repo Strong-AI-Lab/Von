@@ -24,13 +24,14 @@ from typing import (
 import openai
 import requests
 
-from ..services.llm_api_key_resolution import get_gemini_api_key
+from ..services.llm_api_key_resolution import get_gemini_api_key, get_openrouter_api_key
 from ..services.settings_service import (
     get_openai_env_var,
     resolve_enabled_llm_settings,
     resolve_llm_setting,
 )
 from ..services.model_parameter_service import (
+    chat_completions_kwargs_from_model_parameters,
     gemini_kwargs_from_model_parameters,
     openai_responses_kwargs_from_model_parameters,
 )
@@ -161,6 +162,8 @@ def infer_llm_client_provider(client: Any) -> Optional[str]:
         return "ollama"
     if "openai" in class_ref:
         return "openai"
+    if "openrouter" in class_ref:
+        return "openrouter"
     if "gemini" in class_ref or "google" in class_ref:
         return "gemini"
     return None
@@ -528,7 +531,7 @@ def _looks_like_browser_object_model_reference(value: str) -> bool:
     if not cleaned:
         return False
     lowered = cleaned.lower()
-    for prefix in ("openai:", "ollama:", "gemini:"):
+    for prefix in ("openai:", "openrouter:", "ollama:", "gemini:"):
         if lowered.startswith(prefix):
             cleaned = cleaned.split(":", 1)[1].strip()
             break
@@ -542,6 +545,19 @@ def _extract_openai_model_id(value: str) -> Optional[str]:
     if not cleaned:
         return None
     if cleaned.lower().startswith("openai:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    if _looks_like_browser_object_model_reference(cleaned):
+        return None
+    return cleaned or None
+
+
+def _extract_openrouter_model_id(value: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.lower().startswith("openrouter:"):
         cleaned = cleaned.split(":", 1)[1].strip()
     if _looks_like_browser_object_model_reference(cleaned):
         return None
@@ -616,6 +632,8 @@ def resolve_provider_from_model_concept(model: Optional[str]) -> Optional[str]:
         if not isinstance(text, str):
             continue
         lowered = text.lower()
+        if "openrouter" in lowered:
+            return "openrouter"
         if "openai" in lowered:
             return "openai"
         if "ollama" in lowered:
@@ -720,6 +738,42 @@ def resolve_openai_model_name(model: Optional[str]) -> Optional[str]:
     return direct or raw
 
 
+def resolve_openrouter_model_name(model: Optional[str]) -> Optional[str]:
+    """Resolve an OpenRouter catalogue slug without inferring its provider."""
+
+    if not isinstance(model, str):
+        return model
+    raw = model.strip()
+    if not raw or _looks_like_browser_object_model_reference(raw):
+        return None
+    direct = _extract_openrouter_model_id(raw)
+    if not raw.startswith("#V#"):
+        return direct
+
+    try:
+        from ..security.access_control import bypass_access_control
+        from ..services.text_value_service import get_texts_for_concept
+
+        with bypass_access_control():
+            rows = get_texts_for_concept(raw, predicate="hasName", limit=20)
+    except Exception:
+        rows = []
+    candidates: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str):
+            continue
+        candidate = _extract_openrouter_model_id(text)
+        if candidate:
+            candidates.append(candidate)
+    for candidate in candidates:
+        if "/" in candidate and not any(char.isspace() for char in candidate):
+            return candidate
+    return candidates[0] if candidates else direct
+
+
 def _resolve_effective_llm_actor_scope(
     user_concept_id: Optional[str] = None,
     org_concept_id: Optional[str] = None,
@@ -787,6 +841,8 @@ def _normalise_model_execution_key(
         model_key = model_key.split(":", 1)[1].strip()
     if provider_key == "openai":
         model_key = resolve_openai_model_name(model_key) or model_key
+    elif provider_key == "openrouter":
+        model_key = resolve_openrouter_model_name(model_key) or model_key
     return provider_key, model_key
 
 
@@ -817,6 +873,7 @@ def assert_model_execution_allowed(
 
     provider_label = {
         "openai": "OpenAI",
+        "openrouter": "OpenRouter",
         "gemini": "Gemini",
     }.get(provider_key, provider_key or "External")
     if not model_key:
@@ -2283,6 +2340,269 @@ class OpenAIClient(LLMInterface):
         return models
 
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_CONNECTION_ID = "#V#openrouter_provider"
+OPENROUTER_PROVIDER_PREFERENCES: Dict[str, Any] = {
+    "zdr": True,
+    "data_collection": "deny",
+    "require_parameters": True,
+}
+
+
+class OpenRouterClient(OpenAIClient):
+    """Opt-in OpenRouter client using its OpenAI-compatible Chat API."""
+
+    DEFAULT_MODEL = ""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        api_key_env_var: str = "OPENROUTER_API_KEY",
+        *,
+        base_url: Optional[str] = None,
+        model_execution_user_concept_id: Optional[str] = None,
+        model_execution_org_concept_id: Optional[str] = None,
+        model_execution_actor_scope_bound: bool = False,
+    ):
+        self.api_key = api_key or get_openrouter_api_key() or ""
+        if not self.api_key:
+            raise ValueError(
+                "OpenRouter API key not provided or found in OPENROUTER_API_KEY "
+                "or OPENROUTER_API_KEY_FILE."
+            )
+        self.base_url = str(
+            base_url or os.getenv("OPENROUTER_BASE_URL") or OPENROUTER_BASE_URL
+        ).rstrip("/")
+        self._model_execution_user_concept_id = model_execution_user_concept_id
+        self._model_execution_org_concept_id = model_execution_org_concept_id
+        self._model_execution_actor_scope_bound = bool(
+            model_execution_actor_scope_bound
+        )
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers={"X-OpenRouter-Metadata": "enabled"},
+        )
+        self.last_response_metadata: Dict[str, Any] = {}
+        logger.info("OpenRouterClient initialised.")
+
+    @staticmethod
+    def _request_provider_preferences(
+        raw_extra_body: Any = None,
+    ) -> Dict[str, Any]:
+        extra_body = dict(raw_extra_body) if isinstance(raw_extra_body, Mapping) else {}
+        raw_provider = extra_body.get("provider")
+        provider_preferences = (
+            dict(raw_provider) if isinstance(raw_provider, Mapping) else {}
+        )
+        # These privacy and compatibility requirements are the minimum Von
+        # profile. Callers may add routing preferences but may not weaken them.
+        provider_preferences.update(OPENROUTER_PROVIDER_PREFERENCES)
+        extra_body["provider"] = provider_preferences
+        return extra_body
+
+    def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
+        target_model = str(resolve_openrouter_model_name(model) or "").strip()
+        if not target_model:
+            raise ValueError("A concrete OpenRouter model slug is required.")
+        return LLMClientConfig(
+            model=target_model,
+            provider="openrouter",
+            api_key=self.api_key,
+            base_url=self.base_url,
+            connection_id=OPENROUTER_CONNECTION_ID,
+            deployment_id=target_model,
+            requested_api_surface="chat_completions",
+            temperature=0.7,
+        )
+
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: List[ToolDefinition],
+        context: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        system_message: Optional[str] = None,
+        llm_params: Optional[Dict[str, Any]] = None,
+        **provider_options: Any,
+    ) -> LLMResponse:
+        options = dict(provider_options)
+        options["extra_body"] = self._request_provider_preferences(
+            options.get("extra_body")
+        )
+        raw_extra_headers = options.get("extra_headers")
+        extra_headers: Dict[str, Any] = (
+            dict(cast(Mapping[str, Any], raw_extra_headers))
+            if isinstance(raw_extra_headers, Mapping)
+            else {}
+        )
+        extra_headers["X-OpenRouter-Metadata"] = "enabled"
+        options["extra_headers"] = extra_headers
+        response = super().generate_with_tools(
+            prompt=prompt,
+            available_tools=available_tools,
+            context=context,
+            model=model,
+            system_message=system_message,
+            llm_params=llm_params,
+            **options,
+        )
+        response.transport_metadata["provider_routing_preferences"] = (
+            sanitise_transport_telemetry_value(
+                options["extra_body"]["provider"]
+            )
+        )
+        response.transport_metadata["router_metadata_requested"] = True
+        return response
+
+    @staticmethod
+    def _openrouter_usage_mapping(usage: Any) -> Dict[str, Any] | None:
+        if usage is None:
+            return None
+        value = lambda key, default=None: (
+            usage.get(key, default)
+            if isinstance(usage, Mapping)
+            else getattr(usage, key, default)
+        )
+        payload: Dict[str, Any] = {
+            "prompt_tokens": value("prompt_tokens"),
+            "completion_tokens": value("completion_tokens"),
+            "total_tokens": value("total_tokens"),
+        }
+        if value("cost") is not None:
+            payload["provider_reported_cost"] = value("cost")
+        if value("cost_details") is not None:
+            payload["provider_reported_cost_details"] = (
+                sanitise_transport_telemetry_value(value("cost_details"))
+            )
+        return payload
+
+    def generate(
+        self,
+        prompt: str,
+        context: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        llm_params: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        target_model = str(resolve_openrouter_model_name(model) or "").strip()
+        if not target_model:
+            raise ValueError("A concrete OpenRouter model slug is required.")
+        self._assert_model_execution_allowed(provider="openrouter", model=target_model)
+        request_started_monotonic = time.monotonic()
+        llm_params_for_model, request_advisory_seconds = (
+            self._split_request_timeout_from_llm_params(llm_params)
+        )
+        request_kwargs = chat_completions_kwargs_from_model_parameters(
+            llm_params_for_model,
+            provider="openrouter",
+            model=target_model,
+        )
+        request_kwargs["extra_body"] = self._request_provider_preferences(
+            request_kwargs.pop("extra_body", None)
+        )
+        try:
+            response = self.client.chat.completions.create(  # type: ignore[arg-type]
+                model=target_model,
+                messages=to_openai_messages(  # type: ignore[arg-type]
+                    build_conversation(prompt, context)
+                ),
+                **request_kwargs,
+            )
+            actual_model = getattr(response, "model", None) or target_model
+            content = self.validate_model_response(response, str(actual_model))
+            raw_metadata = getattr(response, "openrouter_metadata", None)
+            if raw_metadata is None and hasattr(response, "model_dump"):
+                dumped = response.model_dump(exclude_none=True)
+                if isinstance(dumped, Mapping):
+                    raw_metadata = dumped.get("openrouter_metadata")
+            transport_metadata: Dict[str, Any] = {
+                "requested_provider": "openrouter",
+                "effective_provider": "openrouter",
+                "requested_model": target_model,
+                "effective_model": actual_model,
+                "effective_api_surface": "chat_completions",
+                "connection_id": OPENROUTER_CONNECTION_ID,
+                "deployment_id": target_model,
+                "provider_routing_preferences": sanitise_transport_telemetry_value(
+                    request_kwargs["extra_body"]["provider"]
+                ),
+                "router_metadata_requested": True,
+                "generation_id": sanitise_transport_telemetry_value(
+                    getattr(response, "id", None)
+                ),
+                "duration_ms": int(
+                    max(0.0, time.monotonic() - request_started_monotonic) * 1000
+                ),
+            }
+            if raw_metadata is not None:
+                transport_metadata["openrouter_metadata"] = (
+                    sanitise_transport_telemetry_value(raw_metadata, max_depth=6)
+                )
+            self.last_response_metadata = {
+                "provider": "openrouter",
+                "api_surface": "chat_completions",
+                "requested_model": target_model,
+                "effective_model": actual_model,
+                "usage": self._openrouter_usage_mapping(
+                    getattr(response, "usage", None)
+                ),
+                "transport_metadata": transport_metadata,
+                "raw_response": {
+                    "id": getattr(response, "id", None),
+                    "model": actual_model,
+                },
+            }
+            _observe_request_advisory(
+                provider="openrouter",
+                advisory_seconds=request_advisory_seconds,
+                started_monotonic=request_started_monotonic,
+            )
+            return content
+        except ModelExecutionEligibilityError:
+            raise
+        except Exception as exc:
+            safe_error = sanitise_transport_telemetry_text(str(exc))
+            logger.error(
+                "OpenRouter Chat Completions request failed (error_type=%s): %s",
+                type(exc).__name__,
+                safe_error,
+            )
+            raise RuntimeError(f"OpenRouter request failed: {safe_error}") from exc
+
+    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+        raise NotImplementedError("OpenRouter embeddings are not enabled in this release.")
+
+    def list_models(self) -> List[str]:
+        cache_key = "openrouter:models"
+        now = time.time()
+        entry = _MODEL_CACHE.get(cache_key)
+        if entry and now - entry.get("fetched_at", 0) < _MODEL_CACHE_TTL and not entry.get("error"):
+            return list(entry.get("models", []))
+        try:
+            response = self.client.models.list()
+            models = sorted(
+                {
+                    model_id
+                    for item in getattr(response, "data", [])
+                    if isinstance((model_id := getattr(item, "id", None)), str)
+                    and model_id.strip()
+                }
+            )
+        except Exception as exc:
+            safe_error = sanitise_transport_telemetry_text(str(exc))
+            _MODEL_FAIL_BACKOFF[cache_key] = now
+            raise RuntimeError(
+                f"OpenRouter model listing failed: {safe_error}"
+            ) from exc
+        _MODEL_CACHE[cache_key] = {
+            "models": models,
+            "fetched_at": now,
+            "error": None,
+            "source": "refresh",
+        }
+        return models
+
+
 class GeminiClient(LLMInterface):
     """Client for interacting with the Google Gemini API."""
 
@@ -2917,6 +3237,31 @@ def get_llm_client(
             else:
                 raise RuntimeError("No LLM clients available") from e
 
+    elif provider == "openrouter":
+        try:
+            trusted_user_concept_id, trusted_org_concept_id = (
+                _resolve_effective_llm_actor_scope(
+                    user_concept_id,
+                    org_concept_id,
+                )
+            )
+            openrouter_kwargs = dict(kwargs)
+            openrouter_kwargs["model_execution_user_concept_id"] = (
+                trusted_user_concept_id
+            )
+            openrouter_kwargs["model_execution_org_concept_id"] = (
+                trusted_org_concept_id
+            )
+            openrouter_kwargs["model_execution_actor_scope_bound"] = True
+            return OpenRouterClient(**openrouter_kwargs)
+        except Exception as e:
+            safe_error = sanitise_transport_telemetry_text(str(e))
+            logger.error("Failed to initialise OpenRouter client: %s", safe_error)
+            raise RuntimeError(
+                "OpenRouter was selected, but its client could not be initialised. "
+                "No cross-provider fallback was attempted."
+            ) from e
+
     elif provider == "gemini":
         try:
             trusted_user_concept_id, trusted_org_concept_id = (
@@ -2943,16 +3288,7 @@ def get_llm_client(
             ) from e
 
     else:
-        # Invalid provider should raise ValueError instead of defaulting
-        if client_type:  # Only raise if explicitly provided invalid type
-            raise ValueError(f"Unknown provider '{provider}'")
-        else:
-            logger.warning(f"Unknown provider '{provider}'. Defaulting to Ollama.")
-            default_fb = _ensure_ollama_client()
-            if default_fb:
-                return default_fb
-            else:
-                raise RuntimeError("No LLM clients available")
+        raise ValueError(f"Unknown provider '{provider}'")
 
 
 def validate_openai_config(
@@ -3023,6 +3359,8 @@ def get_active_model_name(
                 provider = resolved_provider
         if provider == "openai":
             return resolve_openai_model_name(model)
+        if provider == "openrouter":
+            return resolve_openrouter_model_name(model)
         if provider == "ollama":
             return resolve_ollama_model_name(model)
         return model
