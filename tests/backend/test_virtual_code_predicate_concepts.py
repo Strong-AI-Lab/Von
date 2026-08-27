@@ -512,6 +512,73 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     assert rows[0]["arg2_value"] == "#V#focus"
 
 
+def test_relationship_extent_route_accepts_structural_predicate_concept_id(
+    app_client, monkeypatch
+):
+    _, client = app_client
+    requested_predicates: list[str | None] = []
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: True,
+    )
+
+    def page_rows(*_args, requested_predicate=None, **_kwargs):
+        requested_predicates.append(requested_predicate)
+        return (
+            [
+                {
+                    "relation_id": "struct::#V#person::has_instance::incoming::0",
+                    "source": "structured",
+                    "relation_kind": "binary",
+                    "role": "arg2",
+                    "predicate_id": "has_instance",
+                    "arg1_value": "#V#person",
+                    "arg1_is_concept": True,
+                    "arg2_value": "#V#focus",
+                    "arg2_is_concept": True,
+                    "arg2_index": 2,
+                    "source_concept_id": "#V#person",
+                    "target_value": "#V#focus",
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+            ],
+            True,
+            {
+                "used_extent_index": True,
+                "complete": True,
+                "bounded": False,
+                "has_more": False,
+            },
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_page_for_target",
+        page_rows,
+    )
+
+    responses = [
+        client.get(
+            "/vontology/api/vontology/relationships/extent?"
+            "concept_id=%23V%23focus&role=arg2&source=structured&"
+            f"predicate={predicate}&limit=20"
+        )
+        for predicate in ("%23V%23has_instance", "has_instance")
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert requested_predicates == ["has_instance", "has_instance"]
+    assert [
+        [row["predicate_id"] for row in response.get_json()["rows"]]
+        for response in responses
+    ] == [["has_instance"], ["has_instance"]]
+
+
 def test_relationship_extent_route_dedupes_visibility_alias_rows(
     app_client, monkeypatch
 ):

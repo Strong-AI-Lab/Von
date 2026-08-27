@@ -29,7 +29,10 @@ from ..db.mongo_client import (
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import bypass_access_control, can_access_concept
 from ..security.access_control import filter_accessible_concept_ids
-from .concept_predicate_metadata_service import get_relationship_kinds_set
+from .concept_predicate_metadata_service import (
+    get_relationship_kinds_set,
+    resolve_structural_predicate_storage_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -930,12 +933,12 @@ def _build_relationship_extent_index_query(
         dict.fromkeys(
             [
                 *(
-                    [predicate_id.strip()]
+                    [resolve_structural_predicate_storage_key(predicate_id)]
                     if isinstance(predicate_id, str) and predicate_id.strip()
                     else []
                 ),
                 *(
-                    item.strip()
+                    resolve_structural_predicate_storage_key(item)
                     for item in raw_predicate_ids
                     if isinstance(item, str) and item.strip()
                 ),

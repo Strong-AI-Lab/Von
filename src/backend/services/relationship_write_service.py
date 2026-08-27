@@ -32,6 +32,7 @@ from .concept_predicate_metadata_service import (
     get_relationship_kinds_set,
     get_structural_predicate_aliases,
     get_structural_inverse_map,
+    resolve_structural_predicate_storage_key,
 )
 from .feature_flags import (
     get_event_workflow_integration_enabled,
@@ -256,9 +257,7 @@ def normalise_structural_predicate(predicate: str) -> str:
     predicate = predicate.strip()
 
     # Check #V# prefixed structural aliases first (Vontology-backed)
-    aliases = get_structural_predicate_aliases()
-    if predicate in aliases:
-        return aliases[predicate]
+    predicate = resolve_structural_predicate_storage_key(predicate)
 
     # Check common name aliases
     if predicate in PREDICATE_NAME_ALIASES:

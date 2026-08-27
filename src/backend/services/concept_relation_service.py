@@ -36,7 +36,10 @@ from ..vontology.utils_vontology import (
     is_predicate,
     is_type,
 )
-from .concept_predicate_metadata_service import get_relationship_kinds_set
+from .concept_predicate_metadata_service import (
+    get_relationship_kinds_set,
+    resolve_structural_predicate_storage_key,
+)
 from .relationship_extent_index_service import (
     incoming_dynamic_extent_rows_page_for_target,
     query_relationship_extent_index,
@@ -177,7 +180,11 @@ def build_concept_relations_payload(
     if not concept_id:
         return _empty_payload(limit=limit, offset=offset)
 
-    predicate_allow_list = set(predicate_filter or [])
+    predicate_allow_list = {
+        resolve_structural_predicate_storage_key(predicate)
+        for predicate in (predicate_filter or [])
+        if isinstance(predicate, str) and predicate.strip()
+    }
     structural_predicates = set(get_relationship_kinds_set())
     if predicate_allow_list:
         structural_predicates.update(
@@ -210,7 +217,10 @@ def build_concept_relations_payload(
             return True
         if candidate is None:
             return False
-        return candidate in predicate_allow_list
+        return (
+            resolve_structural_predicate_storage_key(candidate)
+            in predicate_allow_list
+        )
 
     def _record(entry: RelationValue) -> None:
         nonlocal total_matches
@@ -4063,7 +4073,10 @@ def _iter_predicate_filter_tokens(
 def _normalise_predicate_terms(
     predicate_filter: Optional[Sequence[str]],
 ) -> List[str]:
-    return [token.lower() for token in _iter_predicate_filter_tokens(predicate_filter)]
+    return [
+        resolve_structural_predicate_storage_key(token).lower()
+        for token in _iter_predicate_filter_tokens(predicate_filter)
+    ]
 
 
 def _normalise_predicate_display_terms(
@@ -4078,12 +4091,21 @@ def _canonical_exact_predicate_filter_ids(
     """Return exact safe field IDs only when the whole filter is canonical."""
 
     tokens = _iter_predicate_filter_tokens(predicate_filter)
-    if not tokens or any(
-        not token.startswith("#V#") or "." in token or "$" in token or "\x00" in token
-        for token in tokens
-    ):
+    if not tokens:
         return []
-    return list(dict.fromkeys(tokens))
+    structural_predicates = get_relationship_kinds_set()
+    resolved_tokens: List[str] = []
+    for token in tokens:
+        resolved = resolve_structural_predicate_storage_key(token)
+        if (
+            (not token.startswith("#V#") and resolved not in structural_predicates)
+            or "." in resolved
+            or "$" in resolved
+            or "\x00" in resolved
+        ):
+            return []
+        resolved_tokens.append(resolved)
+    return list(dict.fromkeys(resolved_tokens))
 
 
 def _predicate_matches_terms(predicate_id: Any, terms: Sequence[str]) -> bool:
