@@ -140,12 +140,103 @@ def test_summary_field_resolver_resolves_type_field_bindings(monkeypatch) -> Non
     )
 
 
+def test_summary_field_resolver_unions_inherited_fields_and_uses_represented_order(
+    monkeypatch,
+) -> None:
+    concept_docs: dict[str, dict[str, Any]] = {
+        "#V#researcher": {
+            "concept_id": "#V#researcher",
+            "relationships": {
+                "#V#has_summary_fields": [
+                    "#V#summary_field_research_description"
+                ]
+            },
+        },
+        "#V#person": {
+            "concept_id": "#V#person",
+            "relationships": {
+                "#V#has_summary_fields": ["#V#summary_field_email"]
+            },
+        },
+        "#V#thing": {
+            "concept_id": "#V#thing",
+            "relationships": {
+                "#V#has_summary_fields": ["#V#summary_field_description"]
+            },
+        },
+        "#V#summary_field_research_description": {
+            "concept_id": "#V#summary_field_research_description",
+            "name": "Research description",
+        },
+        "#V#summary_field_email": {
+            "concept_id": "#V#summary_field_email",
+            "name": "Email",
+        },
+        "#V#summary_field_description": {
+            "concept_id": "#V#summary_field_description",
+            "name": "Description",
+        },
+    }
+
+    def _find(filter_value, *_args, **_kwargs):
+        ids = (filter_value.get("concept_id") or {}).get("$in") or []
+        return [concept_docs[concept_id] for concept_id in ids]
+
+    rows_by_concept = {
+        "#V#summary_field_research_description": [
+            {
+                "predicate": "#V#has_summary_text_predicates_json",
+                "text": '["#V#has_research_description_as_of"]',
+            },
+            {"predicate": "#V#summary_field_display_order", "text": "5"},
+        ],
+        "#V#summary_field_description": [
+            {
+                "predicate": "#V#has_summary_text_predicates_json",
+                "text": '["hasDescription"]',
+            },
+            {"predicate": "#V#summary_field_display_order", "text": "10"},
+        ],
+        "#V#summary_field_email": [
+            {
+                "predicate": "#V#has_summary_text_predicates_json",
+                "text": '["#V#has_email"]',
+            },
+            {"predicate": "#V#summary_field_display_order", "text": "later"},
+        ],
+    }
+    monkeypatch.setattr(resolver_module.ConceptsRepository, "find", _find)
+    monkeypatch.setattr(
+        resolver_module,
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: rows_by_concept,
+    )
+
+    resolver = resolver_module.ConceptSummaryFieldResolver(cache_ttl_seconds=60.0)
+    definitions = resolver.get_summary_field_definitions_for_types(
+        ["#V#researcher", "#V#person", "#V#thing"]
+    )
+
+    assert [definition.field_key for definition in definitions] == [
+        "research_description",
+        "description",
+        "email",
+    ]
+    assert definitions[0].label == "Research description"
+    assert definitions[0].display_order == 5.0
+    assert definitions[0].text_predicates == (
+        "#V#has_research_description_as_of",
+    )
+    assert definitions[0].origin_type_ids == ("#V#researcher",)
+    assert definitions[2].display_order is None
+
+
 def test_summary_field_bootstrap_materialises_vontology_metadata(
     _reset_mock_db: Any,
 ) -> None:
     report = bootstrap_canonical_concept_summary_fields()
     assert report["success"] is True
-    assert report["counts"]["fields_seen"] == 17
+    assert report["counts"]["fields_seen"] == 18
     assert report["counts"]["errors"] == 0
 
     person_doc = concept_service.get_concept_by_concept_id("#V#person")
@@ -166,6 +257,12 @@ def test_summary_field_bootstrap_materialises_vontology_metadata(
         "affiliation",
         "authored_work",
     )
+    assert resolver.get_summary_fields_for_type("#V#research_description") == (
+        "research_description_as_of",
+    )
+    assert resolver.get_text_predicates_for_field(
+        "research_description_as_of"
+    ) == ("#V#has_research_description_as_of",)
 
 
 def test_summary_field_bootstrap_uses_batched_noop_fast_path(
@@ -241,7 +338,7 @@ def test_summary_field_startup_receipt_hit_performs_no_canonical_scan(
             "fresh": True,
             "reason": "dependency_receipt_current",
             "events_examined": 0,
-            "metadata": {"counts": {"fields_seen": 17}},
+            "metadata": {"counts": {"fields_seen": 18}},
         },
     )
     monkeypatch.setattr(

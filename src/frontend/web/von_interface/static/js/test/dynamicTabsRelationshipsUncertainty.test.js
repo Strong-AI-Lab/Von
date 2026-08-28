@@ -1,5 +1,6 @@
 import {
     buildDescriptionMetadataRows,
+    createRelationshipTextDisclosureCell,
     deriveRelationshipExtentQuery,
     getRelationshipConfidenceScore,
     resolveRelationshipExtentConceptKind,
@@ -89,5 +90,53 @@ describe('dynamicTabs uncertain relationship helpers', () => {
         expect(labels).toEqual(expect.arrayContaining(['Source', 'Attribution', 'Parent', 'Confidence', 'Updated']));
         const confidenceRow = rows.find((row) => row.label === 'Confidence');
         expect(confidenceRow?.value).toBe('83%');
+    });
+
+    test('long relationship literals disclose and copy their exact value', async () => {
+        const longText = 'As of 2026-08-05: current PhD research spans robust knowledge representation, provenance-aware assistants, and a deliberately long final clause.';
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText }
+        });
+
+        const { cell, detailRow } = createRelationshipTextDisclosureCell(
+            longText,
+            'en-NZ',
+            {
+                roleLabel: 'Arg2',
+                predicateLabel: '#V#has_research_description_as_of'
+            }
+        );
+        document.body.append(cell, detailRow);
+
+        expect(cell.querySelector('.relationship-text-preview').textContent).toBe(longText);
+        expect(cell.querySelector('.relationship-text-preview').classList.contains('is-collapsed')).toBe(true);
+        expect(detailRow.hidden).toBe(true);
+        const toggle = cell.querySelector('.relationship-text-toggle');
+        toggle.click();
+        expect(toggle.getAttribute('aria-expanded')).toBe('true');
+        expect(detailRow.hidden).toBe(false);
+        expect(detailRow.querySelector('.relationship-text-full').textContent).toBe(longText);
+        expect(detailRow.querySelector('strong').textContent).toContain(
+            '#V#has_research_description_as_of'
+        );
+
+        cell.querySelector('.relationship-text-copy').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(writeText).toHaveBeenCalledWith(longText);
+        expect(cell.querySelector('.relationship-text-copy').textContent).toBe('Copied');
+
+        detailRow.querySelector('.relationship-text-close').click();
+        expect(detailRow.hidden).toBe(true);
+        expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    });
+
+    test('short relationship literals stay compact without disclosure controls', () => {
+        const { cell, detailRow } = createRelationshipTextDisclosureCell('Short value');
+
+        expect(cell.textContent).toBe('Short value');
+        expect(cell.querySelector('.relationship-text-toggle')).toBeNull();
+        expect(detailRow).toBeNull();
     });
 });

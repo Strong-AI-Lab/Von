@@ -7,6 +7,7 @@ for the concept tab's top summary panel.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any, cast
@@ -21,7 +22,10 @@ from .concept_service import (
     get_concept_by_concept_id,
     resolve_concept_display_names,
 )
-from .concept_summary_field_resolver import get_concept_summary_field_resolver
+from .concept_summary_field_resolver import (
+    SummaryFieldDefinition,
+    get_concept_summary_field_resolver,
+)
 from .concept_type_closure_service import load_type_closure
 from .conversation_projection_service import (
     ConversationProjectionAccessChangedError,
@@ -33,7 +37,8 @@ from .renderer_applicability_service import resolve_renderer_applicability_from_
 from .renderer_applicability_vontology_service import (
     load_renderer_definitions_from_concept_ids,
 )
-from .text_value_service import get_texts_for_concept
+from .scoped_assertion_service import list_visible_scoped_assertions_page
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 CONCEPT_PAGE_RENDERER_CONCEPT_IDS: tuple[str, ...] = (
     "#V#concept_page_conversation_renderer",
@@ -77,6 +82,43 @@ _PERSON_ROLE_EXCLUSIONS: frozenset[str] = frozenset(
         "#V#von_user",
     }
 )
+
+_CONSUMED_SUMMARY_FIELDS_BY_RENDERER: dict[str | None, frozenset[str]] = {
+    "#V#concept_page_identity_renderer": frozenset(
+        {"description", "content", "email", "affiliation", "authored_work"}
+    ),
+    "#V#concept_page_document_renderer": frozenset(
+        {"description", "content", "author", "publication_date"}
+    ),
+    "#V#concept_page_task_renderer": frozenset(
+        {
+            "description",
+            "content",
+            "task_status",
+            "priority",
+            "due_date",
+            "task_source",
+        }
+    ),
+    "#V#concept_page_event_renderer": frozenset(
+        {
+            "description",
+            "content",
+            "event_date",
+            "meeting_participant",
+            "meeting_location",
+            "meeting_host",
+        }
+    ),
+    "#V#concept_page_location_renderer": frozenset(
+        {"description", "content", "capacity", "url"}
+    ),
+    None: frozenset({"description", "content"}),
+}
+
+_PROMOTED_FIELD_VALUE_LIMIT = 250
+
+_logger = logging.getLogger(__name__)
 
 
 def _normalise_strings(raw: Any) -> list[str]:
@@ -305,6 +347,296 @@ def _relationship_values(
             else:
                 values.append(raw)
     return _dedupe_preserve_order(values)
+
+
+def _source_context_for_scope(
+    scope: Any,
+    *,
+    preview_cache: Mapping[str, str],
+) -> dict[str, Any]:
+    scope_payload = scope if isinstance(scope, Mapping) else {}
+    mode = str(scope_payload.get("mode") or "").strip()
+    organisation_id = str(
+        scope_payload.get("organisation_concept_id") or ""
+    ).strip()
+    if mode == "organisation":
+        organisation_name = preview_cache.get(organisation_id)
+        return {
+            "kind": "organisation",
+            "label": (
+                f"Organisation — {organisation_name}"
+                if organisation_name
+                else "Organisation"
+            ),
+            "organisation_concept_id": organisation_id or None,
+        }
+    return {
+        "kind": "personal",
+        "label": "Personal — visible only to you",
+        "organisation_concept_id": None,
+    }
+
+
+def _prime_additional_preview_names(
+    concept_ids: list[str],
+    preview_cache: dict[str, str],
+) -> None:
+    missing_ids = _dedupe_preserve_order(
+        [
+            concept_id
+            for concept_id in concept_ids
+            if concept_id.startswith("#V#") and concept_id not in preview_cache
+        ]
+    )
+    if not missing_ids:
+        return
+    try:
+        docs = list(
+            ConceptsRepository.find(
+                {"concept_id": {"$in": missing_ids}},
+                {"concept_id": 1, "name": 1, "names": 1},
+                limit=len(missing_ids),
+            )
+        )
+    except Exception as exc:
+        _logger.debug(
+            "[concept_summary_renderer] Failed to load promoted value labels: %s",
+            exc,
+        )
+        docs = []
+    display_names = resolve_concept_display_names(docs)
+    for concept_id in missing_ids:
+        preview_cache[concept_id] = display_names.get(concept_id) or concept_id
+
+
+def _project_promoted_text_value(
+    row: Mapping[str, Any],
+    *,
+    preview_cache: Mapping[str, str],
+) -> dict[str, Any] | None:
+    text = row.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    is_scoped = row.get("row_kind") == "scoped_assertion"
+    scope = row.get("assertion_scope")
+    if not isinstance(scope, Mapping):
+        context = row.get("context")
+        scope = (
+            context.get("assertion_scope")
+            if isinstance(context, Mapping)
+            else None
+        )
+    return {
+        "kind": "text",
+        "text": text,
+        "language": str(row.get("lang") or "").strip() or None,
+        "predicate_id": str(row.get("predicate") or "").strip(),
+        "relation_id": row.get("relation_id"),
+        "assertion_id": row.get("assertion_id"),
+        "canonical_publication": not is_scoped,
+        "source_context": (
+            _source_context_for_scope(scope, preview_cache=preview_cache)
+            if is_scoped
+            else {"kind": "canonical", "label": "Canonical"}
+        ),
+        "provenance": row.get("provenance") or {},
+    }
+
+
+def _project_promoted_fields(
+    *,
+    concept_id: str,
+    relationships: Mapping[str, Any],
+    definitions: tuple[SummaryFieldDefinition, ...],
+    consumed_field_keys: frozenset[str],
+    preview_cache: dict[str, str],
+    actor_user_id: str | None,
+    organisation_concept_id: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Project every value of represented fields not owned by a legacy card."""
+
+    promoted_definitions = tuple(
+        definition
+        for definition in definitions
+        if definition.field_key not in consumed_field_keys
+    )
+    if not promoted_definitions:
+        return [], {
+            "context_view": "base_publication",
+            "text_query_truncated": False,
+            "relationship_query_truncated": False,
+        }
+
+    text_predicates = _dedupe_preserve_order(
+        [
+            predicate
+            for definition in promoted_definitions
+            for predicate in definition.text_predicates
+        ]
+    )
+    relationship_predicates = _dedupe_preserve_order(
+        [
+            predicate
+            for definition in promoted_definitions
+            for predicate in definition.relationship_predicates
+        ]
+    )
+    context_view = "actor_effective" if actor_user_id else "base_publication"
+    text_query_metadata: dict[str, Any] = {}
+    promoted_text_rows: list[dict[str, Any]] = []
+    if text_predicates:
+        rows_by_concept = get_texts_for_concepts(
+            [concept_id],
+            predicates=text_predicates,
+            limit_per_concept=_PROMOTED_FIELD_VALUE_LIMIT,
+            query_metadata=text_query_metadata,
+            context_view=context_view,
+        )
+        promoted_text_rows = list(rows_by_concept.get(concept_id) or [])
+
+    scoped_relationship_page: dict[str, Any] = {
+        "items": [],
+        "truncated": False,
+        "counts_are_lower_bounds": False,
+    }
+    if actor_user_id and relationship_predicates:
+        scoped_relationship_page = list_visible_scoped_assertions_page(
+            subject_concept_ids=[concept_id],
+            predicates=relationship_predicates,
+            object_kind="concept",
+            limit=_PROMOTED_FIELD_VALUE_LIMIT,
+            limit_per_subject=_PROMOTED_FIELD_VALUE_LIMIT,
+            user_concept_id=actor_user_id,
+            organisation_concept_id=organisation_concept_id,
+        )
+
+    referenced_ids: list[str] = []
+    for definition in promoted_definitions:
+        for predicate in definition.relationship_predicates:
+            referenced_ids.extend(_normalise_strings(relationships.get(predicate)))
+    for assertion in scoped_relationship_page.get("items") or []:
+        if not isinstance(assertion, Mapping):
+            continue
+        referenced_ids.extend(
+            [
+                str(assertion.get("object_concept_id") or "").strip(),
+                str(
+                    ((assertion.get("scope") or {}).get("organisation_concept_id"))
+                    if isinstance(assertion.get("scope"), Mapping)
+                    else ""
+                ).strip(),
+            ]
+        )
+    for row in promoted_text_rows:
+        scope = row.get("assertion_scope")
+        if not isinstance(scope, Mapping):
+            context = row.get("context")
+            scope = (
+                context.get("assertion_scope")
+                if isinstance(context, Mapping)
+                else None
+            )
+        if isinstance(scope, Mapping):
+            referenced_ids.append(
+                str(scope.get("organisation_concept_id") or "").strip()
+            )
+    _prime_additional_preview_names(referenced_ids, preview_cache)
+
+    fields: list[dict[str, Any]] = []
+    for definition in promoted_definitions:
+        values: list[dict[str, Any]] = []
+        text_predicate_set = set(definition.text_predicates)
+        for row in promoted_text_rows:
+            if str(row.get("predicate") or "").strip() not in text_predicate_set:
+                continue
+            projected = _project_promoted_text_value(
+                row,
+                preview_cache=preview_cache,
+            )
+            if projected is not None:
+                values.append(projected)
+
+        for predicate in definition.relationship_predicates:
+            for object_concept_id in _normalise_strings(
+                relationships.get(predicate)
+            ):
+                if not object_concept_id.startswith("#V#"):
+                    continue
+                values.append(
+                    {
+                        "kind": "concept",
+                        "concept_id": object_concept_id,
+                        "display_name": preview_cache.get(object_concept_id)
+                        or object_concept_id,
+                        "predicate_id": predicate,
+                        "relation_id": None,
+                        "assertion_id": None,
+                        "canonical_publication": True,
+                        "source_context": {
+                            "kind": "canonical",
+                            "label": "Canonical",
+                        },
+                        "provenance": {},
+                    }
+                )
+        relationship_predicate_set = set(definition.relationship_predicates)
+        for assertion in scoped_relationship_page.get("items") or []:
+            if not isinstance(assertion, Mapping):
+                continue
+            predicate = str(assertion.get("predicate") or "").strip()
+            if predicate not in relationship_predicate_set:
+                continue
+            object_concept_id = str(
+                assertion.get("object_concept_id") or ""
+            ).strip()
+            if not object_concept_id:
+                continue
+            values.append(
+                {
+                    "kind": "concept",
+                    "concept_id": object_concept_id,
+                    "display_name": preview_cache.get(object_concept_id)
+                    or object_concept_id,
+                    "predicate_id": predicate,
+                    "relation_id": None,
+                    "assertion_id": assertion.get("assertion_id"),
+                    "canonical_publication": False,
+                    "source_context": _source_context_for_scope(
+                        assertion.get("scope"),
+                        preview_cache=preview_cache,
+                    ),
+                    "provenance": assertion.get("provenance") or {},
+                }
+            )
+        if not values:
+            continue
+        fields.append(
+            {
+                "field_key": definition.field_key,
+                "field_concept_id": definition.field_concept_id,
+                "label": definition.label,
+                "display_order": definition.display_order,
+                "origin_type_ids": list(definition.origin_type_ids),
+                "values": values,
+            }
+        )
+
+    return fields, {
+        "context_view": context_view,
+        "text_query_truncated": bool(
+            text_query_metadata.get("relation_query_truncated")
+            or text_query_metadata.get("scoped_query_truncated")
+        ),
+        "text_counts_are_lower_bounds": bool(
+            text_query_metadata.get("scoped_counts_are_lower_bounds")
+        ),
+        "relationship_query_truncated": bool(
+            scoped_relationship_page.get("truncated")
+        ),
+        "relationship_counts_are_lower_bounds": bool(
+            scoped_relationship_page.get("counts_are_lower_bounds")
+        ),
+    }
 
 
 def _type_labels(
@@ -888,9 +1220,13 @@ def load_concept_summary_renderer(
     )
     present_predicates = _collect_present_predicates(relationships, text_rows)
     field_resolver = get_concept_summary_field_resolver()
-    summary_field_keys = frozenset(
-        field_resolver.get_summary_fields_for_types(resolved_type_ids)
+    summary_field_definitions = (
+        field_resolver.get_summary_field_definitions_for_types(resolved_type_ids)
     )
+    summary_field_key_list = [
+        definition.field_key for definition in summary_field_definitions
+    ]
+    summary_field_keys = frozenset(summary_field_key_list)
 
     definitions, loading_diagnostics = load_renderer_definitions_from_concept_ids(
         CONCEPT_PAGE_RENDERER_CONCEPT_IDS
@@ -949,6 +1285,13 @@ def load_concept_summary_renderer(
         if conversation_card is None:
             raise ConceptNotFoundError(f"Concept not found: {concept_id}")
         panel = _build_conversation_panel(conversation_card)
+        promoted_fields: list[dict[str, Any]] = []
+        promoted_field_diagnostics = {
+            "context_view": "actor_effective",
+            "skipped_for_conversation_projection": True,
+            "text_query_truncated": False,
+            "relationship_query_truncated": False,
+        }
     else:
         panel = _build_panel_for_renderer(
             renderer_id=selected_renderer_id,
@@ -960,6 +1303,63 @@ def load_concept_summary_renderer(
             preview_cache=preview_cache,
             summary_field_keys=summary_field_keys,
         )
+        consumed_field_keys = _CONSUMED_SUMMARY_FIELDS_BY_RENDERER.get(
+            selected_renderer_id,
+            _CONSUMED_SUMMARY_FIELDS_BY_RENDERER[None],
+        )
+        try:
+            promoted_fields, promoted_field_diagnostics = (
+                _project_promoted_fields(
+                    concept_id=concept_id,
+                    relationships=relationships,
+                    definitions=summary_field_definitions,
+                    consumed_field_keys=consumed_field_keys,
+                    preview_cache=preview_cache,
+                    actor_user_id=actor_user_id,
+                    organisation_concept_id=organisation_concept_id,
+                )
+            )
+            promoted_fields_truncated = bool(
+                promoted_field_diagnostics.get("text_query_truncated")
+                or promoted_field_diagnostics.get(
+                    "relationship_query_truncated"
+                )
+            )
+            panel["promoted_fields_status"] = {
+                "available": True,
+                "truncated": promoted_fields_truncated,
+                **(
+                    {
+                        "message": (
+                            "Some promoted values are not shown; use the full "
+                            "relationship view for the complete bounded page."
+                        )
+                    }
+                    if promoted_fields_truncated
+                    else {}
+                ),
+            }
+        except Exception as exc:
+            _logger.warning(
+                "[concept_summary_renderer] Promoted field projection failed for %s: %s",
+                concept_id,
+                exc,
+            )
+            promoted_fields = []
+            promoted_field_diagnostics = {
+                "context_view": (
+                    "actor_effective" if actor_user_id else "base_publication"
+                ),
+                "available": False,
+                "error_type": type(exc).__name__,
+                "text_query_truncated": False,
+                "relationship_query_truncated": False,
+            }
+            panel["promoted_fields_status"] = {
+                "available": False,
+                "message": "Promoted fields are temporarily unavailable.",
+            }
+        panel["promoted_fields"] = promoted_fields
 
     payload = {
         "success": True,
@@ -967,12 +1367,13 @@ def load_concept_summary_renderer(
         "display_name": _display_name(concept),
         "direct_type_ids": direct_type_ids,
         "resolved_type_ids": resolved_type_ids,
-        "summary_field_keys": sorted(summary_field_keys),
+        "summary_field_keys": summary_field_key_list,
         "selected_renderer": selected.to_dict() if selected else None,
         "panel": panel,
         "diagnostics": {
             "renderer_definition_loading": loading_diagnostics,
             "renderer_resolution": resolution.to_dict(),
+            "promoted_fields": promoted_field_diagnostics,
         },
     }
     if actor_user_id and not is_conversation:

@@ -14,7 +14,7 @@ import { destroyPredicateView, initializePredicateView } from './predicateView.j
 import { getConceptTypeDisplayNames, setCurrentConceptType, setCurrentlySelectedConceptId, setSelectedConceptOriginalName } from './state.js';
 import { activateTab } from './tabNavigation.js';
 import { createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
-import { copyJsonTextWithButtonFeedback, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
+import { copyJsonTextWithButtonFeedback, copyTextWithClipboardFallback, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 import { mountJsonInspector } from './utils/jsonInspector.js';
 import {
     describePublicationContext,
@@ -7297,6 +7297,104 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
 }
 
 const relationshipExtentPageState = new Map();
+let relationshipTextDisclosureSequence = 0;
+
+export function createRelationshipTextDisclosureCell(
+    value,
+    language = '',
+    { roleLabel = 'Argument', predicateLabel = 'relationship' } = {}
+) {
+    const exactText = typeof value === 'string' ? value : String(value ?? '');
+    const cell = document.createElement('td');
+    cell.className = 'relationship-text-cell';
+    const preview = document.createElement('span');
+    preview.className = 'relationship-text-preview';
+    preview.textContent = exactText;
+    cell.appendChild(preview);
+    if (language) {
+        const badge = document.createElement('span');
+        badge.className = 'relationship-text-language';
+        badge.textContent = language;
+        cell.appendChild(badge);
+    }
+
+    const isLong = exactText.length > 60 || exactText.includes('\n');
+    if (!isLong) {
+        return { cell, detailRow: null };
+    }
+    preview.classList.add('is-collapsed');
+    const disclosureId = `relationshipTextDetail_${++relationshipTextDisclosureSequence}`;
+    const controls = document.createElement('div');
+    controls.className = 'relationship-text-controls';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'relationship-text-control relationship-text-toggle';
+    toggle.textContent = 'Show full';
+    toggle.setAttribute('aria-controls', disclosureId);
+    toggle.setAttribute('aria-expanded', 'false');
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'relationship-text-control relationship-text-copy';
+    copy.textContent = 'Copy';
+    copy.setAttribute('aria-label', `Copy full ${roleLabel} text`);
+    copy.setAttribute('aria-live', 'polite');
+    copy.addEventListener('click', async () => {
+        const copied = await copyTextWithClipboardFallback(exactText);
+        copy.textContent = copied ? 'Copied' : 'Copy failed';
+    });
+    controls.append(toggle, copy);
+    cell.appendChild(controls);
+
+    const detailRow = document.createElement('tr');
+    detailRow.className = 'relationship-text-detail-row';
+    detailRow.hidden = true;
+    const detailCell = document.createElement('td');
+    detailCell.colSpan = 10;
+    const detail = document.createElement('section');
+    detail.id = disclosureId;
+    detail.className = 'relationship-text-detail';
+    const detailHeader = document.createElement('div');
+    detailHeader.className = 'relationship-text-detail-header';
+    const detailTitle = document.createElement('strong');
+    detailTitle.textContent = `${roleLabel} · ${predicateLabel}`;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'relationship-text-control relationship-text-close';
+    close.textContent = 'Close';
+    const fullText = document.createElement('pre');
+    fullText.className = 'relationship-text-full';
+    fullText.textContent = exactText;
+    const detailActions = document.createElement('div');
+    detailActions.className = 'relationship-text-detail-actions';
+    const detailCopy = document.createElement('button');
+    detailCopy.type = 'button';
+    detailCopy.className = 'relationship-text-control relationship-text-copy';
+    detailCopy.textContent = 'Copy full text';
+    detailCopy.setAttribute('aria-live', 'polite');
+    detailCopy.addEventListener('click', async () => {
+        const copied = await copyTextWithClipboardFallback(exactText);
+        detailCopy.textContent = copied ? 'Copied' : 'Copy failed';
+    });
+    detailActions.appendChild(detailCopy);
+    detailHeader.append(detailTitle, close);
+    detail.append(detailHeader, fullText, detailActions);
+    detailCell.appendChild(detail);
+    detailRow.appendChild(detailCell);
+
+    const setExpanded = (expanded) => {
+        detailRow.hidden = !expanded;
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        toggle.textContent = expanded ? 'Hide full' : 'Show full';
+    };
+    toggle.addEventListener('click', () => {
+        setExpanded(detailRow.hidden);
+    });
+    close.addEventListener('click', () => {
+        setExpanded(false);
+        toggle.focus();
+    });
+    return { cell, detailRow };
+}
 
 function relationshipExtentStateKey(conceptId, suffix) {
     return `${conceptId}::${suffix}`;
@@ -7434,23 +7532,6 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
             return cell;
         };
 
-        const createTextCell = (value, language = '') => {
-            const cell = document.createElement('td');
-            const span = document.createElement('span');
-            span.textContent = value || '';
-            span.style.fontFamily = 'monospace';
-            cell.appendChild(span);
-            if (language) {
-                const badge = document.createElement('span');
-                badge.textContent = ` ${language}`;
-                badge.style.fontSize = '0.75rem';
-                badge.style.color = '#6b7280';
-                badge.style.marginLeft = '6px';
-                cell.appendChild(badge);
-            }
-            return cell;
-        };
-
         const createRelationStateCell = (row) => {
             const cell = document.createElement('td');
             const state = String(row?.relation_state || (row?.is_asserted ? 'asserted' : 'uncertain')).trim().toLowerCase() || 'asserted';
@@ -7505,6 +7586,7 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
         const tbody = document.createElement('tbody');
         for (const row of rows) {
             const tr = document.createElement('tr');
+            const textDetailRows = [];
 
             const roleCell = document.createElement('td');
             roleCell.textContent = row.role === 'arg2' ? 'arg2' : 'arg1';
@@ -7517,14 +7599,26 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
             if (row.arg1_is_concept || arg1ConceptId) {
                 tr.appendChild(createConceptCell(arg1ConceptId || row.arg1_value, row.arg1_value));
             } else {
-                tr.appendChild(createTextCell(row.arg1_value || ''));
+                const disclosure = createRelationshipTextDisclosureCell(
+                    row.arg1_value || '',
+                    '',
+                    { roleLabel: 'Arg1', predicateLabel: row.predicate_id || 'relationship' }
+                );
+                tr.appendChild(disclosure.cell);
+                if (disclosure.detailRow) textDetailRows.push(disclosure.detailRow);
             }
 
             const arg2ConceptId = normalisePotentialConceptId(row.arg2_value);
             if (row.arg2_is_concept || arg2ConceptId) {
                 tr.appendChild(createConceptCell(arg2ConceptId || row.arg2_value, row.arg2_value));
             } else {
-                tr.appendChild(createTextCell(row.arg2_value || '', row.arg2_lang || ''));
+                const disclosure = createRelationshipTextDisclosureCell(
+                    row.arg2_value || '',
+                    row.arg2_lang || '',
+                    { roleLabel: 'Arg2', predicateLabel: row.predicate_id || 'relationship' }
+                );
+                tr.appendChild(disclosure.cell);
+                if (disclosure.detailRow) textDetailRows.push(disclosure.detailRow);
             }
 
             tr.appendChild(createRelationStateCell(row));
@@ -7681,6 +7775,7 @@ async function renderRelationships(conceptId, suffix, kind, { offset = 0, append
             tr.appendChild(actionCell);
 
             tbody.appendChild(tr);
+            textDetailRows.forEach((detailRow) => tbody.appendChild(detailRow));
         }
 
         table.appendChild(tbody);

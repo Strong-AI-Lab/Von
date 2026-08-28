@@ -11895,6 +11895,130 @@ button.prompt-vontology-cartouche {
     line-height: 1.55;
 }
 
+.concept-summary-promoted-fields {
+    display: grid;
+    gap: 10px;
+}
+
+.concept-summary-promoted-field {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid #d9e1ec;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.82);
+}
+
+.concept-summary-promoted-label {
+    margin: 0;
+    color: #475569;
+    font-size: 0.76rem;
+    font-weight: 750;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.concept-summary-promoted-values {
+    display: grid;
+    gap: 9px;
+    min-width: 0;
+}
+
+.concept-summary-promoted-value {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.concept-summary-promoted-value + .concept-summary-promoted-value {
+    padding-top: 9px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.concept-summary-promoted-text {
+    margin: 0;
+    color: #0f172a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.concept-summary-promoted-text.is-collapsed {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.concept-summary-promoted-controls,
+.concept-summary-promoted-value-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+}
+
+.concept-summary-promoted-control,
+.concept-summary-promoted-concept {
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #0f172a;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 650;
+    padding: 4px 9px;
+}
+
+.concept-summary-promoted-control:hover,
+.concept-summary-promoted-concept:hover {
+    background: #f1f5f9;
+}
+
+.concept-summary-promoted-concept {
+    justify-self: start;
+    border-color: #99d5cc;
+    background: #f0fdfa;
+    color: #115e59;
+}
+
+.concept-summary-promoted-scope,
+.concept-summary-promoted-predicate {
+    color: #64748b;
+    font-size: 0.72rem;
+}
+
+.concept-summary-promoted-scope {
+    border-radius: 999px;
+    padding: 2px 7px;
+    background: #f1f5f9;
+}
+
+.concept-summary-promoted-scope.scope-personal {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.concept-summary-promoted-scope.scope-organisation {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.concept-summary-promoted-predicate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.concept-summary-promoted-unavailable {
+    margin: 0;
+    color: #92400e;
+    font-size: 0.82rem;
+}
+
 .concept-summary-toggle {
     border: 1px solid #cbd5e1;
     background: #fff;
@@ -15805,6 +15929,113 @@ body.settings-body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.predicate-extent-table td.relationship-text-cell {
+    min-width: 180px;
+    max-width: 420px;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+}
+
+.relationship-text-preview {
+    display: block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.relationship-text-preview.is-collapsed {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.relationship-text-language {
+    display: inline-flex;
+    margin-top: 4px;
+    border-radius: 999px;
+    padding: 1px 6px;
+    background: #f1f5f9;
+    color: #64748b;
+    font-size: 0.72rem;
+}
+
+.relationship-text-controls,
+.relationship-text-detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.relationship-text-control {
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    padding: 3px 8px;
+    background: #ffffff;
+    color: #334155;
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 650;
+}
+
+.relationship-text-control:hover {
+    background: #f1f5f9;
+}
+
+.predicate-extent-table tbody tr.relationship-text-detail-row:hover {
+    background: transparent;
+}
+
+.predicate-extent-table tr.relationship-text-detail-row td {
+    max-width: none;
+    overflow: visible;
+    padding: 0 12px 12px;
+    text-overflow: clip;
+    white-space: normal;
+}
+
+.relationship-text-detail {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid #bfdbfe;
+    border-radius: 10px;
+    background: #f8fbff;
+}
+
+.relationship-text-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    color: #1e3a5f;
+    overflow-wrap: anywhere;
+}
+
+.relationship-text-detail-header strong {
+    min-width: 0;
+}
+
+.relationship-text-detail-header .relationship-text-close {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.relationship-text-full {
+    max-height: 420px;
+    margin: 0;
+    overflow: auto;
+    color: #0f172a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.86rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
 }
 
 .predicate-extent-table td.source-text_relations {

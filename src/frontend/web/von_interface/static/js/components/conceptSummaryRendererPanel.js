@@ -1,5 +1,6 @@
 import { getJsonDetailed } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
+import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 
 const PANEL_VARIANTS = new Set([
   'identity',
@@ -10,6 +11,8 @@ const PANEL_VARIANTS = new Set([
   'conversation',
   'generic',
 ]);
+const LONG_PROMOTED_TEXT_MIN_CHARS = 60;
+let promotedTextDisclosureSequence = 0;
 
 function getMountElement(stepContainer, suffix) {
   return (
@@ -70,6 +73,142 @@ function createFacts(facts = []) {
     list.appendChild(fact);
   });
   return list;
+}
+
+function createPromotedValueMeta(value) {
+  const predicateId = cleanText(value?.predicate_id);
+  const sourceLabel = cleanText(value?.source_context?.label);
+  const rawScopeKind = cleanText(value?.source_context?.kind);
+  const scopeKind = ['canonical', 'personal', 'organisation'].includes(rawScopeKind)
+    ? rawScopeKind
+    : 'canonical';
+  if (!predicateId && !sourceLabel) return null;
+  const meta = document.createElement('div');
+  meta.className = 'concept-summary-promoted-value-meta';
+  if (sourceLabel) {
+    appendTextElement(
+      meta,
+      'span',
+      `concept-summary-promoted-scope scope-${scopeKind}`,
+      sourceLabel,
+    );
+  }
+  if (predicateId) {
+    const predicate = appendTextElement(
+      meta,
+      'span',
+      'concept-summary-promoted-predicate',
+      predicateId,
+    );
+    if (predicate) predicate.title = predicateId;
+  }
+  return meta;
+}
+
+function createPromotedTextValue(value) {
+  const exactText = typeof value?.text === 'string' ? value.text : '';
+  if (!exactText.trim()) return null;
+  const item = document.createElement('article');
+  item.className = 'concept-summary-promoted-value concept-summary-promoted-text-value';
+  const text = document.createElement('p');
+  text.className = 'concept-summary-promoted-text';
+  text.textContent = exactText;
+  const isLong = exactText.length > LONG_PROMOTED_TEXT_MIN_CHARS || exactText.includes('\n');
+  if (isLong) text.classList.add('is-collapsed');
+  const disclosureId = `conceptSummaryPromotedText_${++promotedTextDisclosureSequence}`;
+  text.id = disclosureId;
+  item.appendChild(text);
+
+  const controls = document.createElement('div');
+  controls.className = 'concept-summary-promoted-controls';
+  if (isLong) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'concept-summary-promoted-control concept-summary-promoted-toggle';
+    toggle.textContent = 'Show full text';
+    toggle.setAttribute('aria-controls', disclosureId);
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.addEventListener('click', () => {
+      const shouldExpand = text.classList.contains('is-collapsed');
+      text.classList.toggle('is-collapsed', !shouldExpand);
+      toggle.setAttribute('aria-expanded', shouldExpand ? 'true' : 'false');
+      toggle.textContent = shouldExpand ? 'Show less' : 'Show full text';
+    });
+    controls.appendChild(toggle);
+  }
+
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'concept-summary-promoted-control concept-summary-promoted-copy';
+  copy.textContent = 'Copy';
+  copy.setAttribute('aria-label', 'Copy full text');
+  copy.setAttribute('aria-live', 'polite');
+  copy.addEventListener('click', async () => {
+    const copied = await copyTextWithClipboardFallback(exactText);
+    copy.textContent = copied ? 'Copied' : 'Copy failed';
+  });
+  controls.appendChild(copy);
+  item.appendChild(controls);
+  const meta = createPromotedValueMeta(value);
+  if (meta) item.appendChild(meta);
+  return item;
+}
+
+function createPromotedConceptValue(value) {
+  const conceptId = cleanText(value?.concept_id);
+  if (!conceptId.startsWith('#V#')) return null;
+  const item = document.createElement('article');
+  item.className = 'concept-summary-promoted-value concept-summary-promoted-concept-value';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'concept-summary-promoted-concept';
+  button.textContent = cleanText(value?.display_name) || conceptId;
+  button.title = conceptId;
+  button.addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+      detail: {
+        conceptId,
+        createConceptTab: true,
+        promoteExistingTab: true,
+        modifierKeys: { shiftKey: true },
+      },
+    }));
+  });
+  item.appendChild(button);
+  const meta = createPromotedValueMeta(value);
+  if (meta) item.appendChild(meta);
+  return item;
+}
+
+function createPromotedFields(rawFields = []) {
+  const fields = Array.isArray(rawFields) ? rawFields.slice(0, 100) : [];
+  const container = document.createElement('section');
+  container.className = 'concept-summary-promoted-fields';
+  let renderedFieldCount = 0;
+  fields.forEach((field) => {
+    const label = cleanText(field?.label);
+    const rawValues = Array.isArray(field?.values) ? field.values.slice(0, 250) : [];
+    if (!label || rawValues.length === 0) return;
+    const values = rawValues.flatMap((value) => {
+      const element = value?.kind === 'concept'
+        ? createPromotedConceptValue(value)
+        : value?.kind === 'text'
+          ? createPromotedTextValue(value)
+          : null;
+      return element ? [element] : [];
+    });
+    if (values.length === 0) return;
+    const section = document.createElement('section');
+    section.className = 'concept-summary-promoted-field';
+    appendTextElement(section, 'h4', 'concept-summary-promoted-label', label);
+    const valueList = document.createElement('div');
+    valueList.className = 'concept-summary-promoted-values';
+    valueList.append(...values);
+    section.appendChild(valueList);
+    container.appendChild(section);
+    renderedFieldCount += 1;
+  });
+  return renderedFieldCount > 0 ? container : null;
 }
 
 function createExpandedSections(expandedSections = []) {
@@ -271,6 +410,16 @@ function applyPanelPayload(panel, payload) {
   const facts = createFacts(panelData.facts);
   if (facts) panel.appendChild(facts);
   appendTextElement(panel, 'p', 'concept-summary-text', panelData.summary);
+  const promotedFields = createPromotedFields(panelData.promoted_fields);
+  if (promotedFields) panel.appendChild(promotedFields);
+  if (cleanText(panelData?.promoted_fields_status?.message)) {
+    appendTextElement(
+      panel,
+      'p',
+      'concept-summary-promoted-unavailable',
+      panelData.promoted_fields_status.message,
+    );
+  }
   const focus = createFocalConcepts(panelData.focal_concepts);
   if (focus) panel.appendChild(focus);
   const primaryAction = createOpenConversationButton(panelData.open_action);
