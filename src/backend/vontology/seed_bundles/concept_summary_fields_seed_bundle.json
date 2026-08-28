@@ -1,10 +1,11 @@
 {
   "schema_version": "concept_summary_field_seed_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1958",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2234",
   "managed_by": "concept_summary_field_vontology_service",
   "concepts": [
     {"concept_id": "#V#thing", "name": "Thing", "parent_concept_ids": [], "create_as_instance": false, "description": "The most general Vontology type."},
+    {"concept_id": "#V#abstract_object", "name": "Abstract Object", "parent_concept_ids": ["#V#thing"], "create_as_instance": false, "description": "A non-physical object."},
     {"concept_id": "#V#predicate", "name": "Predicate", "parent_concept_ids": ["#V#thing"], "create_as_instance": false, "description": "A relationship or text-relation predicate concept."},
     {"concept_id": "#V#summary_field", "name": "Summary Field", "parent_concept_ids": ["#V#thing"], "create_as_instance": false, "description": "A type of represented concept-summary field configuration."},
     {"concept_id": "#V#has_summary_fields", "name": "has summary fields", "parent_concept_ids": ["#V#predicate"], "create_as_instance": true, "description": "Relates a Vontology type concept to the summary field concepts used for instances of that type."},
@@ -14,11 +15,13 @@
     {"concept_id": "#V#person", "name": "Person", "parent_concept_ids": ["#V#thing"]},
     {"concept_id": "#V#document", "name": "Document", "parent_concept_ids": ["#V#thing"]},
     {"concept_id": "#V#research_paper", "name": "Research Paper", "parent_concept_ids": ["#V#document"]},
+    {"concept_id": "#V#research_description", "name": "Research Description", "parent_concept_ids": ["#V#abstract_object"]},
     {"concept_id": "#V#task", "name": "Task", "parent_concept_ids": ["#V#thing"]},
     {"concept_id": "#V#meeting", "name": "Meeting", "parent_concept_ids": ["#V#thing"]},
     {"concept_id": "#V#room", "name": "Room", "parent_concept_ids": ["#V#thing"]},
     {"concept_id": "#V#summary_field_description", "name": "Description", "parent_concept_ids": ["#V#summary_field"], "create_as_instance": true, "description": "Concept-summary field configuration for description.", "system_tags": ["concept-summary-field", "renderer-support"]},
     {"concept_id": "#V#summary_field_content", "name": "Content", "parent_concept_ids": ["#V#summary_field"], "create_as_instance": true, "description": "Concept-summary field configuration for content.", "system_tags": ["concept-summary-field", "renderer-support"]},
+    {"concept_id": "#V#summary_field_research_description_as_of", "name": "Research Description As Of", "parent_concept_ids": ["#V#summary_field"], "create_as_instance": true, "description": "Promotes dated research-description text in the concept summary without changing KCAP salience.", "system_tags": ["concept-summary-field", "renderer-support"]},
     {"concept_id": "#V#summary_field_email", "name": "Email", "parent_concept_ids": ["#V#summary_field"], "create_as_instance": true, "description": "Concept-summary field configuration for email.", "system_tags": ["concept-summary-field", "renderer-support"]},
     {"concept_id": "#V#summary_field_publication_date", "name": "Publication Date", "parent_concept_ids": ["#V#summary_field"], "create_as_instance": true, "description": "Concept-summary field configuration for publication_date.", "system_tags": ["concept-summary-field", "renderer-support"]},
     {"concept_id": "#V#summary_field_task_status", "name": "Task Status", "parent_concept_ids": ["#V#summary_field"], "create_as_instance": true, "description": "Concept-summary field configuration for task_status.", "system_tags": ["concept-summary-field", "renderer-support"]},
@@ -40,6 +43,8 @@
     {"subject_concept_id": "#V#summary_field_description", "predicate": "#V#summary_field_display_order", "text": "10", "lang": "en-NZ"},
     {"subject_concept_id": "#V#summary_field_content", "predicate": "#V#has_summary_text_predicates_json", "text_json": ["hasContent", "#V#hasContent"], "lang": "en-NZ"},
     {"subject_concept_id": "#V#summary_field_content", "predicate": "#V#summary_field_display_order", "text": "20", "lang": "en-NZ"},
+    {"subject_concept_id": "#V#summary_field_research_description_as_of", "predicate": "#V#has_summary_text_predicates_json", "text_json": ["#V#has_research_description_as_of"], "lang": "en-NZ"},
+    {"subject_concept_id": "#V#summary_field_research_description_as_of", "predicate": "#V#summary_field_display_order", "text": "15", "lang": "en-NZ"},
     {"subject_concept_id": "#V#summary_field_email", "predicate": "#V#has_summary_text_predicates_json", "text_json": ["#V#has_email", "has_email"], "lang": "en-NZ"},
     {"subject_concept_id": "#V#summary_field_email", "predicate": "#V#summary_field_display_order", "text": "30", "lang": "en-NZ"},
     {"subject_concept_id": "#V#summary_field_publication_date", "predicate": "#V#has_summary_text_predicates_json", "text_json": ["#V#has_publication_date", "has_publication_date"], "lang": "en-NZ"},
@@ -78,6 +83,7 @@
     {"subject_concept_id": "#V#task", "predicate": "#V#has_summary_fields", "object_concept_ids": ["#V#summary_field_description", "#V#summary_field_task_status", "#V#summary_field_priority", "#V#summary_field_due_date", "#V#summary_field_task_source"]},
     {"subject_concept_id": "#V#meeting", "predicate": "#V#has_summary_fields", "object_concept_ids": ["#V#summary_field_description", "#V#summary_field_event_date", "#V#summary_field_meeting_participant", "#V#summary_field_meeting_location", "#V#summary_field_meeting_host"]},
     {"subject_concept_id": "#V#room", "predicate": "#V#has_summary_fields", "object_concept_ids": ["#V#summary_field_description", "#V#summary_field_capacity", "#V#summary_field_url"]},
-    {"subject_concept_id": "#V#thing", "predicate": "#V#has_summary_fields", "object_concept_ids": ["#V#summary_field_description", "#V#summary_field_content"]}
+    {"subject_concept_id": "#V#thing", "predicate": "#V#has_summary_fields", "object_concept_ids": ["#V#summary_field_description", "#V#summary_field_content"]},
+    {"subject_concept_id": "#V#research_description", "predicate": "#V#has_summary_fields", "object_concept_ids": ["#V#summary_field_research_description_as_of"]}
   ]
 }

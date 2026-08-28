@@ -110,6 +110,15 @@ describe('concept summary renderer panel', () => {
                     facts: [{ label: '<b>Email</b>', value: '<svg onload="window.__summaryXss = true">' }],
                     summary: '<a href="javascript:window.__summaryXss = true">unsafe link</a>',
                     expanded_sections: [{ title: '<i>Details</i>', items: ['<iframe srcdoc="x"></iframe>'] }],
+                    promoted_fields: [{
+                        label: '<b>Promoted</b>',
+                        values: [{
+                            kind: 'text',
+                            text: '<img src=x onerror="window.__summaryXss = true"> exact promoted text that is deliberately long enough to disclose',
+                            predicate_id: '#V#unsafe_predicate',
+                            source_context: { kind: 'canonical', label: 'Canonical' },
+                        }],
+                    }],
                 },
             },
         });
@@ -129,7 +138,86 @@ describe('concept summary renderer panel', () => {
             '<script>window.__summaryXss = true</script>',
         );
         expect(panel.textContent).toContain('<a href="javascript:window.__summaryXss = true">unsafe link</a>');
+        expect(panel.textContent).toContain('<img src=x onerror="window.__summaryXss = true"> exact promoted text');
         expect(window.__summaryXss).toBeUndefined();
+    });
+
+    test('renders promoted type fields with exact disclosure, copy, scope, and concept navigation', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const longText = 'As of 2026-08-05: current PhD research spans robust knowledge representation, provenance-aware assistants, and a deliberately long final clause.';
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText },
+        });
+        api.getJsonDetailed.mockResolvedValue({
+            data: {
+                panel: {
+                    variant: 'generic',
+                    title: 'Research profile',
+                    promoted_fields: [
+                        {
+                            field_key: 'research_description',
+                            label: 'Research description',
+                            values: [
+                                {
+                                    kind: 'text',
+                                    text: longText,
+                                    predicate_id: '#V#has_research_description_as_of',
+                                    source_context: {
+                                        kind: 'personal',
+                                        label: 'Personal — visible only to you',
+                                    },
+                                },
+                                {
+                                    kind: 'concept',
+                                    concept_id: '#V#knowledge_representation',
+                                    display_name: 'Knowledge representation',
+                                    predicate_id: '#V#research_topic',
+                                    source_context: { kind: 'canonical', label: 'Canonical' },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+        });
+        const seen = [];
+        const handler = (event) => seen.push(event.detail);
+        document.addEventListener('von:selectConceptById', handler);
+
+        const {
+            ensureConceptSummaryRendererPanelForConceptTab,
+        } = require('../../src/frontend/web/von_interface/static/js/components/conceptSummaryRendererPanel.js');
+        await ensureConceptSummaryRendererPanelForConceptTab({
+            conceptId: '#V#research_profile',
+            suffix: 'test',
+        });
+
+        const text = document.querySelector('.concept-summary-promoted-text');
+        const toggle = document.querySelector('.concept-summary-promoted-toggle');
+        expect(text.textContent).toBe(longText);
+        expect(text.classList.contains('is-collapsed')).toBe(true);
+        expect(toggle.getAttribute('aria-expanded')).toBe('false');
+        toggle.click();
+        expect(text.classList.contains('is-collapsed')).toBe(false);
+        expect(toggle.getAttribute('aria-expanded')).toBe('true');
+        document.querySelector('.concept-summary-promoted-copy').click();
+        await flushMicrotasks();
+        expect(writeText).toHaveBeenCalledWith(longText);
+        expect(document.querySelector('.concept-summary-promoted-copy').textContent).toBe('Copied');
+        expect(document.querySelector('.concept-summary-promoted-scope').textContent).toBe(
+            'Personal — visible only to you',
+        );
+
+        document.querySelector('.concept-summary-promoted-concept').click();
+        expect(seen).toEqual([{
+            conceptId: '#V#knowledge_representation',
+            createConceptTab: true,
+            promoteExistingTab: true,
+            modifierKeys: { shiftKey: true },
+        }]);
+        document.removeEventListener('von:selectConceptById', handler);
     });
 
     test('opens an allow-listed conversation and focal concept through reauthorising controllers', async () => {

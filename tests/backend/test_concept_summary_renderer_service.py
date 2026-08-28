@@ -39,11 +39,34 @@ class _FakeSummaryFieldResolver:
         return self._relationship_predicates.get(field_key, ())
 
     def get_summary_fields_for_types(self, type_ids) -> tuple[str, ...]:
+        return tuple(
+            definition.field_key
+            for definition in self.get_summary_field_definitions_for_types(type_ids)
+        )
+
+    def get_summary_field_definitions_for_types(self, type_ids):
+        field_keys = []
+        origins = {}
         for type_id in type_ids:
-            fields = self._fields_by_type.get(type_id)
-            if fields:
-                return fields
-        return ()
+            for field_key in self._fields_by_type.get(type_id, ()):
+                if field_key not in origins:
+                    field_keys.append(field_key)
+                    origins[field_key] = []
+                origins[field_key].append(type_id)
+        return tuple(
+            service.SummaryFieldDefinition(
+                field_key=field_key,
+                field_concept_id=f"#V#summary_field_{field_key}",
+                label=field_key.replace("_", " ").title(),
+                display_order=float(index * 10),
+                text_predicates=self.get_text_predicates_for_field(field_key),
+                relationship_predicates=(
+                    self.get_relationship_predicates_for_field(field_key)
+                ),
+                origin_type_ids=tuple(origins[field_key]),
+            )
+            for index, field_key in enumerate(field_keys, start=1)
+        )
 
 
 def _install_summary_field_resolver(monkeypatch) -> None:
@@ -320,6 +343,182 @@ def test_load_concept_summary_renderer_falls_back_to_generic_text_summary(
     assert payload["selected_renderer"]["renderer_id"] == "#V#concept_page_text_summary_renderer"
     assert payload["panel"]["variant"] == "generic"
     assert payload["panel"]["summary"] == "Fallback summary content."
+
+
+def test_load_concept_summary_renderer_projects_all_values_of_custom_type_field(
+    monkeypatch,
+) -> None:
+    class _PromotedFieldResolver(_FakeSummaryFieldResolver):
+        _text_predicates = {
+            **_FakeSummaryFieldResolver._text_predicates,
+            "research_description": ("#V#has_research_description_as_of",),
+        }
+        _fields_by_type = {
+            **_FakeSummaryFieldResolver._fields_by_type,
+            "#V#researcher": (
+                "research_description",
+                "description",
+                "content",
+            ),
+        }
+
+        def get_summary_field_definitions_for_types(self, type_ids):
+            definitions = super().get_summary_field_definitions_for_types(type_ids)
+            return tuple(
+                service.SummaryFieldDefinition(
+                    field_key=definition.field_key,
+                    field_concept_id=definition.field_concept_id,
+                    label=(
+                        "Research description"
+                        if definition.field_key == "research_description"
+                        else definition.label
+                    ),
+                    display_order=(
+                        5.0
+                        if definition.field_key == "research_description"
+                        else definition.display_order
+                    ),
+                    text_predicates=definition.text_predicates,
+                    relationship_predicates=definition.relationship_predicates,
+                    origin_type_ids=definition.origin_type_ids,
+                )
+                for definition in definitions
+            )
+
+    _install_summary_field_resolver(monkeypatch)
+    monkeypatch.setattr(
+        service,
+        "get_concept_summary_field_resolver",
+        lambda: _PromotedFieldResolver(),
+    )
+    concept_docs = {
+        "#V#profile": {
+            "concept_id": "#V#profile",
+            "name": "Research profile",
+            "relationships": {"is_an_instance_of": ["#V#researcher"]},
+        },
+        "#V#researcher": {
+            "concept_id": "#V#researcher",
+            "name": "Researcher",
+            "relationships": {"is_a_type_of": ["#V#thing"]},
+        },
+        "#V#thing": {
+            "concept_id": "#V#thing",
+            "name": "Thing",
+            "relationships": {"is_a_type_of": []},
+        },
+    }
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: concept_docs[concept_id],
+    )
+    monkeypatch.setattr(
+        service,
+        "enrich_concept_with_text_relations",
+        lambda concept: concept,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        lambda subject_concept_id, limit=250: [],
+    )
+    captured_query = {}
+
+    def _promoted_texts(*_args, **kwargs):
+        captured_query.update(kwargs)
+        return {
+            "#V#profile": [
+                {
+                    "predicate": "#V#has_research_description_as_of",
+                    "text": "As of 2026-08-05: first exact long description.",
+                    "lang": "en-NZ",
+                    "relation_id": "rel-1",
+                    "row_kind": "base_text_relation",
+                    "provenance": {"source": "canonical"},
+                },
+                {
+                    "predicate": "#V#has_research_description_as_of",
+                    "text": "A personal revision that must remain separately labelled.",
+                    "lang": "en-NZ",
+                    "assertion_id": "assertion-1",
+                    "row_kind": "scoped_assertion",
+                    "assertion_scope": {"mode": "user"},
+                    "provenance": {"source": "conversation"},
+                },
+            ]
+        }
+
+    monkeypatch.setattr(service, "get_texts_for_concepts", _promoted_texts)
+    monkeypatch.setattr(
+        service,
+        "load_renderer_definitions_from_concept_ids",
+        lambda concept_ids: (
+            [
+                {
+                    "renderer_id": "#V#concept_page_text_summary_renderer",
+                    "renderer_type": "text_summary",
+                    "modalities": ["textual"],
+                    "applies_to_object_kinds": ["concept"],
+                    "required_context_tags": ["concept_page_summary"],
+                    "priority": 10,
+                }
+            ],
+            {
+                "loaded_definition_count": 1,
+                "requested_concept_ids": list(concept_ids),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "list_focal_conversation_backlinks",
+        lambda **_kwargs: {},
+    )
+
+    payload = service.load_concept_summary_renderer(
+        "#V#profile",
+        actor_user_id="#V#actor",
+        actor_namespace="#V#actor",
+    )
+
+    assert captured_query["predicates"] == [
+        "#V#has_research_description_as_of"
+    ]
+    assert captured_query["context_view"] == "actor_effective"
+    promoted = payload["panel"]["promoted_fields"]
+    assert len(promoted) == 1
+    assert promoted[0]["field_key"] == "research_description"
+    assert promoted[0]["label"] == "Research description"
+    assert [value["text"] for value in promoted[0]["values"]] == [
+        "As of 2026-08-05: first exact long description.",
+        "A personal revision that must remain separately labelled.",
+    ]
+    assert promoted[0]["values"][0]["canonical_publication"] is True
+    assert promoted[0]["values"][1]["source_context"]["kind"] == "personal"
+    assert payload["diagnostics"]["promoted_fields"]["context_view"] == (
+        "actor_effective"
+    )
+
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concepts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("temporary promoted-field read failure")
+        ),
+    )
+    degraded_payload = service.load_concept_summary_renderer(
+        "#V#profile",
+        actor_user_id="#V#actor",
+        actor_namespace="#V#actor",
+    )
+    assert degraded_payload["panel"]["title"] == "Research profile"
+    assert degraded_payload["panel"]["promoted_fields"] == []
+    assert degraded_payload["panel"]["promoted_fields_status"] == {
+        "available": False,
+        "message": "Promoted fields are temporarily unavailable.",
+    }
+    assert degraded_payload["diagnostics"]["promoted_fields"]["available"] is False
 
 
 def _install_conversation_concept(monkeypatch, *, concept_id="#V#conversation_abc"):
