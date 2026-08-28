@@ -568,6 +568,148 @@ describe('task panel ontology-backed groups', () => {
         );
     });
 
+    test('shows unscoped tasks and assigns one to a represented organisation', async () => {
+        const { getJson, patchJson } = require(apiServiceModulePath);
+        const unscopedTask = {
+            task_concept_id: '#V#task_unscoped',
+            title: 'Unscoped task',
+            description: 'Needs an organisation',
+            status: 'pending',
+            priority: 'medium',
+            organisation_concept_id: null,
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+        };
+
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/von/api/organisations/my_organisations') {
+                return Promise.resolve({
+                    organisations: [
+                        { concept_id: '#V#group_org', name: 'Household', role: 'member' },
+                        { concept_id: '#V#other_org', name: 'Other lab', role: 'admin' },
+                    ],
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                return Promise.resolve({
+                    tasks: [unscopedTask],
+                    count: 1,
+                    offset: 0,
+                    has_more: false,
+                });
+            }
+            if (url === '/api/tasks/%23V%23task_unscoped') {
+                return Promise.resolve(unscopedTask);
+            }
+            if (typeof url === 'string' && url.includes('/comments?')) {
+                return Promise.resolve({ comments: [] });
+            }
+            if (typeof url === 'string' && url.includes('/attachments?')) {
+                return Promise.resolve({ attachments: [] });
+            }
+            if (typeof url === 'string' && url.includes('/history?')) {
+                return Promise.resolve({ history: [] });
+            }
+            return Promise.resolve({});
+        });
+        patchJson.mockResolvedValue({
+            task: { ...unscopedTask, organisation_concept_id: '#V#other_org' },
+            changed_fields: ['organisation_concept_id'],
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+
+        expect(document.querySelector('.task-organisation-unscoped')?.textContent || '')
+            .toContain('Unscoped');
+
+        document.querySelector('.task-detail-toggle-btn').click();
+        await flushRenderQueue();
+
+        const organisationSelect = document.querySelector(
+            '#globalTaskInspector .task-detail-organisation-input',
+        );
+        expect(organisationSelect).toBeTruthy();
+        expect(Array.from(organisationSelect.options).map((option) => option.value))
+            .toEqual(['', '#V#group_org', '#V#other_org']);
+
+        organisationSelect.value = '#V#other_org';
+        document.querySelector('#globalTaskInspector .task-save-fields-btn').click();
+        await flushRenderQueue();
+
+        expect(patchJson).toHaveBeenCalledWith(
+            '/api/tasks/%23V%23task_unscoped',
+            expect.objectContaining({ organisation_concept_id: '#V#other_org' }),
+        );
+    });
+
+    test('clears old cards and ignores an in-flight response after organisation switch', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        let resolveOldTasks;
+        let taskRequestCount = 0;
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/von/api/organisations/my_organisations') {
+                return Promise.resolve({ organisations: [] });
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                taskRequestCount += 1;
+                if (taskRequestCount === 1) {
+                    return new Promise((resolve) => {
+                        resolveOldTasks = resolve;
+                    });
+                }
+                return Promise.resolve({
+                    tasks: [{
+                        task_concept_id: '#V#task_new_org',
+                        title: 'New organisation task',
+                        status: 'pending',
+                        priority: 'medium',
+                        organisation_concept_id: '#V#new_org',
+                    }],
+                    count: 1,
+                    offset: 0,
+                    has_more: false,
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks, getTasks } = require(taskPanelModulePath);
+        const opening = showGlobalTasks();
+        await flushRenderQueue();
+
+        document.dispatchEvent(new CustomEvent('orgSwitched', {
+            detail: { organisation_id: '#V#new_org' },
+        }));
+        await flushRenderQueue();
+
+        resolveOldTasks({
+            tasks: [{
+                task_concept_id: '#V#task_old_org',
+                title: 'Old organisation task',
+                status: 'pending',
+                priority: 'medium',
+                organisation_concept_id: '#V#group_org',
+            }],
+            count: 1,
+            offset: 0,
+            has_more: false,
+        });
+        await opening;
+        await flushRenderQueue();
+
+        expect(taskRequestCount).toBe(2);
+        expect(getTasks().map((task) => task.title)).toEqual(['New organisation task']);
+        expect(document.body.textContent).not.toContain('Old organisation task');
+    });
+
     test('loads side-panel user tasks with hidden bulk collections excluded by default', async () => {
         document.body.innerHTML = `
             <div id="taskPanel" class="hidden">

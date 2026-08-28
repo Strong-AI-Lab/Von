@@ -8,16 +8,25 @@ All tasks are stored as first-class Vontology concepts (type: #V#task_specificat
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import contextvars
 import hashlib
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..security.access_control import can_access_concept
+from ..security.visibility_predicates import (
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+    SPECIFIC_TO_ORG_PREDICATES_READ,
+    SPECIFIC_TO_USER_PREDICATES_WRITE,
+    get_specific_to_org_values,
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
 from ..services.text_value_service import (
     get_texts_for_concept,
     get_texts_for_concepts,
@@ -26,19 +35,13 @@ from ..services.text_value_service import (
 from ..utils.concept_id_utils import (
     ensure_v_concept_prefix,
 )
-from ..security.visibility_predicates import (
-    SPECIFIC_TO_ORG_PREDICATES_WRITE,
-    SPECIFIC_TO_USER_PREDICATES_WRITE,
-    set_specific_to_org_values,
-    set_specific_to_user_values,
-)
-from ..security.access_control import can_access_concept
 from .effort_unit_ontology_service import (
     ensure_effort_unit_ontology,
     extract_effort_unit_type_ids,
     persist_successor_effort_unit_type_links,
     resolve_successor_effort_unit_type_ids,
 )
+from .organisation_membership_service import is_user_member_of_organisation
 from .task_ontology_service import (
     DEFAULT_TASK_SOURCE_ID,
     EVIDENCE_TEXT_PREDICATES,
@@ -55,16 +58,18 @@ from .task_ontology_service import (
     REPORTS_TO_RELATIONSHIP_PREDICATES,
     TASK_REFERENCE_CODE_TEXT_PREDICATES,
     TASK_ROLE_TEXT_PREDICATES,
-    TASK_SOURCE_RELATIONSHIP_PREDICATES,
     TASK_SOURCE_DEFINITIONS,
+    TASK_SOURCE_RELATIONSHIP_PREDICATES,
     TASK_TYPE_DEFINITIONS,
-    ensure_task_ontology,
+    ensure_task_ontology,  # noqa: F401  # retained as the task-ontology test seam
     get_task_source_definition,
-    get_task_taxonomy as get_task_taxonomy_definition,
     get_task_type_definition,
     is_known_task_type_id,
     normalise_task_source_id,
     normalise_task_type_ids,
+)
+from .task_ontology_service import (
+    get_task_taxonomy as get_task_taxonomy_definition,
 )
 from .workflow_event_integration_service import (
     maybe_launch_effort_unit_completed_workflow,
@@ -77,6 +82,8 @@ logger = logging.getLogger(__name__)
 TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION = "task_list_load_telemetry.v1"
 TASK_SEARCH_ACCESSIBLE_CANDIDATE_LIMIT = 400
 TASK_LIST_MAX_PAGE_SIZE = 200
+TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED = "current_plus_unscoped"
+TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY = "unscoped_only"
 
 
 def _round_duration_ms(duration_seconds: float) -> float:
@@ -329,6 +336,15 @@ class InvalidTaskDataError(TaskManagementError):
     """Invalid task data provided."""
 
     pass
+
+
+class TaskOrganisationScopeAccessError(TaskManagementError):
+    """The actor may not move a task into or out of an organisation scope."""
+
+    def __init__(self, reason_code: str, safe_message: str):
+        super().__init__(safe_message)
+        self.reason_code = reason_code
+        self.safe_message = safe_message
 
 
 def _task_concept_id_for_agent_creation_fingerprint(
@@ -1839,6 +1855,29 @@ def _get_task_conversation_details(
     return details
 
 
+def _task_doc_organisation_concept_id(doc: Mapping[str, Any]) -> str | None:
+    relationships_raw = doc.get("relationships")
+    metadata_raw = doc.get("metadata")
+    relationships = (
+        relationships_raw if isinstance(relationships_raw, dict) else {}
+    )
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    canonical_organisation_id = _normalise_optional_concept_id(
+        _first_relationship_value(
+            relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE)
+        )
+    )
+    represented_organisation_ids = get_specific_to_org_values(relationships)
+    metadata_organisation_id = _normalise_optional_concept_id(
+        metadata.get(TASK_METADATA_KEY_ORGANISATION)
+    )
+    return (
+        canonical_organisation_id
+        or (represented_organisation_ids[0] if represented_organisation_ids else None)
+        or metadata_organisation_id
+    )
+
+
 def _build_task_response(
     doc: Dict[str, Any],
     *,
@@ -1911,6 +1950,7 @@ def _build_task_response(
     task_type_ids = _task_type_ids_from_doc(doc)
 
     metadata = doc.get("metadata", {})
+    organisation_concept_id = _task_doc_organisation_concept_id(doc)
     labels = _metadata_string_list(metadata.get(TASK_METADATA_KEY_LABELS))
     components = _metadata_string_list(metadata.get(TASK_METADATA_KEY_COMPONENTS))
     fix_versions = _metadata_string_list(metadata.get(TASK_METADATA_KEY_FIX_VERSIONS))
@@ -2028,7 +2068,7 @@ def _build_task_response(
         "conversation_name": conversation_name,
         "start_date": start_date,
         "due_date": due_date,
-        "organisation_concept_id": metadata.get(TASK_METADATA_KEY_ORGANISATION),
+        "organisation_concept_id": organisation_concept_id,
         "labels": labels,
         "components": components,
         "fix_versions": fix_versions,
@@ -2585,6 +2625,7 @@ def _has_nonempty_filter_values(value: list[str] | str | None) -> bool:
 def _build_task_listing_query(
     *,
     organisation_concept_id: str | None = None,
+    organisation_scope_mode: str | None = None,
     user_concept_id: str | None = None,
     include_created: bool = False,
     assignee_concept_id: str | None = None,
@@ -2594,13 +2635,36 @@ def _build_task_listing_query(
         "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
     }
 
+    organisation_id = None
     if organisation_concept_id:
         organisation_id = _normalise_optional_concept_id(organisation_concept_id)
         if not organisation_id:
             raise InvalidTaskDataError(
                 f"Invalid organisation_concept_id: {organisation_concept_id}"
             )
-        base_query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = organisation_id
+    organisation_field = f"metadata.{TASK_METADATA_KEY_ORGANISATION}"
+    if organisation_scope_mode == TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED:
+        if not organisation_id:
+            raise InvalidTaskDataError(
+                "current_plus_unscoped requires organisation_concept_id"
+            )
+        base_query["$or"] = [
+            {organisation_field: organisation_id},
+            {organisation_field: None},
+            {organisation_field: {"$exists": False}},
+        ]
+    elif organisation_scope_mode == TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY:
+        base_query["$or"] = [
+            {organisation_field: None},
+            {organisation_field: {"$exists": False}},
+        ]
+    elif organisation_scope_mode is not None:
+        raise InvalidTaskDataError(
+            f"Invalid organisation_scope_mode: {organisation_scope_mode}"
+        )
+    elif organisation_id:
+        # Preserve the existing exact-organisation contract for direct callers.
+        base_query[organisation_field] = organisation_id
 
     clauses: list[Mapping[str, Any]] = [base_query]
 
@@ -2639,10 +2703,28 @@ def _build_task_listing_query(
     return _and_query_clauses(*clauses)
 
 
+def _task_doc_matches_organisation_scope(
+    doc: Mapping[str, Any],
+    *,
+    organisation_concept_id: str | None,
+    organisation_scope_mode: str | None,
+) -> bool:
+    if organisation_scope_mode is None:
+        return True
+    effective_organisation_id = _task_doc_organisation_concept_id(doc)
+    if organisation_scope_mode == TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY:
+        return effective_organisation_id is None
+    if organisation_scope_mode == TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED:
+        return effective_organisation_id in {None, organisation_concept_id}
+    return False
+
+
 def _build_bulk_visibility_summary_for_query(
     base_query: Mapping[str, Any],
     *,
     collection_ids: set[str],
+    organisation_concept_id: str | None = None,
+    organisation_scope_mode: str | None = None,
 ) -> Dict[str, Any]:
     hidden_query = _and_query_clauses(
         base_query,
@@ -2650,11 +2732,19 @@ def _build_bulk_visibility_summary_for_query(
     )
     projection = {
         "concept_id": 1,
+        "relationships": 1,
+        f"metadata.{TASK_METADATA_KEY_ORGANISATION}": 1,
         f"metadata.{TASK_METADATA_KEY_BULK_TASK_COLLECTIONS}": 1,
     }
     hidden_task_stubs: list[Dict[str, Any]] = []
     for doc in ConceptsRepository.find(hidden_query, projection=projection):
         if not isinstance(doc, Mapping):
+            continue
+        if not _task_doc_matches_organisation_scope(
+            doc,
+            organisation_concept_id=organisation_concept_id,
+            organisation_scope_mode=organisation_scope_mode,
+        ):
             continue
         metadata_raw = doc.get("metadata")
         metadata: Mapping[str, Any] = (
@@ -2733,6 +2823,7 @@ def _filter_task_response_list(
 def list_tasks_with_visibility(
     *,
     organisation_concept_id: str | None = None,
+    organisation_scope_mode: str | None = None,
     user_concept_id: str | None = None,
     include_created: bool = False,
     assignee_concept_id: str | None = None,
@@ -2783,6 +2874,7 @@ def list_tasks_with_visibility(
 
     base_query = _build_task_listing_query(
         organisation_concept_id=organisation_concept_id,
+        organisation_scope_mode=organisation_scope_mode,
         user_concept_id=user_concept_id,
         include_created=include_created,
         assignee_concept_id=assignee_concept_id,
@@ -2795,6 +2887,8 @@ def list_tasks_with_visibility(
     )
     mark_load(
         "build_queries",
+        organisation_scope_mode=organisation_scope_mode,
+        has_organisation_scope=bool(organisation_concept_id),
         has_user_scope=bool(user_concept_id),
         include_created=bool(include_created),
         has_assignee_scope=bool(assignee_concept_id),
@@ -2809,6 +2903,8 @@ def list_tasks_with_visibility(
         visibility_summary = _build_bulk_visibility_summary_for_query(
             base_query,
             collection_ids=collection_ids,
+            organisation_concept_id=organisation_concept_id,
+            organisation_scope_mode=organisation_scope_mode,
         )
         mark_load(
             "bulk_visibility_summary",
@@ -2846,6 +2942,17 @@ def list_tasks_with_visibility(
             )
         )
         mark_load("repository_find_all", raw_count=len(docs))
+
+        docs = [
+            doc
+            for doc in docs
+            if _task_doc_matches_organisation_scope(
+                doc,
+                organisation_concept_id=organisation_concept_id,
+                organisation_scope_mode=organisation_scope_mode,
+            )
+        ]
+        mark_load("organisation_scope_filter", filtered_count=len(docs))
 
         tasks = _build_task_responses(docs)
         mark_load("build_task_responses", response_count=len(tasks))
@@ -2894,6 +3001,22 @@ def list_tasks_with_visibility(
             total_is_exhaustive = False
             docs = docs[:limit]
 
+        docs = [
+            doc
+            for doc in docs
+            if _task_doc_matches_organisation_scope(
+                doc,
+                organisation_concept_id=organisation_concept_id,
+                organisation_scope_mode=organisation_scope_mode,
+            )
+        ]
+        mark_load("organisation_scope_filter", filtered_count=len(docs))
+        if organisation_scope_mode is not None:
+            # The indexed metadata mirror bounds the page, while represented
+            # relationships make the final authority decision. Legacy drift can
+            # therefore make a metadata count an upper bound rather than exact.
+            total_is_exhaustive = False
+
         paged_tasks = _build_task_responses(docs)
         mark_load("build_task_responses", response_count=len(paged_tasks))
 
@@ -2917,6 +3040,8 @@ def list_tasks_with_visibility(
         "hidden_bulk_task_collections": visibility_summary[
             "hidden_bulk_task_collections"
         ],
+        "organisation_concept_id": organisation_concept_id,
+        "organisation_scope_mode": organisation_scope_mode,
     }
     mark_load("response_payload", returned_count=len(paged_tasks), total=total)
     payload["load_telemetry"] = finish_load(
@@ -2925,6 +3050,8 @@ def list_tasks_with_visibility(
             "offset": offset,
             "bulk_visibility": visibility,
             "bulk_collection_count": len(collection_ids),
+            "organisation_concept_id": organisation_concept_id,
+            "organisation_scope_mode": organisation_scope_mode,
             "has_user_scope": bool(user_concept_id),
             "include_created": bool(include_created),
             "has_assignee_scope": bool(assignee_concept_id),
@@ -4411,6 +4538,49 @@ def update_task_fields(
     warnings: list[str] = []
     existing_task_type_ids = set(existing_task.get("task_type_ids") or [])
 
+    organisation_field_present = "organisation_concept_id" in fields
+    existing_organisation_concept_id = _normalise_optional_concept_id(
+        existing_task.get("organisation_concept_id")
+    )
+    organisation_concept_id = existing_organisation_concept_id
+    if organisation_field_present:
+        raw_org = fields.get("organisation_concept_id")
+        if raw_org is None or (isinstance(raw_org, str) and not raw_org.strip()):
+            organisation_concept_id = None
+        else:
+            organisation_concept_id = _normalise_optional_concept_id(raw_org)
+            if not organisation_concept_id:
+                raise InvalidTaskDataError(
+                    f"Invalid organisation_concept_id: {raw_org}"
+                )
+            if not ConceptsRepository.find_one(
+                {"concept_id": organisation_concept_id},
+                projection={"_id": 1},
+            ):
+                raise InvalidTaskDataError(
+                    f"organisation_concept_id not found: {organisation_concept_id}"
+                )
+        if organisation_concept_id != existing_organisation_concept_id:
+            actor_id = _normalise_optional_concept_id(actor_concept_id)
+            if not actor_id:
+                raise TaskOrganisationScopeAccessError(
+                    "authenticated_actor_required",
+                    "An authenticated actor is required to change task organisation scope",
+                )
+            for required_membership_org_id in dict.fromkeys(
+                [existing_organisation_concept_id, organisation_concept_id]
+            ):
+                if not required_membership_org_id:
+                    continue
+                if not is_user_member_of_organisation(
+                    actor_id,
+                    required_membership_org_id,
+                ):
+                    raise TaskOrganisationScopeAccessError(
+                        "organisation_membership_required",
+                        "You must be a represented member of both the source and destination organisations",
+                    )
+
     current_start = _parse_datetime(existing_task.get("start_date"))
     current_due = _parse_datetime(existing_task.get("due_date"))
     next_start = current_start
@@ -4754,37 +4924,50 @@ def update_task_fields(
         )
         changed_fields.append("backlog_rank")
 
-    if "organisation_concept_id" in fields:
-        raw_org = fields.get("organisation_concept_id")
-        if raw_org is None or (isinstance(raw_org, str) and not raw_org.strip()):
-            organisation_concept_id = None
-        else:
-            organisation_concept_id = _normalise_optional_concept_id(raw_org)
-            if not organisation_concept_id:
-                raise InvalidTaskDataError(
-                    f"Invalid organisation_concept_id: {raw_org}"
-                )
-            if not ConceptsRepository.find_one(
-                {"concept_id": organisation_concept_id},
-                projection={"_id": 1},
-            ):
-                raise InvalidTaskDataError(
-                    f"organisation_concept_id not found: {organisation_concept_id}"
-                )
-        _set_task_metadata_value(
-            task_concept_id=task_concept_id,
-            metadata_key=TASK_METADATA_KEY_ORGANISATION,
-            value=organisation_concept_id,
-        )
-        relationship_updates: Dict[str, Any] = {}
-        org_targets = [organisation_concept_id] if organisation_concept_id else []
-        for predicate in SPECIFIC_TO_ORG_PREDICATES_WRITE:
-            relationship_updates[f"relationships.{predicate}"] = list(org_targets)
-        ConceptsRepository.update_one(
-            {"concept_id": task_concept_id},
-            {"$set": relationship_updates},
-        )
-        changed_fields.append("organisation_concept_id")
+    if organisation_field_present:
+        if organisation_concept_id != existing_organisation_concept_id:
+            actor_id = _normalise_optional_concept_id(actor_concept_id)
+            assert actor_id is not None
+
+            current_relationships = task_doc.get("relationships")
+            if not isinstance(current_relationships, dict):
+                current_relationships = {}
+            updated_relationships = set_specific_to_org_values(
+                current_relationships,
+                [organisation_concept_id] if organisation_concept_id else [],
+            )
+            set_values: Dict[str, Any] = {
+                f"metadata.{TASK_METADATA_KEY_ORGANISATION}": organisation_concept_id,
+                "updated_at": _now(),
+            }
+            unset_values: Dict[str, str] = {}
+            for predicate in SPECIFIC_TO_ORG_PREDICATES_READ:
+                field_path = f"relationships.{predicate}"
+                if predicate in updated_relationships:
+                    set_values[field_path] = updated_relationships[predicate]
+                elif predicate in current_relationships:
+                    unset_values[field_path] = ""
+            scope_history_event = {
+                "event_id": f"event_{uuid.uuid4().hex[:12]}",
+                "event_type": "task_organisation_scope_changed",
+                "timestamp": _now().isoformat(),
+                "actor_concept_id": actor_id,
+                "details": {
+                    "from_organisation_concept_id": existing_organisation_concept_id,
+                    "to_organisation_concept_id": organisation_concept_id,
+                },
+            }
+            update_document: Dict[str, Any] = {
+                "$set": set_values,
+                "$push": {f"metadata.{TASK_METADATA_KEY_HISTORY}": scope_history_event},
+            }
+            if unset_values:
+                update_document["$unset"] = unset_values
+            ConceptsRepository.update_one(
+                {"concept_id": task_concept_id},
+                update_document,
+            )
+            changed_fields.append("organisation_concept_id")
 
     if "reporter_concept_id" in fields:
         raw_reporter = fields.get("reporter_concept_id")

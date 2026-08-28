@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from flask import Flask
 import pytest
+from flask import Flask
 
 
 class _FakeConceptCollection:
@@ -127,8 +127,9 @@ def test_header_identity_cache_is_request_local(monkeypatch) -> None:
 def test_explicit_anonymous_actor_suppresses_ambient_identity_without_a_source(
     monkeypatch,
 ) -> None:
-    import src.backend.security.access_control as access_control
     from flask import session
+
+    import src.backend.security.access_control as access_control
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -155,8 +156,9 @@ def test_explicit_anonymous_actor_suppresses_ambient_identity_without_a_source(
 def test_visibility_evaluator_is_rebuilt_for_each_request_after_revocation(
     monkeypatch,
 ) -> None:
-    import src.backend.security.access_control as access_control
     from flask import session
+
+    import src.backend.security.access_control as access_control
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -186,8 +188,9 @@ def test_visibility_evaluator_is_rebuilt_for_each_request_after_revocation(
 def test_visibility_evaluator_can_be_invalidated_within_one_request(
     monkeypatch,
 ) -> None:
-    import src.backend.security.access_control as access_control
     from flask import session
+
+    import src.backend.security.access_control as access_control
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -422,14 +425,56 @@ def test_access_controlled_cursor_prewarms_relationships_in_bounded_batches(
     assert [len(batch) for batch in prewarmed_batches] == [64, 64, 2]
 
 
+def test_access_controlled_cursor_resolves_actor_scope_once_per_batch(
+    monkeypatch,
+) -> None:
+    import src.backend.db.repositories.concepts_repository as concepts_repository
+    import src.backend.security.access_control as access_control
+
+    documents = [
+        {
+            "concept_id": f"#V#batch_scope_source_{index}",
+            "relationships": {},
+        }
+        for index in range(130)
+    ]
+    calls = {"user": 0, "organisation": 0}
+
+    def _current_user() -> str:
+        calls["user"] += 1
+        return "#V#member"
+
+    def _current_organisation() -> str:
+        calls["organisation"] += 1
+        return "#V#sail"
+
+    monkeypatch.setattr(access_control, "should_enforce_access_control", lambda: True)
+    monkeypatch.setattr(access_control, "get_effective_user_concept_id", _current_user)
+    monkeypatch.setattr(
+        access_control,
+        "get_effective_organisation_concept_id",
+        _current_organisation,
+    )
+
+    access_control.invalidate_current_access_evaluator()
+    try:
+        returned = list(concepts_repository._AccessControlledCursor(iter(documents)))
+    finally:
+        access_control.invalidate_current_access_evaluator()
+
+    assert returned == documents
+    assert calls == {"user": 3, "organisation": 3}
+
+
 def test_window_session_organisation_context_controls_visibility(monkeypatch) -> None:
     mongomock = pytest.importorskip("mongomock")
+    from flask import session
+
     import src.backend.security.access_control as access_control
     import src.backend.services.window_session_context_service as window_context
     from src.backend.services.window_session_context_service import (
         set_window_organisation,
     )
-    from flask import session
 
     window_context._window_session_store = None
     set_window_organisation(
@@ -472,3 +517,36 @@ def test_window_session_organisation_context_controls_visibility(monkeypatch) ->
             )["accessible"]
             is True
         )
+
+
+def test_window_session_personal_context_does_not_inherit_flask_organisation() -> None:
+    from flask import session
+
+    import src.backend.security.access_control as access_control
+    import src.backend.services.window_session_context_service as window_context
+    from src.backend.services.window_session_context_service import (
+        WindowSessionContext,
+        WindowSessionStore,
+    )
+
+    window_context._window_session_store = WindowSessionStore()
+    window_context._window_session_store.set(
+        WindowSessionContext(
+            window_session_id="ws_personal",
+            user_id="#V#michael_witbrock",
+            organisation_concept_id=None,
+            role_in_org=None,
+            namespace="#V#michael_witbrock",
+        )
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    with app.test_request_context(
+        "/api/tasks/",
+        headers={"X-Von-Window-Session": "ws_personal"},
+    ):
+        session["user_concept_id"] = "#V#michael_witbrock"
+        session["organisation_concept_id"] = "#V#other_tab_org"
+
+        assert access_control.get_effective_organisation_concept_id() is None

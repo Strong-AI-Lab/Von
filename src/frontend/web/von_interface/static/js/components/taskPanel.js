@@ -37,6 +37,10 @@ let _globalTasksOpenPromise = null;
 let _globalTaskNextOffset = 0;
 let _globalTaskHasMore = false;
 let _globalTaskTotal = null;
+let _globalTaskLoadGeneration = 0;
+let _activeOrganisationConceptId;
+let _taskOrganisationOptions = [];
+let _taskOrganisationOptionsLoaded = false;
 let _taskTaxonomy = {
     task_types: [],
     task_sources: [],
@@ -52,6 +56,7 @@ const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
 const TASK_LIST_LIMIT = '500';
 const GLOBAL_TASK_PAGE_SIZE = 50;
 const TASK_PANEL_LOAD_TELEMETRY_SCHEMA_VERSION = 'task_panel_load_telemetry.v1';
+const TASK_PANEL_ORG_SWITCH_HANDLER_KEY = '__vonTaskPanelOrgSwitchHandler';
 const TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN = /^\/api\/tasks\/[A-Za-z0-9%_-]+\/external-resource-actions\/[A-Za-z0-9._%-]+$/;
 
 // Constants
@@ -105,6 +110,84 @@ function getCurrentUserConceptId() {
     } catch (_) {
         return '';
     }
+}
+
+function getCurrentOrganisationConceptId() {
+    if (_activeOrganisationConceptId !== undefined) {
+        return normaliseTaskConceptId(_activeOrganisationConceptId || '');
+    }
+    try {
+        const ctx = getUserContext ? getUserContext() : {};
+        return normaliseTaskConceptId(ctx?.org_id || ctx?.organisation_id || '');
+    } catch (_) {
+        return '';
+    }
+}
+
+function normaliseTaskOrganisationOption(option) {
+    const conceptId = normaliseTaskConceptId(option?.concept_id || '');
+    if (!conceptId) return null;
+    return {
+        concept_id: conceptId,
+        name: typeof option?.name === 'string' && option.name.trim()
+            ? option.name.trim()
+            : deriveConceptNameFromId(conceptId),
+        role: typeof option?.role === 'string' ? option.role.trim() : '',
+    };
+}
+
+async function ensureTaskOrganisationOptionsLoaded() {
+    if (_taskOrganisationOptionsLoaded) return;
+    try {
+        const response = await getJson('/von/api/organisations/my_organisations');
+        const seen = new Set();
+        _taskOrganisationOptions = (Array.isArray(response?.organisations)
+            ? response.organisations
+            : [])
+            .map(normaliseTaskOrganisationOption)
+            .filter((option) => {
+                if (!option || seen.has(option.concept_id)) return false;
+                seen.add(option.concept_id);
+                return true;
+            });
+        _taskOrganisationOptionsLoaded = true;
+    } catch (err) {
+        console.debug('[taskPanel] Failed to load organisation memberships:', err);
+    }
+}
+
+function handleTaskPanelOrganisationSwitch(event) {
+    _activeOrganisationConceptId = normaliseTaskConceptId(
+        event?.detail?.organisation_id || '',
+    );
+    _globalTaskLoadGeneration += 1;
+    _isLoading = false;
+    _tasks = [];
+    _taskDetailState = {};
+    _selectedTaskId = '';
+    _globalTaskNextOffset = 0;
+    _globalTaskHasMore = false;
+    _globalTaskTotal = null;
+    _hiddenBulkTaskTotal = 0;
+    _hiddenBulkTaskCollections = [];
+    loadTaskGroupSelectionFromStorage();
+
+    if (_isGlobalTabMode) {
+        renderTaskList();
+        void loadGlobalTasks();
+    } else if (_isVisible) {
+        renderTaskList();
+        void refreshTasks();
+    }
+}
+
+function ensureTaskPanelOrganisationSwitchListener() {
+    const previousHandler = document[TASK_PANEL_ORG_SWITCH_HANDLER_KEY];
+    if (typeof previousHandler === 'function') {
+        document.removeEventListener('orgSwitched', previousHandler);
+    }
+    document[TASK_PANEL_ORG_SWITCH_HANDLER_KEY] = handleTaskPanelOrganisationSwitch;
+    document.addEventListener('orgSwitched', handleTaskPanelOrganisationSwitch);
 }
 
 function getTaskTypeOptions() {
@@ -493,6 +576,7 @@ export function initializeTaskPanel() {
         return;
     }
     loadTaskGroupSelectionFromStorage();
+    ensureTaskPanelOrganisationSwitchListener();
     renderTaskGroupFilterControls();
 
     // Set up close button
@@ -608,6 +692,11 @@ async function openGlobalTasks() {
     _globalTaskNextOffset = 0;
     _globalTaskHasMore = false;
     _globalTaskTotal = null;
+    _globalTaskLoadGeneration += 1;
+    _tasks = [];
+    _taskDetailState = {};
+    _selectedTaskId = '';
+    ensureTaskPanelOrganisationSwitchListener();
 
     // Initialize the global tasks container if needed
     if (!_globalTasksContainer) {
@@ -622,7 +711,10 @@ async function openGlobalTasks() {
     renderTaskLoadProgress('Preparing All Tasks workspace', telemetry);
     markTaskLoadStage(telemetry, 'taxonomy_request', 'Loading task filters');
     renderTaskLoadProgress('Loading task filters', telemetry);
-    await ensureTaskTaxonomyLoaded();
+    await Promise.all([
+        ensureTaskTaxonomyLoaded(),
+        ensureTaskOrganisationOptionsLoaded(),
+    ]);
     markTaskLoadStage(telemetry, 'taxonomy_response', 'Task filters loaded');
     renderTaskLoadProgress('Task filters loaded', telemetry);
     renderGlobalTasksTabContent();
@@ -974,6 +1066,8 @@ async function loadGlobalTasks(options = {}) {
     if (_isLoading) return;
 
     const append = options?.append === true;
+    const requestGeneration = _globalTaskLoadGeneration;
+    const requestOrganisationConceptId = getCurrentOrganisationConceptId();
     const requestOffset = append ? _globalTaskNextOffset : 0;
     const telemetry = options?.telemetry || createTaskLoadTelemetry(
         append ? 'global_tasks_next_page' : 'global_tasks_refresh',
@@ -1004,6 +1098,12 @@ async function loadGlobalTasks(options = {}) {
         renderTaskLoadProgress('Requesting tasks from Von', telemetry);
 
         const response = await getJson(url);
+        if (
+            requestGeneration !== _globalTaskLoadGeneration
+            || requestOrganisationConceptId !== getCurrentOrganisationConceptId()
+        ) {
+            return;
+        }
         telemetry.backend = response?.load_telemetry || null;
         markTaskLoadStage(telemetry, 'response_received', 'Task payload received', {
             returned_count: Array.isArray(response?.tasks) ? response.tasks.length : 0,
@@ -1062,6 +1162,7 @@ async function loadGlobalTasks(options = {}) {
         });
         renderTaskLoadProgress(`Loaded ${_tasks.length} tasks`, telemetry);
     } catch (err) {
+        if (requestGeneration !== _globalTaskLoadGeneration) return;
         console.error('[taskPanel] Failed to load global tasks:', err);
         finishTaskLoadTelemetry(telemetry, 'error', 'Failed to load tasks', {
             error_type: err?.name || 'Error',
@@ -1070,9 +1171,11 @@ async function loadGlobalTasks(options = {}) {
         showToast('Failed to load tasks', 'error');
     } finally {
         stopProgressTicker();
-        _isLoading = false;
-        updateLoadingState(false);
-        renderGlobalTaskPagination();
+        if (requestGeneration === _globalTaskLoadGeneration) {
+            _isLoading = false;
+            updateLoadingState(false);
+            renderGlobalTaskPagination();
+        }
     }
 }
 
@@ -1445,7 +1548,7 @@ function getTaskGroupStorageKey() {
     try {
         const ctx = getUserContext ? getUserContext() : {};
         const normalisedUser = normaliseTaskConceptId(ctx?.user_id);
-        const normalisedOrg = normaliseTaskConceptId(ctx?.org_id);
+        const normalisedOrg = getCurrentOrganisationConceptId();
         if (normalisedUser) userId = normalisedUser;
         if (normalisedOrg) orgId = normalisedOrg;
     } catch (_) {
@@ -1779,6 +1882,48 @@ function renderTaskHistoryRows(history) {
     `).join('');
 }
 
+function getTaskOrganisationDisplayName(organisationConceptId) {
+    const conceptId = normaliseTaskConceptId(organisationConceptId || '');
+    if (!conceptId) return 'Unscoped';
+    return _taskOrganisationOptions.find((option) => option.concept_id === conceptId)?.name
+        || deriveConceptNameFromId(conceptId);
+}
+
+function renderTaskOrganisationField(task) {
+    const currentOrganisationId = normaliseTaskConceptId(
+        task?.organisation_concept_id || '',
+    );
+    const options = [..._taskOrganisationOptions];
+    if (
+        currentOrganisationId
+        && !options.some((option) => option.concept_id === currentOrganisationId)
+    ) {
+        options.unshift({
+            concept_id: currentOrganisationId,
+            name: deriveConceptNameFromId(currentOrganisationId),
+            role: '',
+        });
+    }
+    const hasAssignableOrganisation = options.length > 0;
+    const disabled = !currentOrganisationId && !hasAssignableOrganisation;
+    return `
+        <label class="task-detail-label">
+            Organisation
+            <select class="task-detail-input task-detail-organisation-input" ${disabled ? 'disabled' : ''}>
+                ${!currentOrganisationId ? '<option value="" selected>Unscoped</option>' : ''}
+                ${options.map((option) => `
+                    <option value="${escapeHtml(option.concept_id)}" ${currentOrganisationId === option.concept_id ? 'selected' : ''}>
+                        ${escapeHtml(option.name)}${option.role ? ` (${escapeHtml(option.role)})` : ''}
+                    </option>
+                `).join('')}
+            </select>
+            <span class="task-detail-help">
+                ${disabled ? 'Organisation memberships are unavailable.' : 'Only represented organisation memberships can be selected.'}
+            </span>
+        </label>
+    `;
+}
+
 function renderTaskDetailsPanel(task, detailState) {
     const taskId = getTaskId(task);
     const detailTask = detailState.task || task;
@@ -1837,6 +1982,7 @@ function renderTaskDetailsPanel(task, detailState) {
                             `).join('')}
                         </select>
                     </label>
+                    ${renderTaskOrganisationField(detailTask)}
                     <label class="task-detail-label">
                         Report to concept ID
                         <input class="task-detail-input task-detail-report-to-input" type="text" value="${escapeHtml(reportToValue)}" />
@@ -2098,6 +2244,7 @@ function renderTaskInspector(task, detailState) {
                 <div class="task-inspector-row"><div class="task-inspector-label">Title</div><div class="task-inspector-value">${escapeHtml(detailTask.title || 'Untitled task')}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Type</div><div class="task-inspector-value">${taskTypes.length > 0 ? taskTypes.map((item) => `<span class="task-type-chip">${escapeHtml(item.label || item.concept_id || 'Typed')}</span>`).join('') : '<span class="task-empty-inline">Unspecified</span>'}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Source</div><div class="task-inspector-value">${sourceSummary ? `<span class="task-source-chip">${escapeHtml(sourceSummary.label)}</span>` : '<span class="task-empty-inline">Unspecified</span>'}</div></div>
+                <div class="task-inspector-row"><div class="task-inspector-label">Organisation</div><div class="task-inspector-value">${escapeHtml(getTaskOrganisationDisplayName(detailTask.organisation_concept_id))}</div></div>
                 ${renderTaskExternalResourceActions(detailTask)}
                 <div class="task-inspector-row"><div class="task-inspector-label">Priority</div><div class="task-inspector-value">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</div></div>
                 <div class="task-inspector-row"><div class="task-inspector-label">Owner</div><div class="task-inspector-value">${renderTaskConceptValue(detailTask.assignee_concept_id)}</div></div>
@@ -2137,6 +2284,7 @@ function renderTaskInspector(task, detailState) {
                             `).join('')}
                         </select>
                     </label>
+                    ${renderTaskOrganisationField(detailTask)}
                     <label class="task-detail-label">
                         Report to concept ID
                         <input class="task-detail-input task-detail-report-to-input" type="text" value="${escapeHtml(reportToValue)}" />
@@ -2382,6 +2530,14 @@ function renderTaskItem(task) {
             </span>
         `).join('')}</div>`
         : '';
+    const organisationChipHtml = `
+        <div class="task-meta-chip-row">
+            <span class="task-source-chip task-organisation-chip ${task.organisation_concept_id ? '' : 'task-organisation-unscoped'}"
+                title="Task organisation scope">
+                ${escapeHtml(getTaskOrganisationDisplayName(task.organisation_concept_id))}
+            </span>
+        </div>
+    `;
     const parentChipHtml = task.parent_task_concept_id
         ? renderTaskConceptLink({
             conceptId: task.parent_task_concept_id,
@@ -2413,6 +2569,7 @@ function renderTaskItem(task) {
             <div class="task-item-body">
                 <p class="task-description">${truncatedDescription}</p>
                 ${typeChipsHtml}
+                ${organisationChipHtml}
                 ${bulkCollectionChipsHtml}
                 ${labelsHtml}
                 ${componentsHtml}
@@ -2540,8 +2697,28 @@ async function saveTaskParityFields(taskId, panelEl) {
     setIfPresent('.task-detail-start-input', 'start_date', localInputValueToIso);
     setIfPresent('.task-detail-due-input', 'due_date', localInputValueToIso);
 
+    const previousOrganisationId = normaliseTaskConceptId(
+        (_tasks.find((task) => getTaskId(task) === taskId)?.organisation_concept_id) || '',
+    );
+    const organisationInput = panelEl.querySelector('.task-detail-organisation-input');
+    const requestedOrganisationId = normaliseTaskConceptId(
+        organisationInput?.value || '',
+    );
+    if (organisationInput && requestedOrganisationId !== previousOrganisationId) {
+        payload.organisation_concept_id = requestedOrganisationId || null;
+    }
     await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, payload);
     showToast('Task fields updated', 'success');
+    if (Object.prototype.hasOwnProperty.call(payload, 'organisation_concept_id')) {
+        if (_isGlobalTabMode) {
+            _selectedTaskId = '';
+            delete _taskDetailState[taskId];
+            await loadGlobalTasks();
+        } else {
+            await refreshTasks();
+        }
+        return;
+    }
     await loadTaskDetails(taskId, { refreshList: true });
 }
 

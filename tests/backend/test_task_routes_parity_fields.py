@@ -5,6 +5,11 @@ from __future__ import annotations
 from flask import Flask
 
 from src.backend.server.routes.task_routes import task_bp
+from src.backend.services.task_management_service import (
+    TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED,
+    TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY,
+    TaskOrganisationScopeAccessError,
+)
 
 
 def _build_client():
@@ -162,6 +167,29 @@ def test_update_task_route_uses_update_task_fields(monkeypatch):
     assert captured["actor_concept_id"] == "#V#user_alice"
 
 
+def test_update_task_route_returns_typed_scope_denial(monkeypatch):
+    client = _build_client()
+
+    def _deny_scope_change(*args, **kwargs):
+        raise TaskOrganisationScopeAccessError(
+            "organisation_membership_required",
+            "You must be a represented member of both the source and destination organisations",
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.update_task_fields",
+        _deny_scope_change,
+    )
+
+    response = client.patch(
+        "/api/tasks/%23V%23task_1",
+        json={"organisation_concept_id": "#V#other_org"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["reason_code"] == "organisation_membership_required"
+
+
 def test_search_tasks_route_supports_start_and_epic_filters(monkeypatch):
     client = _build_client()
     captured: dict = {}
@@ -230,6 +258,10 @@ def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
         "src.backend.server.routes.task_routes.list_tasks_with_visibility",
         _fake_list_tasks_with_visibility,
     )
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes._get_current_org_concept_id",
+        lambda: "#V#household_org",
+    )
 
     response = client.get(
         "/api/tasks/?bulk_visibility=exclude&limit=10&offset=5"
@@ -253,6 +285,11 @@ def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
     assert captured["offset"] == 5
     assert captured["include_total"] is False
     assert captured["include_bulk_summary"] is False
+    assert captured["organisation_concept_id"] == "#V#household_org"
+    assert (
+        captured["organisation_scope_mode"]
+        == TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED
+    )
     telemetry = payload["load_telemetry"]
     assert telemetry["schema_version"] == "task_list_load_telemetry.v1"
     assert telemetry["source"] == "task_routes.list_tasks_route"
@@ -291,6 +328,10 @@ def test_list_tasks_route_telemetry_handles_missing_bulk_collection_ids(monkeypa
     assert response.status_code == 200
     telemetry = response.get_json()["load_telemetry"]
     assert telemetry["request"]["bulk_collection_count"] == 0
+    assert (
+        telemetry["request"]["organisation_scope_mode"]
+        == TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY
+    )
 
 
 def test_my_tasks_route_uses_visibility_listing(monkeypatch):

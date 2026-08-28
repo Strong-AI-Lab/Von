@@ -20,9 +20,12 @@ from ...services.task_external_resource_action_service import (
     resolve_task_external_resource_action,
 )
 from ...services.task_management_service import (
+    TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED,
+    TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY,
     InvalidTaskDataError,
     TaskManagementError,
     TaskNotFoundError,
+    TaskOrganisationScopeAccessError,
     add_task_attachment,
     add_task_comment,
     apply_bulk_task_visibility,
@@ -170,8 +173,17 @@ def _get_current_user_concept_id() -> str | None:
 
 
 def _get_current_org_concept_id() -> str | None:
-    """Get the current organisation's concept_id from session."""
-    org_concept_id = session.get("org_id") or session.get("organisation_concept_id")
+    """Get the exact active-window organisation from trusted server context."""
+    try:
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        org_concept_id = get_effective_organisation_concept_id()
+    except Exception:
+        if request.headers.get("X-Von-Window-Session"):
+            return None
+        org_concept_id = session.get("org_id") or session.get(
+            "organisation_concept_id"
+        )
     if isinstance(org_concept_id, str) and org_concept_id.strip():
         return org_concept_id.strip()
     return None
@@ -366,6 +378,10 @@ def update_task_route(task_concept_id: str) -> ResponseReturnValue:
         return jsonify({"error": str(e)}), 404
     except InvalidTaskDataError as e:
         return jsonify({"error": str(e)}), 400
+    except TaskOrganisationScopeAccessError as e:
+        return jsonify(
+            {"error": e.safe_message, "reason_code": e.reason_code}
+        ), 403
     except TaskManagementError as e:
         logger.error(f"Failed to update task: {e}")
         return jsonify({"error": str(e)}), 500
@@ -455,6 +471,8 @@ def list_tasks_route() -> ResponseReturnValue:
 
         # If filtering by session, use get_tasks_for_conversation
         service_telemetry = None
+        organisation_concept_id = None
+        organisation_scope_mode = None
         if session_id:
             tasks = get_tasks_for_conversation(session_id=session_id)
             mark_load("conversation_task_query", raw_count=len(tasks))
@@ -493,7 +511,15 @@ def list_tasks_route() -> ResponseReturnValue:
                 total=len(visible_tasks),
             )
         else:
+            organisation_concept_id = _get_current_org_concept_id()
+            organisation_scope_mode = (
+                TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED
+                if organisation_concept_id
+                else TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY
+            )
             payload = list_tasks_with_visibility(
+                organisation_concept_id=organisation_concept_id,
+                organisation_scope_mode=organisation_scope_mode,
                 user_concept_id=user_concept_id,
                 include_created=include_created,
                 assignee_concept_id=assignee_concept_id,
@@ -536,6 +562,8 @@ def list_tasks_route() -> ResponseReturnValue:
                 "has_task_source_filter": bool(task_source_ids),
                 "include_total": include_total is not False,
                 "include_bulk_summary": include_bulk_summary is not False,
+                "organisation_concept_id": organisation_concept_id,
+                "organisation_scope_mode": organisation_scope_mode,
             },
             service=service_telemetry,
         )
@@ -684,7 +712,15 @@ def my_tasks_route() -> ResponseReturnValue:
         )
         bulk_collection_ids = _parse_bulk_collection_ids()
 
+        organisation_concept_id = _get_current_org_concept_id()
+        organisation_scope_mode = (
+            TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED
+            if organisation_concept_id
+            else TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY
+        )
         payload = list_tasks_with_visibility(
+            organisation_concept_id=organisation_concept_id,
+            organisation_scope_mode=organisation_scope_mode,
             user_concept_id=user_concept_id,
             status_filter=status_filter,
             include_created=include_created,

@@ -16,49 +16,54 @@ from src.backend.security.visibility_predicates import (
     CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
 )
 from src.backend.services.task_management_service import (
-    TASK_SPECIFICATION_TYPE_ID,
-    TASK_STATUS_PENDING,
-    TASK_STATUS_IN_PROGRESS,
-    TASK_STATUS_COMPLETED,
-    TASK_STATUS_CANCELLED,
-    VALID_TASK_STATUSES,
-    VALID_PRIORITIES,
-    PRIORITY_MEDIUM,
     JIRA_MIGRATION_BULK_COLLECTION_ID,
-    TaskNotFoundError,
+    PRIORITY_MEDIUM,
+    TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED,
+    TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY,
+    TASK_SPECIFICATION_TYPE_ID,
+    TASK_STATUS_CANCELLED,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_IN_PROGRESS,
+    TASK_STATUS_PENDING,
+    VALID_PRIORITIES,
+    VALID_TASK_STATUSES,
     InvalidTaskDataError,
-    apply_bulk_task_visibility,
-    backfill_jira_migration_bulk_task_collections,
-    build_jira_migration_bulk_task_collection,
-    create_task,
-    find_task_by_agent_creation_fingerprint,
-    get_task,
-    get_task_taxonomy,
-    find_task_by_external_reference,
+    TaskNotFoundError,
+    TaskOrganisationScopeAccessError,
+    _build_task_listing_query,
+    _task_doc_matches_organisation_scope,
     add_task_attachment,
     add_task_comment,
     add_task_worklog,
-    record_task_history_event,
-    upsert_task_external_reference,
-    update_task_status,
-    update_task_fields,
+    apply_bulk_task_visibility,
     assign_task,
+    backfill_jira_migration_bulk_task_collections,
+    build_jira_migration_bulk_task_collection,
+    create_task,
+    delete_task,
+    find_task_by_agent_creation_fingerprint,
+    find_task_by_external_reference,
+    get_task,
+    get_task_taxonomy,
     get_tasks_for_user,
     list_tasks,
     list_tasks_with_visibility,
+    record_task_history_event,
     search_tasks,
-    delete_task,
+    update_task_fields,
+    update_task_status,
+    upsert_task_external_reference,
 )
 from src.backend.services.task_ontology_service import (
     DEFAULT_TASK_SOURCE_ID,
     DEFAULT_TASK_TYPE_ID,
     JIRA_IMPORTED_TASK_SOURCE_ID,
+    PREDICATE_HAS_EVIDENCE,
+    PREDICATE_HAS_NEXT_CHECKPOINT,
+    PREDICATE_HAS_PROGRESS_SIGNAL,
     PREDICATE_HAS_TASK_REFERENCE_CODE,
     PREDICATE_HAS_TASK_ROLE,
     PREDICATE_HAS_TASK_SOURCE,
-    PREDICATE_HAS_NEXT_CHECKPOINT,
-    PREDICATE_HAS_PROGRESS_SIGNAL,
-    PREDICATE_HAS_EVIDENCE,
     PREDICATE_REPORTS_TO,
 )
 
@@ -1149,6 +1154,47 @@ class TestBulkTaskCollections:
             JIRA_MIGRATION_BULK_COLLECTION_ID
         )
 
+    def test_task_listing_query_includes_current_organisation_and_unscoped(self) -> None:
+        query = _build_task_listing_query(
+            organisation_concept_id="#V#household_org",
+            organisation_scope_mode=TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED,
+        )
+
+        assert query["$or"] == [
+            {"metadata.organisation_concept_id": "#V#household_org"},
+            {"metadata.organisation_concept_id": None},
+            {"metadata.organisation_concept_id": {"$exists": False}},
+        ]
+
+    def test_task_listing_query_personal_scope_is_unscoped_only(self) -> None:
+        query = _build_task_listing_query(
+            organisation_scope_mode=TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY,
+        )
+
+        assert query["$or"] == [
+            {"metadata.organisation_concept_id": None},
+            {"metadata.organisation_concept_id": {"$exists": False}},
+        ]
+
+    def test_task_scope_filter_treats_represented_org_as_authoritative(self) -> None:
+        legacy_drifted_task = {
+            "relationships": {
+                CANONICAL_SPECIFIC_TO_ORG_PREDICATE: ["#V#other_org"]
+            },
+            "metadata": {"organisation_concept_id": None},
+        }
+
+        assert not _task_doc_matches_organisation_scope(
+            legacy_drifted_task,
+            organisation_concept_id="#V#household_org",
+            organisation_scope_mode=TASK_ORGANISATION_SCOPE_CURRENT_PLUS_UNSCOPED,
+        )
+        assert not _task_doc_matches_organisation_scope(
+            legacy_drifted_task,
+            organisation_concept_id=None,
+            organisation_scope_mode=TASK_ORGANISATION_SCOPE_UNSCOPED_ONLY,
+        )
+
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
     def test_search_tasks_excludes_bulk_collection_before_pagination(
@@ -1651,8 +1697,13 @@ class TestTaskParityDatesAndEpic:
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch(
+        "src.backend.services.task_management_service.is_user_member_of_organisation",
+        return_value=True,
+    )
     def test_update_task_fields_supports_creator_reporter_and_watchers(
         self,
+        mock_is_member: MagicMock,
         mock_get_texts: MagicMock,
         mock_repo: MagicMock,
         mock_get_task: MagicMock,
@@ -1742,6 +1793,73 @@ class TestTaskParityDatesAndEpic:
             == ["#V#sail_org"]
             for payload in set_payloads
         )
+        scope_events = [
+            payload["$push"]["metadata.task_history"]
+            for payload in update_payloads
+            if payload.get("$push", {}).get("metadata.task_history", {}).get(
+                "event_type"
+            )
+            == "task_organisation_scope_changed"
+        ]
+        assert len(scope_events) == 1
+        assert scope_events[0]["actor_concept_id"] == "#V#user_alice"
+        assert scope_events[0]["details"] == {
+            "from_organisation_concept_id": None,
+            "to_organisation_concept_id": "#V#sail_org",
+        }
+        mock_is_member.assert_called_once_with("#V#user_alice", "#V#sail_org")
+
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch(
+        "src.backend.services.task_management_service.is_user_member_of_organisation",
+        return_value=False,
+    )
+    def test_update_task_fields_rejects_destination_without_membership(
+        self,
+        mock_is_member: MagicMock,
+        mock_upsert_text: MagicMock,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        task_doc = {
+            "concept_id": "#V#task_1",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+        def _fake_find_one(query, projection=None):
+            if query.get("concept_id") == "#V#task_1":
+                return task_doc
+            if query.get("concept_id") == "#V#other_org":
+                return {"concept_id": "#V#other_org"}
+            return None
+
+        mock_repo.find_one.side_effect = _fake_find_one
+        mock_get_texts.return_value = []
+
+        with pytest.raises(
+            TaskOrganisationScopeAccessError,
+            match="represented member",
+        ) as exc_info:
+            update_task_fields(
+                "#V#task_1",
+                fields={
+                    "priority": "high",
+                    "organisation_concept_id": "#V#other_org",
+                },
+                actor_concept_id="#V#user_alice",
+            )
+
+        assert exc_info.value.reason_code == "organisation_membership_required"
+        mock_is_member.assert_called_once_with("#V#user_alice", "#V#other_org")
+        mock_upsert_text.assert_not_called()
+        mock_get_task.assert_not_called()
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
