@@ -1735,6 +1735,23 @@ def _ensure_concepts_collection_indexes(concepts_coll: Collection) -> None:
             [("embedding_status", ASCENDING), ("updated_at", DESCENDING)],
             name="embedding_status_updated_at_desc",
         )
+    if "direct_message_idempotency_scope_unique" not in existing_indexes:
+        concepts_coll.create_index(
+            [
+                (
+                    "concept_data.metadata.delivery_idempotency_scope",
+                    ASCENDING,
+                )
+            ],
+            name="direct_message_idempotency_scope_unique",
+            unique=True,
+            partialFilterExpression={
+                "concept_data.metadata.delivery_idempotency_scope": {
+                    "$exists": True,
+                    "$type": "string",
+                }
+            },
+        )
     if "updated_at_-1" not in existing_indexes:
         concepts_coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 

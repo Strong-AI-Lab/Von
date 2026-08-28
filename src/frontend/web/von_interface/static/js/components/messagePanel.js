@@ -6,6 +6,7 @@
  */
 
 import { getJson, postJson, postJsonDetailed } from '../apiService.js';
+import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
 import { cartouchifyElementText } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
@@ -25,9 +26,19 @@ let _isLoading = false;
 let _unreadCount = 0;
 let _replySendFailureState = null;
 let _newMessageSendFailureState = null;
+let _replySendPending = false;
+let _newMessageSendPending = false;
+let _replyDeliveryAttempt = null;
+let _newMessageDeliveryAttempt = null;
+let _deliveryKeySequence = 0;
 
 const COMPOSE_SCOPE_REPLY = 'reply';
 const COMPOSE_SCOPE_NEW_MESSAGE = 'newMessage';
+const REPLY_DELIVERY_ATTEMPT_STORAGE_KEY = 'von_message_reply_delivery_attempt_v1';
+const REPLY_DELIVERY_ATTEMPT_SCHEMA_VERSION = 'direct_message_reply_delivery_attempt.v2';
+const NEW_MESSAGE_DELIVERY_ATTEMPT_STORAGE_KEY = 'von_message_new_delivery_attempt_v1';
+const NEW_MESSAGE_DELIVERY_ATTEMPT_SCHEMA_VERSION = 'direct_message_new_delivery_attempt.v2';
+const MESSAGE_THREAD_PREDICATE_ID = '#V#is_part_of_thread';
 
 const MESSAGE_PANEL_ICONS = Object.freeze({
     chat: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.2A7.8 7.8 0 0 1 5 4.8 8 8 0 0 1 13 4a8 8 0 0 1 8 8Z"/><path d="M8 10h8"/><path d="M8 14h5"/></svg>',
@@ -101,6 +112,9 @@ function resetMessagesViewportPosition() {
 function renderMessagesTabContent() {
     if (!_messagesContainer) return;
 
+    syncVisibleReplyDeliveryAttempt();
+    syncVisibleNewMessageDeliveryAttempt();
+
     _messagesContainer.innerHTML = `
         <div class="messages-layout">
             <div class="messages-sidebar">
@@ -143,7 +157,7 @@ function renderMessagesTabContent() {
                     </div>
                     <div class="message-compose-row">
                         <textarea id="messageInput" class="message-input" placeholder="Type your message..." rows="3"></textarea>
-                        <button id="sendMessageBtn" class="send-message-btn">Send</button>
+                        <button id="sendMessageBtn" class="send-message-btn" type="button" aria-busy="false">Send</button>
                     </div>
                 </div>
             </div>
@@ -172,7 +186,7 @@ function renderMessagesTabContent() {
                 </div>
                 <div class="message-modal-footer">
                     <button id="cancelNewMessage" class="modal-cancel-btn">Cancel</button>
-                    <button id="sendNewMessage" class="modal-send-btn">Send</button>
+                    <button id="sendNewMessage" class="modal-send-btn" type="button" aria-busy="false">Send</button>
                 </div>
             </div>
         </div>
@@ -183,6 +197,9 @@ function renderMessagesTabContent() {
 
     // Attach event listeners
     attachMessagesEventListeners();
+    restoreNewMessageDeliveryAttemptForCurrentScope();
+    renderComposePendingUi(COMPOSE_SCOPE_REPLY);
+    renderComposePendingUi(COMPOSE_SCOPE_NEW_MESSAGE);
 }
 
 /**
@@ -222,24 +239,26 @@ function attachMessagesEventListeners() {
                 handleSendReply();
             }
         });
+        msgInput.addEventListener('input', syncVisibleReplyDeliveryAttempt);
     }
 
     const replyRecoverySelect = _messagesContainer.querySelector('#messageComposeRecoverySelect');
     if (replyRecoverySelect) {
         replyRecoverySelect.addEventListener('change', (event) => {
             updateComposeRecoverySelection(COMPOSE_SCOPE_REPLY, event.target?.value || '');
+            syncVisibleReplyDeliveryAttempt();
         });
     }
 
     // New message modal
     const closeModalBtn = _messagesContainer.querySelector('#closeNewMessageModal');
     if (closeModalBtn) {
-        closeModalBtn.addEventListener('click', hideNewMessageModal);
+        closeModalBtn.addEventListener('click', () => hideNewMessageModal());
     }
 
     const cancelBtn = _messagesContainer.querySelector('#cancelNewMessage');
     if (cancelBtn) {
-        cancelBtn.addEventListener('click', hideNewMessageModal);
+        cancelBtn.addEventListener('click', () => hideNewMessageModal());
     }
 
     const sendNewBtn = _messagesContainer.querySelector('#sendNewMessage');
@@ -251,6 +270,7 @@ function attachMessagesEventListeners() {
     if (newMessageRecoverySelect) {
         newMessageRecoverySelect.addEventListener('change', (event) => {
             updateComposeRecoverySelection(COMPOSE_SCOPE_NEW_MESSAGE, event.target?.value || '');
+            syncVisibleNewMessageDeliveryAttempt();
         });
     }
 
@@ -258,7 +278,13 @@ function attachMessagesEventListeners() {
     if (recipientInput) {
         recipientInput.addEventListener('input', () => {
             resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
+            syncVisibleNewMessageDeliveryAttempt();
         });
+    }
+
+    const newMessageContent = _messagesContainer.querySelector('#newMessageContent');
+    if (newMessageContent) {
+        newMessageContent.addEventListener('input', syncVisibleNewMessageDeliveryAttempt);
     }
 }
 
@@ -280,7 +306,8 @@ async function loadMessageThreads() {
         const response = await getJson('/api/messages/threads?limit=20');
         _threads = response.threads || [];
         renderThreadList();
-        autoOpenUserId = resolveAutoOpenThreadUserId();
+        autoOpenUserId = resolveStoredReplyAttemptAutoOpenUserId()
+            || resolveAutoOpenThreadUserId();
 
     } catch (err) {
         console.error('[messagePanel] Failed to load threads:', err);
@@ -397,6 +424,21 @@ function renderThreadList() {
  * Select a conversation to view.
  */
 async function selectConversation(userId) {
+    const renderedSelection = _messagesContainer?.querySelector(
+        '.message-thread-item.selected',
+    );
+    if (renderedSelection) {
+        syncVisibleReplyDeliveryAttempt();
+    }
+    const replyInput = _messagesContainer?.querySelector('#messageInput');
+    if (replyInput) {
+        replyInput.value = '';
+    }
+    // Detach the in-memory attempt while changing scope without deleting the
+    // session record. A matching recipient can bind it again after actor/thread
+    // context has been read from the server.
+    _replyDeliveryAttempt = null;
+    _currentMessages = [];
     _currentConversationUserId = userId;
     resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
 
@@ -439,6 +481,7 @@ async function loadConversation(userId) {
         _currentMessages = response.messages || [];
         _currentUserId = response.current_user_id || null;
         await renderMessages();
+        restoreReplyDeliveryAttemptForCurrentScope();
 
         // Mark messages as read
         const unreadIds = _currentMessages
@@ -795,6 +838,51 @@ async function renderMessages() {
     contentEl.scrollTop = contentEl.scrollHeight;
 }
 
+function isComposePending(scope) {
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        return _replySendPending;
+    }
+    if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        return _newMessageSendPending;
+    }
+    return false;
+}
+
+function renderComposePendingUi(scope) {
+    if (!_messagesContainer) return;
+
+    const button = scope === COMPOSE_SCOPE_REPLY
+        ? _messagesContainer.querySelector('#sendMessageBtn')
+        : _messagesContainer.querySelector('#sendNewMessage');
+    if (!button) return;
+
+    const pending = isComposePending(scope);
+    button.disabled = pending;
+    button.textContent = pending ? 'Sending…' : 'Send';
+    button.setAttribute('aria-busy', pending ? 'true' : 'false');
+
+    if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        const recipientInput = _messagesContainer.querySelector('#newMessageRecipient');
+        const contentInput = _messagesContainer.querySelector('#newMessageContent');
+        const closeButton = _messagesContainer.querySelector('#closeNewMessageModal');
+        const cancelButton = _messagesContainer.querySelector('#cancelNewMessage');
+        if (recipientInput) recipientInput.disabled = pending;
+        if (contentInput) contentInput.disabled = pending;
+        if (closeButton) closeButton.disabled = pending;
+        if (cancelButton) cancelButton.disabled = pending;
+    }
+}
+
+function setComposePending(scope, pending) {
+    const nextPending = Boolean(pending);
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        _replySendPending = nextPending;
+    } else if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        _newMessageSendPending = nextPending;
+    }
+    renderComposePendingUi(scope);
+}
+
 function getComposeFailureState(scope) {
     if (scope === COMPOSE_SCOPE_REPLY) {
         return _replySendFailureState;
@@ -803,6 +891,644 @@ function getComposeFailureState(scope) {
         return _newMessageSendFailureState;
     }
     return null;
+}
+
+function getDeliveryAttempt(scope) {
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        return _replyDeliveryAttempt;
+    }
+    if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        return _newMessageDeliveryAttempt;
+    }
+    return null;
+}
+
+function setDeliveryAttempt(scope, attempt) {
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        _replyDeliveryAttempt = attempt;
+        if (attempt) {
+            persistReplyDeliveryAttempt(attempt);
+        } else {
+            clearPersistedReplyDeliveryAttempt();
+        }
+    } else if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        _newMessageDeliveryAttempt = attempt;
+        if (attempt) {
+            persistNewMessageDeliveryAttempt(attempt);
+        } else {
+            clearPersistedNewMessageDeliveryAttempt();
+        }
+    }
+}
+
+function normaliseDeliveryConceptId(value) {
+    const cleaned = String(value || '').trim();
+    if (!cleaned) return '';
+    return cleaned.startsWith('#V#') ? cleaned : `#V#${cleaned}`;
+}
+
+function createDeliveryIdempotencyKey() {
+    try {
+        if (typeof globalThis.crypto?.randomUUID === 'function') {
+            return globalThis.crypto.randomUUID();
+        }
+    } catch (_) {
+        // Fall back to a process-local, time-based key in older browser shells.
+    }
+
+    _deliveryKeySequence += 1;
+    const randomPart = Math.random().toString(36).slice(2, 12);
+    return `dm-${Date.now().toString(36)}-${_deliveryKeySequence.toString(36)}-${randomPart}`;
+}
+
+function resolveDeliveryOrganisationId(explicitOrganisationConceptId) {
+    return normaliseDeliveryConceptId(
+        explicitOrganisationConceptId || getSessionScopedOrgId() || '',
+    );
+}
+
+function readSessionActorConceptId() {
+    try {
+        const raw = sessionStorage.getItem('von_current_user');
+        if (!raw) return '';
+        let storedUser = raw;
+        try {
+            storedUser = JSON.parse(raw);
+        } catch (_) {
+            // Legacy storage may contain the concept ID directly.
+        }
+        if (typeof storedUser === 'string') {
+            return normaliseDeliveryConceptId(storedUser);
+        }
+        return normaliseDeliveryConceptId(
+            storedUser?.concept_id || storedUser?.id || '',
+        );
+    } catch (_) {
+        return '';
+    }
+}
+
+function resolveCurrentReplyActorId() {
+    return normaliseDeliveryConceptId(_currentUserId || readSessionActorConceptId());
+}
+
+function resolveCurrentReplyThreadId() {
+    const threadIds = new Set();
+    _currentMessages.forEach((message) => {
+        const values = message?.relationships?.[MESSAGE_THREAD_PREDICATE_ID];
+        if (!Array.isArray(values)) return;
+        values.forEach((value) => {
+            const conceptId = normaliseDeliveryConceptId(value);
+            if (conceptId) threadIds.add(conceptId);
+        });
+    });
+    return threadIds.size === 1 ? Array.from(threadIds)[0] : '';
+}
+
+function buildDeliveryScope({
+    recipientIds,
+    organisationConceptId,
+    actorUserId,
+    threadId,
+}) {
+    const normalisedRecipients = recipientIds
+        .map(normaliseDeliveryConceptId)
+        .filter(Boolean)
+        .sort((left, right) => left.localeCompare(right));
+    return {
+        actor_user_id: normaliseDeliveryConceptId(
+            actorUserId || resolveCurrentReplyActorId(),
+        ),
+        organisation_concept_id: resolveDeliveryOrganisationId(organisationConceptId),
+        recipient_ids: normalisedRecipients,
+        thread_id: normaliseDeliveryConceptId(threadId || ''),
+    };
+}
+
+function buildDeliveryFingerprintFromScope(deliveryScope, content) {
+    return JSON.stringify({
+        scope: deliveryScope,
+        content: String(content || '').trim(),
+    });
+}
+
+function deliveryScopesMatch(left, right) {
+    return JSON.stringify(left || null) === JSON.stringify(right || null);
+}
+
+function buildCurrentComposeSessionScope() {
+    return {
+        actor_user_id: readSessionActorConceptId(),
+        organisation_concept_id: resolveDeliveryOrganisationId(''),
+    };
+}
+
+function composeSessionScopesEqual(left, right) {
+    return JSON.stringify(left || null) === JSON.stringify(right || null);
+}
+
+function isBoundComposeSessionScope(scope) {
+    return Boolean(
+        scope?.actor_user_id
+        && scope?.organisation_concept_id
+    );
+}
+
+function clearPersistedReplyDeliveryAttempt() {
+    try {
+        sessionStorage.removeItem(REPLY_DELIVERY_ATTEMPT_STORAGE_KEY);
+    } catch (_) {
+        // Storage can be unavailable in restricted browser contexts.
+    }
+}
+
+function persistReplyDeliveryAttempt(attempt) {
+    if (
+        !attempt?.key
+        || !attempt?.fingerprint
+        || !String(attempt?.draft || '').trim()
+        || !isBoundComposeSessionScope(attempt?.sessionScope)
+    ) {
+        clearPersistedReplyDeliveryAttempt();
+        return;
+    }
+    try {
+        sessionStorage.setItem(REPLY_DELIVERY_ATTEMPT_STORAGE_KEY, JSON.stringify({
+            schema_version: REPLY_DELIVERY_ATTEMPT_SCHEMA_VERSION,
+            key: attempt.key,
+            fingerprint: attempt.fingerprint,
+            draft: attempt.draft,
+            scope: attempt.scope,
+            session_scope: attempt.sessionScope,
+            recovery_state: attempt.recoveryState || null,
+        }));
+    } catch (_) {
+        // The in-memory attempt still protects the current rendered tab.
+    }
+}
+
+function readPersistedReplyDeliveryAttempt() {
+    let stored;
+    try {
+        stored = JSON.parse(
+            sessionStorage.getItem(REPLY_DELIVERY_ATTEMPT_STORAGE_KEY) || 'null',
+        );
+    } catch (_) {
+        clearPersistedReplyDeliveryAttempt();
+        return null;
+    }
+
+    const draft = typeof stored?.draft === 'string' ? stored.draft : '';
+    const key = typeof stored?.key === 'string' ? stored.key.trim() : '';
+    const fingerprint = typeof stored?.fingerprint === 'string'
+        ? stored.fingerprint
+        : '';
+    const scope = stored?.scope;
+    const recipientIds = Array.isArray(scope?.recipient_ids)
+        ? scope.recipient_ids.map(normaliseDeliveryConceptId).filter(Boolean)
+        : [];
+    const normalisedScope = {
+        actor_user_id: normaliseDeliveryConceptId(scope?.actor_user_id || ''),
+        organisation_concept_id: normaliseDeliveryConceptId(
+            scope?.organisation_concept_id || '',
+        ),
+        recipient_ids: recipientIds.sort((left, right) => left.localeCompare(right)),
+        thread_id: normaliseDeliveryConceptId(scope?.thread_id || ''),
+    };
+    const expectedFingerprint = buildDeliveryFingerprintFromScope(normalisedScope, draft);
+    const rawSessionScope = stored?.session_scope;
+    const sessionScope = {
+        actor_user_id: normaliseDeliveryConceptId(rawSessionScope?.actor_user_id || ''),
+        organisation_concept_id: normaliseDeliveryConceptId(
+            rawSessionScope?.organisation_concept_id || '',
+        ),
+    };
+    const recoveryState = normaliseComposeFailureState(stored?.recovery_state);
+    const requiresExplicitRecoveryOrganisation = Boolean(
+        normalisedScope.organisation_concept_id
+        && normalisedScope.organisation_concept_id
+            !== sessionScope.organisation_concept_id
+    );
+
+    if (
+        stored?.schema_version !== REPLY_DELIVERY_ATTEMPT_SCHEMA_VERSION
+        || !key
+        || !draft.trim()
+        || !normalisedScope.actor_user_id
+        || normalisedScope.recipient_ids.length === 0
+        || !isBoundComposeSessionScope(sessionScope)
+        || (
+            requiresExplicitRecoveryOrganisation
+            && recoveryState?.selectedOrganisationConceptId
+                !== normalisedScope.organisation_concept_id
+        )
+        || fingerprint !== expectedFingerprint
+    ) {
+        clearPersistedReplyDeliveryAttempt();
+        return null;
+    }
+
+    return {
+        key,
+        fingerprint,
+        draft,
+        scope: normalisedScope,
+        sessionScope,
+        recoveryState,
+    };
+}
+
+function clearPersistedNewMessageDeliveryAttempt() {
+    try {
+        sessionStorage.removeItem(NEW_MESSAGE_DELIVERY_ATTEMPT_STORAGE_KEY);
+    } catch (_) {
+        // Storage can be unavailable in restricted browser contexts.
+    }
+}
+
+function persistNewMessageDeliveryAttempt(attempt) {
+    const recipient = typeof attempt?.recipient === 'string' ? attempt.recipient : '';
+    const draft = typeof attempt?.draft === 'string' ? attempt.draft : '';
+    const sessionScope = attempt?.sessionScope;
+    if (
+        !attempt?.key
+        || !attempt?.fingerprint
+        || !recipient.trim()
+        || !draft.trim()
+        || !sessionScope?.actor_user_id
+        || !sessionScope?.organisation_concept_id
+    ) {
+        clearPersistedNewMessageDeliveryAttempt();
+        return;
+    }
+
+    try {
+        sessionStorage.setItem(NEW_MESSAGE_DELIVERY_ATTEMPT_STORAGE_KEY, JSON.stringify({
+            schema_version: NEW_MESSAGE_DELIVERY_ATTEMPT_SCHEMA_VERSION,
+            key: attempt.key,
+            fingerprint: attempt.fingerprint,
+            recipient,
+            draft,
+            scope: sessionScope,
+            delivery_scope: attempt.scope,
+            recovery_state: attempt.recoveryState || null,
+        }));
+    } catch (_) {
+        // The in-memory attempt still protects the current rendered tab.
+    }
+}
+
+function readPersistedNewMessageDeliveryAttempt() {
+    let stored;
+    try {
+        stored = JSON.parse(
+            sessionStorage.getItem(NEW_MESSAGE_DELIVERY_ATTEMPT_STORAGE_KEY) || 'null',
+        );
+    } catch (_) {
+        clearPersistedNewMessageDeliveryAttempt();
+        return null;
+    }
+
+    const recipient = typeof stored?.recipient === 'string' ? stored.recipient : '';
+    const draft = typeof stored?.draft === 'string' ? stored.draft : '';
+    const key = typeof stored?.key === 'string' ? stored.key.trim() : '';
+    const fingerprint = typeof stored?.fingerprint === 'string'
+        ? stored.fingerprint
+        : '';
+    const sessionScope = {
+        actor_user_id: normaliseDeliveryConceptId(stored?.scope?.actor_user_id || ''),
+        organisation_concept_id: normaliseDeliveryConceptId(
+            stored?.scope?.organisation_concept_id || '',
+        ),
+    };
+    const rawDeliveryScope = stored?.delivery_scope;
+    const recipientIds = Array.isArray(rawDeliveryScope?.recipient_ids)
+        ? rawDeliveryScope.recipient_ids
+            .map(normaliseDeliveryConceptId)
+            .filter(Boolean)
+            .sort((left, right) => left.localeCompare(right))
+        : [];
+    const deliveryScope = {
+        actor_user_id: normaliseDeliveryConceptId(rawDeliveryScope?.actor_user_id || ''),
+        organisation_concept_id: normaliseDeliveryConceptId(
+            rawDeliveryScope?.organisation_concept_id || '',
+        ),
+        recipient_ids: recipientIds,
+        thread_id: normaliseDeliveryConceptId(rawDeliveryScope?.thread_id || ''),
+    };
+    const expectedFingerprint = buildDeliveryFingerprintFromScope(deliveryScope, draft);
+    const recoveryState = normaliseComposeFailureState(stored?.recovery_state);
+    const requiresExplicitRecoveryOrganisation = Boolean(
+        deliveryScope.organisation_concept_id
+        && deliveryScope.organisation_concept_id
+            !== sessionScope.organisation_concept_id
+    );
+
+    if (
+        stored?.schema_version !== NEW_MESSAGE_DELIVERY_ATTEMPT_SCHEMA_VERSION
+        || !key
+        || !recipient.trim()
+        || !draft.trim()
+        || !sessionScope.actor_user_id
+        || !sessionScope.organisation_concept_id
+        || deliveryScope.recipient_ids.length !== 1
+        || (
+            requiresExplicitRecoveryOrganisation
+            && recoveryState?.selectedOrganisationConceptId
+                !== deliveryScope.organisation_concept_id
+        )
+        || normaliseDeliveryConceptId(recipient) !== deliveryScope.recipient_ids[0]
+        || fingerprint !== expectedFingerprint
+    ) {
+        clearPersistedNewMessageDeliveryAttempt();
+        return null;
+    }
+
+    return {
+        key,
+        fingerprint,
+        recipient,
+        draft,
+        scope: deliveryScope,
+        sessionScope,
+        recoveryState,
+    };
+}
+
+function buildCurrentReplyDeliveryScope(organisationConceptId) {
+    if (!_currentConversationUserId) return null;
+    const selectedOrganisationConceptId = organisationConceptId === undefined
+        ? getSelectedRecoveryOrganisationConceptId(COMPOSE_SCOPE_REPLY)
+        : organisationConceptId;
+    return buildDeliveryScope({
+        recipientIds: [_currentConversationUserId],
+        organisationConceptId: selectedOrganisationConceptId,
+        actorUserId: _currentUserId,
+        threadId: resolveCurrentReplyThreadId(),
+    });
+}
+
+function replaceVisibleDeliveryAttempt(scope, {
+    deliveryScope,
+    draft,
+    recipient = '',
+    sessionScope,
+}) {
+    const fingerprint = buildDeliveryFingerprintFromScope(deliveryScope, draft);
+    setDeliveryAttempt(scope, {
+        fingerprint,
+        key: createDeliveryIdempotencyKey(),
+        draft,
+        scope: deliveryScope,
+        sessionScope,
+        recoveryState: getPersistableComposeRecoveryState(scope),
+        ...(scope === COMPOSE_SCOPE_NEW_MESSAGE ? { recipient } : {}),
+    });
+}
+
+function syncVisibleReplyDeliveryAttempt() {
+    const replyInput = _messagesContainer?.querySelector('#messageInput');
+    if (!replyInput) return;
+
+    const draft = replyInput.value;
+    const currentAttempt = getDeliveryAttempt(COMPOSE_SCOPE_REPLY);
+    if (!currentAttempt) {
+        // A newly typed visible draft supersedes any off-screen attempt from a
+        // different conversation. Do not retain its invisible key.
+        if (draft.trim()) {
+            clearPersistedReplyDeliveryAttempt();
+        }
+        return;
+    }
+
+    if (!draft.trim()) {
+        setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
+        return;
+    }
+
+    const deliveryScope = buildCurrentReplyDeliveryScope();
+    const fingerprint = deliveryScope
+        ? buildDeliveryFingerprintFromScope(deliveryScope, draft)
+        : '';
+    const sessionScope = buildCurrentComposeSessionScope();
+    if (!composeSessionScopesEqual(sessionScope, currentAttempt.sessionScope)) {
+        setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
+        return;
+    }
+    if (
+        !deliveryScope
+        || fingerprint !== currentAttempt.fingerprint
+        || !deliveryScopesMatch(deliveryScope, currentAttempt.scope)
+    ) {
+        if (!deliveryScope) {
+            setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
+            return;
+        }
+        replaceVisibleDeliveryAttempt(COMPOSE_SCOPE_REPLY, {
+            deliveryScope,
+            draft,
+            sessionScope,
+        });
+        return;
+    }
+
+    setDeliveryAttempt(COMPOSE_SCOPE_REPLY, {
+        ...currentAttempt,
+        draft,
+        scope: deliveryScope,
+        sessionScope,
+        recoveryState: getPersistableComposeRecoveryState(COMPOSE_SCOPE_REPLY),
+    });
+}
+
+function syncVisibleNewMessageDeliveryAttempt() {
+    const recipientInput = _messagesContainer?.querySelector('#newMessageRecipient');
+    const contentInput = _messagesContainer?.querySelector('#newMessageContent');
+    if (!recipientInput || !contentInput) return;
+
+    const recipient = recipientInput.value;
+    const draft = contentInput.value;
+    const currentAttempt = getDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE);
+    if (!currentAttempt) {
+        if (recipient.trim() || draft.trim()) {
+            clearPersistedNewMessageDeliveryAttempt();
+        }
+        return;
+    }
+
+    if (!recipient.trim() || !draft.trim()) {
+        setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
+        return;
+    }
+
+    const failureState = getComposeFailureState(COMPOSE_SCOPE_NEW_MESSAGE);
+    const selectedOrganisationConceptId = String(
+        failureState?.selectedOrganisationConceptId || '',
+    ).trim();
+    const deliveryScope = buildDeliveryScope({
+        recipientIds: [recipient],
+        organisationConceptId: selectedOrganisationConceptId,
+    });
+    const fingerprint = buildDeliveryFingerprintFromScope(deliveryScope, draft);
+    const sessionScope = buildCurrentComposeSessionScope();
+    if (!composeSessionScopesEqual(sessionScope, currentAttempt.sessionScope)) {
+        setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
+        return;
+    }
+    if (
+        fingerprint !== currentAttempt.fingerprint
+        || !deliveryScopesMatch(deliveryScope, currentAttempt.scope)
+    ) {
+        replaceVisibleDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, {
+            deliveryScope,
+            recipient,
+            draft,
+            sessionScope,
+        });
+        return;
+    }
+
+    setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, {
+        ...currentAttempt,
+        recipient,
+        draft,
+        scope: deliveryScope,
+        sessionScope,
+        recoveryState: getPersistableComposeRecoveryState(COMPOSE_SCOPE_NEW_MESSAGE),
+    });
+}
+
+function restoreNewMessageDeliveryAttemptForCurrentScope() {
+    const persistedAttempt = readPersistedNewMessageDeliveryAttempt();
+    const sessionScope = buildCurrentComposeSessionScope();
+    if (
+        !persistedAttempt
+        || !isBoundComposeSessionScope(sessionScope)
+        || !composeSessionScopesEqual(persistedAttempt.sessionScope, sessionScope)
+    ) {
+        _newMessageDeliveryAttempt = null;
+        return false;
+    }
+
+    const modal = _messagesContainer?.querySelector('#newMessageModal');
+    const recipientInput = modal?.querySelector('#newMessageRecipient');
+    const contentInput = modal?.querySelector('#newMessageContent');
+    if (!modal || !recipientInput || !contentInput) {
+        _newMessageDeliveryAttempt = null;
+        return false;
+    }
+
+    _newMessageDeliveryAttempt = persistedAttempt;
+    recipientInput.value = persistedAttempt.recipient;
+    contentInput.value = persistedAttempt.draft;
+    modal.classList.remove('hidden');
+    setComposeFailureState(COMPOSE_SCOPE_NEW_MESSAGE, persistedAttempt.recoveryState);
+    return true;
+}
+
+function restoreReplyDeliveryAttemptForCurrentScope() {
+    const replyInput = _messagesContainer?.querySelector('#messageInput');
+    if (!replyInput) return false;
+
+    const persistedAttempt = readPersistedReplyDeliveryAttempt();
+    const sessionScope = buildCurrentComposeSessionScope();
+    const deliveryScope = persistedAttempt
+        ? buildCurrentReplyDeliveryScope(
+            persistedAttempt.scope.organisation_concept_id,
+        )
+        : null;
+    if (
+        !persistedAttempt
+        || !isBoundComposeSessionScope(sessionScope)
+        || !composeSessionScopesEqual(persistedAttempt.sessionScope, sessionScope)
+        || !deliveryScope
+        || !deliveryScopesMatch(persistedAttempt.scope, deliveryScope)
+        || persistedAttempt.fingerprint
+            !== buildDeliveryFingerprintFromScope(deliveryScope, persistedAttempt.draft)
+    ) {
+        _replyDeliveryAttempt = null;
+        return false;
+    }
+
+    _replyDeliveryAttempt = persistedAttempt;
+    replyInput.value = persistedAttempt.draft;
+    setComposeFailureState(COMPOSE_SCOPE_REPLY, persistedAttempt.recoveryState);
+    return true;
+}
+
+function resolveStoredReplyAttemptAutoOpenUserId() {
+    const persistedAttempt = readPersistedReplyDeliveryAttempt();
+    if (!persistedAttempt) return null;
+
+    const sessionScope = buildCurrentComposeSessionScope();
+    if (
+        !isBoundComposeSessionScope(sessionScope)
+        || !composeSessionScopesEqual(persistedAttempt.sessionScope, sessionScope)
+        || persistedAttempt.scope.recipient_ids.length !== 1
+    ) {
+        return null;
+    }
+
+    const recipientId = persistedAttempt.scope.recipient_ids[0];
+    const matchingThread = _threads.some(
+        (thread) => normaliseDeliveryConceptId(getThreadUserId(thread)) === recipientId,
+    );
+    return matchingThread ? recipientId : null;
+}
+
+function getOrCreateDeliveryIdempotencyKey({
+    scope,
+    recipientIds,
+    content,
+    visibleDraft,
+    visibleRecipient,
+    organisationConceptId,
+    actorUserId,
+    threadId,
+}) {
+    const deliveryScope = buildDeliveryScope({
+        recipientIds,
+        organisationConceptId,
+        actorUserId,
+        threadId,
+    });
+    const fingerprint = buildDeliveryFingerprintFromScope(deliveryScope, content);
+    const draft = String(visibleDraft ?? content ?? '');
+    const recipient = String(visibleRecipient ?? recipientIds[0] ?? '');
+    const sessionScope = buildCurrentComposeSessionScope();
+    const recoveryState = getPersistableComposeRecoveryState(scope);
+    const currentAttempt = getDeliveryAttempt(scope);
+    const sameSessionScope = composeSessionScopesEqual(
+        sessionScope,
+        currentAttempt?.sessionScope,
+    );
+    if (
+        currentAttempt?.fingerprint === fingerprint
+        && currentAttempt?.key
+        && sameSessionScope
+    ) {
+        setDeliveryAttempt(scope, {
+            ...currentAttempt,
+            draft,
+            sessionScope,
+            recoveryState,
+            ...(scope === COMPOSE_SCOPE_NEW_MESSAGE ? { recipient } : {}),
+            scope: deliveryScope,
+        });
+        return currentAttempt.key;
+    }
+
+    const key = createDeliveryIdempotencyKey();
+    setDeliveryAttempt(scope, {
+        fingerprint,
+        key,
+        draft,
+        sessionScope,
+        recoveryState,
+        ...(scope === COMPOSE_SCOPE_NEW_MESSAGE ? { recipient } : {}),
+        scope: deliveryScope,
+    });
+    return key;
 }
 
 function getComposeUiElements(scope) {
@@ -836,7 +1562,9 @@ function normaliseRecoveryOrganisationOption(option) {
         return null;
     }
 
-    const conceptId = String(option.concept_id || option.conceptId || '').trim();
+    const conceptId = normaliseDeliveryConceptId(
+        option.concept_id || option.conceptId || '',
+    );
     if (!conceptId) {
         return null;
     }
@@ -869,6 +1597,83 @@ function buildMessageSendFailureState(err) {
             ? organisationOptions[0].conceptId
             : '',
     };
+}
+
+function normaliseComposeFailureState(nextState) {
+    if (!nextState || typeof nextState !== 'object') {
+        return null;
+    }
+
+    const organisationOptions = Array.isArray(nextState.organisationOptions)
+        ? nextState.organisationOptions
+            .map(normaliseRecoveryOrganisationOption)
+            .filter(Boolean)
+        : [];
+    const selectedOrganisationConceptId = normaliseDeliveryConceptId(
+        nextState.selectedOrganisationConceptId || '',
+    );
+    const knownOrganisationIds = new Set(
+        organisationOptions.map((option) => option.conceptId),
+    );
+
+    return {
+        errorMessage: String(nextState.errorMessage || '').trim() || 'Failed to send message',
+        organisationOptions,
+        selectedOrganisationConceptId: organisationOptions.length === 1
+            ? organisationOptions[0].conceptId
+            : (knownOrganisationIds.has(selectedOrganisationConceptId)
+                ? selectedOrganisationConceptId
+                : ''),
+    };
+}
+
+function getPersistableComposeRecoveryState(scope) {
+    const failureState = normaliseComposeFailureState(getComposeFailureState(scope));
+    if (
+        !failureState?.selectedOrganisationConceptId
+        || failureState.organisationOptions.length === 0
+    ) {
+        return null;
+    }
+    return failureState;
+}
+
+function getSelectedRecoveryOrganisationConceptId(scope) {
+    return normaliseDeliveryConceptId(
+        getComposeFailureState(scope)?.selectedOrganisationConceptId || '',
+    );
+}
+
+function buildMessageSendFailureStatePreservingRecovery(scope, err) {
+    const nextState = buildMessageSendFailureState(err);
+    if (nextState.organisationOptions.length > 0) {
+        return nextState;
+    }
+
+    const retainedRecoveryState = getPersistableComposeRecoveryState(scope)
+        || normaliseComposeFailureState(getDeliveryAttempt(scope)?.recoveryState);
+    if (!retainedRecoveryState?.selectedOrganisationConceptId) {
+        return nextState;
+    }
+
+    return {
+        ...nextState,
+        organisationOptions: retainedRecoveryState.organisationOptions,
+        selectedOrganisationConceptId:
+            retainedRecoveryState.selectedOrganisationConceptId,
+    };
+}
+
+function recordComposeSendFailure(scope, err) {
+    setComposeFailureState(
+        scope,
+        buildMessageSendFailureStatePreservingRecovery(scope, err),
+    );
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        syncVisibleReplyDeliveryAttempt();
+    } else if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        syncVisibleNewMessageDeliveryAttempt();
+    }
 }
 
 function renderComposeFailureUi(scope) {
@@ -939,25 +1744,7 @@ function renderComposeFailureUi(scope) {
 }
 
 function setComposeFailureState(scope, nextState) {
-    let normalisedState = null;
-
-    if (nextState && typeof nextState === 'object') {
-        const organisationOptions = Array.isArray(nextState.organisationOptions)
-            ? nextState.organisationOptions.filter(Boolean)
-            : [];
-        const selectedOrganisationConceptId = String(nextState.selectedOrganisationConceptId || '').trim();
-        const knownOrganisationIds = new Set(
-            organisationOptions.map((option) => String(option.conceptId || '').trim()).filter(Boolean),
-        );
-
-        normalisedState = {
-            errorMessage: String(nextState.errorMessage || '').trim() || 'Failed to send message',
-            organisationOptions,
-            selectedOrganisationConceptId: organisationOptions.length === 1
-                ? organisationOptions[0].conceptId
-                : (knownOrganisationIds.has(selectedOrganisationConceptId) ? selectedOrganisationConceptId : ''),
-        };
-    }
+    const normalisedState = normaliseComposeFailureState(nextState);
 
     if (scope === COMPOSE_SCOPE_REPLY) {
         _replySendFailureState = normalisedState;
@@ -984,7 +1771,14 @@ function updateComposeRecoverySelection(scope, organisationConceptId) {
     });
 }
 
-function buildSendPayload({ scope, recipientIds, content }) {
+function buildSendPayload({
+    scope,
+    recipientIds,
+    content,
+    visibleDraft = content,
+    visibleRecipient,
+    threadId = '',
+}) {
     const failureState = getComposeFailureState(scope);
     const organisationOptions = Array.isArray(failureState?.organisationOptions)
         ? failureState.organisationOptions
@@ -1002,9 +1796,20 @@ function buildSendPayload({ scope, recipientIds, content }) {
         return null;
     }
 
+    const deliveryIdempotencyKey = getOrCreateDeliveryIdempotencyKey({
+        scope,
+        recipientIds,
+        content,
+        visibleDraft,
+        visibleRecipient,
+        organisationConceptId: selectedOrganisationConceptId,
+        threadId,
+    });
+
     return {
         recipient_ids: recipientIds,
         content,
+        delivery_idempotency_key: deliveryIdempotencyKey,
         ...(selectedOrganisationConceptId
             ? { organisation_concept_id: selectedOrganisationConceptId }
             : {}),
@@ -1015,6 +1820,10 @@ function buildSendPayload({ scope, recipientIds, content }) {
  * Handle sending a reply in the current conversation.
  */
 async function handleSendReply() {
+    if (isComposePending(COMPOSE_SCOPE_REPLY)) {
+        return;
+    }
+
     if (!_currentConversationUserId) {
         showToast('No conversation selected', 'warning');
         return;
@@ -1023,7 +1832,8 @@ async function handleSendReply() {
     const msgInput = _messagesContainer?.querySelector('#messageInput');
     if (!msgInput) return;
 
-    const content = msgInput.value.trim();
+    const visibleDraft = msgInput.value;
+    const content = visibleDraft.trim();
     if (!content) {
         showToast('Please enter a message', 'warning');
         return;
@@ -1033,16 +1843,27 @@ async function handleSendReply() {
         scope: COMPOSE_SCOPE_REPLY,
         recipientIds: [_currentConversationUserId],
         content,
+        visibleDraft,
+        threadId: resolveCurrentReplyThreadId(),
     });
     if (!payload) {
         return;
     }
 
+    const submittedConversationUserId = _currentConversationUserId;
+    setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
         await postJsonDetailed('/api/messages/', payload);
 
         resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
-        msgInput.value = '';
+        setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
+        const activeReplyInput = _messagesContainer?.querySelector('#messageInput');
+        if (
+            _currentConversationUserId === submittedConversationUserId
+            && activeReplyInput?.value.trim() === content
+        ) {
+            activeReplyInput.value = '';
+        }
         showToast('Message sent', 'success');
 
         // Reload conversation
@@ -1050,7 +1871,9 @@ async function handleSendReply() {
 
     } catch (err) {
         console.error('[messagePanel] Failed to send message:', err);
-        setComposeFailureState(COMPOSE_SCOPE_REPLY, buildMessageSendFailureState(err));
+        recordComposeSendFailure(COMPOSE_SCOPE_REPLY, err);
+    } finally {
+        setComposePending(COMPOSE_SCOPE_REPLY, false);
     }
 }
 
@@ -1072,7 +1895,11 @@ function showNewMessageModal() {
 /**
  * Hide the new message modal.
  */
-function hideNewMessageModal() {
+function hideNewMessageModal({ force = false } = {}) {
+    if (_newMessageSendPending && !force) {
+        return;
+    }
+
     const modal = _messagesContainer?.querySelector('#newMessageModal');
     if (modal) {
         modal.classList.add('hidden');
@@ -1082,6 +1909,9 @@ function hideNewMessageModal() {
         const contentInput = modal.querySelector('#newMessageContent');
         if (recipientInput) recipientInput.value = '';
         if (contentInput) contentInput.value = '';
+        if (_newMessageDeliveryAttempt) {
+            setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
+        }
     }
 }
 
@@ -1089,13 +1919,19 @@ function hideNewMessageModal() {
  * Handle sending a new message from the modal.
  */
 async function handleSendNewMessage() {
+    if (isComposePending(COMPOSE_SCOPE_NEW_MESSAGE)) {
+        return;
+    }
+
     const recipientInput = _messagesContainer?.querySelector('#newMessageRecipient');
     const contentInput = _messagesContainer?.querySelector('#newMessageContent');
 
     if (!recipientInput || !contentInput) return;
 
-    const recipient = recipientInput.value.trim();
-    const content = contentInput.value.trim();
+    const visibleRecipient = recipientInput.value;
+    const visibleDraft = contentInput.value;
+    const recipient = visibleRecipient.trim();
+    const content = visibleDraft.trim();
 
     if (!recipient) {
         showToast('Please enter a recipient', 'warning');
@@ -1115,17 +1951,21 @@ async function handleSendNewMessage() {
         scope: COMPOSE_SCOPE_NEW_MESSAGE,
         recipientIds: [recipientId],
         content,
+        visibleDraft,
+        visibleRecipient,
     });
     if (!payload) {
         return;
     }
 
+    setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, true);
     try {
         await postJsonDetailed('/api/messages/', payload);
 
         resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
+        setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
         showToast('Message sent', 'success');
-        hideNewMessageModal();
+        hideNewMessageModal({ force: true });
 
         // Reload threads and select the new conversation
         await loadMessageThreads();
@@ -1133,7 +1973,9 @@ async function handleSendNewMessage() {
 
     } catch (err) {
         console.error('[messagePanel] Failed to send new message:', err);
-        setComposeFailureState(COMPOSE_SCOPE_NEW_MESSAGE, buildMessageSendFailureState(err));
+        recordComposeSendFailure(COMPOSE_SCOPE_NEW_MESSAGE, err);
+    } finally {
+        setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, false);
     }
 }
 

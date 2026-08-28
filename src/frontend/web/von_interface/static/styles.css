@@ -4911,6 +4911,13 @@ body[data-active-tab="messagesTab"] .tab-content-area {
     box-shadow: 0 8px 16px rgba(33, 95, 141, 0.18);
 }
 
+.send-message-btn:disabled,
+.modal-send-btn:disabled {
+    cursor: wait;
+    opacity: 0.72;
+    box-shadow: none;
+}
+
 .message-modal {
     background: rgba(15, 23, 42, 0.42);
     backdrop-filter: blur(3px);

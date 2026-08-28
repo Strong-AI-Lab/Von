@@ -8,24 +8,32 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pymongo.errors import DuplicateKeyError
 
+from src.backend.security.visibility_predicates import (
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+)
 from src.backend.services.message_service import (
-    MESSAGE_TYPE_CONCEPT_ID,
-    MESSAGE_STATUS_SENT,
+    DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD,
+    DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX,
+    DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD,
+    DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD,
     MESSAGE_STATUS_READ,
-    PREDICATE_SENDER,
+    MESSAGE_STATUS_SENT,
+    MESSAGE_TYPE_CONCEPT_ID,
     PREDICATE_RECIPIENT,
+    PREDICATE_SENDER,
+    DirectMessageIdempotencyConflict,
+    build_direct_message_delivery_identity,
     create_message,
+    create_message_idempotently,
+    delete_message,
     get_message,
     get_message_for_user,
     get_messages_for_user,
     get_unread_count,
     mark_message_read,
-    delete_message,
-)
-from src.backend.security.visibility_predicates import (
-    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
-    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
 )
 
 
@@ -222,6 +230,357 @@ class TestCreateMessage:
                 content="   ",
             )
 
+    def test_create_message_rejects_unbound_server_document_identity(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="Invalid server-owned direct-message document identity",
+        ):
+            create_message(
+                sender_id="#V#user_alice",
+                recipient_ids=["#V#user_bob"],
+                content="Hello",
+                metadata={DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD: "a" * 64},
+                _server_owned_document_id=(
+                    DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX + ("b" * 64)
+                ),
+            )
+
+
+class TestIdempotentMessageCreate:
+    """Tests for sender-scoped REST delivery retry reconciliation."""
+
+    @staticmethod
+    def _identity(**overrides):
+        arguments = {
+            "delivery_idempotency_key": "browser-send-1",
+            "sender_id": "#V#user_alice",
+            "organisation_concept_id": "#V#org_test",
+            "recipient_ids": ["#V#user_bob", "#V#user_charlie"],
+            "content": "Please review this.",
+            "subject": "Review",
+        }
+        arguments.update(overrides)
+        return build_direct_message_delivery_identity(**arguments)
+
+    @staticmethod
+    def _message_for_identity(identity):
+        return {
+            "_id": identity.document_id,
+            "concept_id": "#V#message_winner",
+            "relationships": {
+                "is_an_instance_of": [MESSAGE_TYPE_CONCEPT_ID],
+                PREDICATE_SENDER: ["#V#user_alice"],
+                PREDICATE_RECIPIENT: ["#V#user_bob", "#V#user_charlie"],
+            },
+            "concept_data": {
+                "organisation_concept_id": "#V#org_test",
+                "sent_at": "2026-08-28T05:00:00+00:00",
+                "metadata": {
+                    DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD: (
+                        identity.idempotency_scope
+                    ),
+                    DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD: (
+                        identity.payload_fingerprint
+                    ),
+                    DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD: (
+                        identity.delivery_fingerprint
+                    ),
+                },
+            },
+        }
+
+    def test_identity_is_sender_scoped_and_payload_binds_org_recipients_content(
+        self,
+    ) -> None:
+        baseline = self._identity()
+        reordered_recipients = self._identity(
+            recipient_ids=["#V#user_charlie", "#V#user_bob"]
+        )
+        changed_sender = self._identity(sender_id="#V#user_dana")
+        changed_org = self._identity(organisation_concept_id="#V#org_other")
+        changed_recipients = self._identity(recipient_ids=["#V#user_bob"])
+        changed_content = self._identity(content="A materially different message")
+        changed_metadata = self._identity(metadata={"intent": "action_required"})
+
+        assert reordered_recipients == baseline
+        assert changed_sender.idempotency_scope != baseline.idempotency_scope
+        assert changed_org.idempotency_scope == baseline.idempotency_scope
+        assert changed_recipients.idempotency_scope == baseline.idempotency_scope
+        assert changed_content.idempotency_scope == baseline.idempotency_scope
+        assert changed_metadata.idempotency_scope == baseline.idempotency_scope
+        assert changed_org.payload_fingerprint != baseline.payload_fingerprint
+        assert changed_recipients.payload_fingerprint != baseline.payload_fingerprint
+        assert changed_content.payload_fingerprint != baseline.payload_fingerprint
+        assert changed_metadata.payload_fingerprint != baseline.payload_fingerprint
+
+    @patch("src.backend.services.message_service.create_message")
+    @patch(
+        "src.backend.services.message_service."
+        "get_message_for_delivery_idempotency_scope"
+    )
+    def test_first_delivery_persists_server_owned_fingerprints(
+        self,
+        mock_get_prior: MagicMock,
+        mock_create: MagicMock,
+    ) -> None:
+        mock_get_prior.return_value = None
+        mock_create.side_effect = lambda **kwargs: {
+            "concept_id": "#V#message_created",
+            "concept_data": {"metadata": kwargs["metadata"]},
+        }
+
+        receipt = create_message_idempotently(
+            delivery_idempotency_key="browser-send-1",
+            sender_id="#V#user_alice",
+            organisation_concept_id="#V#org_test",
+            recipient_ids=["#V#user_bob", "#V#user_charlie"],
+            content="Please review this.",
+            subject="Review",
+            metadata={
+                "intent": "review_request",
+                DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD: "client-spoofed",
+            },
+        )
+
+        assert receipt.reused is False
+        persisted_metadata = mock_create.call_args.kwargs["metadata"]
+        assert persisted_metadata["intent"] == "review_request"
+        assert persisted_metadata[DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD] == (
+            receipt.delivery_identity.idempotency_scope
+        )
+        assert persisted_metadata[DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD] == (
+            receipt.delivery_identity.payload_fingerprint
+        )
+        assert persisted_metadata[DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD] == (
+            receipt.delivery_identity.delivery_fingerprint
+        )
+        assert mock_create.call_args.kwargs["_server_owned_document_id"] == (
+            receipt.delivery_identity.document_id
+        )
+
+    @patch("src.backend.services.message_service.create_message")
+    @patch(
+        "src.backend.services.message_service."
+        "get_message_for_delivery_idempotency_scope"
+    )
+    def test_duplicate_key_race_reuses_atomic_winner(
+        self,
+        mock_get_prior: MagicMock,
+        mock_create: MagicMock,
+    ) -> None:
+        identity = self._identity()
+        winner = self._message_for_identity(identity)
+        mock_get_prior.side_effect = [None, winner]
+        mock_create.side_effect = DuplicateKeyError("duplicate retry scope")
+
+        receipt = create_message_idempotently(
+            delivery_idempotency_key="browser-send-1",
+            sender_id="#V#user_alice",
+            organisation_concept_id="#V#org_test",
+            recipient_ids=["#V#user_bob", "#V#user_charlie"],
+            content="Please review this.",
+            subject="Review",
+        )
+
+        assert receipt.reused is True
+        assert receipt.message["concept_id"] == "#V#message_winner"
+        assert mock_get_prior.call_count == 2
+        assert mock_create.call_args.kwargs["_server_owned_document_id"] == (
+            identity.document_id
+        )
+
+    @patch("src.backend.services.message_service.create_message")
+    @patch(
+        "src.backend.services.message_service."
+        "get_message_for_delivery_idempotency_scope"
+    )
+    def test_duplicate_document_id_race_with_changed_payload_conflicts(
+        self,
+        mock_get_prior: MagicMock,
+        mock_create: MagicMock,
+    ) -> None:
+        winning_identity = self._identity(content="Winning payload")
+        winner = self._message_for_identity(winning_identity)
+        mock_get_prior.side_effect = [None, winner]
+        mock_create.side_effect = DuplicateKeyError("duplicate built-in _id")
+
+        with pytest.raises(
+            DirectMessageIdempotencyConflict,
+            match="different message payload",
+        ):
+            create_message_idempotently(
+                delivery_idempotency_key="browser-send-1",
+                sender_id="#V#user_alice",
+                organisation_concept_id="#V#org_test",
+                recipient_ids=["#V#user_bob", "#V#user_charlie"],
+                content="Losing changed payload",
+                subject="Review",
+            )
+
+        losing_identity = self._identity(content="Losing changed payload")
+        assert mock_create.call_args.kwargs["_server_owned_document_id"] == (
+            losing_identity.document_id
+        )
+        assert losing_identity.document_id == winning_identity.document_id
+
+    @patch("src.backend.services.message_service.create_message")
+    @patch(
+        "src.backend.services.message_service."
+        "get_message_for_delivery_idempotency_scope"
+    )
+    def test_same_sender_key_with_changed_material_payload_is_rejected(
+        self,
+        mock_get_prior: MagicMock,
+        mock_create: MagicMock,
+    ) -> None:
+        existing_identity = self._identity()
+        mock_get_prior.return_value = self._message_for_identity(existing_identity)
+        baseline_arguments = {
+            "delivery_idempotency_key": "browser-send-1",
+            "sender_id": "#V#user_alice",
+            "organisation_concept_id": "#V#org_test",
+            "recipient_ids": ["#V#user_bob", "#V#user_charlie"],
+            "content": "Please review this.",
+            "subject": "Review",
+        }
+
+        for changed_fields in (
+            {"organisation_concept_id": "#V#org_other"},
+            {"recipient_ids": ["#V#user_bob"]},
+            {"content": "Changed message"},
+            {"metadata": {"intent": "action_required"}},
+        ):
+            arguments = {**baseline_arguments, **changed_fields}
+            with pytest.raises(
+                DirectMessageIdempotencyConflict,
+                match="different message payload",
+            ):
+                create_message_idempotently(
+                    **arguments,
+                )
+
+        mock_create.assert_not_called()
+
+    @patch("src.backend.services.message_service.create_message")
+    @patch(
+        "src.backend.services.message_service."
+        "get_message_for_delivery_idempotency_scope"
+    )
+    def test_same_client_key_is_isolated_between_trusted_senders(
+        self,
+        mock_get_prior: MagicMock,
+        mock_create: MagicMock,
+    ) -> None:
+        mock_get_prior.return_value = None
+        mock_create.side_effect = lambda **kwargs: {
+            "concept_id": "#V#message_dana",
+            "concept_data": {"metadata": kwargs["metadata"]},
+        }
+
+        receipt = create_message_idempotently(
+            delivery_idempotency_key="browser-send-1",
+            sender_id="#V#user_dana",
+            organisation_concept_id="#V#org_test",
+            recipient_ids=["#V#user_bob", "#V#user_charlie"],
+            content="Please review this.",
+            subject="Review",
+        )
+
+        assert receipt.reused is False
+        assert mock_get_prior.call_args.kwargs["sender_id"] == "#V#user_dana"
+        assert receipt.delivery_identity.idempotency_scope != (
+            self._identity().idempotency_scope
+        )
+
+    def test_builtin_document_id_concurrent_race_works_without_custom_index(
+        self,
+        monkeypatch,
+    ) -> None:
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        import mongomock
+
+        from src.backend.services import message_service as message_service_module
+
+        collection = mongomock.MongoClient().von_test.concepts
+        assert "direct_message_idempotency_scope_unique" not in (
+            collection.index_information()
+        )
+        monkeypatch.setattr(
+            message_service_module,
+            "get_concepts_collection",
+            lambda: collection,
+        )
+        monkeypatch.setattr(
+            message_service_module,
+            "apply_concept_query_filter",
+            lambda query: query,
+        )
+        monkeypatch.setattr(
+            message_service_module.ConceptsRepository,
+            "insert_one",
+            lambda document: collection.insert_one(dict(document)),
+        )
+        monkeypatch.setattr(
+            message_service_module,
+            "upsert_text_for_concept",
+            lambda **_kwargs: {},
+        )
+        monkeypatch.setattr(
+            message_service_module,
+            "maybe_launch_direct_message_workflow",
+            lambda **_kwargs: {"triggered": False},
+        )
+        original_get = message_service_module.get_message_for_delivery_idempotency_scope
+        first_reads_lock = threading.Lock()
+        first_reads_barrier = threading.Barrier(2)
+        first_read_count = 0
+
+        def force_both_concurrent_pre_reads_to_miss(**kwargs):
+            nonlocal first_read_count
+            with first_reads_lock:
+                is_initial_read = first_read_count < 2
+                if is_initial_read:
+                    first_read_count += 1
+            if is_initial_read:
+                first_reads_barrier.wait(timeout=2)
+                return None
+            return original_get(**kwargs)
+
+        monkeypatch.setattr(
+            message_service_module,
+            "get_message_for_delivery_idempotency_scope",
+            force_both_concurrent_pre_reads_to_miss,
+        )
+
+        arguments = {
+            "delivery_idempotency_key": "browser-send-no-custom-index",
+            "sender_id": "#V#user_alice",
+            "organisation_concept_id": "#V#org_test",
+            "recipient_ids": ["#V#user_bob"],
+            "content": "One durable message",
+            "metadata": {"intent": "info"},
+        }
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            receipts = list(
+                executor.map(
+                    lambda _index: create_message_idempotently(**arguments),
+                    range(2),
+                )
+            )
+
+        assert sorted(receipt.reused for receipt in receipts) == [False, True]
+        assert len({receipt.message["concept_id"] for receipt in receipts}) == 1
+        assert receipts[0].message["concept_id"].startswith("#V#message_user_alice_")
+        assert collection.count_documents({}) == 1
+        assert "direct_message_idempotency_scope_unique" not in (
+            collection.index_information()
+        )
+        stored = collection.find_one({})
+        assert stored is not None
+        assert stored["_id"] == receipts[0].delivery_identity.document_id
+
 
 class TestGetMessage:
     """Tests for get_message function."""
@@ -297,6 +656,35 @@ class TestGetMessage:
             {f"relationships.{PREDICATE_SENDER}": "#V#user_charlie"},
             {f"relationships.{PREDICATE_RECIPIENT}": "#V#user_charlie"},
         ]
+
+    @patch("src.backend.services.message_service.get_concepts_collection")
+    @patch("src.backend.services.message_service.apply_concept_query_filter")
+    def test_idempotency_lookup_uses_builtin_document_id_not_custom_index(
+        self,
+        mock_filter: MagicMock,
+        mock_get_coll: MagicMock,
+    ) -> None:
+        from src.backend.services.message_service import (
+            get_message_for_delivery_idempotency_scope,
+        )
+
+        collection = MagicMock()
+        mock_get_coll.return_value = collection
+        mock_filter.side_effect = lambda query: query
+        collection.find_one.return_value = None
+
+        result = get_message_for_delivery_idempotency_scope(
+            sender_id="#V#user_alice",
+            idempotency_scope="a" * 64,
+        )
+
+        assert result is None
+        query = collection.find_one.call_args.args[0]
+        assert query["_id"] == (
+            f"{DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX}{'a' * 64}"
+        )
+        assert query[f"relationships.{PREDICATE_SENDER}"] == "#V#user_alice"
+        assert "concept_data.metadata.delivery_idempotency_scope" not in query
 
 
 class TestGetMessagesForUser:

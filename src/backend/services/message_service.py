@@ -8,21 +8,26 @@ JVNAUTOSCI-1071
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from pymongo.errors import DuplicateKeyError
+
 from ..db.mongo_client import get_concepts_collection
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..services.text_value_service import upsert_text_for_concept
-from .workflow_event_integration_service import (
-    maybe_launch_direct_message_workflow,
-)
 from ..security.access_control import (
     apply_concept_query_filter,
 )
 from ..security.visibility_predicates import (
     set_specific_to_user_values,
+)
+from ..services.text_value_service import upsert_text_for_concept
+from .workflow_event_integration_service import (
+    maybe_launch_direct_message_workflow,
 )
 
 _log = logging.getLogger(__name__)
@@ -40,6 +45,48 @@ PREDICATE_REPLY_TO = "#V#is_reply_to"  # For reply chains
 MESSAGE_STATUS_SENT = "sent"
 MESSAGE_STATUS_DELIVERED = "delivered"
 MESSAGE_STATUS_READ = "read"
+
+DIRECT_MESSAGE_IDEMPOTENCY_SCHEMA_VERSION = "direct_message_idempotency.v1"
+DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD = "delivery_idempotency_scope"
+DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD = "delivery_payload_fingerprint"
+DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD = "delivery_fingerprint"
+DIRECT_MESSAGE_IDEMPOTENCY_KEY_HASH_FIELD = "delivery_idempotency_key_hash"
+MAX_DIRECT_MESSAGE_IDEMPOTENCY_KEY_LENGTH = 512
+DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX = "direct_message_idempotency_v1:"
+
+_DIRECT_MESSAGE_RESERVED_DELIVERY_METADATA_FIELDS = frozenset(
+    {
+        DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD,
+        DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD,
+        DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD,
+        DIRECT_MESSAGE_IDEMPOTENCY_KEY_HASH_FIELD,
+        "delivery_idempotency_schema_version",
+    }
+)
+
+
+class DirectMessageIdempotencyConflict(ValueError):
+    """The same scoped idempotency key names a different message intent."""
+
+
+@dataclass(frozen=True)
+class DirectMessageDeliveryIdentity:
+    """Opaque hashes used to reconcile one actor-scoped delivery request."""
+
+    idempotency_scope: str
+    payload_fingerprint: str
+    delivery_fingerprint: str
+    idempotency_key_hash: str
+    document_id: str
+
+
+@dataclass(frozen=True)
+class DirectMessageCreateReceipt:
+    """Result of an idempotent direct-message create or replay."""
+
+    message: Dict[str, Any]
+    reused: bool
+    delivery_identity: DirectMessageDeliveryIdentity
 
 
 def _normalise_concept_id(value: Any) -> Optional[str]:
@@ -68,6 +115,154 @@ def normalise_message_recipient_ids(value: Any) -> List[str]:
         seen.add(fingerprint)
         recipients.append(concept_id)
     return recipients
+
+
+def normalise_direct_message_delivery_idempotency_key(value: Any) -> Optional[str]:
+    """Validate an optional client retry key without treating it as authority."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("delivery_idempotency_key must be a string")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("delivery_idempotency_key must not be empty")
+    if len(cleaned) > MAX_DIRECT_MESSAGE_IDEMPOTENCY_KEY_LENGTH:
+        raise ValueError(
+            "delivery_idempotency_key must be at most "
+            f"{MAX_DIRECT_MESSAGE_IDEMPOTENCY_KEY_LENGTH} characters"
+        )
+    return cleaned
+
+
+def _normalise_optional_message_text(value: Any, *, field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value.strip() or None
+
+
+def _canonical_json_sha256(payload: Dict[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Direct-message metadata must be valid JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _material_delivery_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in metadata.items()
+        if isinstance(key, str)
+        and key not in _DIRECT_MESSAGE_RESERVED_DELIVERY_METADATA_FIELDS
+    }
+
+
+def sanitise_direct_message_delivery_metadata(
+    metadata: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Remove server-owned delivery identity fields from client metadata."""
+
+    return _material_delivery_metadata(metadata)
+
+
+def build_direct_message_delivery_identity(
+    *,
+    delivery_idempotency_key: str,
+    sender_id: str,
+    organisation_concept_id: str,
+    recipient_ids: List[str],
+    content: str,
+    subject: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    reply_to_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> DirectMessageDeliveryIdentity:
+    """Build a scoped retry identity and a separately comparable payload hash.
+
+    The client key is never an authority carrier. Its unique claim is bound to
+    the trusted sender, so the same key remains isolated between actors. The
+    separate payload hash binds the authorised organisation and canonical
+    recipient set along with visible message content; changing any of those
+    fields is therefore conflicting key reuse rather than a second delivery.
+    """
+
+    normalised_key = normalise_direct_message_delivery_idempotency_key(
+        delivery_idempotency_key
+    )
+    normalised_sender = _normalise_concept_id(sender_id)
+    normalised_org = _normalise_concept_id(organisation_concept_id)
+    normalised_recipients = normalise_message_recipient_ids(recipient_ids)
+    if normalised_key is None:
+        raise ValueError("delivery_idempotency_key is required")
+    if normalised_sender is None:
+        raise ValueError("sender_id is required")
+    if normalised_org is None:
+        raise ValueError("organisation_concept_id is required")
+    if not normalised_recipients:
+        raise ValueError("At least one recipient is required")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Message content cannot be empty")
+
+    canonical_recipients = sorted(
+        normalised_recipients,
+        key=lambda item: item.casefold(),
+    )
+    idempotency_key_hash = hashlib.sha256(normalised_key.encode("utf-8")).hexdigest()
+    idempotency_scope = _canonical_json_sha256(
+        {
+            "schema_version": DIRECT_MESSAGE_IDEMPOTENCY_SCHEMA_VERSION,
+            "delivery_idempotency_key": normalised_key,
+            "sender_id": normalised_sender,
+        }
+    )
+    payload_fingerprint = _canonical_json_sha256(
+        {
+            "schema_version": DIRECT_MESSAGE_IDEMPOTENCY_SCHEMA_VERSION,
+            "organisation_concept_id": normalised_org,
+            "recipient_ids": canonical_recipients,
+            "content": content.strip(),
+            "subject": _normalise_optional_message_text(
+                subject,
+                field_name="subject",
+            ),
+            "thread_id": _normalise_optional_message_text(
+                thread_id,
+                field_name="thread_id",
+            ),
+            "reply_to_id": _normalise_optional_message_text(
+                reply_to_id,
+                field_name="reply_to_id",
+            ),
+            "metadata": _material_delivery_metadata(metadata),
+        }
+    )
+    delivery_fingerprint = _canonical_json_sha256(
+        {
+            "schema_version": DIRECT_MESSAGE_IDEMPOTENCY_SCHEMA_VERSION,
+            "idempotency_scope": idempotency_scope,
+            "payload_fingerprint": payload_fingerprint,
+        }
+    )
+    return DirectMessageDeliveryIdentity(
+        idempotency_scope=idempotency_scope,
+        payload_fingerprint=payload_fingerprint,
+        delivery_fingerprint=delivery_fingerprint,
+        idempotency_key_hash=idempotency_key_hash,
+        document_id=(
+            f"{DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX}{idempotency_scope}"
+        ),
+    )
 
 
 def authorise_direct_message_participants(
@@ -179,6 +374,7 @@ def create_message(
     reply_to_id: Optional[str] = None,
     org_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    _server_owned_document_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new direct message.
 
@@ -191,6 +387,8 @@ def create_message(
         reply_to_id: Optional message ID this is replying to.
         org_id: Optional organisation context for org-scoped messages.
         metadata: Optional additional metadata.
+        _server_owned_document_id: Internal deterministic Mongo identity for an
+            already server-derived idempotency scope. REST clients cannot set it.
 
     Returns:
         The created message document.
@@ -257,6 +455,22 @@ def create_message(
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+    if _server_owned_document_id is not None:
+        document_id = str(_server_owned_document_id).strip()
+        scope_hash = document_id.removeprefix(
+            DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX
+        )
+        persisted_scope = str(
+            metadata_payload.get(DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD) or ""
+        ).strip()
+        if (
+            not document_id.startswith(DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX)
+            or len(scope_hash) != 64
+            or any(character not in "0123456789abcdef" for character in scope_hash)
+            or persisted_scope != scope_hash
+        ):
+            raise ValueError("Invalid server-owned direct-message document identity")
+        concept_doc["_id"] = document_id
 
     # Add optional subject
     if subject:
@@ -372,6 +586,156 @@ def get_message_for_delivery_fingerprint(
         "concept_data.metadata.delivery_fingerprint": delivery_fingerprint.strip(),
     }
     return coll.find_one(apply_concept_query_filter(base_filter))
+
+
+def get_message_for_delivery_idempotency_scope(
+    *,
+    sender_id: str,
+    idempotency_scope: str,
+) -> Optional[Dict[str, Any]]:
+    """Read the trusted sender's message through Mongo's built-in unique key."""
+
+    normalised_sender = _normalise_concept_id(sender_id)
+    scope = str(idempotency_scope or "").strip()
+    if normalised_sender is None or not scope:
+        return None
+    coll = get_concepts_collection()
+    if coll is None:
+        return None
+    base_filter: Dict[str, Any] = {
+        "_id": f"{DIRECT_MESSAGE_IDEMPOTENCY_DOCUMENT_ID_PREFIX}{scope}",
+        "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
+        f"relationships.{PREDICATE_SENDER}": normalised_sender,
+    }
+    message = coll.find_one(apply_concept_query_filter(base_filter))
+    return message if isinstance(message, dict) else None
+
+
+def _require_matching_delivery_identity(
+    message: Dict[str, Any],
+    expected: DirectMessageDeliveryIdentity,
+) -> None:
+    concept_data = message.get("concept_data")
+    concept_data = concept_data if isinstance(concept_data, dict) else {}
+    metadata = concept_data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if (
+        metadata.get(DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD)
+        != expected.idempotency_scope
+        or metadata.get(DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD)
+        != expected.payload_fingerprint
+        or metadata.get(DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD)
+        != expected.delivery_fingerprint
+    ):
+        raise DirectMessageIdempotencyConflict(
+            "delivery_idempotency_key was already used for a different message payload"
+        )
+
+
+def create_message_idempotently(
+    *,
+    delivery_idempotency_key: str,
+    sender_id: str,
+    recipient_ids: List[str],
+    content: str,
+    organisation_concept_id: str,
+    subject: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    reply_to_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> DirectMessageCreateReceipt:
+    """Create once, or reconcile a concurrent/retried REST delivery request.
+
+    A deterministic, server-owned Mongo ``_id`` derived from the opaque sender
+    scope is the atomic claim. The pre-read is the fast replay path; built-in
+    ``_id`` uniqueness and ``DuplicateKeyError`` recovery make simultaneous
+    requests converge even when optional index bootstrap fails open.
+    """
+
+    normalised_recipients = normalise_message_recipient_ids(recipient_ids)
+    normalised_subject = _normalise_optional_message_text(
+        subject,
+        field_name="subject",
+    )
+    normalised_thread_id = _normalise_optional_message_text(
+        thread_id,
+        field_name="thread_id",
+    )
+    normalised_reply_to_id = _normalise_optional_message_text(
+        reply_to_id,
+        field_name="reply_to_id",
+    )
+    material_metadata = _material_delivery_metadata(metadata)
+    identity = build_direct_message_delivery_identity(
+        delivery_idempotency_key=delivery_idempotency_key,
+        sender_id=sender_id,
+        organisation_concept_id=organisation_concept_id,
+        recipient_ids=normalised_recipients,
+        content=content,
+        subject=normalised_subject,
+        thread_id=normalised_thread_id,
+        reply_to_id=normalised_reply_to_id,
+        metadata=material_metadata,
+    )
+
+    def find_prior() -> Optional[Dict[str, Any]]:
+        return get_message_for_delivery_idempotency_scope(
+            sender_id=sender_id,
+            idempotency_scope=identity.idempotency_scope,
+        )
+
+    prior_message = find_prior()
+    if isinstance(prior_message, dict):
+        _require_matching_delivery_identity(prior_message, identity)
+        return DirectMessageCreateReceipt(
+            message=prior_message,
+            reused=True,
+            delivery_identity=identity,
+        )
+
+    persistence_metadata = dict(material_metadata)
+    persistence_metadata.update(
+        {
+            "delivery_idempotency_schema_version": (
+                DIRECT_MESSAGE_IDEMPOTENCY_SCHEMA_VERSION
+            ),
+            DIRECT_MESSAGE_IDEMPOTENCY_SCOPE_FIELD: identity.idempotency_scope,
+            DIRECT_MESSAGE_PAYLOAD_FINGERPRINT_FIELD: identity.payload_fingerprint,
+            DIRECT_MESSAGE_DELIVERY_FINGERPRINT_FIELD: identity.delivery_fingerprint,
+            DIRECT_MESSAGE_IDEMPOTENCY_KEY_HASH_FIELD: identity.idempotency_key_hash,
+        }
+    )
+
+    try:
+        message = create_message(
+            sender_id=sender_id,
+            recipient_ids=normalised_recipients,
+            content=content.strip(),
+            subject=normalised_subject,
+            thread_id=normalised_thread_id,
+            reply_to_id=normalised_reply_to_id,
+            org_id=organisation_concept_id,
+            metadata=persistence_metadata,
+            _server_owned_document_id=identity.document_id,
+        )
+    except DuplicateKeyError as exc:
+        winner = find_prior()
+        if not isinstance(winner, dict):
+            raise RuntimeError(
+                "Direct-message idempotency race could not be reconciled"
+            ) from exc
+        _require_matching_delivery_identity(winner, identity)
+        return DirectMessageCreateReceipt(
+            message=winner,
+            reused=True,
+            delivery_identity=identity,
+        )
+
+    return DirectMessageCreateReceipt(
+        message=message,
+        reused=False,
+        delivery_identity=identity,
+    )
 
 
 def get_messages_for_user(

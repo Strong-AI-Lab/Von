@@ -2298,10 +2298,16 @@ def test_process_invalidation_does_not_clobber_completed_current_generation_buil
 def test_workflow_routing_text_relation_change_invalidates_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services import text_value_service
+    from src.backend.workflows.durable import registry_factory
 
     invalidations: list[dict[str, object]] = []
     discovery_cache_clears: list[bool] = []
+
+    class _CachedRegistry:
+        def has(self, workflow_id: str) -> bool:
+            return workflow_id == "#V#workflow_repair_or_create_workflow"
 
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
@@ -2312,8 +2318,14 @@ def test_workflow_routing_text_relation_change_invalidates_projection(
         lambda: discovery_cache_clears.append(True),
     )
     monkeypatch.setattr(
-        "src.backend.services.workflow_capability_service.is_authoritative_workflow_concept_id",
-        lambda concept_id: concept_id == "#V#workflow_repair_or_create_workflow",
+        registry_factory,
+        "get_cached_shared_workflow_registry_read_only",
+        lambda: _CachedRegistry(),
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find_one",
+        lambda *_args, **_kwargs: None,
     )
 
     text_value_service._invalidate_workflow_routing_projection_for_text_relation_change(
@@ -2341,7 +2353,9 @@ def test_workflow_routing_text_relation_change_skips_non_workflow_subject(
     on task/episode concepts; those writes previously invalidated the routing
     index and starved live workflow discovery of a ready index."""
 
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services import text_value_service
+    from src.backend.workflows.durable import registry_factory
 
     invalidations: list[str | None] = []
     discovery_cache_clears: list[bool] = []
@@ -2357,8 +2371,21 @@ def test_workflow_routing_text_relation_change_skips_non_workflow_subject(
         lambda: discovery_cache_clears.append(True),
     )
     monkeypatch.setattr(
-        "src.backend.services.workflow_capability_service.is_authoritative_workflow_concept_id",
-        lambda concept_id: False,
+        registry_factory,
+        "get_cached_shared_workflow_registry_read_only",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "get_shared_workflow_registry_read_only",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ordinary description write must not build the registry")
+        ),
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find_one",
+        lambda *_args, **_kwargs: None,
     )
 
     text_value_service._invalidate_workflow_routing_projection_for_text_relation_change(
@@ -2377,37 +2404,111 @@ def test_is_authoritative_workflow_concept_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import src.backend.services.workflow_capability_service as capability_service
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.workflows.durable import registry_factory
+
+    registry_checks: list[str] = []
+    represented_queries: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    class _CachedRegistry:
+        def has(self, workflow_id: str) -> bool:
+            registry_checks.append(workflow_id)
+            return workflow_id == "#V#a_workflow"
 
     monkeypatch.setattr(
-        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
-        lambda **kwargs: object(),
+        registry_factory,
+        "get_cached_shared_workflow_registry_read_only",
+        lambda: _CachedRegistry(),
     )
     monkeypatch.setattr(
-        capability_service,
-        "_authoritative_registry_workflow_ids",
-        lambda registry: ("#V#a_workflow", "#V#b_workflow"),
+        registry_factory,
+        "get_shared_workflow_registry_read_only",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "latency-sensitive identity check must not build the registry"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find_one",
+        lambda query, projection=None: (
+            represented_queries.append((dict(query), dict(projection or {}))) or None
+        ),
     )
 
     assert capability_service.is_authoritative_workflow_concept_id("#V#a_workflow")
     assert not capability_service.is_authoritative_workflow_concept_id("#V#task_x")
     assert not capability_service.is_authoritative_workflow_concept_id("")
     assert not capability_service.is_authoritative_workflow_concept_id(None)  # type: ignore[arg-type]
+    assert registry_checks == ["#V#a_workflow", "#V#task_x"]
+    assert represented_queries == [
+        (
+            {
+                "concept_id": "#V#task_x",
+                "$or": [
+                    {"relationships.#V#hasInitialStep": {"$exists": True}},
+                    {"relationships.hasInitialStep": {"$exists": True}},
+                    {"relationships.#V#has_initial_step": {"$exists": True}},
+                    {"relationships.has_initial_step": {"$exists": True}},
+                ],
+            },
+            {"concept_id": 1},
+        )
+    ]
+
+
+def test_is_authoritative_workflow_concept_id_uses_exact_represented_graph_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.workflows.durable import registry_factory
+
+    monkeypatch.setattr(
+        registry_factory,
+        "get_cached_shared_workflow_registry_read_only",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find_one",
+        lambda query, projection=None: (
+            {"concept_id": "#V#represented_workflow"}
+            if query.get("concept_id") == "#V#represented_workflow"
+            else None
+        ),
+    )
+
+    assert capability_service.is_authoritative_workflow_concept_id(
+        "#V#represented_workflow"
+    )
+    assert not capability_service.is_authoritative_workflow_concept_id(
+        "#V#ordinary_message"
+    )
 
 
 def test_is_authoritative_workflow_concept_id_fails_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import src.backend.services.workflow_capability_service as capability_service
-
-    def _raise(**kwargs: object) -> object:
-        raise RuntimeError("registry unavailable")
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.workflows.durable import registry_factory
 
     monkeypatch.setattr(
-        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
-        _raise,
+        registry_factory,
+        "get_cached_shared_workflow_registry_read_only",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find_one",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("represented workflow authority unavailable")
+        ),
     )
 
-    # Registry lookup failure must degrade to the prior always-invalidate
+    # Represented-authority lookup failure must degrade to the prior always-invalidate
     # behaviour rather than silently skipping a legitimate workflow update.
     assert capability_service.is_authoritative_workflow_concept_id("#V#task_x")
 

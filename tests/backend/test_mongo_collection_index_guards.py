@@ -294,6 +294,7 @@ def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
         "relationships_has_initial_step_1",
         "relationships_v_evidence_view_applies_to_tool_1",
         "episode_critique_remediation_external_instance_lookup",
+        "direct_message_idempotency_scope_unique",
         "embedding_status_updated_at_desc",
         "legacy_name_exact_1",
         "updated_at_-1",
@@ -315,6 +316,26 @@ def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
     ]
     assert concept_indexes_by_name["embedding_status_updated_at_desc"]["kwargs"] == {
         "name": "embedding_status_updated_at_desc"
+    }
+    assert concept_indexes_by_name["direct_message_idempotency_scope_unique"][
+        "keys"
+    ] == [
+        (
+            "concept_data.metadata.delivery_idempotency_scope",
+            mc.ASCENDING,
+        )
+    ]
+    assert concept_indexes_by_name["direct_message_idempotency_scope_unique"][
+        "kwargs"
+    ] == {
+        "name": "direct_message_idempotency_scope_unique",
+        "unique": True,
+        "partialFilterExpression": {
+            "concept_data.metadata.delivery_idempotency_scope": {
+                "$exists": True,
+                "$type": "string",
+            }
+        },
     }
 
 
