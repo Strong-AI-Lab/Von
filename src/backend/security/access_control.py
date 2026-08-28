@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from bson import BSON
@@ -471,9 +471,12 @@ def get_effective_organisation_concept_id() -> Optional[str]:
                 user_for_context,
                 require_known_window=True,
             )
-            org_id = _normalise_stored_org_concept_id(effective.get("organisation_id"))
-            if org_id:
-                return org_id
+            # A known window session is authoritative even when its explicit
+            # selection is Personal. Falling through here would resurrect the
+            # browser-wide Flask organisation selected by another tab.
+            return _normalise_stored_org_concept_id(
+                effective.get("organisation_id")
+            )
     except WindowSessionContextUnavailable:
         # An explicit unknown/expired/other-actor selector must never inherit
         # the browser-wide organisation selected by another tab.
@@ -799,11 +802,12 @@ def _relationship_concept_ids(value: Any) -> set[str]:
 
 def prewarm_concept_relationship_access(
     documents: Iterable[Dict[str, Any]],
-) -> None:
+) -> AccessEvaluator | None:
     """Batch-cache visibility for relationship targets in concept documents."""
 
     if not should_enforce_access_control():
-        return
+        return None
+    evaluator = _current_evaluator()
     concept_ids: set[str] = set()
     for document in documents:
         if not isinstance(document, dict):
@@ -812,17 +816,21 @@ def prewarm_concept_relationship_access(
         if isinstance(relationships, dict):
             concept_ids.update(_relationship_concept_ids(relationships))
     if concept_ids:
-        _current_evaluator().accessible_concept_ids(concept_ids)
+        evaluator.accessible_concept_ids(concept_ids)
+    return evaluator
 
 
 def sanitize_concept_document(
     doc: Optional[Dict[str, Any]],
+    *,
+    access_evaluator: AccessEvaluator | None = None,
 ) -> Optional[Dict[str, Any]]:
     if doc is None:
         return None
     if not should_enforce_access_control():
         return doc
-    user_id = get_effective_user_concept_id()
+    evaluator = access_evaluator or _current_evaluator()
+    user_id = evaluator.user_id
 
     # Get user email for detailed logging
     user_email = "unknown"
@@ -837,7 +845,7 @@ def sanitize_concept_document(
     relationships = relationships if isinstance(relationships, dict) else {}
     user_specific = _get_specific_to_user_values(relationships)
 
-    org_id = get_effective_organisation_concept_id()
+    org_id = evaluator.org_id
     org_specific = get_specific_to_org_values(relationships)
 
     if not _document_visible_to_actor(doc, user_id, org_id):
@@ -857,8 +865,7 @@ def sanitize_concept_document(
         )
     if not isinstance(relationships, dict):
         return doc
-    evaluator = _current_evaluator()
-    prewarm_concept_relationship_access((doc,))
+    evaluator.accessible_concept_ids(_relationship_concept_ids(relationships))
     new_relationships: Dict[str, Any] = {}
     changed = False
     for predicate, value in relationships.items():

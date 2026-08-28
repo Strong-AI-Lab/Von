@@ -1,17 +1,19 @@
 from __future__ import annotations
+
+import logging
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Iterable, Literal, Mapping, Set
+from typing import Any, Deque, Dict, Iterable, List, Literal, Mapping, Optional, Set
+
 from pymongo.collection import Collection
 from pymongo.database import Database
-import logging
 
-from ..mongo_client import get_db, get_concepts_collection
 from ...security.access_control import (
     apply_concept_query_filter,
     apply_pipeline_filter,
     prewarm_concept_relationship_access,
     sanitize_concept_document,
 )
+from ..mongo_client import get_concepts_collection, get_db
 
 
 # --- Legacy Field Guard -------------------------------------------------
@@ -167,9 +169,15 @@ class _AccessControlledCursor:
                 except StopIteration:
                     self._exhausted = True
                     break
-            prewarm_concept_relationship_access(batch)
+            access_evaluator = prewarm_concept_relationship_access(batch)
             for doc in batch:
-                sanitised = sanitize_concept_document(doc)
+                if access_evaluator is None:
+                    sanitised = sanitize_concept_document(doc)
+                else:
+                    sanitised = sanitize_concept_document(
+                        doc,
+                        access_evaluator=access_evaluator,
+                    )
                 if sanitised is not None:
                     self._buffer.append(sanitised)
         return self._buffer.popleft()
@@ -448,7 +456,9 @@ class ConceptsRepository:
             if not source:
                 return collected
             try:
-                from ...services.concept_predicate_metadata_service import get_relationship_kinds
+                from ...services.concept_predicate_metadata_service import (
+                    get_relationship_kinds,
+                )
                 kinds: tuple[str, ...] = get_relationship_kinds()
             except Exception:
                 kinds = RELATIONSHIP_KINDS
