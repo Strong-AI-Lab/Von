@@ -440,9 +440,15 @@ def is_authoritative_workflow_concept_id(concept_id: str) -> bool:
     on unrelated concepts (e.g. task or episode-critique concepts produced by
     background workflows) must not invalidate the workflow routing index.
 
-    Fails open (returns True) when the registry cannot be resolved, so a lookup
-    failure degrades to the prior always-invalidate behaviour rather than
-    silently skipping a legitimate workflow update.
+    This check is used on every routing-relevant text write, including ordinary
+    ``hasDescription`` writes.  It must therefore never construct the shared
+    workflow registry on the caller's latency-sensitive path.  Prefer an
+    already-built registry, then use the same represented ``hasInitialStep``
+    criterion as workflow discovery for an exact concept lookup.
+
+    Fails open (returns True) when represented authority cannot be read, so a
+    lookup failure degrades to the prior always-invalidate behaviour rather
+    than silently skipping a legitimate workflow update.
     """
 
     cleaned = str(concept_id or "").strip()
@@ -450,14 +456,30 @@ def is_authoritative_workflow_concept_id(concept_id: str) -> bool:
         return False
     try:
         from ..workflows.durable.registry_factory import (
-            get_shared_workflow_registry_read_only,
+            get_cached_shared_workflow_registry_read_only,
         )
 
-        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
-        authoritative_ids = set(_authoritative_registry_workflow_ids(registry))
+        registry = get_cached_shared_workflow_registry_read_only()
+        if registry is not None and registry.has(cleaned):
+            return True
+
+        from ..db.repositories.concepts_repository import ConceptsRepository
+        from ..workflows.vontology_loader import WORKFLOW_GRAPH_PREDICATE_ALIASES
+
+        initial_step_query = [
+            {f"relationships.{predicate}": {"$exists": True}}
+            for predicate in WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"]
+        ]
+        represented_workflow = ConceptsRepository.find_one(
+            {
+                "concept_id": cleaned,
+                "$or": initial_step_query,
+            },
+            {"concept_id": 1},
+        )
     except Exception:
         return True
-    return cleaned in authoritative_ids
+    return represented_workflow is not None
 
 
 def _authoritative_registry_fingerprint_rows(

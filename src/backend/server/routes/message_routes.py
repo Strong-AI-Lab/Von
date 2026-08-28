@@ -12,16 +12,20 @@ from flask import Blueprint, jsonify, request, session
 from flask.typing import ResponseReturnValue
 
 from ...services.message_service import (
+    DirectMessageIdempotencyConflict,
     authorise_direct_message_participants,
     create_message,
-    get_message_for_user,
-    get_messages_for_user,
+    create_message_idempotently,
+    delete_message,
     get_conversation_between_users,
+    get_message_for_user,
+    get_message_threads_for_user,
+    get_messages_for_user,
     get_unread_count,
     mark_message_read,
     mark_messages_read_bulk,
-    delete_message,
-    get_message_threads_for_user,
+    normalise_direct_message_delivery_idempotency_key,
+    sanitise_direct_message_delivery_metadata,
     search_messages,
 )
 from ...services.paper_recommendation_review_service import (
@@ -29,6 +33,11 @@ from ...services.paper_recommendation_review_service import (
 )
 from ...services.paper_recommendation_vontology_service import (
     record_paper_recommendation_feedback,
+)
+from ...services.window_session_context_service import (
+    WindowSessionContextRecoveryUnavailable,
+    WindowSessionContextUnavailable,
+    get_effective_context,
 )
 
 _log = logging.getLogger(__name__)
@@ -98,23 +107,46 @@ def _get_current_user_concept_id() -> Optional[str]:
     return None
 
 
-def _get_current_org_concept_id(user_concept_id: Optional[str]) -> Optional[str]:
-    """Get the current organisation's concept ID from effective window/session context."""
+def _get_current_org_concept_id(
+    user_concept_id: Optional[str],
+    *,
+    require_known_window: bool = False,
+) -> Optional[str]:
+    """Get the organisation from the actor-bound window or legacy session context.
+
+    A supplied window selector must never silently degrade to the browser-wide
+    Flask session for an organisation-scoped mutation.  Callers opt into that
+    boundary with ``require_known_window`` while no-window clients retain the
+    legacy session fallback.
+    """
+    window_session_id = request.headers.get("X-Von-Window-Session")
+    strict_window = bool(
+        require_known_window
+        and isinstance(window_session_id, str)
+        and window_session_id.strip()
+    )
     if isinstance(user_concept_id, str) and user_concept_id.strip():
         try:
-            from ...services.window_session_context_service import get_effective_context
-
-            window_session_id = request.headers.get("X-Von-Window-Session")
             effective = get_effective_context(
                 window_session_id,
                 dict(session),
                 user_concept_id.strip(),
+                require_known_window=strict_window,
             )
             org_id = _normalise_concept_id(effective.get("organisation_id"))
-            if org_id:
+            if org_id or strict_window:
                 return org_id
-        except Exception:
-            pass
+        except (
+            WindowSessionContextRecoveryUnavailable,
+            WindowSessionContextUnavailable,
+        ):
+            if strict_window:
+                raise
+        except Exception as exc:
+            if strict_window:
+                raise WindowSessionContextRecoveryUnavailable(
+                    "window_session_context_recovery_unavailable"
+                ) from exc
 
     return _normalise_concept_id(session.get("organisation_concept_id"))
 
@@ -286,6 +318,7 @@ def send_message() -> ResponseReturnValue:
         "thread_id": "Optional thread concept ID",
         "reply_to_id": "Optional message ID being replied to",
         "organisation_concept_id": "Optional explicit send scope",
+        "delivery_idempotency_key": "Optional stable key for one UI send",
         "metadata": {}
     }
     """
@@ -301,7 +334,33 @@ def send_message() -> ResponseReturnValue:
     explicit_org_id = _normalise_concept_id(
         data.get("organisation_concept_id") or data.get("org_id")
     )
-    org_id = explicit_org_id or _get_current_org_concept_id(sender_id)
+    try:
+        org_id = explicit_org_id or _get_current_org_concept_id(
+            sender_id,
+            require_known_window=True,
+        )
+    except WindowSessionContextRecoveryUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "Window organisation context could not be recovered",
+                    "error_code": "window_context_recovery_unavailable",
+                    "retryable": True,
+                }
+            ),
+            503,
+        )
+    except WindowSessionContextUnavailable:
+        return (
+            jsonify(
+                {
+                    "error": "Window organisation context must be rebound",
+                    "error_code": "window_context_unavailable",
+                    "retryable": True,
+                }
+            ),
+            409,
+        )
     if not isinstance(org_id, str) or not org_id:
         return jsonify({"error": "No organisation context"}), 400
 
@@ -312,6 +371,62 @@ def send_message() -> ResponseReturnValue:
         return jsonify({"error": "At least one recipient is required"}), 400
     if not content:
         return jsonify({"error": "Message content is required"}), 400
+    if "idempotency_key" in data:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Use delivery_idempotency_key for direct-message retries"
+                    ),
+                    "error_code": "unsupported_idempotency_key_field",
+                }
+            ),
+            400,
+        )
+
+    try:
+        body_idempotency_key = (
+            normalise_direct_message_delivery_idempotency_key(
+                data.get("delivery_idempotency_key")
+            )
+            if "delivery_idempotency_key" in data
+            else None
+        )
+        header_idempotency_key = (
+            normalise_direct_message_delivery_idempotency_key(
+                request.headers.get("Idempotency-Key")
+            )
+            if request.headers.get("Idempotency-Key") is not None
+            else None
+        )
+    except ValueError as exc:
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "error_code": "invalid_idempotency_key",
+                }
+            ),
+            400,
+        )
+    if (
+        body_idempotency_key
+        and header_idempotency_key
+        and body_idempotency_key != header_idempotency_key
+    ):
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Body delivery_idempotency_key and Idempotency-Key "
+                        "header must match"
+                    ),
+                    "error_code": "idempotency_key_mismatch",
+                }
+            ),
+            400,
+        )
+    idempotency_key = body_idempotency_key or header_idempotency_key
 
     try:
         is_authorised, invalid_ids = _authorise_sender_and_recipients_for_org(
@@ -341,9 +456,9 @@ def send_message() -> ResponseReturnValue:
                 403,
             )
 
-        metadata = data.get("metadata")
-        metadata_payload = metadata if isinstance(metadata, dict) else {}
-        metadata_payload = dict(metadata_payload)
+        metadata_payload = sanitise_direct_message_delivery_metadata(
+            data.get("metadata") if isinstance(data.get("metadata"), dict) else None
+        )
         metadata_payload.setdefault("delivery_channel", "interuser_message")
         metadata_payload.setdefault("intent", "info")
         metadata_payload.setdefault(
@@ -351,46 +466,82 @@ def send_message() -> ResponseReturnValue:
             f"Sent by Von on behalf of {sender_id}",
         )
 
-        message = create_message(
-            sender_id=sender_id,
-            recipient_ids=recipient_ids,
-            content=content,
-            subject=data.get("subject"),
-            thread_id=data.get("thread_id"),
-            reply_to_id=data.get("reply_to_id"),
-            org_id=org_id,
-            metadata=metadata_payload,
-        )
+        reused = False
+        if idempotency_key:
+            create_receipt = create_message_idempotently(
+                delivery_idempotency_key=idempotency_key,
+                sender_id=sender_id,
+                recipient_ids=recipient_ids,
+                content=content,
+                subject=data.get("subject"),
+                thread_id=data.get("thread_id"),
+                reply_to_id=data.get("reply_to_id"),
+                organisation_concept_id=org_id,
+                metadata=metadata_payload,
+            )
+            message = create_receipt.message
+            reused = create_receipt.reused
+        else:
+            message = create_message(
+                sender_id=sender_id,
+                recipient_ids=recipient_ids,
+                content=content,
+                subject=data.get("subject"),
+                thread_id=data.get("thread_id"),
+                reply_to_id=data.get("reply_to_id"),
+                org_id=org_id,
+                metadata=metadata_payload,
+            )
 
-        from ...services.episode_logging_service import log_episode
+        if not reused:
+            from ...services.episode_logging_service import log_episode
 
-        log_episode(
-            episode_type="interuser_message_sent",
-            actor_user_id=sender_id,
-            organisation_concept_id=org_id,
-            payload={
-                "message_id": message.get("concept_id"),
-                "recipient_ids": recipient_ids,
-                "intent": metadata_payload.get("intent"),
-                "thread_id": data.get("thread_id"),
-                "reply_to_id": data.get("reply_to_id"),
-            },
-            status="sent",
-        )
+            log_episode(
+                episode_type="interuser_message_sent",
+                actor_user_id=sender_id,
+                organisation_concept_id=org_id,
+                payload={
+                    "message_id": message.get("concept_id"),
+                    "recipient_ids": recipient_ids,
+                    "intent": metadata_payload.get("intent"),
+                    "thread_id": data.get("thread_id"),
+                    "reply_to_id": data.get("reply_to_id"),
+                },
+                status="sent",
+            )
 
         # Return sanitised response
+        delivery_status = "reused" if reused else "created"
         return (
             jsonify(
                 {
                     "success": True,
+                    "effect_status": "succeeded",
+                    "changed": not reused,
+                    "reused": reused,
+                    "idempotent_replay": reused,
+                    "delivery_status": delivery_status,
                     "message_id": message.get("concept_id"),
                     "sent_at": message.get("concept_data", {}).get("sent_at"),
-                    "attribution": metadata_payload.get("attribution"),
+                    "attribution": message.get("concept_data", {}).get(
+                        "attribution",
+                        metadata_payload.get("attribution"),
+                    ),
                 }
             ),
-            201,
+            200 if reused else 201,
         )
 
+    except DirectMessageIdempotencyConflict as exc:
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "error_code": "idempotency_key_reused_with_different_payload",
+                }
+            ),
+            409,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
