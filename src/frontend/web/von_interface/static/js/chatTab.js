@@ -10,6 +10,10 @@ import { initializeMessagePanel, loadUnreadCount } from './components/messagePan
 import { loadMyOrganisations } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { initializeTaskPanel, isTaskPanelVisible, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
+import {
+    decorateInspectableReferences,
+    initializeReferenceInspector
+} from './components/referenceInspector.js';
 import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
 import { activateTab } from './tabNavigation.js';
 import { isAnnotationEnabled } from './featureFlags.js';
@@ -22320,6 +22324,7 @@ function renderAssistantMessageContent(container, message, debugData) {
         hydrateChatConceptCartouches(container);
         void resolveInlineVontologyAliasesInElement(container, { expectedRenderMode: 'text' });
         renderTableDisplayElementsIntoContainer(container, debugData);
+        decorateInspectableReferences(container, debugData?.reference_manifest);
         return;
     }
 
@@ -22340,12 +22345,32 @@ function renderAssistantMessageContent(container, message, debugData) {
     void renderChatMarkdownIntoContainer(container, text)
         .then(() => {
             renderTableDisplayElementsIntoContainer(container, debugData);
+            decorateInspectableReferences(container, debugData?.reference_manifest);
         })
         .catch((err) => {
             console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
             container.textContent = text;
             renderTableDisplayElementsIntoContainer(container, debugData);
+            decorateInspectableReferences(container, debugData?.reference_manifest);
         });
+}
+
+function refreshInspectableReferencesForTurn(turnId, debugData = null) {
+    if (!turnId) return 0;
+    const escapedTurnId = (
+        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+            ? CSS.escape(String(turnId))
+            : String(turnId).replace(/["\\]/g, '\\$&')
+    );
+    const messageContainer = document.querySelector(
+        `.message-container[data-turn-id="${escapedTurnId}"]`
+    );
+    const messageText = messageContainer?.querySelector('.chat-message-text');
+    if (!messageText) return 0;
+    return decorateInspectableReferences(
+        messageText,
+        debugData?.reference_manifest || llmDebugData.get(turnId)?.reference_manifest
+    );
 }
 
 function formatKindLabel(kind) {
@@ -32167,6 +32192,7 @@ export function initializeChatTab() {
 
     // Initialize LLM debug popup handlers
     initializeLlmDebugPopup();
+    initializeReferenceInspector();
     bindDiagnosticsExportShortcut();
     initializeHistoryControls();
     initializeConversationSituationPanel();
@@ -36089,6 +36115,7 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
                     : (existing?.timestamp || null)
             };
             setLlmDebugDataEntry(turnId, merged);
+            refreshInspectableReferencesForTurn(turnId, merged);
             if (!renderRetainedThinkingCardForDebugData(turnId, merged)) {
                 renderRetainedThinkingUnavailableState(turnId);
             }

@@ -58,6 +58,7 @@ def test_load_effective_assertions_projects_scopes_and_batches_names(
             "limit": limit,
         }
         return [
+            {"concept_id": "#V#event", "name": "Research event"},
             {"concept_id": "#V#date_of_event", "name": "Date of event"},
             {"concept_id": "#V#event_location", "name": "Event location"},
             {"concept_id": "#V#room", "name": "Room 1"},
@@ -87,6 +88,7 @@ def test_load_effective_assertions_projects_scopes_and_batches_names(
     assert captured["find"]["filter"] == {
         "concept_id": {
             "$in": [
+                "#V#event",
                 "#V#date_of_event",
                 "#V#event_location",
                 "#V#room",
@@ -94,7 +96,7 @@ def test_load_effective_assertions_projects_scopes_and_batches_names(
             ]
         }
     }
-    assert captured["find"]["limit"] == 4
+    assert captured["find"]["limit"] == 5
     assert result["has_more"] is True
     assert result["next_offset"] == 2
     assert result["counts_are_lower_bounds"] is True
@@ -114,6 +116,74 @@ def test_load_effective_assertions_projects_scopes_and_batches_names(
     assert result["items"][1]["source_context"]["label"] == (
         "Organisation — Example Lab"
     )
+    assert result["items"][0]["subject"] == {
+        "concept_id": "#V#event",
+        "display_name": "Research event",
+    }
+    assert result["items"][0]["human_statement"] == (
+        "Research event Date of event June 2026"
+    )
+
+
+def test_exact_profile_assertion_projects_user_facing_profile(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service,
+        "get_visible_scoped_assertion_by_id",
+        lambda _assertion_id: {
+            "assertion_id": "ska_profile",
+            "assertion_revision": 2,
+            "subject_concept_id": "#V#student",
+            "predicate": "#V#has_paper_matching_profile_json",
+            "object_kind": "text",
+            "object_text": {
+                "text": (
+                    '{"schema_version":"paper_matching_profile.v1",'
+                    '"project_description":"Robust multimodal learning",'
+                    '"stated_interest_terms":["multimodal learning"],'
+                    '"negative_interest_terms":[],"preferred_authors":[],'
+                    '"preferred_venues":["NeurIPS"],"notes":"Derived from papers"}'
+                ),
+                "language": "en-NZ",
+            },
+            "scope": {"mode": "organisation", "organisation_concept_id": "#V#lab"},
+            "status": "asserted",
+            "provenance": {"capability_name": "upsert_scoped_assertion"},
+        },
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": "#V#student", "name": "Student A"},
+            {
+                "concept_id": "#V#has_paper_matching_profile_json",
+                "name": "Has paper matching profile",
+            },
+            {"concept_id": "#V#lab", "name": "Strong AI Lab"},
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "resolve_concept_display_names",
+        lambda docs: {row["concept_id"]: row["name"] for row in docs},
+    )
+
+    result = service.load_effective_assertion_by_id("ska_profile")
+
+    assert result is not None
+    assertion = result["assertion"]
+    assert assertion["subject"]["display_name"] == "Student A"
+    assert assertion["human_statement"] == "Student A has a paper-matching profile."
+    assert assertion["presentation"] == {
+        "kind": "paper_matching_profile",
+        "project_description": "Robust multimodal learning",
+        "stated_interest_terms": ["multimodal learning"],
+        "negative_interest_terms": [],
+        "preferred_authors": [],
+        "preferred_venues": ["NeurIPS"],
+        "notes": "Derived from papers",
+        "updated_at": None,
+    }
 
 
 def test_load_effective_assertions_does_not_query_metadata_for_empty_page(

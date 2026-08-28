@@ -109,3 +109,64 @@ def test_effective_assertion_route_returns_retryable_degraded_state(
         "error_code": "actor_effective_assertions_unavailable",
         "retryable": True,
     }
+
+
+def test_exact_assertion_route_is_non_disclosing_for_anonymous_and_missing(
+    monkeypatch,
+) -> None:
+    app = _make_app()
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes._get_current_user_concept_id",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes.load_effective_assertion_by_id",
+        lambda _assertion_id: (_ for _ in ()).throw(
+            AssertionError("anonymous requests must not inspect assertions")
+        ),
+    )
+
+    with app.test_client() as client:
+        anonymous = client.get("/api/concepts/assertions/ska_private")
+
+    assert anonymous.status_code == 404
+    assert anonymous.get_json() == {"error": "assertion_not_found"}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes._get_current_user_concept_id",
+        lambda: "#V#actor",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes.load_effective_assertion_by_id",
+        lambda _assertion_id: None,
+    )
+    with app.test_client() as client:
+        missing = client.get("/api/concepts/assertions/ska_private")
+
+    assert missing.status_code == 404
+    assert missing.get_json() == {"error": "assertion_not_found"}
+
+
+def test_exact_assertion_route_returns_actor_visible_projection(monkeypatch) -> None:
+    app = _make_app()
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes._get_current_user_concept_id",
+        lambda: "#V#actor",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes.load_effective_assertion_by_id",
+        lambda assertion_id: {
+            "success": True,
+            "context_view": "actor_effective",
+            "assertion": {"assertion_id": assertion_id, "status": "retracted"},
+        },
+    )
+
+    with app.test_client() as client:
+        response = client.get("/api/concepts/assertions/ska_visible")
+
+    assert response.status_code == 200
+    assert response.get_json()["assertion"] == {
+        "assertion_id": "ska_visible",
+        "status": "retracted",
+    }
