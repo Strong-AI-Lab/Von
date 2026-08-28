@@ -43,6 +43,7 @@ from ...services.concept_summary_renderer_service import (
 )
 from ...services.concept_effective_assertion_service import (
     DEFAULT_PAGE_LIMIT as DEFAULT_EFFECTIVE_ASSERTION_PAGE_LIMIT,
+    load_effective_assertion_by_id,
     load_concept_effective_assertions,
 )
 from ...vontology.utils_vontology import (
@@ -409,6 +410,46 @@ def get_concept_effective_assertions(concept_id: str) -> ResponseReturnValue:
             exc_info=True,
         )
         return jsonify({"error": "Failed to load actor-effective assertions"}), 500
+
+
+@concept_bp.route("/assertions/<string:assertion_id>", methods=["GET"])
+def get_effective_assertion_by_id(assertion_id: str) -> ResponseReturnValue:
+    """Return one exact assertion without disclosing inaccessible IDs."""
+
+    if not _get_current_user_concept_id():
+        return jsonify({"error": "assertion_not_found"}), 404
+    try:
+        payload = load_effective_assertion_by_id(assertion_id)
+        if payload is None:
+            return jsonify({"error": "assertion_not_found"}), 404
+        return jsonify(payload), 200
+    except (PermissionError, ValueError):
+        return jsonify({"error": "assertion_not_found"}), 404
+    except RuntimeError as exc:
+        current_app.logger.warning(
+            "Exact actor-effective assertion unavailable for %s: %s",
+            assertion_id,
+            exc,
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "Assertion is temporarily unavailable",
+                    "error_code": "actor_effective_assertion_unavailable",
+                    "retryable": True,
+                }
+            ),
+            503,
+        )
+    except Exception as exc:
+        current_app.logger.error(
+            "Failed to load exact actor-effective assertion %s: %s",
+            assertion_id,
+            exc,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to load assertion"}), 500
 
 
 @concept_bp.route("/", methods=["GET"])

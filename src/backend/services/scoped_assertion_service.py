@@ -1856,6 +1856,64 @@ def list_visible_scoped_assertions_page(
         }
 
 
+def get_visible_scoped_assertion_by_id(
+    assertion_id: Any,
+    *,
+    user_concept_id: str | None = None,
+    organisation_concept_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one exact actor-visible assertion in any lifecycle state.
+
+    Exact inspection is deliberately separate from the active assertion-list
+    query. A retracted occurrence remains inspectable by an authorised actor,
+    while audience and referenced-concept visibility still fail closed. Missing,
+    inaccessible, and malformed identifiers all return the same absence result.
+    """
+
+    assertion_token = str(assertion_id or "").strip()
+    if (
+        not assertion_token.startswith("ska_")
+        or len(assertion_token) > 256
+        or not re.fullmatch(r"ska_[A-Za-z0-9_-]+", assertion_token)
+    ):
+        return None
+
+    actor_user_id, actor_org_id = _resolve_read_actor(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+    )
+    audience_keys = _audience_keys_for_actor(
+        user_concept_id=actor_user_id,
+        organisation_concept_id=actor_org_id,
+    )
+    if not audience_keys:
+        return None
+
+    collection = get_scoped_knowledge_assertions_collection()
+    if collection is None:
+        raise RuntimeError("scoped assertion store unavailable")
+
+    audience_query = {
+        "$or": [
+            {"scope.audience_key": {"$in": audience_keys}},
+            {"scope.audience_keys": {"$in": audience_keys}},
+        ]
+    }
+    with override_current_actor(actor_user_id, actor_org_id):
+        document = collection.find_one(
+            {
+                "assertion_id": assertion_token,
+                **audience_query,
+            }
+        )
+        if not isinstance(document, Mapping):
+            return None
+        visible_documents = _visible_assertion_documents([document])
+        if len(visible_documents) != 1:
+            return None
+        return _serialise(visible_documents[0])
+
+
 def list_visible_scoped_assertions(
     *,
     subject_concept_ids: Sequence[str] | None = None,
@@ -1924,6 +1982,7 @@ def scoped_text_assertion_to_relation_row(
 __all__ = [
     "STANDALONE_TEXT_ASSERTION_FORM",
     "add_text_assertion_concept_links",
+    "get_visible_scoped_assertion_by_id",
     "list_visible_scoped_assertions",
     "list_visible_scoped_assertions_page",
     "retract_scoped_assertion",

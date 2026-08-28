@@ -85,6 +85,27 @@
       <div id="conversationSituationBody" class="chat-situation-body" aria-busy="false"></div>
     </section>
 
+    <aside id="conversationReferenceInspector" class="chat-reference-inspector hidden" role="complementary"
+      aria-labelledby="conversationReferenceInspectorTitle" tabindex="-1">
+      <div class="chat-reference-inspector-header">
+        <div>
+          <div id="conversationReferenceInspectorEyebrow" class="chat-reference-inspector-eyebrow">Conversation reference</div>
+          <h3 id="conversationReferenceInspectorTitle" class="chat-reference-inspector-title">Reference Inspector</h3>
+        </div>
+        <div class="chat-reference-inspector-actions">
+          <button id="conversationReferenceInspectorRefreshBtn" class="btn-mini" type="button">Refresh</button>
+          <button id="conversationReferenceInspectorCopyBtn" class="btn-mini" type="button">Copy ID</button>
+          <button id="conversationReferenceInspectorCloseBtn" class="btn-mini" type="button"
+            aria-label="Close reference inspector">Close</button>
+        </div>
+      </div>
+      <p id="conversationReferenceInspectorExplanation" class="chat-reference-inspector-explanation">
+        Inspect the object named by this conversation reference.
+      </p>
+      <p id="conversationReferenceInspectorStatus" class="visually-hidden" role="status" aria-live="polite"></p>
+      <div id="conversationReferenceInspectorBody" class="chat-reference-inspector-body" aria-busy="false"></div>
+    </aside>
+
     <div id="workflowStatusPanel" class="workflow-status-panel" aria-live="polite" aria-label="Workflow status">
       <div class="workflow-status-header">
         <div class="workflow-status-titlebar">

@@ -8,12 +8,19 @@ predicate, object, and organisation labels in one concept batch.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import json
+from collections.abc import Mapping
+from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from .concept_service import resolve_concept_display_names
+from .paper_recommendation_constants import (
+    GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
+)
 from .scoped_assertion_service import (
     MAX_PAGE_LIMIT,
+    STANDALONE_TEXT_ASSERTION_FORM,
+    get_visible_scoped_assertion_by_id,
     list_visible_scoped_assertions_page,
 )
 
@@ -32,7 +39,7 @@ def _normalise_page_value(
     if value is None:
         return default
     if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be an integer")
+        raise ValueError(f"{field_name} must be an integer")  # noqa: TRY004
     try:
         resolved = int(value)
     except (TypeError, ValueError) as exc:
@@ -46,8 +53,7 @@ def _humanise_identifier(value: Any, *, fallback: str) -> str:
     token = str(value or "").strip()
     if not token:
         return fallback
-    if token.startswith("#V#"):
-        token = token[3:]
+    token = token.removeprefix("#V#")
     return " ".join(token.replace("_", " ").split()) or fallback
 
 
@@ -57,6 +63,7 @@ def _referenced_concept_ids(items: list[Mapping[str, Any]]) -> list[str]:
     for item in items:
         scope = item.get("scope")
         candidates = [
+            item.get("subject_concept_id"),
             item.get("predicate"),
             item.get("object_concept_id"),
             (
@@ -87,11 +94,26 @@ def _display_names_for_ids(concept_ids: list[str]) -> dict[str, str]:
     return resolve_concept_display_names(concept_docs)
 
 
+def _profile_text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [cleaned for item in value if (cleaned := str(item or "").strip())]
+
+
 def _project_item(
     item: Mapping[str, Any],
     *,
     display_names: Mapping[str, str],
 ) -> dict[str, Any]:
+    assertion_form = str(item.get("assertion_form") or "relation").strip()
+    subject_id = str(item.get("subject_concept_id") or "").strip()
+    subject_label = display_names.get(subject_id) or _humanise_identifier(
+        subject_id,
+        fallback="Source assertion",
+    )
     predicate_id = str(item.get("predicate") or "").strip()
     predicate_label = display_names.get(predicate_id) or _humanise_identifier(
         predicate_id,
@@ -115,6 +137,44 @@ def _project_item(
             "text": str(text_payload.get("text") or ""),
             "language": str(text_payload.get("language") or "") or None,
         }
+
+    if assertion_form == STANDALONE_TEXT_ASSERTION_FORM:
+        human_statement = str(object_payload.get("text") or "")
+    else:
+        object_label = str(
+            object_payload.get("display_name") or object_payload.get("text") or ""
+        ).strip()
+        human_statement = " ".join(
+            part for part in (subject_label, predicate_label, object_label) if part
+        )
+
+    presentation: dict[str, Any] | None = None
+    if (
+        predicate_id == GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID
+        and object_payload.get("kind") == "text"
+    ):
+        try:
+            profile = json.loads(str(object_payload.get("text") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            profile = None
+        if isinstance(profile, Mapping):
+            presentation = {
+                "kind": "paper_matching_profile",
+                "project_description": str(profile.get("project_description") or ""),
+                "stated_interest_terms": _profile_text_list(
+                    profile.get("stated_interest_terms")
+                ),
+                "negative_interest_terms": _profile_text_list(
+                    profile.get("negative_interest_terms")
+                ),
+                "preferred_authors": _profile_text_list(
+                    profile.get("preferred_authors")
+                ),
+                "preferred_venues": _profile_text_list(profile.get("preferred_venues")),
+                "notes": str(profile.get("notes") or ""),
+                "updated_at": profile.get("updated_at"),
+            }
+            human_statement = f"{subject_label} has a paper-matching profile."
 
     scope = item.get("scope")
     scope_payload = scope if isinstance(scope, Mapping) else {}
@@ -143,13 +203,19 @@ def _project_item(
     return {
         "assertion_id": item.get("assertion_id"),
         "assertion_revision": item.get("assertion_revision"),
-        "subject_concept_id": item.get("subject_concept_id"),
+        "assertion_form": assertion_form,
+        "subject": {
+            "concept_id": subject_id or None,
+            "display_name": subject_label,
+        },
         "predicate": {
             "concept_id": predicate_id if predicate_id.startswith("#V#") else None,
             "storage_id": predicate_id,
             "display_name": predicate_label,
         },
         "object": object_payload,
+        "human_statement": human_statement,
+        "presentation": presentation,
         "source_context": source_context,
         "status": item.get("status"),
         "canonical_publication": False,
@@ -157,6 +223,20 @@ def _project_item(
         "provenance": item.get("provenance"),
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
+    }
+
+
+def load_effective_assertion_by_id(assertion_id: Any) -> dict[str, Any] | None:
+    """Return one current, presentation-ready assertion after exact actor checks."""
+
+    item = get_visible_scoped_assertion_by_id(assertion_id)
+    if not isinstance(item, Mapping):
+        return None
+    display_names = _display_names_for_ids(_referenced_concept_ids([item]))
+    return {
+        "success": True,
+        "context_view": "actor_effective",
+        "assertion": _project_item(item, display_names=display_names),
     }
 
 
@@ -219,4 +299,5 @@ __all__ = [
     "DEFAULT_PAGE_LIMIT",
     "MAX_CONCEPT_PAGE_LIMIT",
     "load_concept_effective_assertions",
+    "load_effective_assertion_by_id",
 ]

@@ -175,6 +175,82 @@ def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypat
     }
 
 
+def test_history_endpoint_projects_reference_manifest_for_legacy_turn(monkeypatch):
+    from src.backend.server.routes.von_routes import von_bp
+
+    evidence_id = "ev_legacy_history_evidence"
+    instance_id = "bd571204-d0ac-43e6-8764-11d757c37d35"
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {
+            "namespace": "#V#test_user@org",
+            "organisation_id": "#V#org",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_session_state",
+        lambda **_kwargs: {
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": f"instance `{instance_id}`; evidence `{evidence_id}`",
+                    "llm_debug_data": {
+                        "request_id": "request-legacy-history",
+                        "aux_llm_calls": [
+                            {
+                                "type": "adaptive_turn_evidence_index",
+                                "evidence": [
+                                    {
+                                        "evidence_id": evidence_id,
+                                        "preview": "bounded legacy preview",
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "adaptive_turn_effect_outcome_report",
+                                "schema_version": "adaptive_turn_effect_outcome_report.v1",
+                                "facts": [
+                                    {
+                                        "instance_id": instance_id,
+                                        "workflow_id": "#V#legacy_workflow",
+                                        "effect_status": "failed",
+                                        "evidence_id": evidence_id,
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                }
+            ]
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_bp, url_prefix="/von")
+
+    response = app.test_client().get(
+        "/von/history",
+        query_string={"session_id": "session-legacy", "segments": 1},
+    )
+
+    assert response.status_code == 200
+    debug = response.get_json()["history"][0]["llm_debug_data"]
+    manifest = debug["reference_manifest"]
+    references = {item["reference_id"]: item for item in manifest["references"]}
+    assert references[evidence_id]["reference_type"] == "turn_evidence"
+    assert references[evidence_id]["evidence"]["preview"] == "bounded legacy preview"
+    assert references[instance_id]["reference_type"] == "workflow_instance"
+
+
 def test_history_debug_returns_stored_turn_execution_diagnostics(monkeypatch):
     from src.backend.server.routes.von_routes import von_bp
 

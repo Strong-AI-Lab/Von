@@ -138,6 +138,10 @@ from ...services.turn_output_health_service import (
     build_turn_output_health,
     turn_output_health_issue_messages,
 )
+from ...services.turn_reference_manifest_service import (
+    build_turn_reference_manifest,
+    build_turn_reference_manifest_from_debug,
+)
 from ...services.turn_failure_capsule_service import (
     TURN_FAILURE_CAPSULE_MAX_BYTES,
     TURN_FAILURE_CAPSULE_SCHEMA_VERSION,
@@ -8090,6 +8094,16 @@ def _finalise_llm_debug_info(
         ),
     )
     llm_debug_info["turn_failure_capsule"] = turn_failure_capsule
+    reference_manifest = build_turn_reference_manifest(
+        response_text=final_response_text,
+        request_id=llm_debug_info.get("request_id"),
+        evidence_index=evidence_index,
+        outcome_report=outcome_report,
+        tool_invocations=turn_record_tool_invocations_payload,
+        user_concept_id=(user_id or resolved_actor_concept_id),
+        organisation_concept_id=org_id,
+    )
+    llm_debug_info["reference_manifest"] = reference_manifest
     turn_execution_record: dict[str, Any] = {
         "schema_version": "turn_execution_record.observational.v1",
         "record_kind": "observational",
@@ -8129,6 +8143,7 @@ def _finalise_llm_debug_info(
         ),
         "search_evidence": list(search_evidence_payload or []),
         "evidence_index": evidence_index,
+        "reference_manifest": reference_manifest,
         "turn_execution_diagnostics": (
             dict(diagnostics_payload)
             if isinstance(diagnostics_payload, Mapping)
@@ -14754,6 +14769,38 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
 
 
+def _with_viewer_scoped_history_reference_manifests(
+    messages: list[dict[str, Any]],
+    *,
+    user_concept_id: str,
+    organisation_concept_id: str | None,
+) -> list[dict[str, Any]]:
+    """Project inspectable references onto history without rewriting it."""
+
+    projected: list[dict[str, Any]] = []
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        message = dict(raw_message)
+        response_text = message.get("content")
+        if message.get("role") != "assistant" or not isinstance(response_text, str):
+            projected.append(message)
+            continue
+        raw_debug = message.get("llm_debug_data")
+        debug = dict(raw_debug) if isinstance(raw_debug, Mapping) else {}
+        manifest = build_turn_reference_manifest_from_debug(
+            response_text=response_text,
+            debug_info=debug,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+        )
+        if debug or int(manifest.get("reference_count") or 0) > 0:
+            debug["reference_manifest"] = manifest
+            message["llm_debug_data"] = debug
+        projected.append(message)
+    return projected
+
+
 @von_bp.route("/history", methods=["GET"])
 def history():
     """Retrieve chat history segments for the current user."""
@@ -14817,9 +14864,10 @@ def history():
         effective = get_effective_context(
             window_session_id, dict(session), user_concept_id
         )
-        namespace = effective.get(
-            "namespace"
-        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        namespace, organisation_concept_id = _resolve_history_request_scope_hints(
+            user_concept_id=user_concept_id,
+            effective_context=effective,
+        )
         owner_user_id = user_concept_id
         shared_invite = None
 
@@ -14934,6 +14982,12 @@ def history():
         segment_count = min(segment_count, total_segments)
         selected_segments = segments[-segment_count:]
         flattened_history = [msg for segment in selected_segments for msg in segment]
+        if include_debug:
+            flattened_history = _with_viewer_scoped_history_reference_manifests(
+                flattened_history,
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
+            )
         segments_returned = len(selected_segments)
         history_truncated = bool(meta.get("history_truncated"))
         has_more = history_truncated or segments_returned < total_segments
@@ -15206,6 +15260,17 @@ def history_debug():
                         "history_index": history_index,
                     },
                 }
+            )
+        stored_response = (
+            debug_data.get("response") if isinstance(debug_data, Mapping) else None
+        )
+        if isinstance(stored_response, str):
+            debug_data = dict(debug_data)
+            debug_data["reference_manifest"] = build_turn_reference_manifest_from_debug(
+                response_text=stored_response,
+                debug_info=debug_data,
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
             )
         if view in {"transformations", "response_transformations"}:
             transformation_payload = None

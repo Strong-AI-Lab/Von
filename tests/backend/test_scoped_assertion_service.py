@@ -248,6 +248,66 @@ def test_standalone_text_is_visible_without_links_and_links_are_optional(
     assert degraded[0]["concept_links"] == []
 
 
+def test_exact_assertion_read_keeps_retracted_lifecycle_and_hides_other_audience(
+    monkeypatch,
+) -> None:
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    row = _stored_text_assertion(
+        assertion_id="ska_exact_retracted",
+        subject_concept_id="#V#event",
+    )
+    row["status"] = "retracted"
+    row["assertion_revision"] = 3
+    collection.insert_one(row)
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+
+    visible = service.get_visible_scoped_assertion_by_id(
+        "ska_exact_retracted",
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    hidden = service.get_visible_scoped_assertion_by_id(
+        "ska_exact_retracted",
+        user_concept_id="#V#outsider",
+        organisation_concept_id="#V#other_org",
+    )
+
+    assert visible is not None
+    assert visible["status"] == "retracted"
+    assert visible["assertion_revision"] == 3
+    assert hidden is None
+
+
+def test_exact_assertion_read_rejects_lookalike_without_store_access(
+    monkeypatch,
+) -> None:
+    from src.backend.services import scoped_assertion_service as service
+
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("malformed IDs must not reach storage")
+        ),
+    )
+
+    assert service.get_visible_scoped_assertion_by_id(
+        "not_ska_123",
+        user_concept_id="#V#member",
+    ) is None
+
+
 def test_standalone_retraction_is_canonical_and_marks_rag_delete(monkeypatch):
     from src.backend.services import scoped_assertion_service as service
 
