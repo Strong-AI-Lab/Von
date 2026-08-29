@@ -7,7 +7,7 @@ import {
 } from './utils/localModelPreferences.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
-import { loadMyOrganisations } from './components/orgSelector.js';
+import { loadMyOrganisations, synchroniseOrganisationContext } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { initializeTaskPanel, isTaskPanelVisible, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
 import {
@@ -94,9 +94,7 @@ async function repairCurrentWindowOrganisationBinding() {
     if (!context?.user_id) {
         return false;
     }
-    await postJson('/von/api/session/set_organisation', {
-        organisation_concept_id: context.org_id || null
-    });
+    await synchroniseOrganisationContext(() => getUserContext()?.org_id || null);
     return true;
 }
 
@@ -184,6 +182,29 @@ const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
 let lastSessionTabsRefreshMs = 0;
 let pendingSessionTabsRefresh = null;
 let lastRenderedSessionCount = 0;
+let chatOrganisationGeneration = 0;
+let pendingChatOrganisationSwitchId = null;
+const chatSessionTabsFetchAbortControllers = new Set();
+
+function normaliseOrganisationSwitchId(detail = {}) {
+    const switchId = typeof detail?.switch_id === 'string' ? detail.switch_id.trim() : '';
+    return switchId || null;
+}
+
+function isChatOrganisationRequestCurrent(generation) {
+    return generation === chatOrganisationGeneration && pendingChatOrganisationSwitchId === null;
+}
+
+function abortChatSessionTabsFetches() {
+    chatSessionTabsFetchAbortControllers.forEach((controller) => {
+        try {
+            controller.abort();
+        } catch (_) {
+            // Ignore abort races.
+        }
+    });
+    chatSessionTabsFetchAbortControllers.clear();
+}
 
 // JVNAUTOSCI-982: Per-session metadata (programme/project/activity/modality links)
 const CHAT_SESSION_LINK_KEYS = [
@@ -5734,7 +5755,11 @@ function isRequestInActiveChatSession(request) {
     if (!request || typeof request !== 'object') {
         return false;
     }
-    return request.sessionKey === getChatRequestSessionKey(activeChatSessionId);
+    const organisationGeneration = Number.isInteger(request.organisationGeneration)
+        ? request.organisationGeneration
+        : chatOrganisationGeneration;
+    return isChatOrganisationRequestCurrent(organisationGeneration)
+        && request.sessionKey === getChatRequestSessionKey(activeChatSessionId);
 }
 
 function getQueuedChatPromptCountForSession(sessionId = activeChatSessionId) {
@@ -24246,6 +24271,10 @@ async function loadChatSessionFocus(sessionId, { force = false } = {}) {
         renderActiveChatSessionFocusChips([]);
         return [];
     }
+    if (pendingChatOrganisationSwitchId !== null) {
+        return [];
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     const cached = chatSessionFocusCache.get(sid);
     if (!force && cached) {
         if (sid === activeChatSessionId) {
@@ -24261,6 +24290,7 @@ async function loadChatSessionFocus(sessionId, { force = false } = {}) {
             cache: 'no-store'
         });
         const data = await response.json().catch(() => ({}));
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) return [];
         if (!response.ok) {
             // Focus is an actor-authorised projection.  A cached label must not
             // remain visible after the server denies this actor access.
@@ -24270,6 +24300,7 @@ async function loadChatSessionFocus(sessionId, { force = false } = {}) {
         if (activeChatSessionId !== sid) return [];
         return acceptChatSessionFocus(sid, getFocusFromPayload(data));
     } catch (error) {
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) return [];
         console.warn('[chatTab] Unable to load conversation focus', error);
         // Fail closed: cache is only a rendering optimisation, never evidence
         // that the current actor may still see the source concepts.
@@ -25334,6 +25365,10 @@ async function loadChatSessionLinks(sessionId, options = {}) {
         _clearChatSessionMetadata();
         return;
     }
+    if (pendingChatOrganisationSwitchId !== null) {
+        return;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
 
     const force = options.force === true;
     const cached = chatSessionLinksCache.get(sid);
@@ -25360,6 +25395,7 @@ async function loadChatSessionLinks(sessionId, options = {}) {
         const data = await resp.json().catch(() => ({}));
 
         if (abortController.signal.aborted) return;
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) return;
         if (activeChatSessionId !== sid) return;
 
         if (resp.status === 401 || data?.error === 'Not authenticated') {
@@ -25377,7 +25413,7 @@ async function loadChatSessionLinks(sessionId, options = {}) {
         chatSessionLinksCache.set(sid, links);
         _setActiveChatSessionLinksState({ sessionId: sid, links, statusText: '', statusTone: 'info', disabled: false });
     } catch (err) {
-        if (err?.name === 'AbortError') return;
+        if (err?.name === 'AbortError' || !isChatOrganisationRequestCurrent(organisationGenerationAtStart)) return;
         _setActiveChatSessionLinksState({ sessionId: sid, links: cached || {}, statusText: 'Unable to load metadata.', statusTone: 'error', disabled: false });
     }
 }
@@ -25832,8 +25868,17 @@ async function refreshChatSessionTabs() {
     if (!container) {
         return;
     }
+    if (pendingChatOrganisationSwitchId !== null) {
+        renderChatSessionTabsPlaceholder('loading');
+        container.hidden = false;
+        return;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     const selectionGenerationAtStart = chatSessionSelectionGeneration;
     await _ensureInviteSessionContext();
+    if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+        return;
+    }
 
     const hasCachedTabs = Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0;
     const containerLooksEmpty = container.hidden || !container.firstElementChild;
@@ -25861,13 +25906,23 @@ async function refreshChatSessionTabs() {
     }
 
     lastSessionTabsRefreshMs = Date.now();
+    const abortController = new AbortController();
+    chatSessionTabsFetchAbortControllers.add(abortController);
 
     try {
         const response = await fetch(buildChatSessionTabsFetchUrl(), {
             cache: 'no-store',
-            headers: buildChatFetchHeaders()
+            headers: buildChatFetchHeaders(),
+            signal: abortController.signal
         });
         const data = await response.json();
+
+        // Every organisation-scoped response is bound to the generation in
+        // which it started. Aborting is best effort; this fence also rejects
+        // mocks, caches, and transports that complete after abort.
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return;
+        }
 
         if (data?.authenticated === false) {
             _stopChatTabsLoadingTicker();
@@ -26053,6 +26108,9 @@ async function refreshChatSessionTabs() {
             void loadChatSessionLinks(sidForMeta, { force: false });
         }
     } catch (err) {
+        if (err?.name === 'AbortError' || !isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return;
+        }
         console.error('Failed to load chat sessions:', err);
 
         // If the refresh failed but we have cached tabs, ensure they remain visible.
@@ -26066,6 +26124,8 @@ async function refreshChatSessionTabs() {
             _stopChatTabsLoadingTicker();
             renderChatSessionTabsPlaceholder('error');
         }
+    } finally {
+        chatSessionTabsFetchAbortControllers.delete(abortController);
     }
 }
 
@@ -27034,6 +27094,9 @@ function createNewChatSession() {
         try {
             return await createChatSession('', { preserveComposerDraft: true });
         } catch (err) {
+            if (err?.organisationSwitchSuperseded === true) {
+                return null;
+            }
             console.error('[chatTab] Unable to create chat:', err);
             const msg = err?.message ? String(err.message) : 'Unable to create chat.';
             showToast(msg, 'error');
@@ -27272,6 +27335,12 @@ async function promptRenameChatSession(sessionId, currentName) {
 }
 
 async function createChatSession(sessionName, options = {}) {
+    if (pendingChatOrganisationSwitchId !== null) {
+        const error = new Error('Organisation change in progress.');
+        error.organisationSwitchSuperseded = true;
+        throw error;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     const payload = {};
     if (typeof sessionName === 'string' && sessionName.trim()) {
         payload.session_name = sessionName.trim();
@@ -27287,6 +27356,12 @@ async function createChatSession(sessionName, options = {}) {
         body: JSON.stringify(payload)
     });
     const data = await response.json();
+
+    if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+        const error = new Error('Organisation changed before conversation creation completed.');
+        error.organisationSwitchSuperseded = true;
+        throw error;
+    }
 
     if (!response.ok) {
         const msg = data?.error ? String(data.error) : 'Unable to create chat session.';
@@ -28158,11 +28233,18 @@ async function loadChatHistory(options = {}) {
         console.error('scrollableField not found');
         return false;
     }
+    if (pendingChatOrganisationSwitchId !== null) {
+        return false;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
 
     const requestedSegments = Number.isInteger(segments) && segments > 0 ? segments : historySegmentsShown;
     const segmentCount = Math.max(requestedSegments || 1, 1);
 
     await _ensureInviteSessionContext();
+    if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+        return false;
+    }
 
     const requestedSessionId = normaliseHistorySessionId(activeChatSessionId);
     clearHistoryLoadState({ sessionId: requestedSessionId });
@@ -28210,10 +28292,13 @@ async function loadChatHistory(options = {}) {
         });
         const data = await response.json().catch(() => ({}));
 
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return false;
+        }
         if (!activeHistoryRequest || activeHistoryRequest.id !== requestId) {
             return false;
         }
-        if (requestedSessionId && activeChatSessionId && requestedSessionId !== activeChatSessionId) {
+        if (requestedSessionId !== normaliseHistorySessionId(activeChatSessionId)) {
             return false;
         }
 
@@ -28343,7 +28428,10 @@ async function loadChatHistory(options = {}) {
         }
         return false;
     } catch (error) {
-        if (error?.name === 'AbortError') {
+        if (
+            error?.name === 'AbortError'
+            || !isChatOrganisationRequestCurrent(organisationGenerationAtStart)
+        ) {
             return false;
         }
         const targetSessionId = normaliseHistorySessionId(requestedSessionId || activeChatSessionId);
@@ -28653,7 +28741,7 @@ async function _ensureInviteSessionContext() {
 
     if (ctx.org_id && (!sessionCtx || sessionCtx.organisation_id !== ctx.org_id)) {
         try {
-            await postJson('/von/api/session/set_organisation', { organisation_concept_id: ctx.org_id });
+            await synchroniseOrganisationContext(() => getUserContext()?.org_id || null);
         } catch (e) {
             console.warn('[invite] Failed to sync session organisation', e);
         }
@@ -29091,6 +29179,10 @@ async function renderIncomingInvitesList() {
 }
 
 async function loadIncomingInvites({ silent = false } = {}) {
+    if (pendingChatOrganisationSwitchId !== null) {
+        return;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     if (incomingInviteLoadInFlight) {
         if (silent) return;
         try { incomingInviteAbortController?.abort(); } catch (_) { }
@@ -29121,6 +29213,9 @@ async function loadIncomingInvites({ silent = false } = {}) {
 
         const pendingData = await pendingResp.json();
         const acceptedData = await acceptedResp.json();
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return;
+        }
         if (!pendingResp.ok || !acceptedResp.ok) {
             if (!silent) {
                 setIncomingInviteStatus(pendingData?.error || acceptedData?.error || 'Unable to load invites.');
@@ -29144,6 +29239,9 @@ async function loadIncomingInvites({ silent = false } = {}) {
         }
         await renderIncomingInvitesList();
     } catch (e) {
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return;
+        }
         if (e && e.name === 'AbortError') {
             if (!silent) {
                 setIncomingInviteStatus('Invite loading timed out.');
@@ -32170,13 +32268,87 @@ function invalidateLlmExecutionContextForOrgSwitch() {
     return synchroniseLlmExecutionContext({ force: true, reason: 'organisation_context_changed' });
 }
 
-async function handleOrgSwitchForChatTab(_detail) {
-    // An organisation change invalidates the previous actor-scoped execution
-    // even when no conversation is selected (and therefore setting the active
-    // session to null below is a no-op).
+function detachChatWorkForOrganisationSwitch() {
+    const liveRequests = Array.from(new Set(liveChatRequestsBySession.values()));
+    liveChatRequestsBySession.clear();
+    finishedThinkingCardsBySession.clear();
+    activeChatRequest = null;
+    lastFinishedThinkingCard = null;
+    liveRequests.forEach((request) => {
+        request.detachedForOrganisationSwitch = true;
+        request.foregroundDeliveryCompleted = true;
+        stopToolUseProgressPolling(request);
+        stopThinkingTooltipTicker(request);
+        stopForegroundTaskResultPolling(request);
+        try {
+            request.abortController?.abort();
+        } catch (_) {
+            // The durable server task, if already admitted, remains recoverable.
+        }
+    });
+
+    queuedChatPrompts = [];
+    if (queuedChatPromptDrainTimer !== null) {
+        clearTimeout(queuedChatPromptDrainTimer);
+        queuedChatPromptDrainTimer = null;
+    }
+    queuedChatPromptDrainPromise = null;
+    queuedChatPromptDrainRequested = false;
+    queuedChatPromptClaimsInFlight.clear();
+    chatPromptQueueAdmissionServerInstanceId = null;
+    for (const timer of queuedChatPromptSyncTimers.values()) {
+        clearTimeout(timer);
+    }
+    queuedChatPromptSyncTimers.clear();
+    selectedChatPromptQueueEntryId = null;
+    locallyHiddenChatPromptQueueEntryKeys.clear();
+    renderChatTaskQueuePanel();
+    refreshChatSessionTabActivityIndicators();
+    updateSendButtonForCurrentChatState();
+}
+
+function startOrganisationSwitchForChatTab(detail = {}) {
+    const requestedSwitchId = normaliseOrganisationSwitchId(detail);
+    if (requestedSwitchId && pendingChatOrganisationSwitchId === requestedSwitchId) {
+        return chatOrganisationGeneration;
+    }
+
+    chatOrganisationGeneration += 1;
+    pendingChatOrganisationSwitchId = requestedSwitchId || `implicit-org-switch-${chatOrganisationGeneration}`;
+
+    // Clear actor- and organisation-scoped state synchronously, before the
+    // server switch completes.  Network aborts reduce wasted work; generation
+    // checks remain the authority fence for responses which still complete.
     invalidateLlmExecutionContextForOrgSwitch();
+    detachChatWorkForOrganisationSwitch();
+    abortActiveHistoryRequest();
+    abortChatSessionTabsFetches();
+    try {
+        chatSessionLinksLoadInFlight?.abortController?.abort?.();
+    } catch (_) {
+        // Ignore abort races.
+    }
+    chatSessionLinksLoadInFlight = null;
+    const inviteController = incomingInviteAbortController;
+    incomingInviteAbortController = null;
+    incomingInviteLoadInFlight = false;
+    try {
+        inviteController?.abort();
+    } catch (_) {
+        // Ignore abort races.
+    }
+
+    if (pendingSessionTabsRefresh) {
+        clearTimeout(pendingSessionTabsRefresh);
+        pendingSessionTabsRefresh = null;
+    }
+    lastSessionTabsRefreshMs = 0;
+
     const container = getChatSessionTabsContainer();
     sessionTabsCache = [];
+    sessionHistoryCache.clear();
+    chatSessionLinksCache.clear();
+    chatSessionFocusCache.clear();
     expandedConversationHistoryLimit = null;
     expandedConversationHistoryBaseLimit = null;
     lastRenderedSessionCount = 0;
@@ -32184,20 +32356,36 @@ async function handleOrgSwitchForChatTab(_detail) {
     _clearChatSessionMetadata();
     _clearConversationSituationState({ closePanel: true });
 
-    // JVNAUTOSCI-1011: Clear the active session and chat display on org switch
-    // to prevent showing data from the previous org
-    const previousSessionId = activeChatSessionId;
+    transcriptTurns.length = 0;
+    turnEditHistory.clear();
+    clearLlmDebugDataEntries();
     setActiveChatSession(null, null);
     displayedHistorySessionId = null;
+    historySegmentsShown = 0;
+    totalHistorySegments = 0;
     clearHistoryLoadState();
+    updateHistoryBanner();
 
-    // Clear the chat display and show loading state
+    incomingInviteState = { invites: [], acceptedInvites: [], totalCount: 0 };
+    setIncomingInviteBadge(0);
+    setIncomingInviteStatus('');
+    void renderIncomingInvitesList();
+
+    sharedConversationUnreadSessions.clear();
+    sharedConversationLastHistoryIndex.clear();
+    sharedConversationResyncInFlight.clear();
+    seenSharedTurnIds.clear();
+    clearLatestUnreadBoundary();
+    hideNewSharedMessagesIndicator();
+
     const scrollableField = document.getElementById('scrollableField');
     if (scrollableField) {
         scrollableField.innerHTML = '<div class="chat-session-loading">Loading conversations...</div>';
     }
 
     closeSharedConversationStream();
+    stopIncomingInvitePolling();
+    stopSharedSessionBadgePolling();
     stopWorkflowStatusStream('workflow_stream_stopped_org_switch');
     clearWorkflowStatusSnapshotRetryTimer();
     workflowStatusStreamState.items.clear();
@@ -32213,14 +32401,48 @@ async function handleOrgSwitchForChatTab(_detail) {
         container.hidden = false;
     }
 
+    publishRealtimeConnectionTelemetry('org_switch_started');
+    return chatOrganisationGeneration;
+}
+
+function finishOrganisationSwitchRecovery() {
+    startIncomingInvitePolling();
+    startSharedSessionBadgePolling();
+    void loadIncomingInvites({ silent: true });
+    startWorkflowStatusStream();
+    void refreshWorkflowStatusSnapshot({ silent: true });
+    syncSharedConversationStreams();
+    void refreshChatPromptQueueFromServer({ silent: true });
+}
+
+async function handleOrgSwitchForChatTab(detail = {}) {
+    const acceptedSwitchId = normaliseOrganisationSwitchId(detail);
+    if (
+        acceptedSwitchId
+        && pendingChatOrganisationSwitchId
+        && acceptedSwitchId !== pendingChatOrganisationSwitchId
+    ) {
+        return false;
+    }
+
+    if (pendingChatOrganisationSwitchId === null) {
+        startOrganisationSwitchForChatTab(detail);
+    }
+    const organisationGeneration = chatOrganisationGeneration;
+    pendingChatOrganisationSwitchId = null;
+    const scrollableField = document.getElementById('scrollableField');
+
     // Wait for session tabs to refresh (loads sessions for new org)
     await refreshChatSessionTabs();
+    if (!isChatOrganisationRequestCurrent(organisationGeneration)) {
+        return false;
+    }
 
-    // After refresh, if we have a new active session, load its history
-    if (activeChatSessionId && activeChatSessionId !== previousSessionId) {
+    // Always reload the accepted organisation's active conversation. Session
+    // identifiers are not used as proof that cached content has the same scope.
+    if (activeChatSessionId) {
         console.log('[chatTab] Org switch: loading history for new session', {
-            new_session: activeChatSessionId,
-            previous_session: previousSessionId
+            new_session: activeChatSessionId
         });
         void switchToChatSession(activeChatSessionId);
     } else if (!activeChatSessionId) {
@@ -32230,12 +32452,40 @@ async function handleOrgSwitchForChatTab(_detail) {
         }
     }
 
-    void loadIncomingInvites({ silent: true });
-    startWorkflowStatusStream();
-    void refreshWorkflowStatusSnapshot({ silent: true });
-    syncSharedConversationStreams();
-    void refreshChatPromptQueueFromServer({ silent: true });
+    finishOrganisationSwitchRecovery();
     publishRealtimeConnectionTelemetry('org_switch_completed');
+    return true;
+}
+
+async function handleOrgSwitchFailureForChatTab(detail = {}) {
+    const failedSwitchId = normaliseOrganisationSwitchId(detail);
+    if (
+        failedSwitchId
+        && pendingChatOrganisationSwitchId
+        && failedSwitchId !== pendingChatOrganisationSwitchId
+    ) {
+        return false;
+    }
+    if (pendingChatOrganisationSwitchId === null) {
+        return false;
+    }
+
+    const organisationGeneration = chatOrganisationGeneration;
+    pendingChatOrganisationSwitchId = null;
+    await refreshChatSessionTabs();
+    if (!isChatOrganisationRequestCurrent(organisationGeneration)) {
+        return false;
+    }
+
+    const scrollableField = document.getElementById('scrollableField');
+    if (activeChatSessionId) {
+        void switchToChatSession(activeChatSessionId);
+    } else if (scrollableField) {
+        scrollableField.innerHTML = '';
+    }
+    finishOrganisationSwitchRecovery();
+    publishRealtimeConnectionTelemetry('org_switch_failed_recovered');
+    return true;
 }
 
 try {
@@ -32412,10 +32662,20 @@ export function initializeChatTab() {
 
     if (!orgSwitchListenerBound) {
         orgSwitchListenerBound = true;
+        document.addEventListener('orgSwitchStarted', (e) => {
+            const { organisation_id } = e.detail || {};
+            console.log('[chatTab] Organisation switch started', { organisation_id });
+            startOrganisationSwitchForChatTab(e.detail || {});
+        });
         document.addEventListener('orgSwitched', (e) => {
             const { organisation_id, namespace } = e.detail || {};
             console.log('[chatTab] Organisation switched', { organisation_id, namespace });
-            handleOrgSwitchForChatTab(e.detail || {});
+            void handleOrgSwitchForChatTab(e.detail || {});
+        });
+        document.addEventListener('orgSwitchFailed', (e) => {
+            const { organisation_id, error } = e.detail || {};
+            console.warn('[chatTab] Organisation switch failed', { organisation_id, error });
+            void handleOrgSwitchFailureForChatTab(e.detail || {});
         });
     }
 
@@ -33958,8 +34218,15 @@ function mergePersistedChatPromptQueueEntry(entry) {
 }
 
 async function refreshChatPromptQueueFromServer(options = {}) {
+    if (pendingChatOrganisationSwitchId !== null) {
+        return false;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     try {
         const data = await fetchChatPromptQueueJson('');
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return false;
+        }
         chatPromptQueueAdmissionServerInstanceId = (
             typeof data?.turn_admission?.server_instance_id === 'string'
             && data.turn_admission.server_instance_id.trim()
@@ -34004,6 +34271,9 @@ async function refreshChatPromptQueueFromServer(options = {}) {
             recentFailedItems: canonicalRecentFailedEntries
         };
     } catch (error) {
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return false;
+        }
         if (!options.silent) {
             console.warn('[chatTab] Unable to load persisted chat prompt queue:', error);
         }
@@ -34422,6 +34692,10 @@ function renderChatTaskQueuePanel() {
 }
 
 async function queuePromptForLater(promptRaw, options = {}) {
+    if (pendingChatOrganisationSwitchId !== null) {
+        return null;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     const value = String(promptRaw ?? '');
     const sessionId = normaliseHistorySessionId(options.sessionId);
     const sessionName = (typeof options.sessionName === 'string' && options.sessionName.trim())
@@ -34458,6 +34732,9 @@ async function queuePromptForLater(promptRaw, options = {}) {
 
     try {
         const persisted = await createPersistedChatPromptQueueEntry(localEntry);
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return persisted;
+        }
         if (persisted) {
             const index = queuedChatPrompts.findIndex((entry) => entry.id === localEntry.id);
             if (index >= 0) {
@@ -34500,6 +34777,10 @@ function isChatPromptSessionBusy(sessionId, { includeQueued = false } = {}) {
 }
 
 async function sendQueuedChatPromptEntry(entryId) {
+    if (pendingChatOrganisationSwitchId !== null) {
+        return false;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     const cleanEntryId = (typeof entryId === 'string' && entryId.trim())
         ? entryId.trim()
         : null;
@@ -34543,6 +34824,9 @@ async function sendQueuedChatPromptEntry(entryId) {
     try {
         if (nextEntry.queueId) {
             const updatedEntry = await persistQueuedPromptUpdateNow(nextEntry);
+            if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+                return false;
+            }
             nextEntry = {
                 ...nextEntry,
                 ...updatedEntry
@@ -34607,12 +34891,19 @@ function getQueuedChatPromptHeadsBySession() {
 }
 
 async function drainQueuedChatPromptsForFreeSessions() {
+    if (pendingChatOrganisationSwitchId !== null) {
+        return false;
+    }
+    const organisationGenerationAtStart = chatOrganisationGeneration;
     if (queuedChatPrompts.length === 0) {
         return false;
     }
 
     let startedAny = false;
     while (true) {
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+            return startedAny;
+        }
         const eligibleEntries = Array.from(getQueuedChatPromptHeadsBySession().values())
             .filter((entry) => (
                 entry.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
@@ -34624,6 +34915,9 @@ async function drainQueuedChatPromptsForFreeSessions() {
 
         let startedThisPass = false;
         for (const entry of eligibleEntries) {
+            if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+                return startedAny;
+            }
             const started = await sendQueuedChatPromptEntry(entry.id);
             startedAny = startedAny || started;
             startedThisPass = startedThisPass || started;
@@ -34659,6 +34953,9 @@ function scheduleQueuedChatPromptDrain() {
 }
 
 async function handleSendPrompt(options = {}) {
+    if (pendingChatOrganisationSwitchId !== null) {
+        return;
+    }
     const promptInput = getPromptInputElement();
     if (!promptInput) {
         return;
@@ -34812,6 +35109,7 @@ async function handleSendPrompt(options = {}) {
         : (pendingFileCopyBinding?.displayName || null);
     const request = {
         abortController: new AbortController(),
+        organisationGeneration: chatOrganisationGeneration,
         sessionId: targetSessionId,
         sessionKey: getChatRequestSessionKey(targetSessionId),
         sessionName: targetSessionName,
@@ -34878,7 +35176,12 @@ async function handleSendPrompt(options = {}) {
     }
     invalidateSessionHistoryCache(targetSessionId);
 
-    const isRequestVisible = () => isRequestInActiveChatSession(request);
+    const isRequestCurrentOrganisation = () => (
+        isChatOrganisationRequestCurrent(request.organisationGeneration)
+    );
+    const isRequestVisible = () => (
+        isRequestCurrentOrganisation() && isRequestInActiveChatSession(request)
+    );
 
     // Show loading indicator and disable send button
     if (isRequestVisible()) {
@@ -34924,6 +35227,10 @@ async function handleSendPrompt(options = {}) {
     };
 
     const deliverSuccessfulResponseData = (data, source = 'generate_response') => {
+        if (!isRequestCurrentOrganisation()) {
+            request.foregroundDeliveryCompleted = true;
+            return false;
+        }
         if (!claimForegroundDelivery()) {
             return false;
         }
@@ -35043,6 +35350,10 @@ async function handleSendPrompt(options = {}) {
     };
 
     const deliverErrorResponseData = (data, fallbackMessage = 'An error occurred') => {
+        if (!isRequestCurrentOrganisation()) {
+            request.foregroundDeliveryCompleted = true;
+            return false;
+        }
         if (!claimForegroundDelivery()) {
             return false;
         }
@@ -35089,6 +35400,10 @@ async function handleSendPrompt(options = {}) {
     };
 
     const deliverCancelledResponseData = (data = {}) => {
+        if (!isRequestCurrentOrganisation()) {
+            request.foregroundDeliveryCompleted = true;
+            return false;
+        }
         if (!claimForegroundDelivery()) {
             return false;
         }
@@ -35149,7 +35464,11 @@ async function handleSendPrompt(options = {}) {
         // Queue persistence can yield before the server turn starts. Honour an
         // abort in that window and remove only this still-queued record so a
         // later tab refresh cannot replay a prompt the user already stopped.
-        if (request.aborted || !isLiveChatRequest(request)) {
+        if (
+            request.aborted
+            || !isLiveChatRequest(request)
+            || !isRequestCurrentOrganisation()
+        ) {
             if (request.promptQueueRecordId) {
                 try {
                     await deletePersistedChatPromptQueueEntry({
@@ -39022,6 +39341,24 @@ export function __testOnly_resetConversationSituationState() {
 }
 export async function __testOnly_refreshChatSessionTabs() {
     return refreshChatSessionTabs();
+}
+export async function __testOnly_loadIncomingInvites(options = {}) {
+    return loadIncomingInvites(options);
+}
+export function __testOnly_startOrganisationSwitchForChatTab(detail = {}) {
+    return startOrganisationSwitchForChatTab(detail);
+}
+export async function __testOnly_handleOrgSwitchForChatTab(detail = {}) {
+    return handleOrgSwitchForChatTab(detail);
+}
+export async function __testOnly_handleOrgSwitchFailureForChatTab(detail = {}) {
+    return handleOrgSwitchFailureForChatTab(detail);
+}
+export function __testOnly_getChatOrganisationTransitionState() {
+    return {
+        generation: chatOrganisationGeneration,
+        pendingSwitchId: pendingChatOrganisationSwitchId
+    };
 }
 export function __testOnly_loadChatSessionTabsLayoutPreference() {
     return loadChatSessionTabsLayoutPreference();

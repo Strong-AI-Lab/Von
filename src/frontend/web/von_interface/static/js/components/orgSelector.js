@@ -31,6 +31,34 @@ const SS_CURRENT_NAMESPACE = 'current_user_namespace';
 const LS_ORG_CONTEXT = 'von_org_context';
 const LS_ORG_ROLE = 'von_org_role';
 
+// Organisation switches share one server-owned window context. Serialise them
+// so a slower earlier request cannot overwrite the user's latest selection.
+let organisationSwitchSequence = 0;
+let latestOrganisationSwitchSequence = 0;
+let organisationSwitchQueue = Promise.resolve();
+
+function enqueueOrganisationContextMutation(operation) {
+    const queuedMutation = organisationSwitchQueue.then(operation, operation);
+    organisationSwitchQueue = queuedMutation.then(() => undefined, () => undefined);
+    return queuedMutation;
+}
+
+/**
+ * Rebind the server-owned window context without publishing a user-visible
+ * switch. The target may be resolved when this mutation reaches the front of
+ * the queue so a delayed recovery cannot reinstate an organisation being left.
+ */
+export function synchroniseOrganisationContext(organisationIdOrResolver) {
+    return enqueueOrganisationContextMutation(() => {
+        const resolvedOrganisationId = typeof organisationIdOrResolver === 'function'
+            ? organisationIdOrResolver()
+            : organisationIdOrResolver;
+        return postJson('/von/api/session/set_organisation', {
+            organisation_concept_id: resolvedOrganisationId || null
+        });
+    });
+}
+
 export function normaliseOrganisationDisplayName(label) {
     const text = String(label || '').trim();
     if (!text) return null;
@@ -98,65 +126,118 @@ function renderRetryableOrgSelectorFailure(container, containerId, error) {
  * @param {string} [orgName] - Optional organisation name for event detail
  */
 export async function switchOrganisation(orgConceptId, orgName = null) {
+    const targetOrganisationId = orgConceptId || null;
+    const switchSequence = ++organisationSwitchSequence;
+    latestOrganisationSwitchSequence = switchSequence;
+    const switchId = `org-switch-${switchSequence}`;
+
     try {
-        const targetOrganisationId = orgConceptId || null;
-        const response = await postJson('/von/api/session/set_organisation', {
-            organisation_concept_id: targetOrganisationId
-        });
-
-        if (response.status === 'updated') {
-            if (response.organisation_id) {
-                const orgData = {
-                    concept_id: response.organisation_id,
-                    namespace: response.namespace
-                };
-                const currentOrgData = {
-                    id: null,
-                    concept_id: response.organisation_id,
-                    name: orgName || null
-                };
-
-                // JVNAUTOSCI-1011: Store in sessionStorage for window-scoped context
-                sessionStorage.setItem(SS_ORG_CONTEXT, JSON.stringify(orgData));
-                sessionStorage.setItem(SS_ORG_ROLE, response.role || 'member');
-                setSessionScopedOrgContext(currentOrgData);
-
-                // Also store in localStorage for persistence across restarts/new windows
-                localStorage.setItem(LS_ORG_CONTEXT, JSON.stringify(orgData));
-                localStorage.setItem(LS_ORG_ROLE, response.role || 'member');
-            } else {
-                sessionStorage.removeItem(SS_ORG_CONTEXT);
-                sessionStorage.removeItem(SS_ORG_ROLE);
-                localStorage.removeItem(LS_ORG_CONTEXT);
-                localStorage.removeItem(LS_ORG_ROLE);
-                setSessionScopedOrgContext(null);
-            }
-
-            if (response.namespace) {
-                sessionStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
-                localStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
-            }
-            sessionStorage.removeItem('von_org_switching');
-
-            // Dispatch event so other components can react to org change
-            const event = new CustomEvent('orgSwitched', {
-                detail: {
-                    organisation_id: response.organisation_id,
-                    organisation_name: orgName,
-                    role: response.role,
-                    namespace: response.namespace,
-                    window_session_id: response.window_session_id
-                }
-            });
-            document.dispatchEvent(event);
-
-            return response;
-        }
-        throw new Error(response.error || 'Failed to switch organisation');
-    } catch (err) {
-        console.error('Error switching organisation:', err);
-        throw err;
+        sessionStorage.setItem('von_org_switching', JSON.stringify({
+            concept_id: targetOrganisationId,
+            name: orgName || null
+        }));
+    } catch (_) {
+        // The event still invalidates scoped UI state when storage is unavailable.
     }
+
+    document.dispatchEvent(new CustomEvent('orgSwitchStarted', {
+        detail: {
+            switch_id: switchId,
+            organisation_id: targetOrganisationId,
+            organisation_name: orgName || null
+        }
+    }));
+
+    const executeSwitch = async () => {
+        try {
+            const response = await postJson('/von/api/session/set_organisation', {
+                organisation_concept_id: targetOrganisationId
+            });
+
+            if (response.status === 'updated') {
+                if (response.organisation_id) {
+                    const orgData = {
+                        concept_id: response.organisation_id,
+                        namespace: response.namespace
+                    };
+                    const currentOrgData = {
+                        id: null,
+                        concept_id: response.organisation_id,
+                        name: orgName || null
+                    };
+
+                    // JVNAUTOSCI-1011: Store in sessionStorage for window-scoped context
+                    sessionStorage.setItem(SS_ORG_CONTEXT, JSON.stringify(orgData));
+                    sessionStorage.setItem(SS_ORG_ROLE, response.role || 'member');
+                    setSessionScopedOrgContext(currentOrgData);
+
+                    // Also store in localStorage for persistence across restarts/new windows
+                    localStorage.setItem(LS_ORG_CONTEXT, JSON.stringify(orgData));
+                    localStorage.setItem(LS_ORG_ROLE, response.role || 'member');
+                } else {
+                    sessionStorage.removeItem(SS_ORG_CONTEXT);
+                    sessionStorage.removeItem(SS_ORG_ROLE);
+                    localStorage.removeItem(LS_ORG_CONTEXT);
+                    localStorage.removeItem(LS_ORG_ROLE);
+                    setSessionScopedOrgContext(null);
+                }
+
+                if (response.namespace) {
+                    sessionStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
+                    localStorage.setItem(SS_CURRENT_NAMESPACE, response.namespace);
+                }
+
+                const superseded = switchSequence !== latestOrganisationSwitchSequence;
+                if (!superseded) {
+                    sessionStorage.removeItem('von_org_switching');
+
+                    // Dispatch only the latest accepted selection. Intermediate
+                    // server state is retained for failure recovery but must not
+                    // repopulate scoped UI while a newer selection is pending.
+                    document.dispatchEvent(new CustomEvent('orgSwitched', {
+                        detail: {
+                            switch_id: switchId,
+                            organisation_id: response.organisation_id,
+                            organisation_name: orgName,
+                            role: response.role,
+                            namespace: response.namespace,
+                            window_session_id: response.window_session_id
+                        }
+                    }));
+                }
+
+                return {
+                    ...response,
+                    switch_id: switchId,
+                    superseded
+                };
+            }
+            throw new Error(response.error || 'Failed to switch organisation');
+        } catch (err) {
+            const superseded = switchSequence !== latestOrganisationSwitchSequence;
+            try {
+                err.organisationSwitchSuperseded = superseded;
+                err.organisationSwitchId = switchId;
+            } catch (_) {
+                // Preserve the original failure even if it is not extensible.
+            }
+            if (!superseded) {
+                try { sessionStorage.removeItem('von_org_switching'); } catch (_) { }
+                document.dispatchEvent(new CustomEvent('orgSwitchFailed', {
+                    detail: {
+                        switch_id: switchId,
+                        organisation_id: targetOrganisationId,
+                        organisation_name: orgName || null,
+                        error: err instanceof Error ? err.message : String(err || '')
+                    }
+                }));
+            }
+            console.error('Error switching organisation:', err);
+            throw err;
+        }
+    };
+
+    return enqueueOrganisationContextMutation(executeSwitch);
 }
 
 /**
@@ -236,11 +317,17 @@ export async function renderOrgSelector(containerId) {
                     const orgDisplayName = orgId
                         ? normaliseOrganisationDisplayName(selected?.textContent)
                         : null;
-                    await switchOrganisation(orgId, orgDisplayName || null);
+                    const switchResult = await switchOrganisation(orgId, orgDisplayName || null);
+                    if (switchResult?.superseded === true) {
+                        return;
+                    }
 
                     // Refresh the selector to show updated state
                     await renderOrgSelector(containerId);
                 } catch (err) {
+                    if (err?.organisationSwitchSuperseded === true) {
+                        return;
+                    }
                     console.error('Error switching organisation:', err);
                     alert('Failed to switch organisation: ' + err.message);
                     try { sessionStorage.removeItem('von_org_switching'); } catch { }
