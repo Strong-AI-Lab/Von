@@ -22,6 +22,8 @@ import {
     __testOnly_formatThinkingEtaText,
     __testOnly_renderWorkflowDefinitionsBody,
     __testOnly_setActiveChatSession,
+    __testOnly_updateExternalConversationUi,
+    __testOnly_handleExternalConversationFile,
     __testOnly_setDisplayedHistorySession,
     __testOnly_setUnambiguousTimestampTooltip,
     __testOnly_setWorkflowShowDesigns,
@@ -91,6 +93,7 @@ import {
     __testOnly_getConversationRuntimeCostSnapshot,
     __testOnly_setSessionTabsCache,
     __testOnly_setTranscriptTurns,
+    __test_only__rehydrateHistory,
     setLlmDebugDataForTurn,
     formatChatTimestamp,
     exportConversationMarkdown,
@@ -110,6 +113,120 @@ jest.mock('../apiService.js', () => {
         postJson: jest.fn(),
         WINDOW_SESSION_HEADER: 'X-Window-Session-ID'
     };
+});
+
+describe('external conversation imports', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton" type="button"></button>
+            <button id="resetButton" type="button"></button>
+            <button id="uploadFileButton" type="button"></button>
+            <button id="dictateButton" type="button"></button>
+            <button id="continueImportedConversationBtn" class="hidden" type="button"></button>
+            <textarea id="promptInput" placeholder="Talk with Von here..."></textarea>
+            <div id="chatSessionFocusChips"></div>
+        `;
+        __testOnly_setSessionTabsCache([
+            {
+                session_id: 'external-session',
+                session_name: 'Imported session',
+                external_conversation: {
+                    read_only: true,
+                    provider: 'codex'
+                }
+            }
+        ]);
+        __testOnly_setActiveChatSession('external-session', 'Imported session');
+    });
+
+    afterEach(() => {
+        __testOnly_setActiveChatSession(null, null);
+        __testOnly_setSessionTabsCache([]);
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('marks the imported snapshot read-only and exposes continuation', () => {
+        __testOnly_updateExternalConversationUi();
+
+        expect(document.getElementById('sendButton').disabled).toBe(true);
+        expect(document.getElementById('sendButton').textContent).toBe('Read-only import');
+        expect(document.getElementById('promptInput').disabled).toBe(true);
+        expect(document.getElementById('resetButton').disabled).toBe(true);
+        expect(document.getElementById('uploadFileButton').disabled).toBe(true);
+        expect(document.getElementById('continueImportedConversationBtn').classList.contains('hidden')).toBe(false);
+    });
+
+    test('does not submit a prompt into an imported snapshot', async () => {
+        document.getElementById('promptInput').disabled = false;
+        document.getElementById('promptInput').value = 'Please continue';
+        global.fetch = jest.fn();
+
+        await sendMessage();
+
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('previews provenance and loss before an import can be cancelled', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                success: true,
+                dry_run: true,
+                preview: {
+                    action: 'new',
+                    provider: 'claude_code',
+                    source_title: 'Research chat',
+                    loss_report: { projected_message_count: 4 }
+                }
+            })
+        });
+        const confirm = jest.spyOn(window, 'confirm').mockReturnValue(false);
+        const file = new File(['{}'], 'conversation.json', { type: 'application/json' });
+
+        await __testOnly_handleExternalConversationFile(file);
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(String(global.fetch.mock.calls[0][0])).toContain(
+            '/api/session/import_external_conversation'
+        );
+        expect(confirm).toHaveBeenCalledWith(expect.stringContaining('4 visible messages'));
+    });
+
+    test('renders source actors without attributing them to Von or the custodian', () => {
+        const scrollableField = document.createElement('div');
+        scrollableField.id = 'scrollableField';
+        document.body.appendChild(scrollableField);
+
+        __test_only__rehydrateHistory(scrollableField, [
+            {
+                role: 'user',
+                content: 'Historical human turn',
+                timestamp: '2026-08-01T00:00:00Z',
+                external_actor: {
+                    actor_kind: 'unresolved_human',
+                    display_name: 'Source user'
+                }
+            },
+            {
+                role: 'assistant',
+                content: 'Historical agent turn',
+                timestamp: '2026-08-01T00:00:01Z',
+                external_actor: {
+                    actor_kind: 'agent',
+                    display_name: 'Codex'
+                }
+            }
+        ], { scrollToBottom: false });
+
+        const headers = Array.from(scrollableField.querySelectorAll('.message-header'))
+            .map((header) => header.textContent);
+        expect(headers[0]).toContain('Source user');
+        expect(headers[1]).toContain('Codex');
+        expect(headers[1]).not.toContain('Von •');
+        expect(scrollableField.querySelector('.chat-edit-button')).toBeNull();
+        expect(scrollableField.querySelector('.btn-delete-exchange')).toBeNull();
+    });
 });
 
 describe('conversation runtime cost persistence handover', () => {

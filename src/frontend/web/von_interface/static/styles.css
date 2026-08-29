@@ -7943,6 +7943,35 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     text-transform: lowercase;
 }
 
+.chat-session-imported-marker {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(124, 58, 237, 0.11);
+    color: #6d28d9;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.01em;
+}
+
+.chat-imported-actor-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    margin-right: 12px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: #ede9fe;
+    color: #6d28d9;
+    font-size: 16px;
+    font-weight: 700;
+}
+
 .chat-session-tab-new {
     font-weight: 700;
     padding: 6px 10px;

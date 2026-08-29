@@ -14,6 +14,7 @@ import re
 import time
 import threading
 import secrets
+import tempfile
 import uuid
 import json
 import hashlib
@@ -55,6 +56,12 @@ from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
 from ...services import conversation_management_service
 from ...services import conversation_search_service
+from ...services.external_conversation_import_service import (
+    MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES,
+    ExternalConversationImportError,
+    continue_external_conversation,
+    import_external_conversation_file,
+)
 from ...services.adaptive_turn_service import (
     build_effect_outcome_spoken_fallback,
     execute_adaptive_turn,
@@ -1092,6 +1099,22 @@ def _chat_prompt_queue_error_response(
     )
 
 
+def _external_conversation_read_only_response():
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error": (
+                    "Imported conversations are read-only. Continue as a native "
+                    "Von conversation before sending a new message."
+                ),
+                "error_code": "external_conversation_read_only",
+            }
+        ),
+        409,
+    )
+
+
 @von_bp.route("/api/chat_prompt_queue", methods=["GET"])
 def list_chat_prompt_queue_route():
     scope = _get_current_chat_prompt_queue_scope()
@@ -1137,6 +1160,12 @@ def create_chat_prompt_queue_route():
                 shared_invite=shared_invite,
             )
             if history_user_id and history_namespace:
+                if chat_history_service.is_external_conversation_read_only(
+                    user_id=history_user_id,
+                    session_id=session_id,
+                    namespace=history_namespace,
+                ):
+                    return _external_conversation_read_only_response()
                 conversation_key = build_conversation_key(
                     owner_user_id=history_user_id,
                     history_namespace=history_namespace,
@@ -1198,6 +1227,12 @@ def update_chat_prompt_queue_route(queue_id: str):
                     shared_invite=shared_invite,
                 )
                 if history_user_id and history_namespace:
+                    if chat_history_service.is_external_conversation_read_only(
+                        user_id=history_user_id,
+                        session_id=session_id,
+                        namespace=history_namespace,
+                    ):
+                        return _external_conversation_read_only_response()
                     conversation_key = build_conversation_key(
                         owner_user_id=history_user_id,
                         history_namespace=history_namespace,
@@ -11496,6 +11531,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 ),
                 401,
             )
+        background_session_id = request_conversation_session_id
+        if not background_session_id and isinstance(effective, Mapping):
+            raw_active_session_id = effective.get("chat_session_id")
+            if isinstance(raw_active_session_id, str) and raw_active_session_id.strip():
+                background_session_id = raw_active_session_id.strip()
+        if background_session_id and chat_history_service.is_external_conversation_read_only(
+            user_id=user_concept_id,
+            session_id=background_session_id,
+            namespace=user_namespace,
+        ):
+            return _external_conversation_read_only_response()
         return _submit_generate_background_request(
             app=current_app._get_current_object(),
             request_data=data if isinstance(data, Mapping) else None,
@@ -11548,6 +11594,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         ),
         shared_invite=shared_invite,
     )
+    if (
+        history_user_id
+        and history_namespace
+        and chat_history_service.is_external_conversation_read_only(
+            user_id=history_user_id,
+            session_id=session_id,
+            namespace=history_namespace,
+        )
+    ):
+        return _external_conversation_read_only_response()
 
     # Admission belongs immediately before the canonical history read: two
     # turns admitted after that point could observe the same prior transcript
@@ -16967,6 +17023,12 @@ def reset_context():
                 ),
                 shared_invite=shared_invite,
             )
+            if owner_namespace and chat_history_service.is_external_conversation_read_only(
+                user_id=owner_user_id,
+                session_id=session_id,
+                namespace=owner_namespace,
+            ):
+                return _external_conversation_read_only_response()
             reset_outcome = chat_history_service.reset_chat_history_conversation_state(
                 user_id=owner_user_id,
                 session_id=session_id,
@@ -17552,7 +17614,11 @@ def set_chat_session():
             session_id=session_id,
             namespace=namespace,
         )
-        projection = {"session_name": 1}
+        projection = {
+            "session_name": 1,
+            chat_history_service.EXTERNAL_CONVERSATION_IMPORT_FIELD: 1,
+            "conversation_lineage": 1,
+        }
         if include_history:
             projection["history"] = 1
         user_doc = chat_history_service.find_chat_history_document_for_read(
@@ -17591,6 +17657,9 @@ def set_chat_session():
             return jsonify({"error": "Session not found"}), 404
 
         session_name = doc.get("session_name")
+        external_conversation = (
+            chat_history_service.project_external_conversation_metadata(doc)
+        )
 
         def _normalise_timestamp(value):
             if isinstance(value, datetime):
@@ -17666,6 +17735,7 @@ def set_chat_session():
                     "session_id": session_id,
                     "session_name": session_name,
                     "history": normalised_history,
+                    "external_conversation": external_conversation,
                 }
             ),
             200,
@@ -18017,6 +18087,187 @@ def _authorised_focal_concepts(
         maximum=maximum,
         allow_partial=allow_partial,
     )
+
+
+@von_bp.route("/api/session/import_external_conversation", methods=["POST"])
+def import_external_conversation_route():
+    """Preview or import a supported external transcript for the current actor."""
+
+    user_concept_id = session.get("user_concept_id")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "Not authenticated", "error_code": "not_authenticated"}), 401
+
+    upload = request.files.get("file")
+    if upload is None:
+        return (
+            jsonify(
+                {
+                    "error": "A transcript file is required.",
+                    "error_code": "external_conversation_source_required",
+                }
+            ),
+            400,
+        )
+    raw_bytes = upload.stream.read(MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES + 1)
+    if len(raw_bytes) > MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES:
+        return (
+            jsonify(
+                {
+                    "error": "The uploaded conversation exceeds the 32 MiB import limit.",
+                    "error_code": "external_conversation_source_too_large",
+                }
+            ),
+            413,
+        )
+
+    dry_run_raw = request.form.get("dry_run", "true").strip().lower()
+    dry_run = dry_run_raw not in {"0", "false", "no", "off"}
+    window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    temporary_path: Path | None = None
+    try:
+        effective = get_effective_context(
+            window_session_id,
+            dict(session),
+            user_concept_id.strip(),
+        )
+        suffix = Path(upload.filename or "conversation.jsonl").suffix[:16] or ".jsonl"
+        with tempfile.NamedTemporaryFile(
+            prefix="von-external-conversation-",
+            suffix=suffix,
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(raw_bytes)
+            temporary_path = Path(temporary_file.name)
+        result = import_external_conversation_file(
+            path=temporary_path,
+            custodian_user_id=user_concept_id.strip(),
+            namespace=effective.get("namespace"),
+            organisation_concept_id=_normalise_concept_id(
+                effective.get("organisation_id")
+            ),
+            role_in_org=effective.get("role"),
+            provider_hint=request.form.get("provider"),
+            source_account=request.form.get("source_account"),
+            source_workspace=request.form.get("source_workspace"),
+            dry_run=dry_run,
+        )
+        if not result.get("success"):
+            return jsonify(result), 500
+        if not dry_run:
+            imported_session_id = result.get("projection", {}).get("session_id")
+            if isinstance(imported_session_id, str) and imported_session_id:
+                _set_active_chat_session_for_request(
+                    session_id=imported_session_id,
+                    user_concept_id=user_concept_id.strip(),
+                    window_session_id=window_session_id,
+                )
+        return jsonify(result), 200
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_actor_mismatch",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
+    except ExternalConversationImportError as exc:
+        status_code = 413 if exc.error_code.endswith("too_large") else 400
+        return (
+            jsonify({"error": str(exc), "error_code": exc.error_code}),
+            status_code,
+        )
+    except chat_history_service.ChatHistoryServiceError as exc:
+        current_app.logger.warning("External conversation import rejected: %s", exc)
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "error_code": "external_conversation_projection_conflict",
+                }
+            ),
+            409,
+        )
+    except Exception:
+        current_app.logger.exception("External conversation import failed")
+        return (
+            jsonify(
+                {
+                    "error": "External conversation import failed.",
+                    "error_code": "external_conversation_import_failed",
+                }
+            ),
+            500,
+        )
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                current_app.logger.warning(
+                    "Could not remove temporary external conversation upload %s",
+                    temporary_path,
+                )
+
+
+@von_bp.route("/api/session/continue_external_conversation", methods=["POST"])
+def continue_external_conversation_route():
+    """Fork an imported read-only snapshot into a native Von conversation."""
+
+    user_concept_id = session.get("user_concept_id")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "Not authenticated", "error_code": "not_authenticated"}), 401
+    data = request.get_json(silent=True) or {}
+    source_session_id = data.get("session_id") or data.get("source_session_id")
+    if not isinstance(source_session_id, str) or not source_session_id.strip():
+        return jsonify({"error": "session_id required"}), 400
+    window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    try:
+        effective = get_effective_context(
+            window_session_id,
+            dict(session),
+            user_concept_id.strip(),
+        )
+        result = continue_external_conversation(
+            custodian_user_id=user_concept_id.strip(),
+            source_session_id=source_session_id.strip(),
+            namespace=effective.get("namespace"),
+            organisation_concept_id=_normalise_concept_id(
+                effective.get("organisation_id")
+            ),
+            role_in_org=effective.get("role"),
+        )
+        _set_active_chat_session_for_request(
+            session_id=result["session_id"],
+            user_concept_id=user_concept_id.strip(),
+            window_session_id=window_session_id,
+        )
+        return jsonify(result), 201
+    except ExternalConversationImportError as exc:
+        status_code = 404 if exc.error_code == "external_conversation_not_found" else 409
+        return jsonify({"error": str(exc), "error_code": exc.error_code}), status_code
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_actor_mismatch",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
+    except Exception:
+        current_app.logger.exception("External conversation continuation failed")
+        return (
+            jsonify(
+                {
+                    "error": "External conversation continuation failed.",
+                    "error_code": "external_conversation_continuation_failed",
+                }
+            ),
+            500,
+        )
 
 
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])

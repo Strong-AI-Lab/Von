@@ -18,6 +18,18 @@
             <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
           </div>
           <div class="chat-header-controls" role="group" aria-label="Conversation tools">
+            <button id="importExternalConversationBtn" class="chat-export-btn" type="button"
+              title="Import a Codex, Claude Code, or Copilot conversation" aria-label="Import conversation"
+              data-keep-title="true">
+              <span class="btn-icon">Import</span>
+            </button>
+            <input id="importExternalConversationInput" class="visually-hidden" type="file"
+              accept=".json,.jsonl,application/json,application/x-ndjson" aria-label="Choose conversation file" />
+            <button id="continueImportedConversationBtn" class="chat-export-btn hidden" type="button"
+              title="Continue this imported snapshot as a native Von conversation"
+              aria-label="Continue imported conversation" data-keep-title="true">
+              <span class="btn-icon">Continue</span>
+            </button>
             <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
               title="Inspect this conversation's shared situation" aria-label="Inspect conversation situation"
               aria-expanded="false" aria-controls="conversationSituationPanel" data-keep-title="true">
