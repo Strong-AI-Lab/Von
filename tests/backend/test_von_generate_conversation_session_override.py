@@ -1520,3 +1520,40 @@ def test_shared_generate_uses_owner_situation_and_owner_storage_copy(monkeypatch
     adaptive_call = app.config["_ADAPTIVE_TURN_CALLS"][0]
     assert adaptive_call["conversation_id"] == "shared-session"
     assert adaptive_call["conversation_situation"] == "Shared situation"
+
+
+def test_generate_rejects_new_turn_in_imported_read_only_conversation(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    monkeypatch.setattr(
+        von_routes,
+        "_get_effective_context_with_owned_conversation_recovery",
+        lambda **_kwargs: {
+            "organisation_id": "#V#org",
+            "namespace": "#V#user@org",
+            "chat_session_id": "external-session",
+            "role": "member",
+            "source": "window_session",
+        },
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "is_external_conversation_read_only",
+        lambda **_kwargs: True,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Continue here",
+            "conversation_session_id": "external-session",
+        },
+        headers={"X-Von-Window-Session": "window-identity"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error_code"] == "external_conversation_read_only"
+    assert app.config["_ADAPTIVE_TURN_CALLS"] == []
+    assert history_calls == []

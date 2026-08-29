@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Mapping
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import (
+    OperationFailure,
     PyMongoError,
 )
 from pymongo.read_preferences import ReadPreference
@@ -86,6 +87,8 @@ CHAT_SESSION_PROVENANCE_FIELDS = (
     "is_agent_created",
     "test_artifact_kind",
 )
+EXTERNAL_CONVERSATION_IMPORT_FIELD = "external_conversation_import"
+EXTERNAL_CONVERSATION_IMPORT_SCHEMA_VERSION = "external_conversation_import.v1"
 CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE = "exclude"
 CHAT_SESSION_AGENT_VISIBILITY_INCLUDE = "include"
 CHAT_SESSION_AGENT_VISIBILITY_ONLY = "only"
@@ -251,8 +254,21 @@ def _read_find_one(
         result = chat_history_coll.find_one(query, projection, **kwargs)
         success = True
         return result
-    except TypeError as exc:
-        # Test doubles may not accept PyMongo comment kwargs.
+    except (TypeError, OperationFailure) as exc:
+        # Older Mongo-compatible stores and test doubles may not accept the
+        # observability comment option. Retry only that transport mismatch.
+        if isinstance(exc, OperationFailure):
+            message = str(exc).lower()
+            unsupported_comment = "comment" in message and any(
+                marker in message
+                for marker in (
+                    "unrecognized field",
+                    "unrecognised field",
+                    "unknown option",
+                )
+            )
+            if not unsupported_comment:
+                raise
         error_type = type(exc).__name__
         try:
             result = chat_history_coll.find_one(query, projection)
@@ -299,8 +315,16 @@ def _read_find(
         else:
             cursor = chat_history_coll.find(query, projection)
         success = True
-    except TypeError as exc:
-        # Test doubles may not accept PyMongo comment kwargs.
+    except (TypeError, OperationFailure) as exc:
+        # Test doubles and older compatible servers may not accept comment kwargs.
+        if isinstance(exc, OperationFailure):
+            message = str(exc).lower()
+            unsupported_comment = "comment" in message and any(
+                marker in message
+                for marker in ("unrecognized", "unknown", "unsupported", "invalid")
+            )
+            if not unsupported_comment:
+                raise
         error_type = type(exc).__name__
         try:
             cursor = chat_history_coll.find(query, projection)
@@ -714,6 +738,108 @@ def _session_provenance_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _external_conversation_summary_from_doc(
+    doc: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Return bounded imported-conversation metadata safe for actor-scoped UI reads."""
+
+    manifest = doc.get(EXTERNAL_CONVERSATION_IMPORT_FIELD)
+    if not isinstance(manifest, Mapping):
+        return None
+    if manifest.get("schema_version") != EXTERNAL_CONVERSATION_IMPORT_SCHEMA_VERSION:
+        return None
+    loss_report = manifest.get("loss_report")
+    safe_loss_report: Dict[str, Any] = {}
+    if isinstance(loss_report, Mapping):
+        for key in (
+            "total_event_count",
+            "user_visible_event_count",
+            "non_projected_event_count",
+            "projected_message_count",
+            "projected_character_count",
+            "truncated_message_count",
+            "truncated_character_count",
+            "omitted_visible_message_count",
+            "projection_complete",
+            "invalid_or_unsupported_record_count",
+            "instruction_event_count",
+            "sidechain_record_count",
+            "hidden_request_count",
+            "branch_information_present",
+        ):
+            value = loss_report.get(key)
+            if isinstance(value, (bool, int)) and not isinstance(value, float):
+                safe_loss_report[key] = value
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "read_only": manifest.get("read_only") is True,
+        "provider": _normalise_session_provenance_text(
+            manifest.get("provider"), max_len=80, identifier=True
+        ),
+        "source_session_id": _normalise_session_provenance_text(
+            manifest.get("source_session_id"), max_len=240
+        ),
+        "source_title": _normalise_session_provenance_text(
+            manifest.get("source_title"), max_len=160
+        ),
+        "source_format": _normalise_session_provenance_text(
+            manifest.get("source_format"), max_len=80, identifier=True
+        ),
+        "source_sha256": _normalise_session_provenance_text(
+            manifest.get("source_sha256"), max_len=64
+        ),
+        "package_sha256": _normalise_session_provenance_text(
+            manifest.get("package_sha256"), max_len=64
+        ),
+        "parser_id": _normalise_session_provenance_text(
+            manifest.get("parser_id"), max_len=120
+        ),
+        "parser_version": _normalise_session_provenance_text(
+            manifest.get("parser_version"), max_len=80
+        ),
+        "source_created_at_utc": manifest.get("source_created_at_utc"),
+        "source_updated_at_utc": manifest.get("source_updated_at_utc"),
+        "imported_at_utc": manifest.get("imported_at_utc"),
+        "participant_count": manifest.get("participant_count"),
+        "event_count": manifest.get("event_count"),
+        "loss_report": safe_loss_report,
+    }
+
+
+def _conversation_lineage_summary_from_doc(
+    doc: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    lineage = doc.get("conversation_lineage")
+    if not isinstance(lineage, Mapping):
+        return None
+    allowed = (
+        "schema_version",
+        "lineage_kind",
+        "forked_from_session_id",
+        "source_provider",
+        "source_session_id",
+        "source_snapshot_sha256",
+        "source_package_sha256",
+        "created_at_utc",
+    )
+    return {key: lineage.get(key) for key in allowed if lineage.get(key) is not None}
+
+
+def _session_external_projection_from_doc(doc: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "external_conversation": _external_conversation_summary_from_doc(doc),
+        "conversation_lineage": _conversation_lineage_summary_from_doc(doc),
+    }
+
+
+def project_external_conversation_metadata(
+    doc: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Project bounded external-import metadata from an actor-authorised document."""
+
+    return _external_conversation_summary_from_doc(doc)
+
+
 def _normalise_chat_session_agent_visibility(value: Any) -> str:
     if value is None:
         return CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
@@ -844,6 +970,8 @@ def _add_chat_session_provenance_projection(
 ) -> Dict[str, Any]:
     for field_name in CHAT_SESSION_PROVENANCE_FIELDS:
         projection[field_name] = 1
+    projection[EXTERNAL_CONVERSATION_IMPORT_FIELD] = 1
+    projection["conversation_lineage"] = 1
     return projection
 
 
@@ -3596,6 +3724,286 @@ def set_chat_history_for_session(
         raise ChatHistoryServiceError(f"Could not set chat history: {e}") from e
 
 
+def classify_external_conversation_projection(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str],
+    source_identity_key: str,
+    source_sha256: str,
+    package_sha256: str,
+    parser_version: str,
+) -> str:
+    """Classify an actor-scoped import without mutating its conversation."""
+
+    if not user_id or not session_id or not source_identity_key:
+        raise ChatHistoryServiceError(
+            "user_id, session_id, and source_identity_key are required."
+        )
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=True,
+    )
+    try:
+        doc = _read_find_one(
+            chat_history_coll,
+            query,
+            {EXTERNAL_CONVERSATION_IMPORT_FIELD: 1},
+        )
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not classify external conversation import: {exc}"
+        ) from exc
+    if doc is None:
+        return "new"
+    manifest = doc.get(EXTERNAL_CONVERSATION_IMPORT_FIELD)
+    if not isinstance(manifest, Mapping):
+        raise ChatHistoryServiceError(
+            "The deterministic import session ID collides with a native conversation."
+        )
+    if manifest.get("source_identity_key") != source_identity_key:
+        raise ChatHistoryServiceError(
+            "The deterministic import session ID belongs to another external source."
+        )
+    unchanged = bool(
+        manifest.get("read_only") is True
+        and manifest.get("source_sha256") == source_sha256
+        and manifest.get("package_sha256") == package_sha256
+        and manifest.get("parser_version") == parser_version
+    )
+    return "unchanged" if unchanged else "updated"
+
+
+def get_external_conversation_projection(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str],
+    include_history: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Read an imported projection only through the custodian's actor scope."""
+
+    if not user_id or not session_id:
+        raise ChatHistoryServiceError("user_id and session_id are required.")
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=True,
+    )
+    projection: Dict[str, Any] = {
+        "_id": 0,
+        "session_id": 1,
+        "session_name": 1,
+        "namespace": 1,
+        "organisation_concept_id": 1,
+        "role_in_org": 1,
+        EXTERNAL_CONVERSATION_IMPORT_FIELD: 1,
+        "conversation_lineage": 1,
+    }
+    if include_history:
+        projection["history"] = 1
+    try:
+        doc = _read_find_one(chat_history_coll, query, projection)
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not read external conversation projection: {exc}"
+        ) from exc
+    if not isinstance(doc, dict):
+        return None
+    manifest = doc.get(EXTERNAL_CONVERSATION_IMPORT_FIELD)
+    if not isinstance(manifest, Mapping):
+        return None
+    return doc
+
+
+def is_external_conversation_read_only(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str],
+) -> bool:
+    doc = get_external_conversation_projection(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_history=False,
+    )
+    if not doc:
+        return False
+    manifest = doc.get(EXTERNAL_CONVERSATION_IMPORT_FIELD)
+    return bool(isinstance(manifest, Mapping) and manifest.get("read_only") is True)
+
+
+def upsert_external_conversation_projection(
+    *,
+    user_id: str,
+    session_id: str,
+    session_name: str,
+    namespace: Optional[str],
+    organisation_concept_id: Optional[str],
+    role_in_org: Optional[str],
+    history: List[Dict[str, Any]],
+    manifest: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Create or refresh a read-only imported transcript in actor scope."""
+
+    if not user_id or not session_id:
+        raise ChatHistoryServiceError("user_id and session_id are required.")
+    if not isinstance(history, list) or not history:
+        raise ChatHistoryServiceError("Imported history must contain messages.")
+    if not isinstance(manifest, Mapping):
+        raise ChatHistoryServiceError("An external import manifest is required.")
+    stored_manifest = dict(manifest)
+    if (
+        stored_manifest.get("schema_version")
+        != EXTERNAL_CONVERSATION_IMPORT_SCHEMA_VERSION
+        or stored_manifest.get("read_only") is not True
+        or stored_manifest.get("custodian_user_id") != user_id
+        or not stored_manifest.get("source_identity_key")
+    ):
+        raise ChatHistoryServiceError("The external import manifest is invalid.")
+    for entry in history:
+        if not isinstance(entry, dict) or entry.get("role") not in {
+            "user",
+            "assistant",
+        }:
+            raise ChatHistoryServiceError(
+                "Imported history may contain only user and assistant messages."
+            )
+        if entry.get("author_user_id") is not None:
+            raise ChatHistoryServiceError(
+                "External speakers cannot be attributed to the custodian user."
+            )
+
+    action = classify_external_conversation_projection(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        source_identity_key=str(stored_manifest["source_identity_key"]),
+        source_sha256=str(stored_manifest.get("source_sha256") or ""),
+        package_sha256=str(stored_manifest.get("package_sha256") or ""),
+        parser_version=str(stored_manifest.get("parser_version") or ""),
+    )
+    if action == "unchanged":
+        current = get_external_conversation_projection(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_history=False,
+        )
+        return {
+            "success": True,
+            "action": "unchanged",
+            "session_id": session_id,
+            "canonical_read_back": {
+                "session_id": session_id,
+                "external_conversation": _external_conversation_summary_from_doc(
+                    current or {}
+                ),
+            },
+        }
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    now = datetime.now(timezone.utc)
+    normalised_name = _normalise_session_name(session_name)
+    search_segments = [
+        segment
+        for index, entry in enumerate(history)
+        for segment in [_conversation_search_segment(entry, history_index=index)]
+        if segment is not None
+    ]
+    message_times = [
+        timestamp
+        for entry in history
+        for timestamp in [_coerce_datetime(entry.get("timestamp"))]
+        if timestamp is not None
+    ]
+    first_message_at = min(message_times) if message_times else now
+    last_message_at = max(message_times) if message_times else now
+
+    exact_query: Dict[str, Any] = {"user_id": user_id, "session_id": session_id}
+    if isinstance(namespace, str) and namespace.strip():
+        exact_query["namespace"] = namespace.strip()
+    existing = chat_history_coll.find_one(exact_query, {"session_name": 1})
+    set_fields: Dict[str, Any] = {
+        "history": history,
+        EXTERNAL_CONVERSATION_IMPORT_FIELD: stored_manifest,
+        "origin_kind": "external_conversation_import",
+        "updated_at": last_message_at,
+        "conversation_search_segments": search_segments,
+        "conversation_search_index_version": CONVERSATION_SEARCH_INDEX_VERSION,
+        "conversation_search_indexed_at": now,
+    }
+    if normalised_name and (
+        action == "new" or not _normalise_session_name((existing or {}).get("session_name"))
+    ):
+        set_fields["session_name"] = normalised_name
+        set_fields["conversation_search_title"] = normalised_name
+    if isinstance(namespace, str) and namespace.strip():
+        set_fields["namespace"] = namespace.strip()
+    if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+        set_fields["organisation_concept_id"] = organisation_concept_id.strip()
+    if isinstance(role_in_org, str) and role_in_org.strip():
+        set_fields["role_in_org"] = role_in_org.strip()
+
+    set_on_insert: Dict[str, Any] = {"created_at": first_message_at}
+    try:
+        result = chat_history_coll.update_one(
+            exact_query,
+            {"$set": set_fields, "$setOnInsert": set_on_insert},
+            upsert=True,
+        )
+    except PyMongoError as exc:
+        logger.error("Error storing external conversation projection: %s", exc)
+        raise ChatHistoryServiceError(
+            f"Could not store external conversation projection: {exc}"
+        ) from exc
+    if not (
+        getattr(result, "matched_count", 0)
+        or getattr(result, "upserted_id", None) is not None
+    ):
+        raise ChatHistoryServiceError("External conversation projection was not stored.")
+
+    canonical = get_external_conversation_projection(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_history=False,
+    )
+    canonical_summary = _external_conversation_summary_from_doc(canonical or {})
+    if (
+        not isinstance(canonical_summary, dict)
+        or canonical_summary.get("source_sha256") != stored_manifest.get("source_sha256")
+        or canonical_summary.get("package_sha256")
+        != stored_manifest.get("package_sha256")
+    ):
+        raise ChatHistoryServiceError(
+            "External conversation canonical read-back did not match the import."
+        )
+    return {
+        "success": True,
+        "action": action,
+        "session_id": session_id,
+        "canonical_read_back": {
+            "session_id": session_id,
+            "session_name": (canonical or {}).get("session_name"),
+            "namespace": (canonical or {}).get("namespace"),
+            "external_conversation": canonical_summary,
+        },
+    }
+
+
 def add_reset_marker_to_history(user_id: str, session_id: str) -> None:
     """
     Adds a reset marker to the chat history instead of deleting it.
@@ -4108,6 +4516,7 @@ def _build_session_summary_from_metadata(
         "preview": None,
         **focus,
         **provenance,
+        **_session_external_projection_from_doc(doc),
     }
 
 
@@ -4409,6 +4818,7 @@ def _load_chat_history_session_summaries(
                     "preview": preview,
                     **focus,
                     **provenance,
+                    **_session_external_projection_from_doc(doc),
                 }
             )
 
@@ -4742,6 +5152,7 @@ def get_chat_history_session_summary(
         "preview": preview,
         **focus,
         **provenance,
+        **_session_external_projection_from_doc(doc),
     }
     _record_chat_history_read_success()
     return summary
@@ -4869,6 +5280,7 @@ def create_chat_session(
             "namespace": (doc or {}).get("namespace") or ns,
             **_focus_projection_from_doc(doc),
             **stored_provenance,
+            **_session_external_projection_from_doc(doc or {}),
         }
     except PyMongoError as e:
         logger.error(f"Error creating chat session: {e}", exc_info=True)

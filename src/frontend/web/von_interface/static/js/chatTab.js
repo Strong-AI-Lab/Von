@@ -157,6 +157,7 @@ let totalHistorySegments = 1;
 let activeChatSessionId = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
+let activeExternalConversationMetadata = null;
 let chatSessionSelectionGeneration = 0;
 let newChatCreationInFlight = null;
 let sessionTabsCache = [];
@@ -5862,6 +5863,60 @@ function setFinishedThinkingCardForSession(sessionId, request = null) {
     refreshChatSessionTabActivityIndicators();
 }
 
+function getExternalConversationMetadata(sessionId = activeChatSessionId) {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid) {
+        return null;
+    }
+    if (sid === activeChatSessionId && activeExternalConversationMetadata?.read_only === true) {
+        return activeExternalConversationMetadata;
+    }
+    const session = sessionTabsCache.find(
+        candidate => normaliseHistorySessionId(candidate?.session_id) === sid
+    );
+    const metadata = session?.external_conversation;
+    return metadata && typeof metadata === 'object' && metadata.read_only === true
+        ? metadata
+        : null;
+}
+
+function isExternalConversationReadOnly(sessionId = activeChatSessionId) {
+    return getExternalConversationMetadata(sessionId)?.read_only === true;
+}
+
+function updateExternalConversationUi() {
+    const metadata = getExternalConversationMetadata();
+    const readOnly = metadata?.read_only === true;
+    const promptInput = document.getElementById('promptInput');
+    const continueButton = document.getElementById('continueImportedConversationBtn');
+    const resetButton = document.getElementById('resetButton');
+    const uploadButton = document.getElementById('uploadFileButton');
+    const dictateButton = document.getElementById('dictateButton');
+
+    if (continueButton) {
+        continueButton.classList.toggle('hidden', !readOnly);
+        continueButton.disabled = !readOnly;
+    }
+    if (promptInput) {
+        if (!promptInput.dataset.nativePlaceholder) {
+            promptInput.dataset.nativePlaceholder = promptInput.getAttribute('placeholder') || 'Talk with Von here...';
+        }
+        promptInput.disabled = readOnly;
+        promptInput.setAttribute(
+            'placeholder',
+            readOnly
+                ? 'Imported snapshot — choose Continue to add new turns.'
+                : promptInput.dataset.nativePlaceholder
+        );
+    }
+    [resetButton, uploadButton, dictateButton].forEach((button) => {
+        if (button) {
+            button.disabled = readOnly;
+        }
+    });
+    updateSendButtonForCurrentChatState();
+}
+
 function updateSendButtonForCurrentChatState() {
     const sendButton = document.getElementById('sendButton');
     if (!sendButton) {
@@ -5873,7 +5928,13 @@ function updateSendButtonForCurrentChatState() {
         || queueCounts.running > 0
         || queueCounts.queued > 0
         || queueCounts.restartable > 0;
-    sendButton.disabled = uploadInFlight;
+    const readOnly = isExternalConversationReadOnly();
+    sendButton.disabled = uploadInFlight || readOnly;
+    if (readOnly) {
+        sendButton.textContent = 'Read-only import';
+        sendButton.title = 'Continue this imported snapshot before sending a new message.';
+        return;
+    }
     sendButton.textContent = sessionBusy
         ? 'Queue Prompt'
         : 'Send Prompt';
@@ -23994,7 +24055,7 @@ function updateHistoryBanner() {
     }
 }
 
-function setActiveChatSession(sessionId, sessionName) {
+function setActiveChatSession(sessionId, sessionName, externalConversation = undefined) {
     const previousSessionId = activeChatSessionId;
     activeChatSessionId = (typeof sessionId === 'string' && sessionId.trim())
         ? sessionId.trim()
@@ -24002,6 +24063,16 @@ function setActiveChatSession(sessionId, sessionName) {
     activeChatSessionName = (typeof sessionName === 'string' && sessionName.trim())
         ? sessionName.trim()
         : null;
+    const cachedExternalConversation = activeChatSessionId
+        ? sessionTabsCache.find(
+            session => normaliseHistorySessionId(session?.session_id) === activeChatSessionId
+        )?.external_conversation
+        : null;
+    activeExternalConversationMetadata = (
+        externalConversation && typeof externalConversation === 'object'
+            ? externalConversation
+            : cachedExternalConversation
+    ) || null;
     activeChatSessionOwnerId = null;
     activeChatSessionFocus = activeChatSessionId
         ? (chatSessionFocusCache.get(activeChatSessionId) || [])
@@ -24053,6 +24124,7 @@ function setActiveChatSession(sessionId, sessionName) {
     refreshConversationInfoCopyButtonState();
     renderPendingAttachmentState();
     renderActiveUploadUi();
+    updateExternalConversationUi();
 }
 
 function getChatSessionTabsContainer() {
@@ -26017,6 +26089,12 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         return;
     }
     sessionTabsCache = canonicalSessions;
+    if (activeChatSessionId) {
+        activeExternalConversationMetadata = canonicalSessions.find(
+            session => normaliseHistorySessionId(session?.session_id) === activeChatSessionId
+        )?.external_conversation || null;
+        updateExternalConversationUi();
+    }
 
     // JVNAUTOSCI-1014: Filter hidden sessions unless showHiddenSessions is enabled.
     const sessionsAfterHiddenFilter = showHiddenSessions
@@ -26358,6 +26436,19 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         label.textContent = displayName;
         header.appendChild(label);
 
+        if (session?.external_conversation?.read_only === true) {
+            const importedBadge = document.createElement('span');
+            importedBadge.className = 'chat-session-imported-marker';
+            importedBadge.textContent = 'Imported';
+            const provider = String(session.external_conversation.provider || '').trim();
+            importedBadge.title = provider
+                ? `Read-only import from ${provider.replaceAll('_', ' ')}`
+                : 'Read-only imported conversation';
+            importedBadge.setAttribute('aria-label', importedBadge.title);
+            importedBadge.setAttribute('data-keep-title', 'true');
+            header.appendChild(importedBadge);
+        }
+
         if (hasLiveRequest || queuedPromptCount > 0) {
             const activityBadge = document.createElement('span');
             activityBadge.className = 'chat-session-tab-activity';
@@ -26538,6 +26629,12 @@ function buildNewChatContextMenuItems() {
             }
         },
         {
+            label: 'Import conversation…',
+            onClick: () => {
+                document.getElementById('importExternalConversationInput')?.click();
+            }
+        },
+        {
             label: getChatSessionTabsLayoutMenuLabel(),
             onClick: () => {
                 toggleChatSessionTabsLayout({ announce: true });
@@ -26569,6 +26666,83 @@ function buildNewChatContextMenuItems() {
     }
 
     return items;
+}
+
+function buildExternalConversationImportForm(file, { dryRun }) {
+    const form = new FormData();
+    form.append('file', file, file?.name || 'conversation.jsonl');
+    form.append('dry_run', dryRun ? 'true' : 'false');
+    return form;
+}
+
+async function requestExternalConversationImport(file, { dryRun }) {
+    const response = await fetch('/von/api/session/import_external_conversation', {
+        method: 'POST',
+        headers: buildChatFetchHeaders(),
+        body: buildExternalConversationImportForm(file, { dryRun })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.success !== true) {
+        const error = new Error(data?.error || 'Unable to import this conversation.');
+        error.code = data?.error_code || null;
+        throw error;
+    }
+    return data;
+}
+
+async function handleExternalConversationFile(file) {
+    if (!file || typeof file !== 'object') {
+        return;
+    }
+    const previewResult = await requestExternalConversationImport(file, { dryRun: true });
+    const preview = previewResult?.preview || {};
+    const loss = preview?.loss_report || {};
+    const projectedCount = Number(loss?.projected_message_count || 0);
+    const provider = String(preview?.provider || 'external').replaceAll('_', ' ');
+    const sourceTitle = String(preview?.source_title || file.name || 'Untitled conversation');
+    const action = preview?.action === 'unchanged'
+        ? 'verify the existing import of'
+        : (preview?.action === 'updated' ? 'refresh' : 'import');
+    const confirmed = window.confirm(
+        `${action[0].toUpperCase()}${action.slice(1)} “${sourceTitle}” from ${provider}?\n\n`
+        + `${projectedCount} visible messages will be available as a read-only snapshot. `
+        + 'System instructions, reasoning, and tool events remain historical data and are not executed.'
+    );
+    if (!confirmed) {
+        return;
+    }
+    const result = await requestExternalConversationImport(file, { dryRun: false });
+    const sessionId = normaliseHistorySessionId(
+        result?.projection?.session_id || result?.preview?.session_id
+    );
+    showToast(
+        result?.status === 'unchanged'
+            ? 'That conversation is already imported and current.'
+            : `Imported ${projectedCount} visible messages as a read-only conversation.`,
+        'success'
+    );
+    await refreshChatSessionTabs();
+    if (sessionId) {
+        await switchToChatSession(sessionId);
+    }
+}
+
+async function continueActiveExternalConversation() {
+    if (!activeChatSessionId || !isExternalConversationReadOnly()) {
+        return;
+    }
+    const response = await fetch('/von/api/session/continue_external_conversation', {
+        method: 'POST',
+        headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ session_id: activeChatSessionId })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.success !== true) {
+        throw new Error(data?.error || 'Unable to continue this imported conversation.');
+    }
+    await refreshChatSessionTabs();
+    await switchToChatSession(data.session_id);
+    showToast('Created a native Von continuation. New turns will be added there.', 'success');
 }
 
 function handleContainerContextMenu(event) {
@@ -27316,7 +27490,11 @@ async function switchToChatSession(sessionId) {
             throw new Error('Conversation switch response did not match the selected session.');
         }
 
-        setActiveChatSession(data?.session_id, data?.session_name);
+        setActiveChatSession(
+            data?.session_id,
+            data?.session_name,
+            data?.external_conversation
+        );
 
         // Refresh metadata (server-side session may have changed).
         const effectiveMetaSessionId = (typeof data?.session_id === 'string' && data.session_id.trim())
@@ -28115,7 +28293,15 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         if (msg.role === 'user' || msg.role === 'assistant') {
             const turnId = `history-${msg.role}-${index}`;
             let label = msg.role === 'user' ? 'User' : 'Von';
-            if (msg.role === 'user') {
+            const externalActor = (
+                msg.external_actor && typeof msg.external_actor === 'object'
+            ) ? msg.external_actor : null;
+            if (externalActor) {
+                const externalDisplayName = String(externalActor.display_name || '').trim();
+                label = externalDisplayName || (
+                    msg.role === 'assistant' ? 'Imported agent' : 'Source user'
+                );
+            } else if (msg.role === 'user') {
                 const authorId = _normalisePotentialConceptId(msg.author_user_id);
                 if (authorId) {
                     label = _deriveNameFromConceptId(authorId) || label;
@@ -28144,7 +28330,21 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
                 setLlmDebugDataEntry(turnId, merged);
             }
 
-            appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
+            appendMessage(
+                label,
+                msg.content,
+                turnId,
+                hasDebugData,
+                true,
+                msg.timestamp,
+                null,
+                null,
+                externalActor ? {
+                    assistantMessage: msg.role === 'assistant',
+                    externalActor,
+                    readOnly: true
+                } : null
+            );
             if (msg.role === 'assistant') {
                 const debugData = llmDebugData.get(turnId);
                 if (!renderRetainedThinkingCardForDebugData(turnId, debugData)) {
@@ -32033,6 +32233,9 @@ export function initializeChatTab() {
     const inviteProjectFilter = document.getElementById('inviteProjectFilter');
     const incomingInvitesButton = document.getElementById('incomingInvitesBtn');
     const incomingInvitesCloseButton = document.getElementById('closeIncomingInvites');
+    const importExternalConversationButton = document.getElementById('importExternalConversationBtn');
+    const importExternalConversationInput = document.getElementById('importExternalConversationInput');
+    const continueImportedConversationButton = document.getElementById('continueImportedConversationBtn');
 
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
@@ -32073,6 +32276,41 @@ export function initializeChatTab() {
     uploadUiState.pendingAttachmentEl = pendingAttachmentStatus || null;
     renderPendingAttachmentState();
     renderActiveUploadUi();
+
+    if (importExternalConversationButton && importExternalConversationInput) {
+        importExternalConversationButton.addEventListener('click', () => {
+            importExternalConversationInput.click();
+        });
+        importExternalConversationInput.addEventListener('change', async () => {
+            const file = importExternalConversationInput.files?.[0] || null;
+            importExternalConversationInput.value = '';
+            if (!file) {
+                return;
+            }
+            importExternalConversationButton.disabled = true;
+            try {
+                await handleExternalConversationFile(file);
+            } catch (error) {
+                console.error('[chatTab] External conversation import failed:', error);
+                showToast(error?.message || 'Unable to import this conversation.', 'error');
+            } finally {
+                importExternalConversationButton.disabled = false;
+            }
+        });
+    }
+    if (continueImportedConversationButton) {
+        continueImportedConversationButton.addEventListener('click', async () => {
+            continueImportedConversationButton.disabled = true;
+            try {
+                await continueActiveExternalConversation();
+            } catch (error) {
+                console.error('[chatTab] External conversation continuation failed:', error);
+                showToast(error?.message || 'Unable to continue this conversation.', 'error');
+            } finally {
+                updateExternalConversationUi();
+            }
+        });
+    }
 
     if (uploadFileButton && uploadFileInput) {
         uploadFileButton.addEventListener('click', () => {
@@ -34247,6 +34485,13 @@ async function handleSendPrompt(options = {}) {
                 ? selectedQueueEntry.sessionName.trim()
                 : activeChatSessionName
         );
+    if (targetSessionId && isExternalConversationReadOnly(targetSessionId)) {
+        showToast(
+            'This imported snapshot is read-only. Choose Continue before sending a new message.',
+            'info'
+        );
+        return;
+    }
     if (selectedQueueEntry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED) {
         if (!isChatPromptSessionBusy(targetSessionId)) {
             await sendQueuedChatPromptEntry(selectedQueueEntry.id);
@@ -35082,23 +35327,36 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
     const options = (messageOptions && typeof messageOptions === 'object')
         ? messageOptions
         : {};
+    const externalActor = (
+        options.externalActor && typeof options.externalActor === 'object'
+    ) ? options.externalActor : null;
+    const renderAsAssistant = sender === 'Von'
+        || (isHistory && sender === 'assistant')
+        || options.assistantMessage === true;
     const shouldFollowNewMessage = !isHistory && isScrollableFieldNearBottom(scrollableField);
 
     try {
         const displayTimestamp = formatChatTimestamp(timestampStr);
         const historySuffix = isHistory ? ' (history)' : '';
 
-        if (sender === 'Von' || (isHistory && sender === 'assistant')) {
+        if (renderAsAssistant) {
             // Create a container for Von's response with image
             const messageContainer = document.createElement('div');
             messageContainer.style.cssText = 'display: flex; align-items: flex-start; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;';
             messageContainer.className = 'message-container';
             messageContainer.classList.add('assistant-turn');
-            // Add Von's image
-            const vonImage = document.createElement('img');
-            vonImage.src = '/static/VonImageBig.png';
-            vonImage.alt = 'Von';
-            vonImage.style.cssText = 'width: 40px; height: 40px; border-radius: 50%; margin-right: 12px; flex-shrink: 0; object-fit: cover;';
+            let assistantAvatar;
+            if (externalActor) {
+                assistantAvatar = document.createElement('span');
+                assistantAvatar.className = 'chat-imported-actor-avatar';
+                assistantAvatar.textContent = String(sender || 'Agent').trim().slice(0, 1).toUpperCase() || 'A';
+                assistantAvatar.setAttribute('aria-label', `${sender} (imported actor)`);
+            } else {
+                assistantAvatar = document.createElement('img');
+                assistantAvatar.src = '/static/VonImageBig.png';
+                assistantAvatar.alt = 'Von';
+                assistantAvatar.style.cssText = 'width: 40px; height: 40px; border-radius: 50%; margin-right: 12px; flex-shrink: 0; object-fit: cover;';
+            }
 
             // Add message content
             const messageContent = document.createElement('div');
@@ -35195,7 +35453,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; min-width: 0;';
 
             const headerText = document.createElement('span');
-            headerText.textContent = `Von • ${displayTimestamp}${historySuffix}`;
+            headerText.textContent = `${externalActor ? sender : 'Von'} • ${displayTimestamp}${historySuffix}`;
             headerText.style.minWidth = '0';
             setUnambiguousTimestampTooltip(
                 headerText,
@@ -35304,13 +35562,15 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             // JVNAUTOSCI-1043: Add Edit button for user editing of AI outputs
-            const editButton = document.createElement('button');
-            editButton.className = 'btn-mini chat-edit-button';
-            editButton.textContent = '✎';
-            editButton.title = 'Edit this response';
-            editButton.dataset.turnId = turnId;
-            editButton.addEventListener('click', handleEditButtonClick);
-            messageHeader.appendChild(editButton);
+            if (options.readOnly !== true) {
+                const editButton = document.createElement('button');
+                editButton.className = 'btn-mini chat-edit-button';
+                editButton.textContent = '✎';
+                editButton.title = 'Edit this response';
+                editButton.dataset.turnId = turnId;
+                editButton.addEventListener('click', handleEditButtonClick);
+                messageHeader.appendChild(editButton);
+            }
 
             // Show "edited" indicator if this turn was previously edited
             const existingEdit = turnId ? turnEditHistory.get(turnId) : null;
@@ -35485,7 +35745,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 }
 
                 // Add delete button after the toggle so the close (✕) is right-most.
-                if (turnId) {
+                if (turnId && options.readOnly !== true) {
                     const deleteButton = document.createElement('button');
                     deleteButton.className = 'btn-mini btn-delete-exchange';
                     deleteButton.type = 'button';
@@ -35541,7 +35801,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             if (thinkingCardSlot) {
                 messageContent.appendChild(thinkingCardSlot);
             }
-            messageContainer.appendChild(vonImage);
+            messageContainer.appendChild(assistantAvatar);
             messageContainer.appendChild(messageContent);
 
             if (turnId) messageContainer.dataset.turnId = turnId;
@@ -35615,7 +35875,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             // Add delete button for user messages
-            if (turnId) {
+            if (turnId && options.readOnly !== true) {
                 const deleteButton = document.createElement('button');
                 deleteButton.className = 'btn-mini btn-delete-exchange';
                 deleteButton.type = 'button';
@@ -38580,9 +38840,22 @@ export function __testOnly_getChatSessionTabsLayout() {
         storageKey: getChatSessionTabsLayoutStorageKey()
     };
 }
-export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
-    setActiveChatSession(sessionId, sessionName);
+export function __testOnly_setActiveChatSession(
+    sessionId,
+    sessionName = null,
+    externalConversation = undefined
+) {
+    setActiveChatSession(sessionId, sessionName, externalConversation);
     syncActiveChatRequestPointers();
+}
+export function __testOnly_updateExternalConversationUi() {
+    updateExternalConversationUi();
+}
+export async function __testOnly_handleExternalConversationFile(file) {
+    return handleExternalConversationFile(file);
+}
+export async function __testOnly_continueActiveExternalConversation() {
+    return continueActiveExternalConversation();
 }
 // JVNAUTOSCI-2128/2163: prompt-input history navigation test hooks.
 export function __testOnly_rememberLastSubmittedUserPrompt(rawValue) {
