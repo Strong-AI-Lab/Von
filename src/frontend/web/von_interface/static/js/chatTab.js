@@ -26635,6 +26635,15 @@ function buildNewChatContextMenuItems() {
             }
         },
         {
+            label: 'Import conversations from this machine…',
+            onClick: () => {
+                void startExternalConversationBulkImport().catch((error) => {
+                    console.error('[chatTab] Machine conversation import failed:', error);
+                    showToast(error?.message || 'Unable to start the machine conversation import.', 'error');
+                });
+            }
+        },
+        {
             label: getChatSessionTabsLayoutMenuLabel(),
             onClick: () => {
                 toggleChatSessionTabsLayout({ announce: true });
@@ -26724,6 +26733,163 @@ async function handleExternalConversationFile(file) {
     await refreshChatSessionTabs();
     if (sessionId) {
         await switchToChatSession(sessionId);
+    }
+}
+
+let externalConversationBulkImportBatchId = null;
+let externalConversationBulkImportPollTimer = null;
+let externalConversationBulkImportLastStatus = null;
+let externalConversationBulkImportPanelHidden = false;
+
+async function requestExternalConversationBulkImport(path, { method = 'GET', body = undefined } = {}) {
+    const headers = buildChatFetchHeaders(body === undefined ? undefined : { 'Content-Type': 'application/json' });
+    const response = await fetch(`/von/api/session/external_conversation_import${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        const error = new Error(data?.error || 'Unable to manage the machine conversation import.');
+        error.code = data?.error_code || null;
+        throw error;
+    }
+    return data;
+}
+
+function renderExternalConversationBulkImport(batch, { reconnecting = false } = {}) {
+    const panel = document.getElementById('externalConversationBulkImportPanel');
+    const title = document.getElementById('externalConversationBulkImportTitle');
+    const summary = document.getElementById('externalConversationBulkImportSummary');
+    const pauseButton = document.getElementById('pauseExternalConversationBulkImportBtn');
+    const resumeButton = document.getElementById('resumeExternalConversationBulkImportBtn');
+    const cancelButton = document.getElementById('cancelExternalConversationBulkImportBtn');
+    if (!panel || !title || !summary || !batch) {
+        return;
+    }
+    panel.classList.toggle('hidden', externalConversationBulkImportPanelHidden);
+    const counts = batch.counts || {};
+    const completed = Number(counts.completed || 0);
+    const failed = Number(counts.failed || 0) + Number(counts.unsupported || 0);
+    const diverged = Number(counts.diverged || 0);
+    const total = Number(batch.source_count || 0);
+    const sourceGiB = Number(batch.source_bytes || 0) / (1024 ** 3);
+    const sourceSizeLabel = sourceGiB >= 0.1 ? `, ${sourceGiB.toFixed(1)} GiB source data` : '';
+    const status = String(batch.status || 'unknown').replaceAll('_', ' ');
+    title.textContent = `Machine conversation import: ${status}`;
+    summary.textContent = reconnecting
+        ? `Connection lost; the durable import continues on the server. Reconnecting… ${completed + failed} of ${total} settled.`
+        : `${completed + failed} of ${total} sources settled${sourceSizeLabel}; ${completed} imported, ${failed} failed, ${diverged} have source divergence. Re-running later appends only unseen interactions.`;
+    const canPause = ['planning', 'ready', 'running'].includes(batch.status);
+    const canResume = ['paused', 'pause_requested'].includes(batch.status);
+    const terminal = ['completed', 'partial', 'failed', 'cancelled'].includes(batch.status);
+    pauseButton?.classList.toggle('hidden', !canPause);
+    resumeButton?.classList.toggle('hidden', !canResume);
+    cancelButton?.classList.toggle('hidden', terminal);
+}
+
+function scheduleExternalConversationBulkImportPoll(delay = 2000) {
+    window.clearTimeout(externalConversationBulkImportPollTimer);
+    externalConversationBulkImportPollTimer = window.setTimeout(
+        () => void pollExternalConversationBulkImport(),
+        delay
+    );
+}
+
+async function pollExternalConversationBulkImport() {
+    if (!externalConversationBulkImportBatchId) {
+        return;
+    }
+    try {
+        const batch = await requestExternalConversationBulkImport(`/batches/${encodeURIComponent(externalConversationBulkImportBatchId)}`);
+        renderExternalConversationBulkImport(batch);
+        const terminal = ['completed', 'partial', 'failed', 'cancelled'].includes(batch.status);
+        if (terminal) {
+            if (externalConversationBulkImportLastStatus !== batch.status) {
+                await refreshChatSessionTabs();
+                showToast(
+                    batch.status === 'completed'
+                        ? 'Machine conversation import completed.'
+                        : `Machine conversation import ended with status: ${String(batch.status).replaceAll('_', ' ')}.`,
+                    batch.status === 'completed' ? 'success' : 'info'
+                );
+            }
+        } else {
+            scheduleExternalConversationBulkImportPoll();
+        }
+        externalConversationBulkImportLastStatus = batch.status;
+    } catch (_error) {
+        renderExternalConversationBulkImport(
+            { batch_id: externalConversationBulkImportBatchId, status: externalConversationBulkImportLastStatus || 'running', source_count: 0, counts: {} },
+            { reconnecting: true }
+        );
+        scheduleExternalConversationBulkImportPoll(5000);
+    }
+}
+
+async function loadLatestExternalConversationBulkImport() {
+    try {
+        const data = await requestExternalConversationBulkImport('/batches?limit=20');
+        const batches = Array.isArray(data?.batches) ? data.batches : [];
+        const batch = batches.find((candidate) => !['completed', 'partial', 'failed', 'cancelled'].includes(candidate?.status))
+            || batches[0]
+            || null;
+        if (!batch) {
+            return;
+        }
+        externalConversationBulkImportBatchId = batch.batch_id;
+        externalConversationBulkImportLastStatus = batch.status;
+        renderExternalConversationBulkImport(batch);
+        if (!['completed', 'partial', 'failed', 'cancelled'].includes(batch.status)) {
+            scheduleExternalConversationBulkImportPoll(500);
+        }
+    } catch (_) {
+        // Authentication may not be ready yet; a started batch is rediscovered on the next tab initialisation.
+    }
+}
+
+async function startExternalConversationBulkImport() {
+    const preview = await requestExternalConversationBulkImport('/preview', {
+        method: 'POST',
+        body: { providers: ['codex', 'claude_code', 'copilot', 'gemini'] }
+    });
+    const providerSummary = Object.entries(preview?.providers || {})
+        .filter(([, value]) => Number(value?.source_count || 0) > 0)
+        .map(([provider, value]) => `${provider.replaceAll('_', ' ')}: ${Number(value.source_count)}`)
+        .join(', ');
+    const sourceGiB = Number(preview?.source_bytes || 0) / (1024 ** 3);
+    const sourceSizeLabel = sourceGiB >= 0.1 ? ` (${sourceGiB.toFixed(1)} GiB of source data)` : '';
+    const confirmed = window.confirm(
+        `Import ${Number(preview?.source_count || 0).toLocaleString()} local conversation sources${sourceSizeLabel} into Von?\n\n`
+        + `${providerSummary || 'No supported sources found.'}\n\n`
+        + 'The job is restartable and continues if this browser disconnects. Existing imported events are preserved; only unseen interactions are appended.'
+    );
+    if (!confirmed || Number(preview?.source_count || 0) === 0) {
+        return;
+    }
+    const batch = await requestExternalConversationBulkImport('/batches', {
+        method: 'POST',
+        body: { providers: ['codex', 'claude_code', 'copilot', 'gemini'] }
+    });
+    externalConversationBulkImportBatchId = batch.batch_id;
+    externalConversationBulkImportLastStatus = batch.status;
+    externalConversationBulkImportPanelHidden = false;
+    renderExternalConversationBulkImport(batch);
+    scheduleExternalConversationBulkImportPoll(500);
+}
+
+async function controlExternalConversationBulkImport(action) {
+    if (!externalConversationBulkImportBatchId) {
+        return;
+    }
+    const batch = await requestExternalConversationBulkImport(
+        `/batches/${encodeURIComponent(externalConversationBulkImportBatchId)}/${action}`,
+        { method: 'POST', body: {} }
+    );
+    externalConversationBulkImportLastStatus = batch.status;
+    renderExternalConversationBulkImport(batch);
+    if (!['completed', 'partial', 'failed', 'cancelled', 'paused'].includes(batch.status)) {
+        scheduleExternalConversationBulkImportPoll(500);
     }
 }
 
@@ -32235,6 +32401,7 @@ export function initializeChatTab() {
     const incomingInvitesCloseButton = document.getElementById('closeIncomingInvites');
     const importExternalConversationButton = document.getElementById('importExternalConversationBtn');
     const importExternalConversationInput = document.getElementById('importExternalConversationInput');
+    const importAllExternalConversationsButton = document.getElementById('importAllExternalConversationsBtn');
     const continueImportedConversationButton = document.getElementById('continueImportedConversationBtn');
 
     if (!sendButton || !resetButton || !promptInput) {
@@ -32297,6 +32464,35 @@ export function initializeChatTab() {
                 importExternalConversationButton.disabled = false;
             }
         });
+    }
+    if (importAllExternalConversationsButton) {
+        importAllExternalConversationsButton.addEventListener('click', async () => {
+            importAllExternalConversationsButton.disabled = true;
+            try {
+                await startExternalConversationBulkImport();
+            } catch (error) {
+                console.error('[chatTab] Machine conversation import failed:', error);
+                showToast(error?.message || 'Unable to start the machine conversation import.', 'error');
+            } finally {
+                importAllExternalConversationsButton.disabled = false;
+            }
+        });
+        document.getElementById('pauseExternalConversationBulkImportBtn')?.addEventListener('click', () => {
+            void controlExternalConversationBulkImport('pause').catch((error) => showToast(error?.message || 'Unable to pause import.', 'error'));
+        });
+        document.getElementById('resumeExternalConversationBulkImportBtn')?.addEventListener('click', () => {
+            void controlExternalConversationBulkImport('resume').catch((error) => showToast(error?.message || 'Unable to resume import.', 'error'));
+        });
+        document.getElementById('cancelExternalConversationBulkImportBtn')?.addEventListener('click', () => {
+            if (window.confirm('Cancel this import? Completed conversations remain imported and a later run can safely continue.')) {
+                void controlExternalConversationBulkImport('cancel').catch((error) => showToast(error?.message || 'Unable to cancel import.', 'error'));
+            }
+        });
+        document.getElementById('closeExternalConversationBulkImportBtn')?.addEventListener('click', () => {
+            externalConversationBulkImportPanelHidden = true;
+            document.getElementById('externalConversationBulkImportPanel')?.classList.add('hidden');
+        });
+        void loadLatestExternalConversationBulkImport();
     }
     if (continueImportedConversationButton) {
         continueImportedConversationButton.addEventListener('click', async () => {
@@ -39133,5 +39329,18 @@ export function __testOnly_extractImageFilesFromClipboardEvent(event) {
 }
 export function __testOnly_uploadFilesToVon(files) {
     return uploadFilesToVon(files);
+}
+export function __testOnly_renderExternalConversationBulkImport(batch, options = {}) {
+    return renderExternalConversationBulkImport(batch, options);
+}
+export function __testOnly_startExternalConversationBulkImport() {
+    return startExternalConversationBulkImport();
+}
+export function __testOnly_resetExternalConversationBulkImport() {
+    window.clearTimeout(externalConversationBulkImportPollTimer);
+    externalConversationBulkImportPollTimer = null;
+    externalConversationBulkImportBatchId = null;
+    externalConversationBulkImportLastStatus = null;
+    externalConversationBulkImportPanelHidden = false;
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };

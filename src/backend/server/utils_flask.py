@@ -1355,6 +1355,23 @@ def _is_running_under_pytest() -> bool:
     return "pytest" in sys.modules
 
 
+def _maybe_start_external_conversation_import_worker(app: Flask) -> None:
+    """Resume durable local imports independently of any browser connection."""
+
+    if _is_running_under_pytest():
+        return
+    try:
+        from ..services.external_conversation_bulk_import_service import (
+            start_external_conversation_bulk_import_worker,
+        )
+
+        start_external_conversation_bulk_import_worker()
+    except Exception as exc:
+        app.logger.warning(
+            "[external_conversation_import] Worker startup deferred: %s", exc
+        )
+
+
 def _startup_requeue_unindexed_interaction_sessions(app_logger: logging.Logger) -> None:
     """Requeue eligible unindexed interaction_sessions back to pending.
 
@@ -1489,6 +1506,7 @@ def create_flask_app(
     _bootstrap_concept_summary_fields_for_startup(app)
     _bootstrap_publication_scope_profiles_for_startup(app)
     _configure_durable_workflow_startup(app)
+    _maybe_start_external_conversation_import_worker(app)
     _log_prompt_concept_health(app)
 
     # (Prewarm logic moved below route registrations to avoid early first-request state.)

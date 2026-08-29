@@ -7972,6 +7972,46 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     font-weight: 700;
 }
 
+.external-conversation-bulk-import {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 0.5rem 0.75rem;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--border-color, #d5d9e0);
+    border-radius: 0.6rem;
+    background: var(--panel-bg, #f7f8fa);
+}
+
+.external-conversation-bulk-import.hidden {
+    display: none;
+}
+
+.external-conversation-bulk-import-summary {
+    margin-top: 0.2rem;
+    color: var(--muted-text-color, #596273);
+    font-size: 0.85rem;
+}
+
+.external-conversation-bulk-import-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: 0 0 auto;
+}
+
+.external-conversation-bulk-import-actions button {
+    min-height: 2rem;
+}
+
+@media (max-width: 720px) {
+    .external-conversation-bulk-import {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+
 .chat-session-tab-new {
     font-weight: 700;
     padding: 6px 10px;

@@ -18,7 +18,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import chat_history_service, concept_service
 from .ai_chat_session_ingestion_service import (
@@ -30,11 +30,13 @@ logger = logging.getLogger(__name__)
 
 
 EXTERNAL_CONVERSATION_PACKAGE_SCHEMA_VERSION = "external_conversation_package.v1"
-EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-08-29.1"
+EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-08-29.2"
 EXTERNAL_CONVERSATION_ORIGIN_KIND = "external_conversation_import"
 EXTERNAL_CONVERSATION_LINEAGE_SCHEMA_VERSION = "conversation_lineage.v1"
 MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_EXTERNAL_CONVERSATION_RECORDS = 100_000
+MAX_STREAMED_EXTERNAL_CONVERSATION_RECORDS = 1_000_000
+MAX_EXTERNAL_CONVERSATION_JSONL_LINE_BYTES = 8 * 1024 * 1024
 MAX_PROJECTED_MESSAGE_CHARS = 250_000
 MAX_PROJECTED_TOTAL_CHARS = 4_000_000
 MAX_PROJECTED_MESSAGES = 20_000
@@ -164,6 +166,8 @@ def _normalise_provider(value: Any) -> str | None:
         "copilot": "copilot",
         "codex": "codex",
         "openai_codex": "codex",
+        "gemini": "gemini",
+        "google_gemini": "gemini",
     }
     provider = aliases.get(key)
     if provider is None:
@@ -251,7 +255,10 @@ def _text_blocks(value: Any) -> tuple[ExternalContentBlock, ...]:
             continue
         if not isinstance(item, Mapping):
             continue
-        source_type = _clean_text(item.get("type"), maximum=80) or "unknown"
+        source_type = _clean_text(item.get("type"), maximum=80)
+        if source_type is None and isinstance(item.get("text"), str):
+            source_type = "text"
+        source_type = source_type or "unknown"
         if source_type.lower() not in {
             "text",
             "input_text",
@@ -287,6 +294,7 @@ def _actor_for_role(provider: str, role: str | None) -> ExternalActor:
                 "codex": "Codex",
                 "claude_code": "Claude Code",
                 "copilot": "GitHub Copilot",
+                "gemini": "Gemini",
             }.get(provider, provider),
         )
     if role == "tool":
@@ -449,24 +457,37 @@ def _detect_provider(text: str, provider_hint: str | None) -> tuple[str, Any, st
             for record in sample_records
         ):
             provider = "copilot"
+        elif any(
+            (
+                record.get("kind") == "main"
+                and "sessionId" in record
+                and "projectHash" in record
+            )
+            or (
+                isinstance(record.get("$set"), Mapping)
+                and "messages" in record.get("$set", {})
+            )
+            for record in sample_records
+        ):
+            provider = "gemini"
 
     if not provider:
         raise ExternalConversationImportError(
-            "Von could not detect a supported Codex, Claude Code, or "
+            "Von could not detect a supported Codex, Claude Code, Gemini, or "
             "VS Code/Copilot transcript.",
             error_code="external_conversation_format_not_detected",
         )
     return provider, parsed_json, source_format
 
 
-def _parse_codex(
-    text: str,
+def _parse_codex_records(
+    records: Iterable[Mapping[str, Any]],
     *,
+    invalid: int,
     source_sha256: str,
     source_account: str | None,
     source_workspace: str | None,
 ) -> ExternalConversationPackage:
-    records, invalid = _parse_json_lines(text)
     session_id: str | None = None
     parent_conversation_id: str | None = None
     source_title: str | None = None
@@ -621,7 +642,7 @@ def _parse_codex(
     )
 
 
-def _parse_claude(
+def _parse_codex(
     text: str,
     *,
     source_sha256: str,
@@ -629,6 +650,23 @@ def _parse_claude(
     source_workspace: str | None,
 ) -> ExternalConversationPackage:
     records, invalid = _parse_json_lines(text)
+    return _parse_codex_records(
+        records,
+        invalid=invalid,
+        source_sha256=source_sha256,
+        source_account=source_account,
+        source_workspace=source_workspace,
+    )
+
+
+def _parse_claude_records(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    invalid: int,
+    source_sha256: str,
+    source_account: str | None,
+    source_workspace: str | None,
+) -> ExternalConversationPackage:
     session_id: str | None = None
     source_title: str | None = None
     events: list[ExternalConversationEvent] = []
@@ -746,6 +784,139 @@ def _parse_claude(
             "sidechain_record_count": branch_count,
             "branch_information_present": branch_count > 0,
         },
+    )
+
+
+def _parse_claude(
+    text: str,
+    *,
+    source_sha256: str,
+    source_account: str | None,
+    source_workspace: str | None,
+) -> ExternalConversationPackage:
+    records, invalid = _parse_json_lines(text)
+    return _parse_claude_records(
+        records,
+        invalid=invalid,
+        source_sha256=source_sha256,
+        source_account=source_account,
+        source_workspace=source_workspace,
+    )
+
+
+def _parse_gemini_records(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    invalid: int,
+    source_sha256: str,
+    source_account: str | None,
+    source_workspace: str | None,
+) -> ExternalConversationPackage:
+    state: dict[str, Any] = {}
+    journal_records = 0
+    unsupported = invalid
+    for record in records:
+        if isinstance(record.get("$set"), Mapping):
+            journal_records += 1
+            for raw_path, value in record["$set"].items():
+                path = [part for part in str(raw_path).split(".") if part]
+                state = _set_nested_value(state, path, value, append=False)
+            continue
+        if isinstance(record.get("$push"), Mapping):
+            journal_records += 1
+            for raw_path, value in record["$push"].items():
+                path = [part for part in str(raw_path).split(".") if part]
+                state = _set_nested_value(state, path, value, append=True)
+            continue
+        for key, value in record.items():
+            if key != "__line_number":
+                state[key] = copy.deepcopy(value)
+
+    session_id = _clean_text(state.get("sessionId"), maximum=240) or (
+        f"gemini-{source_sha256[:24]}"
+    )
+    messages = state.get("messages")
+    messages = messages if isinstance(messages, list) else []
+    events: list[ExternalConversationEvent] = []
+    assistant_count = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, Mapping):
+            unsupported += 1
+            continue
+        source_type = (_clean_text(message.get("type"), maximum=80) or "").lower()
+        role = {
+            "user": "user",
+            "human": "user",
+            "assistant": "assistant",
+            "model": "assistant",
+            "gemini": "assistant",
+        }.get(source_type)
+        if role is None:
+            unsupported += 1
+            continue
+        blocks = _text_blocks(message.get("content"))
+        if not blocks:
+            unsupported += 1
+            continue
+        if role == "assistant":
+            assistant_count += 1
+        locator = f"messages:{index}"
+        events.append(
+            ExternalConversationEvent(
+                event_id=_stable_event_id(
+                    provider="gemini",
+                    source_session_id=session_id,
+                    raw_locator=locator,
+                    event_kind="message",
+                    source_id=message.get("id"),
+                ),
+                event_kind="message",
+                source_role=role,
+                actor=_actor_for_role("gemini", role),
+                content_blocks=blocks,
+                source_timestamp_utc=_iso_timestamp(message.get("timestamp")),
+                raw_locator=locator,
+                model=_clean_text(message.get("model"), maximum=160),
+                user_visible=True,
+            )
+        )
+    source_workspace = source_workspace or _clean_text(
+        state.get("projectHash"), maximum=500
+    )
+    return _finish_package(
+        provider="gemini",
+        source_session_id=session_id,
+        source_title=_clean_text(state.get("title"), maximum=160),
+        source_account=source_account,
+        source_workspace=source_workspace,
+        source_format="gemini_chat_journal_jsonl",
+        source_sha256=source_sha256,
+        parser_id="gemini_chat_journal.v1",
+        events=events,
+        loss_report={
+            "invalid_or_unsupported_record_count": unsupported,
+            "journal_record_count": journal_records,
+            "assistant_message_count": assistant_count,
+            "source_has_no_assistant_messages": assistant_count == 0,
+            "branch_information_present": False,
+        },
+    )
+
+
+def _parse_gemini(
+    text: str,
+    *,
+    source_sha256: str,
+    source_account: str | None,
+    source_workspace: str | None,
+) -> ExternalConversationPackage:
+    records, invalid = _parse_json_lines(text)
+    return _parse_gemini_records(
+        records,
+        invalid=invalid,
+        source_sha256=source_sha256,
+        source_account=source_account,
+        source_workspace=source_workspace,
     )
 
 
@@ -1040,6 +1211,127 @@ def _parse_copilot(
     )
 
 
+def _stream_jsonl_records(
+    path: Path,
+    *,
+    statistics: dict[str, int],
+) -> Iterable[Mapping[str, Any]]:
+    """Yield bounded JSONL records without allowing one line to fill memory."""
+
+    with path.open("rb") as handle:
+        line_number = 0
+        observed_records = 0
+        while True:
+            raw = handle.readline(MAX_EXTERNAL_CONVERSATION_JSONL_LINE_BYTES + 1)
+            if not raw:
+                break
+            line_number += 1
+            if len(raw) > MAX_EXTERNAL_CONVERSATION_JSONL_LINE_BYTES:
+                while raw and not raw.endswith(b"\n"):
+                    raw = handle.readline(
+                        MAX_EXTERNAL_CONVERSATION_JSONL_LINE_BYTES + 1
+                    )
+                statistics["oversized_record_count"] = (
+                    statistics.get("oversized_record_count", 0) + 1
+                )
+                observed_records += 1
+                if observed_records > MAX_STREAMED_EXTERNAL_CONVERSATION_RECORDS:
+                    raise ExternalConversationImportError(
+                        "The source contains too many records.",
+                        error_code="external_conversation_record_limit_exceeded",
+                    )
+                continue
+            if not raw.strip():
+                continue
+            observed_records += 1
+            if observed_records > MAX_STREAMED_EXTERNAL_CONVERSATION_RECORDS:
+                raise ExternalConversationImportError(
+                    "The source contains too many records.",
+                    error_code="external_conversation_record_limit_exceeded",
+                )
+            try:
+                text = raw.decode("utf-8-sig" if line_number == 1 else "utf-8")
+                value = json.loads(text)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                statistics["invalid_record_count"] = (
+                    statistics.get("invalid_record_count", 0) + 1
+                )
+                continue
+            if not isinstance(value, Mapping):
+                statistics["invalid_record_count"] = (
+                    statistics.get("invalid_record_count", 0) + 1
+                )
+                continue
+            record = dict(value)
+            record["__line_number"] = line_number
+            yield record
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _parse_streamed_jsonl_file(
+    path: Path,
+    *,
+    provider: str,
+    source_account: str | None,
+    source_workspace: str | None,
+) -> ExternalConversationPackage:
+    before = path.stat()
+    source_sha256 = _sha256_file(path)
+    statistics: dict[str, int] = {
+        "invalid_record_count": 0,
+        "oversized_record_count": 0,
+    }
+    records = _stream_jsonl_records(path, statistics=statistics)
+    if provider == "codex":
+        package = _parse_codex_records(
+            records,
+            invalid=0,
+            source_sha256=source_sha256,
+            source_account=source_account,
+            source_workspace=source_workspace,
+        )
+    elif provider == "claude_code":
+        package = _parse_claude_records(
+            records,
+            invalid=0,
+            source_sha256=source_sha256,
+            source_account=source_account,
+            source_workspace=source_workspace,
+        )
+    elif provider == "gemini":
+        package = _parse_gemini_records(
+            records,
+            invalid=0,
+            source_sha256=source_sha256,
+            source_account=source_account,
+            source_workspace=source_workspace,
+        )
+    else:
+        raise ExternalConversationImportError(
+            f"Large streamed {provider} files are not supported.",
+            error_code="external_conversation_streaming_provider_unsupported",
+        )
+    package.loss_report["invalid_or_unsupported_record_count"] = (
+        int(package.loss_report.get("invalid_or_unsupported_record_count", 0))
+        + statistics["invalid_record_count"]
+    )
+    package.loss_report["oversized_record_count"] = statistics["oversized_record_count"]
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ExternalConversationImportError(
+            "The source changed while it was being read; it can be retried safely.",
+            error_code="external_conversation_source_changed_during_import",
+        )
+    return package
+
+
 def parse_external_conversation_bytes(
     raw_bytes: bytes,
     *,
@@ -1089,6 +1381,13 @@ def parse_external_conversation_bytes(
             source_account=source_account,
             source_workspace=source_workspace,
         )
+    if provider == "gemini":
+        return _parse_gemini(
+            text,
+            source_sha256=source_sha256,
+            source_account=source_account,
+            source_workspace=source_workspace,
+        )
     raise ExternalConversationImportError(
         f"Unsupported provider: {provider}",
         error_code="unsupported_external_conversation_provider",
@@ -1108,14 +1407,30 @@ def parse_external_conversation_file(
             "The external conversation source file does not exist.",
             error_code="external_conversation_source_missing",
         )
-    if source_path.stat().st_size > MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES:
+    provider = _normalise_provider(provider_hint)
+    before = source_path.stat()
+    if before.st_size > MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES:
+        if provider not in {"codex", "claude_code", "gemini"}:
+            raise ExternalConversationImportError(
+                "Large local transcripts require an explicit streamable provider.",
+                error_code="external_conversation_source_too_large",
+            )
+        return _parse_streamed_jsonl_file(
+            source_path,
+            provider=provider,
+            source_account=source_account,
+            source_workspace=source_workspace,
+        )
+    raw_bytes = source_path.read_bytes()
+    after = source_path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ExternalConversationImportError(
-            "The uploaded conversation exceeds the 32 MiB import limit.",
-            error_code="external_conversation_source_too_large",
+            "The source changed while it was being read; it can be retried safely.",
+            error_code="external_conversation_source_changed_during_import",
         )
     return parse_external_conversation_bytes(
-        source_path.read_bytes(),
-        provider_hint=provider_hint,
+        raw_bytes,
+        provider_hint=provider,
         source_account=source_account,
         source_workspace=source_workspace,
     )
@@ -1161,6 +1476,7 @@ def _history_projection(
                 "external_branch_id": event.branch_id,
                 "external_model": event.model,
                 "external_raw_locator": event.raw_locator,
+                "external_source_timestamp_utc": timestamp,
             }
         )
         total_chars += len(projected)
@@ -1267,6 +1583,7 @@ def import_external_conversation_file(
     source_account: str | None = None,
     source_workspace: str | None = None,
     dry_run: bool = True,
+    checkpoint_callback: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     package = parse_external_conversation_file(
         path,
@@ -1347,6 +1664,17 @@ def import_external_conversation_file(
 
     raw_record_result = raw_result.records[0] if raw_result.records else {}
     raw_document_concept_id = record.document_concept_id
+    if checkpoint_callback is not None:
+        checkpoint_callback(
+            "raw_ingested",
+            {
+                "completed": True,
+                "source_sha256": package.source_sha256,
+                "action": raw_record_result.get("action"),
+                "document_concept_id": raw_document_concept_id,
+                "file_copy_concept_id": raw_record_result.get("file_copy_concept_id"),
+            },
+        )
     imported_at = datetime.now(timezone.utc).isoformat()
     manifest = {
         "schema_version": "external_conversation_import.v1",
@@ -1397,6 +1725,19 @@ def import_external_conversation_file(
             "error_code": projection.get("error_code")
             or "conversation_projection_failed",
         }
+    if checkpoint_callback is not None:
+        checkpoint_callback(
+            "projection_reconciled",
+            {
+                "completed": True,
+                "source_sha256": package.source_sha256,
+                "package_sha256": package.package_sha256,
+                "action": projection.get("action"),
+                "session_id": session_id,
+                "appended_message_count": projection.get("appended_message_count"),
+                "divergence": projection.get("divergence"),
+            },
+        )
 
     raw_manifest_annotation_status = "unchanged"
     if (
@@ -1450,6 +1791,8 @@ def import_external_conversation_file(
         "projection": {
             "action": projection.get("action"),
             "session_id": session_id,
+            "appended_message_count": projection.get("appended_message_count"),
+            "divergence": projection.get("divergence"),
         },
         "raw_manifest_annotation_status": raw_manifest_annotation_status,
         "canonical_read_back": projection.get("canonical_read_back"),

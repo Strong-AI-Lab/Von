@@ -9,15 +9,17 @@
 - **Review trigger:** A new provider adapter, a change to conversation ownership
   or sharing, or evidence that a supported export shape no longer parses
 - **State or evidence as of:** 29 August 2026
-- **Live implementation evidence:** `JVNAUTOSCI-2693`,
+- **Live implementation evidence:** `JVNAUTOSCI-2693`, `JVNAUTOSCI-2694`,
   `src/backend/services/external_conversation_import_service.py`, and the
   focused external-conversation backend and frontend tests
 
 ## User outcome
 
-A signed-in person can choose a Codex, Claude Code, or VS Code/Copilot JSON or
-JSONL transcript, inspect a dry-run summary, and import it as a private,
-actor-scoped Von conversation. The imported transcript is visibly read-only.
+A signed-in person can choose a Codex, Claude Code, Gemini, or VS Code/Copilot
+JSON or JSONL transcript, inspect a dry-run summary, and import it as a private,
+actor-scoped Von conversation. They can also preview the allowlisted agent
+conversation stores on the Von server machine and start one durable batch.
+The imported transcript is visibly read-only.
 The person can explicitly fork it into an ordinary native Von conversation
 when they want to add new turns.
 
@@ -27,7 +29,7 @@ authority remain separate.
 
 ## Smallest dependable architecture
 
-The capability has four layers:
+The capability has five layers:
 
 1. The original file is retained through the existing AI chat-session raw
    document and file-copy ingestion path, linked to the importing custodian.
@@ -40,6 +42,9 @@ The capability has four layers:
    event provenance and is marked read-only.
 4. Continue creates a new native conversation with a lineage receipt and a
    copy of the visible history. The source snapshot remains unchanged.
+5. Machine-wide discovery and execution use a persisted batch/item controller.
+   Per-item leases, heartbeats, checkpoints, and retries let the server resume
+   the same work after a browser disconnect or process/machine restart.
 
 This is deterministic format translation and storage validation, so code owns
 the adapters and projection mechanism. It is not a workflow and does not give
@@ -57,6 +62,10 @@ imported content semantic authority.
 - The actor and namespace used for storage come only from authenticated server
   and window-session context. Form fields may label a source account or
   workspace but cannot select the custodian or enlarge access.
+- Machine discovery accepts provider identifiers only. Roots are configured by
+  the server, resolved before use, and symlinks escaping a root are excluded.
+  Local paths are retained only in private batch items and never returned by
+  actor-facing status or preview APIs.
 - The deterministic session and raw-document identities include custodian and
   namespace scope. Another actor cannot discover or update the import by
   knowing the source provider and session identifier.
@@ -84,6 +93,7 @@ Current adapters are:
 | Codex | rollout JSONL (`session_meta`, `response_item`, with `event_msg` fallback) | Project response-item user/assistant messages; keep developer/system instructions non-projecting |
 | Claude Code | conversation JSONL user/assistant records | Preserve UUID parent and sidechain markers; keep thinking and tool blocks non-projecting |
 | VS Code/Copilot | exported chat JSON or chat-session journal JSONL | Replay journal set/append records; exclude hidden transcript requests and tool invocation parts from visible text |
+| Gemini | local chat journal JSONL | Replay `$set`/`$push` message state; preserve the honest absence of agent messages when a journal contains user messages only |
 
 To add another provider, add detection and a deterministic adapter that meets
 this package contract, then add real-shape positive fixtures, malformed and
@@ -93,9 +103,18 @@ to the chat-history message contract when the neutral event fields suffice.
 ## Idempotence, refresh, and read-back
 
 The actor, namespace, provider, optional source account/workspace, and source
-session identifier determine the Von session identity. The source byte hash,
-neutral-package hash, and parser version determine whether an import is new,
-updated, or unchanged.
+session identifier determine the Von session identity. Stable external event
+identifiers and event fingerprints determine synchronisation:
+
+- an already-known event with the same fingerprint is unchanged;
+- an unseen event is appended exactly once;
+- a changed, missing, or reordered known event creates a bounded divergence
+  receipt while the existing Von history remains intact; and
+- a repeated scan with no new source interactions performs no history write.
+
+The source byte hash, neutral-package hash, and parser version still provide
+snapshot and parser provenance, but a changed snapshot no longer licenses
+replacement of prior projected history.
 
 A dry run performs parsing and collision classification but writes nothing. An
 executed import stores the raw source first, then upserts the read-only
@@ -103,10 +122,29 @@ projection, and finally reads the actor-scoped canonical projection back. A
 native-session collision or external-source identity mismatch is an error; it
 must never be overwritten.
 
-The importer currently bounds one source to 32 MiB and 100,000 records. The
-visible projection is bounded to 20,000 messages, 4,000,000 total characters,
-and 250,000 characters per message. Any truncation or omission is reported in
-the preview and stored loss report rather than hidden.
+Browser-uploaded sources remain bounded to 32 MiB and 100,000 records.
+Allowlisted local Codex, Claude Code, and Gemini JSONL sources are parsed and
+archived through bounded streams, with a 1,000,000-record ceiling; individual
+JSONL records over 8 MiB are retained in the raw source but omitted from
+projection with an explicit loss count. The visible projection is bounded to
+20,000 messages, 4,000,000 total characters, and 250,000 characters per
+message. Any truncation or omission is reported in the preview and stored loss
+report rather than hidden.
+
+## Durable batch lifecycle
+
+A batch progresses through `planning`, `ready`, `running`, and a terminal
+state. Pause first records `pause_requested`; the active item is allowed to
+reach a safe checkpoint and no further item is claimed before the batch becomes
+`paused`. Resume preserves the batch and its completed items. Cancel prevents
+new claims but does not undo already completed imports.
+
+Items use fenced leases. An expired `running` lease is eligible for reclaim,
+so shutdown never requires a browser to recreate the operation. Raw custody and
+conversation projection are separately checkpointed. Both operations are
+deterministic and idempotent, making a replay after an ambiguous network or
+process failure safe. A startup worker also resumes `planning`, `ready`, and
+`running` batches; paused and cancelled batches stay held.
 
 ## Non-goals
 

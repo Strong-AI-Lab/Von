@@ -153,6 +153,58 @@ def test_continue_route_creates_and_switches_to_native_fork(monkeypatch):
         assert flask_session["session_id"] == "native-continuation"
 
 
+def test_machine_import_rejects_client_supplied_paths(monkeypatch):
+    app = _make_app(monkeypatch)
+    client = app.test_client()
+    _authenticate(client)
+
+    response = client.post(
+        "/von/api/session/external_conversation_import/preview",
+        json={"root_path": "/tmp/not-authorised"},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.get_json()["error_code"]
+        == "external_conversation_client_path_forbidden"
+    )
+
+
+def test_machine_import_start_uses_authenticated_actor_context(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    app = _make_app(monkeypatch)
+    captured = {}
+
+    def _start(**kwargs):
+        captured.update(kwargs)
+        return {
+            "batch_id": "batch-1",
+            "status": "ready",
+            "source_count": 2,
+            "counts": {"pending": 2},
+        }
+
+    monkeypatch.setattr(von_routes, "start_local_conversation_import", _start)
+    client = app.test_client()
+    _authenticate(client)
+
+    response = client.post(
+        "/von/api/session/external_conversation_import/batches",
+        json={"providers": ["codex", "gemini"]},
+    )
+
+    assert response.status_code == 202
+    assert response.get_json()["batch_id"] == "batch-1"
+    assert captured == {
+        "custodian_user_id": "#V#user",
+        "namespace": "#V#user@org",
+        "organisation_concept_id": "#V#org",
+        "role_in_org": "member",
+        "providers": ["codex", "gemini"],
+    }
+
+
 def test_queue_route_rejects_imported_read_only_session(monkeypatch):
     from src.backend.server.routes import von_routes
 

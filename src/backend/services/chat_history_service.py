@@ -1,6 +1,7 @@
 """Chat history service for persistent conversation storage."""
 
 import hashlib
+import json
 import logging
 import os
 import threading
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Mapping
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import (
+    DuplicateKeyError,
     OperationFailure,
     PyMongoError,
 )
@@ -765,11 +767,40 @@ def _external_conversation_summary_from_doc(
             "instruction_event_count",
             "sidechain_record_count",
             "hidden_request_count",
+            "journal_record_count",
+            "assistant_message_count",
+            "source_has_no_assistant_messages",
+            "oversized_record_count",
             "branch_information_present",
         ):
             value = loss_report.get(key)
             if isinstance(value, (bool, int)) and not isinstance(value, float):
                 safe_loss_report[key] = value
+    synchronisation = manifest.get("synchronisation")
+    safe_synchronisation = None
+    if isinstance(synchronisation, Mapping):
+        divergence = synchronisation.get("divergence")
+        safe_divergence = None
+        if isinstance(divergence, Mapping):
+            safe_divergence = {
+                key: divergence.get(key)
+                for key in (
+                    "schema_version",
+                    "detected_at_utc",
+                    "missing_event_count",
+                    "changed_event_count",
+                    "reordered",
+                    "existing_history_preserved",
+                )
+            }
+        safe_synchronisation = {
+            "schema_version": synchronisation.get("schema_version"),
+            "action": synchronisation.get("action"),
+            "checked_at_utc": synchronisation.get("checked_at_utc"),
+            "appended_message_count": synchronisation.get("appended_message_count"),
+            "retained_message_count": synchronisation.get("retained_message_count"),
+            "divergence": safe_divergence,
+        }
     return {
         "schema_version": manifest.get("schema_version"),
         "read_only": manifest.get("read_only") is True,
@@ -803,6 +834,7 @@ def _external_conversation_summary_from_doc(
         "participant_count": manifest.get("participant_count"),
         "event_count": manifest.get("event_count"),
         "loss_report": safe_loss_report,
+        "synchronisation": safe_synchronisation,
     }
 
 
@@ -3853,6 +3885,7 @@ def upsert_external_conversation_projection(
     role_in_org: Optional[str],
     history: List[Dict[str, Any]],
     manifest: Mapping[str, Any],
+    _concurrency_attempt: int = 0,
 ) -> Dict[str, Any]:
     """Create or refresh a read-only imported transcript in actor scope."""
 
@@ -3884,60 +3917,224 @@ def upsert_external_conversation_projection(
                 "External speakers cannot be attributed to the custodian user."
             )
 
-    action = classify_external_conversation_projection(
-        user_id=user_id,
-        session_id=session_id,
-        namespace=namespace,
-        source_identity_key=str(stored_manifest["source_identity_key"]),
-        source_sha256=str(stored_manifest.get("source_sha256") or ""),
-        package_sha256=str(stored_manifest.get("package_sha256") or ""),
-        parser_version=str(stored_manifest.get("parser_version") or ""),
-    )
-    if action == "unchanged":
-        current = get_external_conversation_projection(
-            user_id=user_id,
-            session_id=session_id,
-            namespace=namespace,
-            include_history=False,
-        )
-        return {
-            "success": True,
-            "action": "unchanged",
-            "session_id": session_id,
-            "canonical_read_back": {
-                "session_id": session_id,
-                "external_conversation": _external_conversation_summary_from_doc(
-                    current or {}
-                ),
-            },
-        }
-
     chat_history_coll = get_chat_history_collection_service()
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
     now = datetime.now(timezone.utc)
     normalised_name = _normalise_session_name(session_name)
+    exact_query: Dict[str, Any] = {"user_id": user_id, "session_id": session_id}
+    if isinstance(namespace, str) and namespace.strip():
+        exact_query["namespace"] = namespace.strip()
+    existing = chat_history_coll.find_one(
+        exact_query,
+        {
+            "session_name": 1,
+            "history": 1,
+            EXTERNAL_CONVERSATION_IMPORT_FIELD: 1,
+        },
+    )
+
+    def _event_fingerprint(entry: Mapping[str, Any]) -> str:
+        timestamp = entry.get("timestamp")
+        if isinstance(timestamp, datetime):
+            timestamp = timestamp.astimezone(timezone.utc).isoformat()
+        payload = {
+            key: entry.get(key)
+            for key in (
+                "role",
+                "content",
+                "external_event_id",
+                "external_event_kind",
+                "external_source_role",
+                "external_actor",
+                "external_parent_event_id",
+                "external_branch_id",
+                "external_model",
+                "external_raw_locator",
+            )
+        }
+        payload["source_timestamp_utc"] = (
+            entry.get("external_source_timestamp_utc")
+            if "external_source_timestamp_utc" in entry
+            else timestamp
+        )
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    incoming_ids: list[str] = []
+    incoming_id_set: set[str] = set()
+    prepared_history: List[Dict[str, Any]] = []
+    for index, entry in enumerate(history):
+        event_id = entry.get("external_event_id")
+        if not isinstance(event_id, str) or not event_id.strip():
+            legacy_identity = "|".join(
+                str(entry.get(key) or "") for key in ("role", "content", "timestamp")
+            )
+            event_id = (
+                "legacy:external:event:"
+                + hashlib.sha256(
+                    f"{index}|{legacy_identity}".encode("utf-8")
+                ).hexdigest()[:24]
+            )
+        event_id = event_id.strip()
+        if event_id in incoming_id_set:
+            raise ChatHistoryServiceError(
+                f"The imported source repeats external event {event_id}."
+            )
+        incoming_ids.append(event_id)
+        incoming_id_set.add(event_id)
+        prepared = dict(entry)
+        prepared["external_event_id"] = event_id
+        prepared["external_event_sha256"] = _event_fingerprint(prepared)
+        prepared_history.append(prepared)
+
+    existing_history = (
+        list(existing.get("history") or []) if isinstance(existing, Mapping) else []
+    )
+    existing_manifest = (
+        existing.get(EXTERNAL_CONVERSATION_IMPORT_FIELD)
+        if isinstance(existing, Mapping)
+        else None
+    )
+    if existing is not None and not isinstance(existing_manifest, Mapping):
+        raise ChatHistoryServiceError(
+            "The deterministic import session ID collides with a native conversation."
+        )
+    if isinstance(existing_manifest, Mapping) and (
+        existing_manifest.get("source_identity_key")
+        != stored_manifest.get("source_identity_key")
+    ):
+        raise ChatHistoryServiceError(
+            "The deterministic import session ID belongs to another external source."
+        )
+    if isinstance(existing_manifest, Mapping) and bool(
+        existing_manifest.get("read_only") is True
+        and existing_manifest.get("source_sha256")
+        == stored_manifest.get("source_sha256")
+        and existing_manifest.get("package_sha256")
+        == stored_manifest.get("package_sha256")
+        and existing_manifest.get("parser_version")
+        == stored_manifest.get("parser_version")
+    ):
+        existing_synchronisation = existing_manifest.get("synchronisation")
+        existing_divergence = (
+            existing_synchronisation.get("divergence")
+            if isinstance(existing_synchronisation, Mapping)
+            else None
+        )
+        return {
+            "success": True,
+            "action": "unchanged",
+            "session_id": session_id,
+            "appended_message_count": 0,
+            "divergence": existing_divergence,
+            "canonical_read_back": {
+                "session_id": session_id,
+                "external_conversation": _external_conversation_summary_from_doc(
+                    existing
+                ),
+            },
+        }
+
+    divergence: Dict[str, Any] | None = None
+    appended_history = prepared_history
+    action = "new"
+    if existing is not None:
+        existing_events = [
+            entry
+            for entry in existing_history
+            if isinstance(entry, Mapping)
+            and isinstance(entry.get("external_event_id"), str)
+        ]
+        existing_by_id = {
+            str(entry["external_event_id"]): entry for entry in existing_events
+        }
+        incoming_by_id = {
+            str(entry["external_event_id"]): entry for entry in prepared_history
+        }
+        existing_ids = list(existing_by_id)
+        incoming_known_ids = [
+            event_id for event_id in incoming_ids if event_id in existing_by_id
+        ]
+        missing_ids = [
+            event_id for event_id in existing_ids if event_id not in incoming_by_id
+        ]
+        changed_ids: list[str] = []
+        for event_id in existing_ids:
+            incoming_entry = incoming_by_id.get(event_id)
+            if incoming_entry is None:
+                continue
+            existing_entry = existing_by_id[event_id]
+            existing_fingerprint = existing_entry.get("external_event_sha256")
+            if not existing_fingerprint:
+                compatible_existing_entry = dict(existing_entry)
+                if "external_source_timestamp_utc" not in compatible_existing_entry:
+                    compatible_existing_entry["external_source_timestamp_utc"] = (
+                        incoming_entry.get("external_source_timestamp_utc")
+                    )
+                existing_fingerprint = _event_fingerprint(
+                    compatible_existing_entry
+                )
+            if existing_fingerprint != incoming_entry.get("external_event_sha256"):
+                changed_ids.append(event_id)
+        expected_known_order = [
+            event_id for event_id in existing_ids if event_id in incoming_by_id
+        ]
+        reordered = incoming_known_ids != expected_known_order
+        appended_history = [
+            entry
+            for entry in prepared_history
+            if entry["external_event_id"] not in existing_by_id
+        ]
+        if missing_ids or changed_ids or reordered:
+            divergence = {
+                "schema_version": "external_conversation_divergence.v1",
+                "detected_at_utc": now.isoformat(),
+                "missing_event_count": len(missing_ids),
+                "changed_event_count": len(changed_ids),
+                "reordered": reordered,
+                "sample_missing_event_ids": missing_ids[:20],
+                "sample_changed_event_ids": changed_ids[:20],
+                "existing_history_preserved": True,
+            }
+        if appended_history:
+            action = "appended_with_divergence" if divergence else "appended"
+        elif divergence:
+            action = "diverged"
+        else:
+            action = "refreshed"
+
+    combined_history = [*existing_history, *appended_history]
+    stored_manifest["synchronisation"] = {
+        "schema_version": "external_conversation_synchronisation.v1",
+        "action": action,
+        "checked_at_utc": now.isoformat(),
+        "appended_message_count": len(appended_history),
+        "retained_message_count": len(existing_history),
+        "divergence": divergence,
+    }
     search_segments = [
         segment
-        for index, entry in enumerate(history)
+        for index, entry in enumerate(combined_history)
         for segment in [_conversation_search_segment(entry, history_index=index)]
         if segment is not None
     ]
     message_times = [
         timestamp
-        for entry in history
+        for entry in combined_history
         for timestamp in [_coerce_datetime(entry.get("timestamp"))]
         if timestamp is not None
     ]
     first_message_at = min(message_times) if message_times else now
     last_message_at = max(message_times) if message_times else now
-
-    exact_query: Dict[str, Any] = {"user_id": user_id, "session_id": session_id}
-    if isinstance(namespace, str) and namespace.strip():
-        exact_query["namespace"] = namespace.strip()
-    existing = chat_history_coll.find_one(exact_query, {"session_name": 1})
     set_fields: Dict[str, Any] = {
-        "history": history,
         EXTERNAL_CONVERSATION_IMPORT_FIELD: stored_manifest,
         "origin_kind": "external_conversation_import",
         "updated_at": last_message_at,
@@ -3946,7 +4143,8 @@ def upsert_external_conversation_projection(
         "conversation_search_indexed_at": now,
     }
     if normalised_name and (
-        action == "new" or not _normalise_session_name((existing or {}).get("session_name"))
+        action == "new"
+        or not _normalise_session_name((existing or {}).get("session_name"))
     ):
         set_fields["session_name"] = normalised_name
         set_fields["conversation_search_title"] = normalised_name
@@ -3958,13 +4156,36 @@ def upsert_external_conversation_projection(
         set_fields["role_in_org"] = role_in_org.strip()
 
     set_on_insert: Dict[str, Any] = {"created_at": first_message_at}
+    update: Dict[str, Any] = {"$set": set_fields, "$setOnInsert": set_on_insert}
+    query = dict(exact_query)
+    upsert = existing is None
+    if existing is None:
+        set_fields["history"] = prepared_history
+    else:
+        query[f"{EXTERNAL_CONVERSATION_IMPORT_FIELD}.package_sha256"] = (
+            existing_manifest.get("package_sha256")
+        )
+        if appended_history:
+            update["$push"] = {"history": {"$each": appended_history}}
     try:
         result = chat_history_coll.update_one(
-            exact_query,
-            {"$set": set_fields, "$setOnInsert": set_on_insert},
-            upsert=True,
+            query,
+            update,
+            upsert=upsert,
         )
     except PyMongoError as exc:
+        if isinstance(exc, DuplicateKeyError) and _concurrency_attempt < 2:
+            return upsert_external_conversation_projection(
+                user_id=user_id,
+                session_id=session_id,
+                session_name=session_name,
+                namespace=namespace,
+                organisation_concept_id=organisation_concept_id,
+                role_in_org=role_in_org,
+                history=history,
+                manifest=manifest,
+                _concurrency_attempt=_concurrency_attempt + 1,
+            )
         logger.error("Error storing external conversation projection: %s", exc)
         raise ChatHistoryServiceError(
             f"Could not store external conversation projection: {exc}"
@@ -3973,7 +4194,21 @@ def upsert_external_conversation_projection(
         getattr(result, "matched_count", 0)
         or getattr(result, "upserted_id", None) is not None
     ):
-        raise ChatHistoryServiceError("External conversation projection was not stored.")
+        if _concurrency_attempt < 2:
+            return upsert_external_conversation_projection(
+                user_id=user_id,
+                session_id=session_id,
+                session_name=session_name,
+                namespace=namespace,
+                organisation_concept_id=organisation_concept_id,
+                role_in_org=role_in_org,
+                history=history,
+                manifest=manifest,
+                _concurrency_attempt=_concurrency_attempt + 1,
+            )
+        raise ChatHistoryServiceError(
+            "External conversation projection was not stored."
+        )
 
     canonical = get_external_conversation_projection(
         user_id=user_id,
@@ -3984,7 +4219,8 @@ def upsert_external_conversation_projection(
     canonical_summary = _external_conversation_summary_from_doc(canonical or {})
     if (
         not isinstance(canonical_summary, dict)
-        or canonical_summary.get("source_sha256") != stored_manifest.get("source_sha256")
+        or canonical_summary.get("source_sha256")
+        != stored_manifest.get("source_sha256")
         or canonical_summary.get("package_sha256")
         != stored_manifest.get("package_sha256")
     ):
@@ -3995,6 +4231,8 @@ def upsert_external_conversation_projection(
         "success": True,
         "action": action,
         "session_id": session_id,
+        "appended_message_count": len(appended_history),
+        "divergence": divergence,
         "canonical_read_back": {
             "session_id": session_id,
             "session_name": (canonical or {}).get("session_name"),
