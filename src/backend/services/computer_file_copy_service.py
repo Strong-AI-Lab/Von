@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,25 @@ class FileCopyBlobInfo:
     content_type: str | None
     original_filename: str | None
     size_bytes: int | None
+
+
+def cleanup_stale_file_copy_spools(
+    *, max_age_seconds: int = 6 * 60 * 60, maximum: int = 1_000
+) -> int:
+    """Remove bounded, recognisable spool remnants left by interrupted processes."""
+
+    cutoff = datetime.now(timezone.utc).timestamp() - max(60, max_age_seconds)
+    removed = 0
+    for candidate in Path(tempfile.gettempdir()).glob("von-file-copy-*.spool"):
+        if removed >= max(1, maximum):
+            break
+        try:
+            if candidate.is_file() and candidate.stat().st_mtime < cutoff:
+                candidate.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _normalise_optional_concept_id(value: Any) -> str | None:
@@ -1046,6 +1066,35 @@ def build_file_copy_registration_lookup(
     """Return the deterministic identity used to register a file-copy concept."""
 
     data_bytes = bytes(data)
+    return build_file_copy_registration_lookup_for_digest(
+        sha256=hashlib.sha256(data_bytes).hexdigest(),
+        size_bytes=len(data_bytes),
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        original_filename=original_filename,
+        type_concept_id=type_concept_id,
+        source_identifier=source_identifier,
+        source_uri=source_uri,
+        blob_key=blob_key,
+    )
+
+
+def build_file_copy_registration_lookup_for_digest(
+    *,
+    sha256: str,
+    size_bytes: int,
+    user_concept_id: str,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+    original_filename: str,
+    type_concept_id: str = "#V#computer_file_copy",
+    source_identifier: str | None = None,
+    source_uri: str | None = None,
+    blob_key: str | None = None,
+) -> dict[str, Any]:
+    """Return file-copy identity without requiring the content in memory."""
+
     clean_filename = original_filename.strip()
     (
         effective_user_concept_id,
@@ -1056,19 +1105,23 @@ def build_file_copy_registration_lookup(
         organisation_concept_id=organisation_concept_id,
         namespace=namespace,
     )
-    sha256 = hashlib.sha256(data_bytes).hexdigest()
+    clean_sha256 = sha256.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", clean_sha256):
+        raise ValueError("sha256 must be a 64-character hexadecimal digest")
+    if size_bytes <= 0:
+        raise ValueError("size_bytes must be positive")
     safe_filename = _safe_filename_for_blob_key(clean_filename)
     resolved_blob_key = (
         blob_key.strip()
         if isinstance(blob_key, str) and blob_key.strip()
         else (
             f"imports/{_slugify_concept_id_for_blob_key(effective_user_concept_id or '')}/"
-            f"{sha256}/{safe_filename}"
+            f"{clean_sha256}/{safe_filename}"
         )
     )
     return {
-        "sha256": sha256,
-        "size_bytes": len(data_bytes),
+        "sha256": clean_sha256,
+        "size_bytes": size_bytes,
         "original_filename": clean_filename,
         "safe_filename": safe_filename,
         "blob_key": resolved_blob_key,
@@ -1369,17 +1422,48 @@ def import_local_file_copy(
                 "allowed_root": str(root),
             }
 
+    spool_path: Path | None = None
     try:
-        data = resolved.read_bytes()
+        source_stat = resolved.stat()
+        digest = hashlib.sha256()
+        size_bytes = 0
+        with (
+            resolved.open("rb") as handle,
+            tempfile.NamedTemporaryFile(
+                prefix="von-file-copy-", suffix=".spool", delete=False
+            ) as spool,
+        ):
+            spool_path = Path(spool.name)
+            while chunk := handle.read(1024 * 1024):
+                spool.write(chunk)
+                digest.update(chunk)
+                size_bytes += len(chunk)
+        source_stat_after = resolved.stat()
     except Exception as exc:
+        if spool_path is not None:
+            spool_path.unlink(missing_ok=True)
         return {
             "success": False,
             "error": "local_file_read_failed",
             "message": str(exc),
             "local_path": str(resolved),
         }
-    if not data:
+    if size_bytes <= 0:
+        if spool_path is not None:
+            spool_path.unlink(missing_ok=True)
         return {"success": False, "error": "empty_file", "local_path": str(resolved)}
+    if (source_stat.st_size, source_stat.st_mtime_ns) != (
+        source_stat_after.st_size,
+        source_stat_after.st_mtime_ns,
+    ):
+        if spool_path is not None:
+            spool_path.unlink(missing_ok=True)
+        return {
+            "success": False,
+            "error": "local_file_changed_during_import",
+            "local_path": str(resolved),
+            "retryable": True,
+        }
 
     original_filename = resolved.name
     content_type, _encoding = mimetypes.guess_type(original_filename)
@@ -1389,21 +1473,204 @@ def import_local_file_copy(
     except Exception:
         resolved_uri = None
 
-    result = import_bytes_file_copy(
-        data=data,
+    (
+        effective_user_concept_id,
+        effective_organisation_concept_id,
+        canonical_namespace,
+    ) = _resolve_file_copy_actor_scope(
         user_concept_id=user_concept_id,
         organisation_concept_id=organisation_concept_id,
         namespace=namespace,
-        namespace_source=namespace_source,
-        original_filename=original_filename,
-        content_type=content_type,
-        type_concept_id=type_concept_id,
-        source_system=source_system,
-        source_identifier=source_identifier or str(resolved),
-        source_uri=source_uri or resolved_uri,
-        metadata={"local_path": str(resolved)},
     )
-    if isinstance(result, dict):
-        result = dict(result)
-        result["local_path"] = str(resolved)
-    return result
+    if not effective_user_concept_id:
+        if spool_path is not None:
+            spool_path.unlink(missing_ok=True)
+        return {"success": False, "error": "missing_user_concept_id"}
+    resolved_namespace_source = _resolve_namespace_source(
+        namespace=namespace,
+        namespace_source=namespace_source,
+        canonical_namespace=canonical_namespace,
+    )
+    resolved_source_identifier = source_identifier or str(resolved)
+    resolved_source_uri = source_uri or resolved_uri
+    sha256 = digest.hexdigest()
+    registration_lookup = build_file_copy_registration_lookup_for_digest(
+        sha256=sha256,
+        size_bytes=size_bytes,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        original_filename=original_filename,
+        type_concept_id=type_concept_id,
+        source_identifier=resolved_source_identifier,
+        source_uri=resolved_source_uri,
+    )
+    resolved_blob_key = str(registration_lookup["blob_key"])
+    existing = find_existing_computer_file_copy_instance(
+        user_concept_id=effective_user_concept_id,
+        blob_key=resolved_blob_key,
+        type_concept_id=type_concept_id,
+        sha256=sha256,
+    )
+    if existing is not None:
+        if spool_path is not None:
+            spool_path.unlink(missing_ok=True)
+        existing_info = resolve_file_copy_blob_info(
+            file_copy_concept_id=existing.concept_id
+        )
+        return {
+            "success": True,
+            "concept_id": existing.concept_id,
+            "type_concept_id": existing.type_concept_id,
+            "uploaded_at": existing.uploaded_at,
+            "storage": {
+                "backend": getattr(existing_info, "blob_backend", None),
+                "key": getattr(existing_info, "blob_key", resolved_blob_key),
+                "uri": getattr(existing_info, "blob_uri", None),
+                "content_type": getattr(existing_info, "content_type", content_type),
+                "size_bytes": getattr(existing_info, "size_bytes", size_bytes),
+                "metadata": None,
+            },
+            "artifact_record": build_file_copy_artifact_record(
+                file_copy_concept_id=existing.concept_id
+            ),
+            "typing": {
+                "success": True,
+                "typing_persisted": False,
+                "status": "reused_existing",
+            },
+            "typing_result": None,
+            "registration_lookup": registration_lookup,
+            "reused_existing": True,
+            "local_path": str(resolved),
+        }
+
+    uploaded_at = _now_utc_iso()
+    persisted_metadata: dict[str, Any] = {
+        "local_path": str(resolved),
+        "original_filename": original_filename,
+        "user_concept_id": effective_user_concept_id,
+        "uploaded_at": uploaded_at,
+        "source_system": source_system,
+        "source_identifier": resolved_source_identifier,
+        "source_uri": resolved_source_uri,
+        "ingested_at": uploaded_at,
+    }
+    if effective_organisation_concept_id:
+        persisted_metadata["organisation_concept_id"] = (
+            effective_organisation_concept_id
+        )
+    if canonical_namespace:
+        persisted_metadata["namespace"] = canonical_namespace
+    if resolved_namespace_source:
+        persisted_metadata["namespace_source"] = resolved_namespace_source
+    if spool_path is None:
+        return {
+            "success": False,
+            "error": "local_file_spool_missing",
+            "local_path": str(resolved),
+        }
+    try:
+        from .blob_uploads import BlobUploadError, put_file_durable
+
+        stored = put_file_durable(
+            key=resolved_blob_key,
+            path=spool_path,
+            content_type=content_type,
+            metadata=persisted_metadata,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        )
+    except BlobUploadError as exc:
+        return {
+            "success": False,
+            "error": "blob_store_upload_failed",
+            "message": str(exc),
+            "blob_key": resolved_blob_key,
+            "registration_lookup": registration_lookup,
+            "effect_phase": "blob_write",
+            "effect_status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "outcome_finality": "blob_write_indeterminate",
+            "local_path": str(resolved),
+        }
+    finally:
+        if spool_path is not None:
+            spool_path.unlink(missing_ok=True)
+    try:
+        created = create_computer_file_copy_instance(
+            type_concept_id=type_concept_id,
+            user_concept_id=effective_user_concept_id,
+            organisation_concept_id=effective_organisation_concept_id,
+            namespace=canonical_namespace,
+            namespace_source=resolved_namespace_source,
+            name=original_filename,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            content_type=content_type,
+            blob_backend=stored.ref.backend,
+            blob_key=stored.ref.key,
+            blob_uri=stored.ref.uri,
+            metadata=persisted_metadata,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": "file_copy_register_failed",
+            "message": str(exc),
+            "blob_key": resolved_blob_key,
+            "registration_lookup": registration_lookup,
+            "effect_phase": "concept_registration",
+            "effect_status": "partial",
+            "changed": True,
+            "mutation_outcome": "partial",
+            "outcome_finality": "blob_persisted_registration_failed",
+            "local_path": str(resolved),
+        }
+
+    typing_result: dict[str, Any] | None = None
+    typing_persist_result: dict[str, Any] | None = None
+    try:
+        from .file_copy_typing_service import (
+            infer_file_copy_typing,
+            persist_file_copy_typing,
+        )
+
+        typing_result = infer_file_copy_typing(
+            content_type=content_type,
+            original_filename=original_filename,
+            size_bytes=size_bytes,
+        )
+        typing_persist_result = persist_file_copy_typing(
+            file_copy_concept_id=created.concept_id,
+            typing_result=typing_result,
+        )
+    except Exception as exc:
+        typing_persist_result = {
+            "success": False,
+            "typing_persisted": False,
+            "error": "typing_persist_failed",
+            "message": str(exc),
+        }
+    return {
+        "success": True,
+        "concept_id": created.concept_id,
+        "type_concept_id": created.type_concept_id,
+        "uploaded_at": created.uploaded_at,
+        "storage": {
+            "backend": stored.ref.backend,
+            "key": stored.ref.key,
+            "uri": stored.ref.uri,
+            "content_type": stored.ref.content_type,
+            "size_bytes": stored.ref.size_bytes,
+            "metadata": stored.ref.metadata,
+        },
+        "artifact_record": build_file_copy_artifact_record(
+            file_copy_concept_id=created.concept_id
+        ),
+        "typing": typing_persist_result,
+        "typing_result": typing_result,
+        "registration_lookup": registration_lookup,
+        "reused_existing": False,
+        "local_path": str(resolved),
+    }

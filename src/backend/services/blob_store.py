@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,15 @@ class BlobStore(Protocol):
         self,
         key: str,
         data: bytes,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef: ...
+
+    def put_file(
+        self,
+        key: str,
+        path: Path,
         *,
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
@@ -325,6 +335,32 @@ class LocalBlobStore:
             uri=str(path),
             content_type=content_type,
             size_bytes=len(data),
+            metadata=dict(metadata) if metadata else None,
+        )
+
+    def put_file(
+        self,
+        key: str,
+        path: Path,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        source = Path(path)
+        destination = self._resolve_path(key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        if metadata:
+            meta_path = destination.with_suffix(destination.suffix + ".meta.json")
+            import json
+
+            meta_path.write_text(json.dumps(dict(metadata), indent=2), encoding="utf-8")
+        return BlobRef(
+            backend="local",
+            key=_normalise_key(key),
+            uri=str(destination),
+            content_type=content_type,
+            size_bytes=source.stat().st_size,
             metadata=dict(metadata) if metadata else None,
         )
 
@@ -670,6 +706,36 @@ class SwiftBlobStore:
             metadata=dict(metadata) if metadata else None,
         )
 
+    def put_file(
+        self,
+        key: str,
+        path: Path,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        source = Path(path)
+        full_key = self._full_key(key)
+        try:
+            with source.open("rb") as handle:
+                self._conn.object_store.create_object(
+                    container=self._container,
+                    name=full_key,
+                    data=handle,
+                    content_type=content_type,
+                    metadata=dict(metadata) if metadata else None,
+                )
+        except Exception as exc:
+            raise self._wrap_operation_exception("put_file", exc) from exc
+        return BlobRef(
+            backend="swift",
+            key=_normalise_key(key),
+            uri=self._build_uri(key),
+            content_type=content_type,
+            size_bytes=source.stat().st_size,
+            metadata=dict(metadata) if metadata else None,
+        )
+
     def get_bytes(self, key: str) -> bytes:
         full_key = self._full_key(key)
         # openstacksdk's proxy API expects the object identifier as the first
@@ -889,6 +955,43 @@ class S3BlobStore:
             metadata=dict(metadata) if metadata else None,
         )
 
+    def put_file(
+        self,
+        key: str,
+        path: Path,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        source = Path(path)
+        full_key = self._full_key(key)
+        extra_args: dict[str, Any] = {}
+        if content_type:
+            extra_args["ContentType"] = content_type
+        if metadata:
+            extra_args["Metadata"] = _normalise_s3_metadata(metadata)
+        with source.open("rb") as handle:
+            upload_fileobj = getattr(self._client, "upload_fileobj", None)
+            if callable(upload_fileobj):
+                kwargs = {"ExtraArgs": extra_args} if extra_args else {}
+                upload_fileobj(handle, self._bucket, full_key, **kwargs)
+            else:
+                put_kwargs: dict[str, Any] = {
+                    "Bucket": self._bucket,
+                    "Key": full_key,
+                    "Body": handle,
+                }
+                put_kwargs.update(extra_args)
+                self._client.put_object(**put_kwargs)
+        return BlobRef(
+            backend="s3",
+            key=_normalise_key(key),
+            uri=self._build_uri(key),
+            content_type=content_type,
+            size_bytes=source.stat().st_size,
+            metadata=dict(metadata) if metadata else None,
+        )
+
     def get_bytes(self, key: str) -> bytes:
         full_key = self._full_key(key)
         response = self._client.get_object(Bucket=self._bucket, Key=full_key)
@@ -1062,6 +1165,22 @@ class FailoverBlobStore:
             "put_bytes",
             key,
             data,
+            content_type=content_type,
+            metadata=metadata,
+        )
+
+    def put_file(
+        self,
+        key: str,
+        path: Path,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        return self._run(
+            "put_file",
+            key,
+            path,
             content_type=content_type,
             metadata=metadata,
         )

@@ -62,6 +62,15 @@ from ...services.external_conversation_import_service import (
     continue_external_conversation,
     import_external_conversation_file,
 )
+from ...services.external_conversation_bulk_import_service import (
+    ExternalConversationBulkImportError,
+    control_local_conversation_import,
+    get_local_conversation_import_batch,
+    list_local_conversation_import_batches,
+    list_local_conversation_import_items,
+    preview_local_conversation_import,
+    start_local_conversation_import,
+)
 from ...services.adaptive_turn_service import (
     build_effect_outcome_spoken_fallback,
     execute_adaptive_turn,
@@ -18209,6 +18218,179 @@ def import_external_conversation_route():
                     "Could not remove temporary external conversation upload %s",
                     temporary_path,
                 )
+
+
+def _external_bulk_import_request_context():
+    user_concept_id = session.get("user_concept_id")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        raise ExternalConversationBulkImportError(
+            "Not authenticated", error_code="not_authenticated", status_code=401
+        )
+    window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    effective = get_effective_context(
+        window_session_id,
+        dict(session),
+        user_concept_id.strip(),
+    )
+    return user_concept_id.strip(), effective
+
+
+def _external_bulk_import_payload() -> dict[str, Any]:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        raise ExternalConversationBulkImportError(
+            "The request body must be an object.",
+            error_code="external_conversation_batch_request_invalid",
+        )
+    forbidden = {
+        key
+        for key in data
+        if any(token in str(key).lower() for token in ("path", "root", "directory"))
+    }
+    if forbidden:
+        raise ExternalConversationBulkImportError(
+            "Local paths cannot be supplied by the client.",
+            error_code="external_conversation_client_path_forbidden",
+        )
+    return data
+
+
+def _external_bulk_import_error_response(exc: Exception):
+    if isinstance(exc, ExternalConversationBulkImportError):
+        return (
+            jsonify({"error": str(exc), "error_code": exc.error_code}),
+            exc.status_code,
+        )
+    if isinstance(exc, WindowSessionOwnershipError):
+        return (
+            jsonify(
+                {
+                    "error": "window_session_actor_mismatch",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
+    current_app.logger.exception("External conversation bulk import request failed")
+    return (
+        jsonify(
+            {
+                "error": "External conversation bulk import failed.",
+                "error_code": "external_conversation_bulk_import_failed",
+            }
+        ),
+        500,
+    )
+
+
+@von_bp.route("/api/session/external_conversation_import/preview", methods=["POST"])
+def preview_external_conversation_bulk_import_route():
+    try:
+        _user_id, _effective = _external_bulk_import_request_context()
+        data = _external_bulk_import_payload()
+        return (
+            jsonify(preview_local_conversation_import(providers=data.get("providers"))),
+            200,
+        )
+    except Exception as exc:
+        return _external_bulk_import_error_response(exc)
+
+
+@von_bp.route("/api/session/external_conversation_import/batches", methods=["POST"])
+def start_external_conversation_bulk_import_route():
+    try:
+        user_id, effective = _external_bulk_import_request_context()
+        data = _external_bulk_import_payload()
+        result = start_local_conversation_import(
+            custodian_user_id=user_id,
+            namespace=effective.get("namespace"),
+            organisation_concept_id=_normalise_concept_id(
+                effective.get("organisation_id")
+            ),
+            role_in_org=effective.get("role"),
+            providers=data.get("providers"),
+        )
+        return jsonify(result), 202
+    except Exception as exc:
+        return _external_bulk_import_error_response(exc)
+
+
+@von_bp.route("/api/session/external_conversation_import/batches", methods=["GET"])
+def list_external_conversation_bulk_imports_route():
+    try:
+        user_id, _effective = _external_bulk_import_request_context()
+        limit = request.args.get("limit", default=20, type=int) or 20
+        return (
+            jsonify(
+                {
+                    "batches": list_local_conversation_import_batches(
+                        custodian_user_id=user_id, limit=limit
+                    )
+                }
+            ),
+            200,
+        )
+    except Exception as exc:
+        return _external_bulk_import_error_response(exc)
+
+
+@von_bp.route(
+    "/api/session/external_conversation_import/batches/<batch_id>", methods=["GET"]
+)
+def get_external_conversation_bulk_import_route(batch_id: str):
+    try:
+        user_id, _effective = _external_bulk_import_request_context()
+        return (
+            jsonify(
+                get_local_conversation_import_batch(
+                    custodian_user_id=user_id, batch_id=batch_id
+                )
+            ),
+            200,
+        )
+    except Exception as exc:
+        return _external_bulk_import_error_response(exc)
+
+
+@von_bp.route(
+    "/api/session/external_conversation_import/batches/<batch_id>/items",
+    methods=["GET"],
+)
+def list_external_conversation_bulk_import_items_route(batch_id: str):
+    try:
+        user_id, _effective = _external_bulk_import_request_context()
+        return (
+            jsonify(
+                list_local_conversation_import_items(
+                    custodian_user_id=user_id,
+                    batch_id=batch_id,
+                    offset=request.args.get("offset", default=0, type=int) or 0,
+                    limit=request.args.get("limit", default=100, type=int) or 100,
+                )
+            ),
+            200,
+        )
+    except Exception as exc:
+        return _external_bulk_import_error_response(exc)
+
+
+@von_bp.route(
+    "/api/session/external_conversation_import/batches/<batch_id>/<action>",
+    methods=["POST"],
+)
+def control_external_conversation_bulk_import_route(batch_id: str, action: str):
+    try:
+        user_id, _effective = _external_bulk_import_request_context()
+        return (
+            jsonify(
+                control_local_conversation_import(
+                    custodian_user_id=user_id, batch_id=batch_id, action=action
+                )
+            ),
+            200,
+        )
+    except Exception as exc:
+        return _external_bulk_import_error_response(exc)
 
 
 @von_bp.route("/api/session/continue_external_conversation", methods=["POST"])

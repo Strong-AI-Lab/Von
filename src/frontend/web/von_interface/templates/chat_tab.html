@@ -19,9 +19,14 @@
           </div>
           <div class="chat-header-controls" role="group" aria-label="Conversation tools">
             <button id="importExternalConversationBtn" class="chat-export-btn" type="button"
-              title="Import a Codex, Claude Code, or Copilot conversation" aria-label="Import conversation"
+              title="Import a Codex, Claude Code, Copilot, or Gemini conversation" aria-label="Import conversation"
               data-keep-title="true">
               <span class="btn-icon">Import</span>
+            </button>
+            <button id="importAllExternalConversationsBtn" class="chat-export-btn" type="button"
+              title="Find and safely import agent conversations stored on this machine"
+              aria-label="Import conversations from this machine" data-keep-title="true">
+              <span class="btn-icon">Import all</span>
             </button>
             <input id="importExternalConversationInput" class="visually-hidden" type="file"
               accept=".json,.jsonl,application/json,application/x-ndjson" aria-label="Choose conversation file" />
@@ -67,6 +72,20 @@
             </button>
           </div>
         </div>
+
+        <section id="externalConversationBulkImportPanel" class="external-conversation-bulk-import hidden"
+          aria-live="polite" aria-label="Machine conversation import progress">
+          <div>
+            <strong id="externalConversationBulkImportTitle">Machine conversation import</strong>
+            <div id="externalConversationBulkImportSummary" class="external-conversation-bulk-import-summary"></div>
+          </div>
+          <div class="external-conversation-bulk-import-actions">
+            <button id="pauseExternalConversationBulkImportBtn" type="button">Pause</button>
+            <button id="resumeExternalConversationBulkImportBtn" type="button" class="hidden">Resume</button>
+            <button id="cancelExternalConversationBulkImportBtn" type="button">Cancel</button>
+            <button id="closeExternalConversationBulkImportBtn" type="button" aria-label="Hide import progress">×</button>
+          </div>
+        </section>
 
     <section id="conversationSituationPanel" class="chat-situation-panel hidden" role="dialog"
       aria-modal="false" aria-labelledby="conversationSituationTitle" tabindex="-1">

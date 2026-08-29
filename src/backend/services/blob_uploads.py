@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 from .blob_store import BlobRef
@@ -120,3 +121,38 @@ def put_bytes_durable(
         raise BlobUploadError("Blob store returned an incomplete reference")
 
     return StoredBytes(ref=ref, sha256=computed_sha, size_bytes=computed_size)
+
+
+def put_file_durable(
+    *,
+    key: str,
+    path: str | Path,
+    content_type: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    sha256: str,
+    size_bytes: int,
+) -> StoredBytes:
+    """Stream a local file to the configured durable blob store."""
+
+    source = Path(path)
+    if not source.is_file() or size_bytes <= 0 or not sha256:
+        raise BlobUploadError("A non-empty local file, sha256, and size are required")
+    meta = {str(k): str(v) for k, v in dict(metadata or {}).items() if v is not None}
+    meta.setdefault("sha256", sha256)
+    meta.setdefault("size_bytes", str(size_bytes))
+
+    from .blob_store import get_blob_store_from_env
+
+    try:
+        store = get_blob_store_from_env()
+        ref = store.put_file(
+            key,
+            source,
+            content_type=content_type,
+            metadata=meta,
+        )
+    except Exception as exc:
+        raise BlobUploadError(f"Blob store put_file failed: {exc}") from exc
+    if not isinstance(ref, BlobRef) or not ref.backend or not ref.key or not ref.uri:
+        raise BlobUploadError("Blob store returned an incomplete reference")
+    return StoredBytes(ref=ref, sha256=sha256, size_bytes=size_bytes)
