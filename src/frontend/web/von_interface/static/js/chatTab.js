@@ -185,6 +185,8 @@ let lastRenderedSessionCount = 0;
 let chatOrganisationGeneration = 0;
 let pendingChatOrganisationSwitchId = null;
 const chatSessionTabsFetchAbortControllers = new Set();
+const CHAT_SESSION_SWITCH_REQUEST_TIMEOUT_MS = 15_000;
+let activeChatSessionSwitchRequest = null;
 
 function normaliseOrganisationSwitchId(detail = {}) {
     const switchId = typeof detail?.switch_id === 'string' ? detail.switch_id.trim() : '';
@@ -204,6 +206,72 @@ function abortChatSessionTabsFetches() {
         }
     });
     chatSessionTabsFetchAbortControllers.clear();
+}
+
+function cancelActiveChatSessionSwitch(reason = 'superseded') {
+    const request = activeChatSessionSwitchRequest;
+    if (!request || request.settled) {
+        return;
+    }
+
+    request.cancelReason = reason;
+    try {
+        request.abortController.abort();
+    } catch (_) {
+        // Ignore abort races.
+    }
+
+    const error = new Error(
+        reason === 'timeout'
+            ? 'Conversation switch timed out.'
+            : 'Conversation switch superseded.'
+    );
+    error.name = reason === 'timeout' ? 'TimeoutError' : 'AbortError';
+    request.rejectCancellation(error);
+}
+
+function createChatSessionSwitchRequest(sessionId, timeoutMs) {
+    cancelActiveChatSessionSwitch('superseded');
+
+    let rejectCancellation = () => {};
+    const cancellationPromise = new Promise((_, reject) => {
+        rejectCancellation = reject;
+    });
+    // Every caller races this promise with the network operation, so its
+    // rejection is observed even when aborting a fetch implementation that
+    // does not itself reject promptly.
+    cancellationPromise.catch(() => {});
+
+    const request = {
+        sessionId,
+        abortController: new AbortController(),
+        cancellationPromise,
+        rejectCancellation,
+        cancelReason: null,
+        settled: false,
+        timeoutId: null
+    };
+    request.timeoutId = setTimeout(() => {
+        if (activeChatSessionSwitchRequest === request && !request.settled) {
+            cancelActiveChatSessionSwitch('timeout');
+        }
+    }, timeoutMs);
+    activeChatSessionSwitchRequest = request;
+    return request;
+}
+
+function finishChatSessionSwitchRequest(request) {
+    if (!request || request.settled) {
+        return;
+    }
+    request.settled = true;
+    if (request.timeoutId !== null) {
+        clearTimeout(request.timeoutId);
+        request.timeoutId = null;
+    }
+    if (activeChatSessionSwitchRequest === request) {
+        activeChatSessionSwitchRequest = null;
+    }
 }
 
 // JVNAUTOSCI-982: Per-session metadata (programme/project/activity/modality links)
@@ -21927,6 +21995,8 @@ function convertQuotedInstructionListItemsToButtons(root) {
 const chatConceptMetaCache = new Map();
 // Map<fullId, Promise<meta|null>> for in-flight lookups.
 const chatConceptMetaPending = new Map();
+let chatConceptMetaHydrationGeneration = 0;
+const chatConceptMetaFetchAbortControllers = new Set();
 
 const CHAT_CONCEPT_META_MAX_RETRIES = 3;
 const chatConceptMetaRetryCounts = new Map();
@@ -21940,6 +22010,52 @@ const CHAT_INLINE_ALIAS_TEXT_SKIP_SELECTORS = [
     '.vontology-cartouche',
     '.vontology-inline-assertion'
 ];
+
+function isChatConceptMetaHydrationCurrent(generation) {
+    return generation === chatConceptMetaHydrationGeneration;
+}
+
+function fetchOptionalChatConceptResource(url, options = {}, generation = chatConceptMetaHydrationGeneration) {
+    if (!isChatConceptMetaHydrationCurrent(generation)) {
+        const error = new Error('Chat concept hydration superseded.');
+        error.name = 'AbortError';
+        return Promise.reject(error);
+    }
+
+    const abortController = new AbortController();
+    chatConceptMetaFetchAbortControllers.add(abortController);
+    const request = fetch(url, {
+        ...options,
+        signal: abortController.signal
+    });
+    const releaseController = () => {
+        chatConceptMetaFetchAbortControllers.delete(abortController);
+    };
+    request.then(releaseController, releaseController);
+    return request;
+}
+
+function cancelChatConceptMetaHydration() {
+    chatConceptMetaHydrationGeneration += 1;
+    chatConceptMetaFetchAbortControllers.forEach((controller) => {
+        try {
+            controller.abort();
+        } catch (_) {
+            // Ignore abort races.
+        }
+    });
+    chatConceptMetaFetchAbortControllers.clear();
+    chatConceptMetaPending.clear();
+    for (const timerId of chatConceptMetaRetryTimers.values()) {
+        try {
+            clearTimeout(timerId);
+        } catch (_) {
+            // Ignore timer races.
+        }
+    }
+    chatConceptMetaRetryTimers.clear();
+    chatConceptMetaRetryCounts.clear();
+}
 
 function shouldRenderMarkdownForAssistant(message, _debugData) {
     const text = String(message ?? '');
@@ -22474,13 +22590,23 @@ function normaliseKindClass(kind) {
     return 'type';
 }
 
-async function fetchConceptMetaForChat(fullId) {
+async function fetchConceptMetaForChat(fullId, generation = chatConceptMetaHydrationGeneration) {
     try {
         // Prefer an exact lookup rather than fuzzy search: avoids incorrect labels.
         const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
-        const nodeRes = await fetch(nodeUrl, { cache: 'no-store' });
+        const nodeRes = await fetchOptionalChatConceptResource(
+            nodeUrl,
+            { cache: 'no-store' },
+            generation
+        );
+        if (!isChatConceptMetaHydrationCurrent(generation)) {
+            return null;
+        }
         if (nodeRes.ok) {
             const node = await nodeRes.json();
+            if (!isChatConceptMetaHydrationCurrent(generation)) {
+                return null;
+            }
             const looksMissing =
                 node &&
                 node.concept_id == null &&
@@ -22521,10 +22647,17 @@ async function fetchConceptMetaForChat(fullId) {
 
         // Fallback to search endpoint if node_content is unavailable.
         const url = `/vontology/api/vontology/search?q=${encodeURIComponent(fullId)}&limit=8`;
-        const res = await fetch(url, { cache: 'no-store' });
+        const res = await fetchOptionalChatConceptResource(
+            url,
+            { cache: 'no-store' },
+            generation
+        );
         if (!res.ok) return null;
 
         const data = await res.json();
+        if (!isChatConceptMetaHydrationCurrent(generation)) {
+            return null;
+        }
         const results = Array.isArray(data?.results) ? data.results : [];
         const match = results.find(r => r && r.id === fullId);
         if (!match || !match.id) return null;
@@ -22538,20 +22671,29 @@ async function fetchConceptMetaForChat(fullId) {
             provisional: true
         };
     } catch (err) {
-        console.debug('[chatTab] fetchConceptMetaForChat failed', err);
+        if (err?.name !== 'AbortError') {
+            console.debug('[chatTab] fetchConceptMetaForChat failed', err);
+        }
         return null;
     }
 }
 
-async function fetchConceptMetaForChatNodeOnly(fullId) {
+async function fetchConceptMetaForChatNodeOnly(fullId, generation = chatConceptMetaHydrationGeneration) {
     try {
         const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
-        const nodeRes = await fetch(nodeUrl, { cache: 'no-store' });
+        const nodeRes = await fetchOptionalChatConceptResource(
+            nodeUrl,
+            { cache: 'no-store' },
+            generation
+        );
         if (!nodeRes.ok) {
             return null;
         }
 
         const node = await nodeRes.json();
+        if (!isChatConceptMetaHydrationCurrent(generation)) {
+            return null;
+        }
         const looksMissing =
             node &&
             node.concept_id == null &&
@@ -22590,12 +22732,17 @@ async function fetchConceptMetaForChatNodeOnly(fullId) {
             names: rawNames || null
         };
     } catch (err) {
-        console.debug('[chatTab] fetchConceptMetaForChatNodeOnly failed', err);
+        if (err?.name !== 'AbortError') {
+            console.debug('[chatTab] fetchConceptMetaForChatNodeOnly failed', err);
+        }
         return null;
     }
 }
 
-async function fetchAndCacheConceptMetaForChat(fullId) {
+async function fetchAndCacheConceptMetaForChat(
+    fullId,
+    generation = chatConceptMetaHydrationGeneration
+) {
     const conceptId = normalisePotentialConceptId(fullId);
     if (!conceptId) {
         return null;
@@ -22606,12 +22753,14 @@ async function fetchAndCacheConceptMetaForChat(fullId) {
     }
 
     if (!chatConceptMetaPending.has(conceptId)) {
-        const p = fetchConceptMetaForChat(conceptId).then((meta) => {
-            chatConceptMetaPending.delete(conceptId);
-            if (meta) {
+        const p = fetchConceptMetaForChat(conceptId, generation).then((meta) => {
+            if (chatConceptMetaPending.get(conceptId) === p) {
+                chatConceptMetaPending.delete(conceptId);
+            }
+            if (meta && isChatConceptMetaHydrationCurrent(generation)) {
                 chatConceptMetaCache.set(conceptId, meta);
             }
-            return meta;
+            return isChatConceptMetaHydrationCurrent(generation) ? meta : null;
         });
         chatConceptMetaPending.set(conceptId, p);
     }
@@ -22619,7 +22768,9 @@ async function fetchAndCacheConceptMetaForChat(fullId) {
     try {
         return await chatConceptMetaPending.get(conceptId);
     } catch (_) {
-        chatConceptMetaPending.delete(conceptId);
+        if (isChatConceptMetaHydrationCurrent(generation)) {
+            chatConceptMetaPending.delete(conceptId);
+        }
         return null;
     }
 }
@@ -22685,18 +22836,28 @@ function scoreAliasSearchResult(row, alias) {
     return score;
 }
 
-async function searchConceptMetaForChatAlias(alias) {
+async function searchConceptMetaForChatAlias(
+    alias,
+    generation = chatConceptMetaHydrationGeneration
+) {
     const params = new URLSearchParams();
     params.set('q', alias);
     params.set('limit', '8');
     params.set('include_individuals', '1');
 
     try {
-        const res = await fetch(`/vontology/api/vontology/search?${params.toString()}`, { cache: 'no-store' });
+        const res = await fetchOptionalChatConceptResource(
+            `/vontology/api/vontology/search?${params.toString()}`,
+            { cache: 'no-store' },
+            generation
+        );
         if (!res.ok) {
             return null;
         }
         const data = await res.json();
+        if (!isChatConceptMetaHydrationCurrent(generation)) {
+            return null;
+        }
         const results = Array.isArray(data?.results) ? data.results : [];
         const scored = results
             .map((row) => ({
@@ -22712,7 +22873,7 @@ async function searchConceptMetaForChatAlias(alias) {
         }
 
         const selected = scored[0];
-        const meta = await fetchAndCacheConceptMetaForChat(selected.fullId);
+        const meta = await fetchAndCacheConceptMetaForChat(selected.fullId, generation);
         if (meta) {
             return {
                 fullId: selected.fullId,
@@ -22729,13 +22890,18 @@ async function searchConceptMetaForChatAlias(alias) {
             source: 'alias_search',
             provisional: true
         };
+        if (!isChatConceptMetaHydrationCurrent(generation)) {
+            return null;
+        }
         chatConceptMetaCache.set(selected.fullId, fallbackMeta);
         return {
             fullId: selected.fullId,
             meta: fallbackMeta
         };
     } catch (err) {
-        console.debug('[chatTab] alias search failed', err);
+        if (err?.name !== 'AbortError') {
+            console.debug('[chatTab] alias search failed', err);
+        }
         return null;
     }
 }
@@ -22747,8 +22913,11 @@ async function resolveChatConceptAlias(alias, options = {}) {
     }
 
     const directFullId = normalisePotentialConceptId(`#V#${cleanAlias}`);
+    const generation = Number.isInteger(options?.generation)
+        ? options.generation
+        : chatConceptMetaHydrationGeneration;
     if (directFullId) {
-        const directMeta = await fetchAndCacheConceptMetaForChat(directFullId);
+        const directMeta = await fetchAndCacheConceptMetaForChat(directFullId, generation);
         if (directMeta) {
             return {
                 alias: cleanAlias,
@@ -22763,7 +22932,7 @@ async function resolveChatConceptAlias(alias, options = {}) {
         return null;
     }
 
-    const searched = await searchConceptMetaForChatAlias(cleanAlias);
+    const searched = await searchConceptMetaForChatAlias(cleanAlias, generation);
     if (!searched) {
         return null;
     }
@@ -22836,6 +23005,7 @@ async function resolveInlineVontologyAliasesInElement(root, options = {}) {
     }
 
     const expectedRenderMode = options?.expectedRenderMode ? String(options.expectedRenderMode) : '';
+    const generation = chatConceptMetaHydrationGeneration;
     if (expectedRenderMode && String(root?.dataset?.renderMode || '') !== expectedRenderMode) {
         return 0;
     }
@@ -22880,7 +23050,10 @@ async function resolveInlineVontologyAliasesInElement(root, options = {}) {
     }
 
     await Promise.all(Array.from(aliasCandidates.entries()).map(async ([alias, candidate]) => {
-        const resolved = await resolveChatConceptAlias(alias, { allowSearch: candidate?.allowSearch === true });
+        const resolved = await resolveChatConceptAlias(alias, {
+            allowSearch: candidate?.allowSearch === true,
+            generation
+        });
         if (candidate && typeof candidate === 'object') {
             candidate.resolved = resolved;
         } else {
@@ -22888,6 +23061,9 @@ async function resolveInlineVontologyAliasesInElement(root, options = {}) {
         }
     }));
 
+    if (!isChatConceptMetaHydrationCurrent(generation)) {
+        return 0;
+    }
     if (expectedRenderMode && String(root?.dataset?.renderMode || '') !== expectedRenderMode) {
         return 0;
     }
@@ -22968,13 +23144,15 @@ function shouldRetryChatConceptMeta(fullId, meta) {
     return false;
 }
 
-function scheduleChatConceptMetaRetry(fullId) {
-    if (!fullId) {
+function scheduleChatConceptMetaRetry(
+    fullId,
+    generation = chatConceptMetaHydrationGeneration
+) {
+    if (!fullId || !isChatConceptMetaHydrationCurrent(generation)) {
         return;
     }
 
-    const retries = chatConceptMetaRetryCounts.get(fullId) || 0;
-    if (retries >= CHAT_CONCEPT_META_MAX_RETRIES) {
+    if ((chatConceptMetaRetryCounts.get(fullId) || 0) >= CHAT_CONCEPT_META_MAX_RETRIES) {
         return;
     }
 
@@ -22982,15 +23160,35 @@ function scheduleChatConceptMetaRetry(fullId) {
         return;
     }
 
-    const delayMs = retries === 0 ? 250 : retries === 1 ? 1000 : 2500;
-    const timerId = setTimeout(() => {
-        chatConceptMetaRetryTimers.delete(fullId);
-        chatConceptMetaRetryCounts.set(fullId, retries + 1);
+    const runRetry = () => {
+        if (!isChatConceptMetaHydrationCurrent(generation)) {
+            return;
+        }
+        const pendingLookup = chatConceptMetaPending.get(fullId);
+        if (pendingLookup) {
+            pendingLookup.then(runRetry, runRetry);
+            return;
+        }
+
+        const replacementTimer = chatConceptMetaRetryTimers.get(fullId);
+        if (replacementTimer !== undefined) {
+            clearTimeout(replacementTimer);
+            chatConceptMetaRetryTimers.delete(fullId);
+        }
+        const currentRetries = chatConceptMetaRetryCounts.get(fullId) || 0;
+        if (currentRetries >= CHAT_CONCEPT_META_MAX_RETRIES) {
+            return;
+        }
+        chatConceptMetaRetryCounts.set(fullId, currentRetries + 1);
 
         const shouldTrackPending = !chatConceptMetaPending.has(fullId);
-        const p = fetchConceptMetaForChatNodeOnly(fullId).then((meta) => {
-            if (shouldTrackPending) {
+        const p = fetchConceptMetaForChatNodeOnly(fullId, generation).then((meta) => {
+            if (shouldTrackPending && chatConceptMetaPending.get(fullId) === p) {
                 chatConceptMetaPending.delete(fullId);
+            }
+
+            if (!isChatConceptMetaHydrationCurrent(generation)) {
+                return null;
             }
 
             if (meta) {
@@ -23000,7 +23198,7 @@ function scheduleChatConceptMetaRetry(fullId) {
                     .filter(el => el.dataset.fullConceptId === fullId)
                     .forEach(el => updateCartoucheElement(el, meta));
             } else {
-                scheduleChatConceptMetaRetry(fullId);
+                scheduleChatConceptMetaRetry(fullId, generation);
             }
 
             return meta;
@@ -23009,6 +23207,15 @@ function scheduleChatConceptMetaRetry(fullId) {
         if (shouldTrackPending) {
             chatConceptMetaPending.set(fullId, p);
         }
+    };
+
+    const retries = chatConceptMetaRetryCounts.get(fullId) || 0;
+    const delayMs = retries === 0 ? 250 : retries === 1 ? 1000 : 2500;
+    const timerId = setTimeout(() => {
+        if (chatConceptMetaRetryTimers.get(fullId) === timerId) {
+            chatConceptMetaRetryTimers.delete(fullId);
+        }
+        runRetry();
     }, delayMs);
 
     chatConceptMetaRetryTimers.set(fullId, timerId);
@@ -23066,6 +23273,7 @@ function hydrateChatConceptCartouches(root) {
     if (cartouches.length === 0) {
         return;
     }
+    const generation = chatConceptMetaHydrationGeneration;
 
     const uniqueIds = new Set();
     for (const el of cartouches) {
@@ -23083,14 +23291,20 @@ function hydrateChatConceptCartouches(root) {
                 .forEach(el => updateCartoucheElement(el, cached));
 
             if (shouldRetryChatConceptMeta(fullId, cached)) {
-                scheduleChatConceptMetaRetry(fullId);
+                scheduleChatConceptMetaRetry(fullId, generation);
             }
             continue;
         }
 
         if (!chatConceptMetaPending.has(fullId)) {
-            const p = fetchConceptMetaForChat(fullId).then((meta) => {
-                chatConceptMetaPending.delete(fullId);
+            const p = fetchConceptMetaForChat(fullId, generation).then((meta) => {
+                if (chatConceptMetaPending.get(fullId) === p) {
+                    chatConceptMetaPending.delete(fullId);
+                }
+
+                if (!isChatConceptMetaHydrationCurrent(generation)) {
+                    return null;
+                }
 
                 // Avoid caching null or provisional results indefinitely; newly-created concepts can
                 // race indexing, and we want a short retry window to auto-hydrate.
@@ -23099,27 +23313,30 @@ function hydrateChatConceptCartouches(root) {
                 }
 
                 if (shouldRetryChatConceptMeta(fullId, meta)) {
-                    scheduleChatConceptMetaRetry(fullId);
+                    scheduleChatConceptMetaRetry(fullId, generation);
                 }
                 return meta;
             });
             chatConceptMetaPending.set(fullId, p);
-            scheduleChatConceptMetaRetry(fullId);
+            scheduleChatConceptMetaRetry(fullId, generation);
         }
 
         chatConceptMetaPending.get(fullId)
             .then((meta) => {
+                if (!isChatConceptMetaHydrationCurrent(generation)) {
+                    return;
+                }
                 cartouches
                     .filter(el => el.dataset.fullConceptId === fullId)
                     .forEach(el => updateCartoucheElement(el, meta));
 
                 if (shouldRetryChatConceptMeta(fullId, meta)) {
-                    scheduleChatConceptMetaRetry(fullId);
+                    scheduleChatConceptMetaRetry(fullId, generation);
                 }
             })
             .catch(() => {
                 // Ignore lookup failures; leave placeholders.
-                scheduleChatConceptMetaRetry(fullId);
+                scheduleChatConceptMetaRetry(fullId, generation);
             });
     }
 }
@@ -23152,17 +23369,8 @@ try {
 
 // Export for testing.
 export function __testOnly_resetChatConceptMetaCaches() {
+    cancelChatConceptMetaHydration();
     chatConceptMetaCache.clear();
-    chatConceptMetaPending.clear();
-    chatConceptMetaRetryCounts.clear();
-    for (const timerId of chatConceptMetaRetryTimers.values()) {
-        try {
-            clearTimeout(timerId);
-        } catch (_) {
-            // Ignore.
-        }
-    }
-    chatConceptMetaRetryTimers.clear();
 }
 
 // Export for testing.
@@ -27582,14 +27790,24 @@ async function renameChatSession(sessionId, sessionName) {
     return data;
 }
 
-async function switchToChatSession(sessionId) {
+async function switchToChatSession(sessionId, options = {}) {
     const sid = String(sessionId || '').trim();
     if (!sid) {
         return { ok: false, error: 'session_id required' };
     }
+    const requestedTimeoutMs = Number(options?.requestTimeoutMs);
+    const requestTimeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+        ? requestedTimeoutMs
+        : CHAT_SESSION_SWITCH_REQUEST_TIMEOUT_MS;
 
     const previousSessionId = activeChatSessionId;
     const previousSessionName = activeChatSessionName;
+
+    // Session selection is latency-critical. Cancel superseded selection work
+    // and optional transcript decoration before it can monopolise the browser's
+    // per-origin request slots.
+    cancelActiveChatSessionSwitch('superseded');
+    cancelChatConceptMetaHydration();
 
     // JVNAUTOSCI-1002: Sync SSE streams when switching away from session
     if (previousSessionId && previousSessionId !== sid) {
@@ -27658,43 +27876,58 @@ async function switchToChatSession(sessionId) {
     totalHistorySegments = 0;
     updateHistoryBanner();
 
+    const switchRequest = createChatSessionSwitchRequest(sid, requestTimeoutMs);
     try {
         let response = null;
         let data = null;
         let setSessionMs = 0;
         const maxAttempts = 2;
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const setSessionStart = performance.now();
-            response = await fetch('/von/api/session/set_chat_session', {
-                method: 'POST',
-                headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
-                body: JSON.stringify({ session_id: sid, include_history: false })
-            });
-            data = await response.json().catch(() => ({}));
-            if (!isCurrentSelection()) {
-                return finishSupersededSwitch();
-            }
-            setSessionMs = Math.round(performance.now() - setSessionStart);
-            console.log('[chatTab] switchToChatSession set_chat_session', {
-                ok: response.ok,
-                status: response.status,
-                duration_ms: setSessionMs,
-                session_id: data?.session_id || sid,
-                attempt
-            });
+        try {
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                const setSessionStart = performance.now();
+                response = await Promise.race([
+                    fetch('/von/api/session/set_chat_session', {
+                        method: 'POST',
+                        headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
+                        body: JSON.stringify({ session_id: sid, include_history: false }),
+                        signal: switchRequest.abortController.signal
+                    }),
+                    switchRequest.cancellationPromise
+                ]);
+                data = await Promise.race([
+                    response.json().catch(() => ({})),
+                    switchRequest.cancellationPromise
+                ]);
+                if (!isCurrentSelection()) {
+                    return finishSupersededSwitch();
+                }
+                setSessionMs = Math.round(performance.now() - setSessionStart);
+                console.log('[chatTab] switchToChatSession set_chat_session', {
+                    ok: response.ok,
+                    status: response.status,
+                    duration_ms: setSessionMs,
+                    session_id: data?.session_id || sid,
+                    attempt
+                });
 
-            if (response.ok) {
-                break;
-            }
+                if (response.ok) {
+                    break;
+                }
 
-            const retryable = Boolean(data?.retryable) || response.status === 503;
-            if (!retryable || attempt >= maxAttempts) {
-                break;
+                const retryable = Boolean(data?.retryable) || response.status === 503;
+                if (!retryable || attempt >= maxAttempts) {
+                    break;
+                }
+                await Promise.race([
+                    new Promise((resolve) => setTimeout(resolve, 320)),
+                    switchRequest.cancellationPromise
+                ]);
+                if (!isCurrentSelection()) {
+                    return finishSupersededSwitch();
+                }
             }
-            await new Promise((resolve) => setTimeout(resolve, 320));
-            if (!isCurrentSelection()) {
-                return finishSupersededSwitch();
-            }
+        } finally {
+            finishChatSessionSwitchRequest(switchRequest);
         }
 
         if (!response) {
@@ -27824,7 +28057,15 @@ async function switchToChatSession(sessionId) {
         if (!isCurrentSelection()) {
             return finishSupersededSwitch();
         }
-        console.error('Error switching chat session:', err);
+        const timedOut = err?.name === 'TimeoutError' || switchRequest.cancelReason === 'timeout';
+        if (timedOut) {
+            console.warn('[chatTab] Conversation switch timed out', {
+                session_id: sid,
+                timeout_ms: requestTimeoutMs
+            });
+        } else {
+            console.error('Error switching chat session:', err);
+        }
         setActiveChatSession(previousSessionId, previousSessionName);
         if (sessionTabsCache.length > 0) {
             renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
@@ -27838,7 +28079,10 @@ async function switchToChatSession(sessionId) {
         }
 
         setChatSessionTabLoading(sid, false);
-        scrollableField.innerHTML = '<div class="chat-session-loading">Unable to switch session.</div>';
+        const failureMessage = timedOut
+            ? 'Conversation switch timed out. Restoring the previous conversation…'
+            : 'Unable to switch session.';
+        scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(failureMessage)}</div>`;
         void loadChatHistory({
             segments: 1,
             scrollToBottom: true,
@@ -27847,9 +28091,14 @@ async function switchToChatSession(sessionId) {
         });
         console.log('[chatTab] switchToChatSession failed', {
             session_id: sid,
+            reason: timedOut ? 'timeout' : 'error',
             duration_ms: Math.round(performance.now() - switchStart)
         });
-        return { ok: false, error: 'Unable to switch session.' };
+        return {
+            ok: false,
+            error: timedOut ? 'Conversation switch timed out.' : 'Unable to switch session.',
+            retryable: timedOut
+        };
     }
 }
 
@@ -32321,6 +32570,8 @@ function startOrganisationSwitchForChatTab(detail = {}) {
     // checks remain the authority fence for responses which still complete.
     invalidateLlmExecutionContextForOrgSwitch();
     detachChatWorkForOrganisationSwitch();
+    cancelActiveChatSessionSwitch('organisation_switch');
+    cancelChatConceptMetaHydration();
     abortActiveHistoryRequest();
     abortChatSessionTabsFetches();
     try {

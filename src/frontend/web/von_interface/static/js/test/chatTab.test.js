@@ -9646,6 +9646,142 @@ describe('chat session composer state', () => {
         }
     });
 
+    test('cancels optional transcript concept lookups before selecting another session', async () => {
+        __testOnly_resetChatConceptMetaCaches();
+        __testOnly_setActiveChatSession('session-1', 'Current');
+        __testOnly_setSessionTabsCache([
+            { session_id: 'session-1', session_name: 'Current', message_count: 1 },
+            { session_id: 'session-2', session_name: 'Target', message_count: 0 }
+        ]);
+
+        const conceptRoot = document.createElement('div');
+        conceptRoot.innerHTML = `
+            <span class="vontology-cartouche" data-full-concept-id="#V#slow_concept">
+                <span class="vontology-cartouche-name"></span>
+                <span class="vontology-cartouche-kind"></span>
+            </span>
+        `;
+        document.body.appendChild(conceptRoot);
+
+        let conceptLookupSignal = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            const requestUrl = String(url);
+            if (requestUrl.startsWith('/vontology/api/vontology/node_content')) {
+                conceptLookupSignal = options.signal;
+                return new Promise((_, reject) => {
+                    options.signal.addEventListener('abort', () => {
+                        const error = new Error('aborted');
+                        error.name = 'AbortError';
+                        reject(error);
+                    }, { once: true });
+                });
+            }
+            if (requestUrl.startsWith('/von/api/session/set_chat_session')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ session_id: 'session-2', session_name: 'Target' })
+                });
+            }
+            if (requestUrl.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            if (requestUrl.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 0,
+                        total_segments: 0,
+                        total_messages: 0
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+        });
+
+        __testOnly_hydrateChatConceptCartouches(conceptRoot);
+        expect(conceptLookupSignal).toBeInstanceOf(AbortSignal);
+        expect(conceptLookupSignal.aborted).toBe(false);
+
+        await expect(switchToChatSession('session-2')).resolves.toEqual(
+            expect.objectContaining({ ok: true })
+        );
+
+        expect(conceptLookupSignal.aborted).toBe(true);
+        expect(document.getElementById('scrollableField').textContent).not.toContain('Switching chat');
+        __testOnly_resetChatConceptMetaCaches();
+    });
+
+    test('times out a stalled session selection and restores the prior conversation', async () => {
+        jest.useFakeTimers();
+        try {
+            __testOnly_setActiveChatSession('session-1', 'Current');
+            __testOnly_setSessionTabsCache([
+                { session_id: 'session-1', session_name: 'Current', message_count: 1 },
+                { session_id: 'session-2', session_name: 'Target', message_count: 0 }
+            ]);
+
+            let setSessionSignal = null;
+            global.fetch = jest.fn((url, options = {}) => {
+                const requestUrl = String(url);
+                if (requestUrl.startsWith('/von/api/session/set_chat_session')) {
+                    setSessionSignal = options.signal;
+                    return new Promise((_, reject) => {
+                        options.signal.addEventListener('abort', () => {
+                            const error = new Error('aborted');
+                            error.name = 'AbortError';
+                            reject(error);
+                        }, { once: true });
+                    });
+                }
+                if (requestUrl.startsWith('/von/api/session/chat_session_links')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ session_links: {} })
+                    });
+                }
+                if (requestUrl.startsWith('/von/history?')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            history: [],
+                            segments_returned: 0,
+                            total_segments: 0,
+                            total_messages: 0
+                        })
+                    });
+                }
+                return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+            });
+
+            const switching = switchToChatSession('session-2', { requestTimeoutMs: 25 });
+            await Promise.resolve();
+            expect(setSessionSignal).toBeInstanceOf(AbortSignal);
+
+            jest.advanceTimersByTime(25);
+            await expect(switching).resolves.toEqual({
+                ok: false,
+                error: 'Conversation switch timed out.',
+                retryable: true
+            });
+
+            expect(setSessionSignal.aborted).toBe(true);
+            expect(__testOnly_buildConversationSituationExportPayload().session_id).toBe('session-1');
+            expect(document.getElementById('scrollableField').textContent).not.toContain('Switching chat');
+        } finally {
+            jest.clearAllTimers();
+            jest.useRealTimers();
+        }
+    });
+
     test('switching chat sessions keeps the originating request running in the background', async () => {
         const promptInput = document.getElementById('promptInput');
         initializePromptCartoucheOverlay(promptInput);
@@ -10298,8 +10434,9 @@ describe('chat cartouche hydration retries', () => {
     });
 
     async function flushMicrotasks() {
-        await Promise.resolve();
-        await Promise.resolve();
+        for (let index = 0; index < 6; index += 1) {
+            await Promise.resolve();
+        }
     }
 
     test('auto-rehydrates after initial provisional lookup', async () => {
