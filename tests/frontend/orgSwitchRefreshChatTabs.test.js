@@ -124,6 +124,48 @@ describe('org switch conversation isolation', () => {
         expect(chatTab.__testOnly_getConversationTranscriptTurnsSnapshot()).toEqual([]);
     });
 
+    test('aborts a pending session selection when an organisation switch starts', async () => {
+        let setSessionSignal = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            const requestUrl = String(url);
+            if (requestUrl.startsWith('/von/api/session/set_chat_session')) {
+                setSessionSignal = options.signal;
+                return new Promise((_, reject) => {
+                    options.signal.addEventListener('abort', () => {
+                        const error = new Error('aborted');
+                        error.name = 'AbortError';
+                        reject(error);
+                    }, { once: true });
+                });
+            }
+            if (requestUrl.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve(jsonResponse({ session_links: {} }));
+            }
+            return Promise.resolve(jsonResponse({ history: [] }));
+        });
+        const chatTab = require(chatTabModulePath);
+        chatTab.__testOnly_setActiveChatSession('old-session', 'Old conversation');
+        chatTab.__testOnly_setSessionTabsCache([
+            { session_id: 'old-session', session_name: 'Old conversation' },
+            { session_id: 'target-session', session_name: 'Target conversation' }
+        ]);
+
+        const selection = chatTab.switchToChatSession(
+            'target-session',
+            { requestTimeoutMs: 1_000 }
+        );
+        await flushPromises();
+        expect(setSessionSignal).toBeInstanceOf(AbortSignal);
+
+        chatTab.__testOnly_startOrganisationSwitchForChatTab({ switch_id: 'switch-new-org' });
+
+        await expect(selection).resolves.toEqual(
+            expect.objectContaining({ ok: false, superseded: true })
+        );
+        expect(setSessionSignal.aborted).toBe(true);
+        expect(document.getElementById('scrollableField').textContent).toBe('Loading conversations...');
+    });
+
     test('does not adopt a conversation created just before switch start', async () => {
         const createResponse = deferred();
         global.fetch = jest.fn((url) => {
