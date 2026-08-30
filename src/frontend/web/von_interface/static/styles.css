@@ -1740,6 +1740,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    min-width: 0;
     padding: 10px 12px;
     background: #fff;
     border: 1px solid #e2e8f0;
@@ -1762,6 +1763,7 @@ body {
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+    min-width: 0;
 }
 
 .task-priority {
@@ -1769,6 +1771,8 @@ body {
 }
 
 .task-title {
+    flex: 1 1 120px;
+    min-width: 0;
     font-weight: 600;
     font-size: 0.9rem;
     color: #1e293b;
@@ -1811,6 +1815,7 @@ body {
 }
 
 .task-item-body {
+    min-width: 0;
     padding-left: 24px;
 }
 
@@ -1819,6 +1824,7 @@ body {
     font-size: 0.8rem;
     color: #64748b;
     line-height: 1.4;
+    overflow-wrap: anywhere;
 }
 
 .task-meta-chip-row {
@@ -1869,6 +1875,8 @@ body {
     background: #f8fafc;
     border: 1px solid #cbd5e1;
     color: #334155;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 .task-hierarchy-chip.task-concept-link {
@@ -1889,11 +1897,13 @@ body {
 
 .task-conversation-link {
     display: inline-block;
+    max-width: 100%;
     margin-top: 4px;
     font-size: 0.75rem;
     color: #2563eb;
     text-decoration: none;
     cursor: pointer;
+    overflow-wrap: anywhere;
 }
 
 .task-conversation-link:hover {
@@ -1995,6 +2005,7 @@ body {
 }
 
 .task-status-select {
+    max-width: 100%;
     padding: 4px 8px;
     font-size: 0.75rem;
     border: 1px solid #d1d5db;
@@ -3439,7 +3450,43 @@ button.unified-search-conversation-main {
 
 .global-task-main {
     min-width: 0;
-    overflow-x: auto;
+}
+
+.task-board-scroll-hint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: fit-content;
+    margin: 0 0 8px;
+    padding: 5px 9px;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 0.75rem;
+    line-height: 1.25;
+}
+
+.task-list[data-view-mode="board"] {
+    max-width: 100%;
+    max-height: clamp(420px, 68dvh, 760px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    touch-action: pan-x pan-y;
+    padding: 3px 4px 10px 3px;
+}
+
+.task-list[data-view-mode="board"]:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 3px;
+    border-radius: 10px;
+}
+
+.task-list[data-view-mode="list"] {
+    max-height: none;
+    overflow: visible;
+    padding: 0;
 }
 
 .task-pagination-control {
@@ -3589,6 +3636,7 @@ button.unified-search-conversation-main {
     display: flex;
     flex-direction: column;
     gap: 16px;
+    min-width: 0;
     padding: 20px;
 }
 
@@ -3597,26 +3645,36 @@ button.unified-search-conversation-main {
     justify-content: space-between;
     gap: 14px;
     align-items: flex-start;
+    min-width: 0;
+}
+
+.task-inspector-heading {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .task-inspector-header h3 {
     margin: 6px 0 6px;
     color: #0f172a;
     font-size: 1.25rem;
+    overflow-wrap: anywhere;
 }
 
 .task-inspector-header p {
     margin: 0;
     color: #475569;
     line-height: 1.5;
+    overflow-wrap: anywhere;
 }
 
 .task-inspector-eyebrow {
+    max-width: 100%;
     font-size: 0.76rem;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #0f766e;
+    overflow-wrap: anywhere;
 }
 
 .task-inspector-badges {
@@ -3624,6 +3682,7 @@ button.unified-search-conversation-main {
     flex-wrap: wrap;
     gap: 8px;
     justify-content: flex-end;
+    max-width: 100%;
 }
 
 .task-inspector-timeline {
@@ -3690,6 +3749,7 @@ button.unified-search-conversation-main {
 .task-inspector-table {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     border: 1px solid #e2e8f0;
     border-radius: 16px;
     overflow: hidden;
@@ -3722,6 +3782,7 @@ button.unified-search-conversation-main {
     align-items: center;
     color: #0f172a;
     line-height: 1.5;
+    overflow-wrap: anywhere;
 }
 
 .task-external-resource-action {
