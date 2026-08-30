@@ -824,7 +824,11 @@ function renderGlobalTasksTabContent() {
             <div id="globalTaskGroupFilterRow" class="task-group-filter-row hidden" aria-label="Task groups"></div>
             <div class="global-task-layout">
                 <div class="global-task-main">
-                    <div id="globalTaskList" class="task-list"></div>
+                    <p id="globalTaskBoardScrollHint" class="task-board-scroll-hint hidden">
+                        <span aria-hidden="true">↔</span>
+                        Scroll horizontally to view all status lanes
+                    </p>
+                    <div id="globalTaskList" class="task-list" role="region" tabindex="0"></div>
                     <div id="globalTaskPagination" class="task-pagination-control" aria-live="polite"></div>
                 </div>
                 <aside id="globalTaskInspector" class="task-inspector" aria-live="polite"></aside>
@@ -1393,6 +1397,19 @@ function renderBulkTaskVisibilityControls() {
 function renderTaskList() {
     if (!_taskListEl) return;
 
+    const previousScrollLeft = _taskListEl.scrollLeft;
+    const previousScrollTop = _taskListEl.scrollTop;
+    const isBoardView = _viewMode === 'board';
+    const scrollHintEl = _globalTasksContainer?.querySelector('#globalTaskBoardScrollHint');
+    _taskListEl.dataset.viewMode = _viewMode;
+    _taskListEl.setAttribute('aria-label', isBoardView ? 'Task board' : 'Task list');
+    if (isBoardView) {
+        _taskListEl.setAttribute('aria-describedby', 'globalTaskBoardScrollHint');
+    } else {
+        _taskListEl.removeAttribute('aria-describedby');
+    }
+    scrollHintEl?.classList.toggle('hidden', !isBoardView);
+
     const filteredTasks = getFilteredTasks();
     ensureSelectedTaskStillValid(filteredTasks);
     renderGlobalTaskSummary(filteredTasks);
@@ -1441,7 +1458,10 @@ function renderTaskList() {
     }
 
     _taskListEl.innerHTML = html;
-    _taskListEl.dataset.viewMode = _viewMode;
+    if (isBoardView) {
+        _taskListEl.scrollLeft = previousScrollLeft;
+        _taskListEl.scrollTop = previousScrollTop;
+    }
 
     renderGlobalTaskInspector();
     attachTaskEventListeners();
@@ -2226,7 +2246,7 @@ function renderTaskInspector(task, detailState) {
     return `
         <div class="task-inspector-card" data-task-id="${escapeHtml(taskId)}">
             <div class="task-inspector-header">
-                <div>
+                <div class="task-inspector-heading">
                     <div class="task-inspector-eyebrow">${escapeHtml(detailTask.reference_code || taskId)}</div>
                     <h3>${escapeHtml(detailTask.title || 'Untitled task')}</h3>
                     <p>${escapeHtml(detailTask.description || 'No description yet.')}</p>
