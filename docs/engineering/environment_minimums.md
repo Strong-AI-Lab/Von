@@ -98,6 +98,19 @@ Why these matter:
   when the set name cannot be derived from an existing URI
 - `MONGO_DNS_FALLBACK_URI=<direct-host Atlas URI>` can still be used as a
   non-local recovery path when SRV/DNS resolution is flaky
+- `MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS=<literal IP list>` optionally gives
+  that direct-host path a second resolver only after the system resolver has
+  failed. It is restricted to seed hosts explicitly named in
+  `MONGO_DNS_FALLBACK_URI`; PyMongo still supplies the original hostname for
+  TLS certificate verification. No public resolver is selected by default.
+- `MONGO_DNS_RESOLVER_FALLBACK_TIMEOUT_SECONDS=2` bounds each explicit resolver
+  attempt without imposing a Mongo operation timeout
+- `MONGO_DNS_RESOLVER_FALLBACK_CACHE_SECONDS=60` coalesces driver lookups and
+  briefly reuses successful answers; the original hostname remains the TLS
+  identity even while an address is cached
+- `MONGO_DNS_RESOLVER_FALLBACK_PREFER_DIRECT=1` explicitly starts on the
+  configured direct-host route when the primary SRV resolver is known to be
+  unavailable, avoiding an otherwise unbounded SRV lookup delay
 - `VON_MONGO_FALLBACK_STICKY_SECONDS=300` controls how long a working fallback
   is reused before Von probes the direct primary route again
 - `VON_SKIP_BROWSER_LAUNCH=1` avoids remote hosts trying to open a local browser
