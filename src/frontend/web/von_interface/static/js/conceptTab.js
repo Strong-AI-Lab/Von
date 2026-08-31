@@ -1555,6 +1555,75 @@ function isMissingInteractionSessionMessage(message) {
     (msg.includes('interaction') && msg.includes('session') && msg.includes('expired'));
 }
 
+export function describeConceptQaRepresentation(data = {}) {
+  const synthesisStatus = data.synthesis_status || '';
+  const synthesis = typeof data.synthesis === 'string' ? data.synthesis.trim() : '';
+  const exactAnswerStatus = data.representation?.exact_answer?.status || '';
+  const exactAnswerStored = exactAnswerStatus === 'stored';
+  const notesInputStatus = data.representation?.notes_input?.status || '';
+  const notesInputStored = notesInputStatus === 'stored';
+
+  let synthesisText = synthesis || 'No new factual statement was identified.';
+  if (synthesisStatus === 'persistence_failed') {
+    synthesisText = synthesis
+      ? `${synthesis} (generated, but the concept notes update failed)`
+      : 'A factual statement was generated, but the concept notes update failed.';
+  } else if (synthesisStatus === 'error') {
+    synthesisText = 'Synthesis could not be completed.';
+  } else if (synthesisStatus === 'no_update') {
+    synthesisText = 'The synthesis model proposed no concept-notes change.';
+  } else if (synthesisStatus === 'not_attempted' && notesInputStored) {
+    synthesisText = 'Supplied notes were preserved; no answer synthesis was requested.';
+  } else if (synthesisStatus === 'not_attempted') {
+    synthesisText = 'The input was preserved without treating a user question as a factual answer.';
+  }
+
+  if (!data.representation) {
+    return {
+      synthesisText,
+      statusText: 'Answer processed. Please respond to the next question.',
+      statusColor: 'green',
+    };
+  }
+  if (exactAnswerStored && synthesisStatus === 'updated') {
+    return {
+      synthesisText,
+      statusText: 'Answer represented with provenance and concept notes updated. Please respond to the next question.',
+      statusColor: 'green',
+    };
+  }
+  if (notesInputStored && (exactAnswerStored || exactAnswerStatus === 'not_provided')) {
+    return {
+      synthesisText,
+      statusText: exactAnswerStored
+        ? 'Response and supplied notes represented with provenance and used to guide the next exchange.'
+        : 'Supplied notes represented with provenance and used to guide the next question.',
+      statusColor: 'green',
+    };
+  }
+  if (exactAnswerStored) {
+    return {
+      synthesisText,
+      statusText: synthesisStatus === 'no_update'
+        ? 'Answer preserved as scoped knowledge; no concept-notes change was proposed. Please respond to the next question.'
+        : 'Answer preserved as scoped knowledge, but the concept-notes update did not complete. Please respond to the next question.',
+      statusColor: '#a65f00',
+    };
+  }
+  if (synthesisStatus === 'updated') {
+    return {
+      synthesisText,
+      statusText: 'Concept notes updated, but exact-answer provenance storage failed. Please respond to the next question.',
+      statusColor: '#a65f00',
+    };
+  }
+  return {
+    synthesisText,
+    statusText: 'The answer was received, but durable knowledge representation failed. Please retry or finish the Q&A.',
+    statusColor: 'red',
+  };
+}
+
 function resetInteractionUiToStep1(statusMessage, suffix = '') {
   try {
     currentInteractionId = null;
@@ -1707,6 +1776,12 @@ export async function handleStartInteraction() {
   const currentlySelectedconceptId = getCurrentlySelectedConceptId();
   console.log("handleStartInteraction called. Currently selected concept ID:", currentlySelectedconceptId);
   const displayNames = getConceptTypeDisplayNames(getCurrentConceptType());
+  const currentNotesForInteraction = elements.conceptNotesInput
+    ? elements.conceptNotesInput.value
+    : originalNotes;
+  const pendingInitialNotes = currentNotesForInteraction.trim() !== (originalNotes || '').trim()
+    ? currentNotesForInteraction
+    : '';
 
   if (!currentlySelectedconceptId) {
     alert(`Please select a ${displayNames.singular.toLowerCase()} to improve by Q&A.`);
@@ -1747,7 +1822,9 @@ export async function handleStartInteraction() {
     elements.updatedNotesDisplay.style.display = 'block';
   }
   if (elements.updatedNotesContent) {
-    elements.updatedNotesContent.value = originalNotes; // Use correct notes source
+    // Preserve unsaved input as Q&A context instead of resetting it to the
+    // previously persisted notes when the interaction opens.
+    elements.updatedNotesContent.value = currentNotesForInteraction;
     elements.updatedNotesContent.readOnly = false;
 
     // Always show the save button during interaction
@@ -1802,7 +1879,9 @@ export async function handleStartInteraction() {
     // Bind the browser-local model choice to this interaction. Initial notes
     // stay out of the start call to avoid duplicating the concept's saved notes.
     const requestBody = buildLocalModelRequestFields();
-    console.log("[handleStartInteraction] Not sending initial_notes to prevent duplication");
+    if (pendingInitialNotes) {
+      requestBody.initial_notes = pendingInitialNotes;
+    }
 
     const response = await fetch(`/api/concepts/${encodeURIComponent(currentlySelectedconceptId)}/start_interaction`, {
       method: 'POST',
@@ -1826,7 +1905,7 @@ export async function handleStartInteraction() {
       headers: await buildConceptInteractionHeaders(),
       body: JSON.stringify({
         interaction_id: currentInteractionId,
-        initial_notes: originalNotes
+        initial_notes: pendingInitialNotes
       })
     });
 
@@ -1871,8 +1950,16 @@ export async function handleStartInteraction() {
       elements.conceptAnswerInput.disabled = false;
     }
 
-    elements.conceptStep2Status.textContent = "Question generated. Please provide your answer.";
-    elements.conceptStep2Status.style.color = "green";
+    if (data.initial_notes_representation?.status === 'stored') {
+      elements.conceptStep2Status.textContent = "Supplied notes represented with provenance. Please provide your answer.";
+      elements.conceptStep2Status.style.color = "green";
+    } else if (data.initial_notes_representation?.status === 'failed') {
+      elements.conceptStep2Status.textContent = "The question uses your supplied notes, but their provenance record failed. Please provide your answer.";
+      elements.conceptStep2Status.style.color = "#a65f00";
+    } else {
+      elements.conceptStep2Status.textContent = "Question generated. Please provide your answer.";
+      elements.conceptStep2Status.style.color = "green";
+    }
 
   } catch (error) {
     console.error("Error in handleStartInteraction:", error);
@@ -2004,6 +2091,8 @@ async function handleSubmitAnswer() {
   const currentlySelectedconceptId = getCurrentlySelectedConceptId();
   console.log("handleSubmitAnswer called. Interaction ID:", currentInteractionId);
   const answer = elements.conceptAnswerInput ? elements.conceptAnswerInput.value.trim() : "";
+  const notesInput = elements.updatedNotesContent ? elements.updatedNotesContent.value.trim() : "";
+  const hasNewNotesInput = Boolean(notesInput && notesInput !== String(originalNotes || '').trim());
 
   // Capture the current question for display later
   const currentQuestion = elements.followUpQuestionP ? elements.followUpQuestionP.textContent : "";
@@ -2012,8 +2101,8 @@ async function handleSubmitAnswer() {
     resetInteractionUiToStep1('No active concept Q&A session. Start a new Q&A to improve the concept.', getActiveConceptTabSuffix());
     return;
   }
-  if (!answer) {
-    alert("Please provide an answer.");
+  if (!answer && !hasNewNotesInput) {
+    alert("Please provide a response, ask a question, or add notes.");
     if (elements.conceptAnswerInput) elements.conceptAnswerInput.focus();
     return;
   }
@@ -2025,7 +2114,7 @@ async function handleSubmitAnswer() {
     return;
   }
 
-  elements.conceptStep2Status.textContent = "Submitting answer...";
+  elements.conceptStep2Status.textContent = "Representing your input...";
   elements.conceptStep2Status.style.color = "blue";
 
   try {
@@ -2034,7 +2123,8 @@ async function handleSubmitAnswer() {
       headers: await buildConceptInteractionHeaders(),
       body: JSON.stringify({
         interaction_id: currentInteractionId,
-        answer: answer
+        answer: answer,
+        notes_input: hasNewNotesInput ? notesInput : ''
       })
     });
 
@@ -2053,8 +2143,9 @@ async function handleSubmitAnswer() {
 
     // Store the current Q&A for display
     const questionForDisplay = currentQuestion;
-    const answerForDisplay = answer;
-    const synthesisForDisplay = data.synthesis || "No synthesis generated";
+    const answerForDisplay = answer || '(notes supplied)';
+    const representationPresentation = describeConceptQaRepresentation(data);
+    const synthesisForDisplay = representationPresentation.synthesisText;
 
     // Update concept notes if provided
     if (data.concept && data.concept.hasOwnProperty('notes')) {
@@ -2063,7 +2154,9 @@ async function handleSubmitAnswer() {
         elements.conceptNotesInput.value = newNotes;
       }
       if (elements.updatedNotesContent) {
-        elements.updatedNotesContent.value = newNotes;
+        // Keep newly supplied notes visible and editable until the user decides
+        // whether to publish them into the canonical concept notes field.
+        elements.updatedNotesContent.value = hasNewNotesInput ? notesInput : newNotes;
       }
       if (elements.updatedNotesTitle) {
         elements.updatedNotesTitle.textContent = 'Updated concept Notes';
@@ -2137,8 +2230,8 @@ async function handleSubmitAnswer() {
         console.log("Set next question:", questionText);
       }
 
-      elements.conceptStep2Status.textContent = "Answer processed. Please respond to the next question.";
-      elements.conceptStep2Status.style.color = "green";
+      elements.conceptStep2Status.textContent = representationPresentation.statusText;
+      elements.conceptStep2Status.style.color = representationPresentation.statusColor;
 
       // Ensure the Save button remains visible and properly managed
       ensureInteractionSaveButtonState();

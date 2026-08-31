@@ -878,6 +878,10 @@ def test_scope_message_contains_boundaries_and_preserves_request_scope() -> None
     assert "stable source or component identifiers" in message
     assert "partial neighbourhood cannot establish absence" in message
     assert "Create only after that bounded reuse check" in message
+    assert "open-ended request such as 'I want to talk about X'" in message
+    assert "get_concept_elicitation_opportunities" in message
+    assert "giving the user's own questions priority" in message
+    assert "preserve the exact text with provenance" in message
 
 
 def test_progressive_evidence_guidance_survives_post_read_continuation() -> None:

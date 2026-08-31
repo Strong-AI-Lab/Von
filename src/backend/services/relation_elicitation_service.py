@@ -54,7 +54,6 @@ class RelationElicitationService:
         if not instance_of:
             return []
 
-
         repo = ConceptsRepository
 
         candidate_predicates: List[str] = []
@@ -127,12 +126,152 @@ class RelationElicitationService:
             if c not in existing_relations
             and (
                 include_hypothesized
-                or (
-                    c not in existing_hypothesized
-                    and c not in existing_uncertain
-                )
+                or (c not in existing_hypothesized and c not in existing_uncertain)
             )
         ]
+
+    def get_elicitation_plan(
+        self,
+        instance_id: str,
+        *,
+        limit: int = 6,
+    ) -> List[Dict[str, Any]]:
+        """Return bounded missing-predicate candidates with human questions.
+
+        This is the shared read surface for concept-tab and ordinary
+        conversation elicitation.  It does not assert that a generated answer
+        fills the predicate; callers preserve exact user text first and treat
+        any formalisation as a separately provenance-bearing enrichment.
+        """
+
+        bounded_limit = max(1, min(int(limit or 6), 12))
+        instance = concept_service.get_concept_by_id(instance_id)
+        if not instance:
+            return []
+        instance_name = str(instance.get("name") or "this concept").strip()
+        relationships = instance.get("relationships") or {}
+        direct_types = relationships.get("is_an_instance_of") or []
+        if isinstance(direct_types, str):
+            direct_types = [direct_types]
+        direct_types = [
+            item for item in direct_types if isinstance(item, str) and item
+        ]
+
+        # Prefer the recomputed inherited field used by the salient-predicate
+        # API. If an empty cache is stale, recover through a small number of
+        # batched ancestor reads rather than one lookup per ancestor.
+        type_projection = {
+            "concept_id": 1,
+            "inherited_salient_binary_predicates": 1,
+            "relationships.suggested_relations_for_type": 1,
+            "relationships.#V#salient_binary_predicate_for_type": 1,
+            "relationships.is_a_type_of": 1,
+        }
+        type_docs = list(
+            ConceptsRepository.find(
+                {"concept_id": {"$in": direct_types}},
+                type_projection,
+            )
+        )
+        opportunities: List[str] = []
+        seen_predicates: set[str] = set()
+        visited_types: set[str] = set()
+
+        def consume_type_docs(docs: List[Dict[str, Any]]) -> List[str]:
+            next_parents: List[str] = []
+            for doc in docs:
+                concept_id = doc.get("concept_id")
+                if isinstance(concept_id, str):
+                    visited_types.add(concept_id)
+                type_relationships = doc.get("relationships") or {}
+                candidates = [
+                    *(type_relationships.get("suggested_relations_for_type") or []),
+                    *(
+                        type_relationships.get(
+                            "#V#salient_binary_predicate_for_type"
+                        )
+                        or []
+                    ),
+                    *(doc.get("inherited_salient_binary_predicates") or []),
+                ]
+                for candidate in candidates:
+                    if (
+                        isinstance(candidate, str)
+                        and candidate
+                        and candidate not in seen_predicates
+                    ):
+                        seen_predicates.add(candidate)
+                        opportunities.append(candidate)
+                for parent in type_relationships.get("is_a_type_of") or []:
+                    if (
+                        isinstance(parent, str)
+                        and parent
+                        and parent not in visited_types
+                        and parent not in next_parents
+                    ):
+                        next_parents.append(parent)
+            return next_parents
+
+        pending_parents = consume_type_docs(type_docs)
+        ancestor_batches = 0
+        while not opportunities and pending_parents and ancestor_batches < 4:
+            current_batch = pending_parents[:32]
+            ancestor_docs = list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": current_batch}},
+                    type_projection,
+                )
+            )
+            pending_parents = consume_type_docs(ancestor_docs)
+            ancestor_batches += 1
+
+        existing_relations = set(relationships.keys())
+        existing_hypothesized = set(
+            (instance.get("hypothesized_relations") or {}).keys()
+        )
+        existing_uncertain = collect_uncertain_predicates(
+            source_id=instance_id,
+            source_doc=instance,
+            include_legacy=True,
+        )
+        opportunities = [
+            predicate
+            for predicate in opportunities
+            if predicate not in existing_relations
+            and predicate not in existing_hypothesized
+            and predicate not in existing_uncertain
+        ]
+
+        selected_predicates = opportunities[:bounded_limit]
+        predicate_docs = list(
+            ConceptsRepository.find(
+                {"concept_id": {"$in": selected_predicates}},
+                {"concept_id": 1, "name": 1, "names": 1},
+            )
+        )
+        predicate_docs_by_id = {
+            str(doc.get("concept_id")): doc
+            for doc in predicate_docs
+            if doc.get("concept_id")
+        }
+        plan: List[Dict[str, Any]] = []
+        for priority, predicate in enumerate(selected_predicates, start=1):
+            predicate_doc = predicate_docs_by_id.get(predicate) or {}
+            predicate_label = str(
+                predicate_doc.get("name")
+                or predicate.replace("#V#", "").replace("_", " ")
+            ).strip()
+            question = f"What is {predicate_label} for {instance_name}?"
+            plan.append(
+                {
+                    "predicate_concept_id": predicate,
+                    "predicate_label": predicate_label,
+                    "priority": priority,
+                    "question": question,
+                    "status": "missing",
+                }
+            )
+        return plan
 
     def generate_question_for_elicit(
         self, instance_id: str, predicate: str
