@@ -1480,6 +1480,7 @@ def submit_concept_answer_route(concept_id: str):
 
     interaction_id = data.get("interaction_id")
     answer = data.get("answer")
+    notes_input = data.get("notes_input", "")
     # user_client_id = request.headers.get('X-User-Client-ID', 'default_user') # Get client ID
     # user_client_id is not directly used in this route's call to service, but service might use it if passed
 
@@ -1487,6 +1488,12 @@ def submit_concept_answer_route(concept_id: str):
         return jsonify(error="interaction_id is required"), 400
     if answer is None:  # Allow empty string for answer, but not missing 'answer' key
         return jsonify(error="answer is required (can be an empty string)"), 400
+    if not isinstance(answer, str):
+        return jsonify(error="answer must be a string"), 400
+    if not isinstance(notes_input, str):
+        return jsonify(error="notes_input must be a string"), 400
+    if not answer.strip() and not notes_input.strip():
+        return jsonify(error="answer or notes_input must contain text"), 400
 
     try:
         from ...security.access_control import get_effective_organisation_concept_id
@@ -1513,7 +1520,10 @@ def submit_concept_answer_route(concept_id: str):
 
         # Call the service to submit the answer
         result = concept_service.submit_concept_answer(
-            interaction_id=interaction_id, user_answer=answer, session=session
+            interaction_id=interaction_id,
+            user_answer=answer,
+            user_notes_input=notes_input,
+            session=session,
         )
         return jsonify(result), 200
 

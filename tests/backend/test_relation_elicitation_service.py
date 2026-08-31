@@ -6,7 +6,6 @@ from src.backend.services.relation_elicitation_service import RelationElicitatio
 
 
 class TestRelationElicitationService(unittest.TestCase):
-
     @patch("src.backend.services.concept_service.get_concept_by_concept_id")
     @patch("src.backend.services.concept_service.get_concept_by_id")
     def test_get_elicitation_opportunities(
@@ -67,7 +66,10 @@ class TestRelationElicitationService(unittest.TestCase):
         mock_get_by_concept_id.return_value = {
             "concept_id": type_id,
             "relationships": {
-                "suggested_relations_for_type": ["hypothesized_relation", "new_opportunity"]
+                "suggested_relations_for_type": [
+                    "hypothesized_relation",
+                    "new_opportunity",
+                ]
             },
         }
 
@@ -78,6 +80,90 @@ class TestRelationElicitationService(unittest.TestCase):
         )
 
         self.assertEqual(opportunities, ["hypothesized_relation", "new_opportunity"])
+
+    @patch("src.backend.services.concept_service.get_concept_by_id")
+    @patch(
+        "src.backend.services.relation_elicitation_service.ConceptsRepository.find"
+    )
+    def test_get_elicitation_plan_exposes_predicate_and_question(
+        self, mock_repo_find, mock_get_by_id
+    ):
+        mock_get_by_id.return_value = {
+            "concept_id": "#V#primary_labs",
+            "name": "Primary Labs",
+            "relationships": {"is_an_instance_of": ["#V#organisation"]},
+        }
+
+        mock_repo_find.side_effect = [
+            [
+                {
+                    "concept_id": "#V#organisation",
+                    "inherited_salient_binary_predicates": [
+                        "#V#has_member_role"
+                    ],
+                    "relationships": {},
+                }
+            ],
+            [
+                {
+                    "concept_id": "#V#has_member_role",
+                    "name": "has member role",
+                }
+            ],
+        ]
+        service = RelationElicitationService(llm_client=False)
+
+        assert service.get_elicitation_plan("#V#primary_labs", limit=1) == [
+            {
+                "predicate_concept_id": "#V#has_member_role",
+                "predicate_label": "has member role",
+                "priority": 1,
+                "question": "What is has member role for Primary Labs?",
+                "status": "missing",
+            }
+        ]
+
+    @patch("src.backend.services.concept_service.get_concept_by_id")
+    @patch(
+        "src.backend.services.relation_elicitation_service.ConceptsRepository.find"
+    )
+    def test_get_elicitation_plan_recovers_from_stale_empty_inherited_cache(
+        self, mock_repo_find, mock_get_by_id
+    ):
+        mock_get_by_id.return_value = {
+            "concept_id": "#V#primary_labs",
+            "name": "Primary Labs",
+            "relationships": {
+                "is_an_instance_of": ["#V#von_user_organisation"]
+            },
+        }
+        mock_repo_find.side_effect = [
+            [
+                {
+                    "concept_id": "#V#von_user_organisation",
+                    "inherited_salient_binary_predicates": [],
+                    "relationships": {"is_a_type_of": ["#V#organization"]},
+                }
+            ],
+            [
+                {
+                    "concept_id": "#V#organization",
+                    "relationships": {
+                        "#V#salient_binary_predicate_for_type": ["#V#has_member"]
+                    },
+                }
+            ],
+            [{"concept_id": "#V#has_member", "name": "has member"}],
+        ]
+
+        plan = RelationElicitationService(llm_client=False).get_elicitation_plan(
+            "#V#primary_labs",
+            limit=1,
+        )
+
+        assert plan[0]["predicate_concept_id"] == "#V#has_member"
+        assert plan[0]["question"] == "What is has member for Primary Labs?"
+        assert mock_repo_find.call_count == 3
 
     @patch(
         "src.backend.services.relation_elicitation_service.upsert_uncertain_relationship_assertion"
@@ -116,6 +202,17 @@ class TestRelationElicitationService(unittest.TestCase):
         self.assertEqual(result["status"], "proposed")
         self.assertEqual(result["stored_in"], "uncertain_relationship_assertions")
         mock_upsert_uncertain.assert_called_once()
+
+
+def test_default_catalogue_exposes_shared_concept_elicitation_capability():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    definition = build_default_catalogue().get("get_concept_elicitation_opportunities")
+
+    assert definition is not None
+    assert definition.category == "read"
+    assert "mixed-initiative" in definition.description
+    assert "formalisation candidate" in definition.description
 
 
 if __name__ == "__main__":

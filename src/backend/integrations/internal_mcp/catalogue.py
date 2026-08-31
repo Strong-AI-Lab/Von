@@ -9607,6 +9607,40 @@ def _get_predicate_extent(**kwargs):
     return {"success": True, **payload}
 
 
+def _get_concept_elicitation_opportunities(**kwargs):
+    """Return a bounded salient-predicate plan for one visible concept."""
+
+    from ...services.relation_elicitation_service import RelationElicitationService
+
+    instance_id = kwargs.get("instance_id") or kwargs.get("concept_id")
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: instance_id",
+            details={"missing": ["instance_id"]},
+        )
+    try:
+        limit = max(1, min(int(kwargs.get("limit") or 6), 12))
+    except (TypeError, ValueError):
+        return make_error_response(
+            "invalid_parameter",
+            "limit must be an integer",
+        )
+    plan = RelationElicitationService(llm_client=False).get_elicitation_plan(
+        instance_id.strip(),
+        limit=limit,
+    )
+    return {
+        "success": True,
+        "instance_id": instance_id.strip(),
+        "opportunities": plan,
+        "count": len(plan),
+        "representation_policy": (
+            "preserve_exact_text_before_optional_formalisation"
+        ),
+    }
+
+
 # Search MCP handlers
 def _search_web(**kwargs):
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
@@ -10631,6 +10665,36 @@ def _concept_search_output_schema() -> Schema:
         optional={},
         allow_unknown=True,
         description="search_concepts output: results (list of {concept_id, name, kind, relevance_score, similarity_score?, hierarchy?}), total_count (int), match_types_used (list[str]), query_info (dict). hierarchy (when include_hierarchy_path=true): {primary_path, paths[], all_parents, max_depth, is_root}",
+    )
+
+
+def _concept_elicitation_opportunities_input_schema() -> Schema:
+    return Schema(
+        required={"instance_id": str},
+        optional={"limit": (int, type(None))},
+        allow_unknown=False,
+        description=(
+            "get_concept_elicitation_opportunities input: one visible individual "
+            "concept ID and optional bounded limit (1-12)."
+        ),
+    )
+
+
+def _concept_elicitation_opportunities_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "instance_id": str,
+            "opportunities": list,
+            "count": int,
+            "representation_policy": str,
+        },
+        optional={"error": (str, type(None)), "error_code": (str, type(None))},
+        allow_unknown=True,
+        description=(
+            "Missing salient predicates ordered for mixed-initiative questions; "
+            "each item includes the predicate ID, label, priority, and a suggested question."
+        ),
     )
 
 
@@ -38763,6 +38827,25 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             category="read",
             hard_timeout_enabled=False,
             description="Find concepts. For 'list instances of X': use instance_of='#V#type' param (e.g., instance_of='#V#researcher'). For 'find X': use query param. Other key params: filter_kind=['individual'|'type'], include_hierarchy_path=true (shows paths), match_type='exact'|'substring'|'similarity'.",
+        ),
+        MethodDefinition(
+            name="get_concept_elicitation_opportunities",
+            handler=_get_concept_elicitation_opportunities,
+            input_schema=_concept_elicitation_opportunities_input_schema(),
+            output_schema=_concept_elicitation_opportunities_output_schema(),
+            category="read",
+            hard_timeout_enabled=False,
+            description=(
+                "For a visible individual concept, return missing suggested or "
+                "salient predicates as an ordered mixed-initiative question plan. "
+                "Use after resolving the focal concept when the user wants to talk "
+                "about it, add knowledge, or continue knowledge elicitation. The "
+                "predicate is a formalisation candidate, not proof that an answer "
+                "fills it: preserve exact user text first, then add only supported "
+                "scoped formalisation. If no concept exists yet, retain a provisional "
+                "conversation focus and elicit identity or type before considering "
+                "a user-scoped create."
+            ),
         ),
         MethodDefinition(
             name="get_predicate_extent",

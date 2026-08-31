@@ -26,6 +26,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 import logging
+import json
 import os
 import uuid  # Added for GUID generation
 from datetime import datetime, timedelta, timezone  # Ensure timezone is imported
@@ -177,6 +178,7 @@ def release_concept_mutation_lease(
         "lease_name": resolved_name,
     }
 
+
 # Concept visibility scope modes used during concept creation.
 # Keep these identifiers stable because MCP payloads and diagnostics depend on them.
 CONCEPT_SCOPE_USER_ORG_DEFAULT = "user_org_default"
@@ -269,8 +271,12 @@ def _resolve_actor_context_hint(
     diagnostics or no-op actor hints.
     """
 
-    resolved_user = user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
-    resolved_org = org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+    resolved_user = (
+        user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+    )
+    resolved_org = (
+        org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+    )
 
     if namespace and (resolved_user is None or resolved_org is None):
         try:
@@ -281,9 +287,17 @@ def _resolve_actor_context_hint(
                 parsed = parse_namespace(canonical_namespace)
                 parsed_user = parsed.get("user_id")
                 parsed_org = parsed.get("org_id")
-                if resolved_user is None and isinstance(parsed_user, str) and parsed_user.strip():
+                if (
+                    resolved_user is None
+                    and isinstance(parsed_user, str)
+                    and parsed_user.strip()
+                ):
                     resolved_user = f"#V#{parsed_user.strip()}"
-                if resolved_org is None and isinstance(parsed_org, str) and parsed_org.strip():
+                if (
+                    resolved_org is None
+                    and isinstance(parsed_org, str)
+                    and parsed_org.strip()
+                ):
                     resolved_org = f"#V#{parsed_org.strip()}"
         except Exception:
             pass
@@ -394,10 +408,7 @@ def _resolve_creation_visibility_scope(
             relationships,
             [actor_user_id],
         )
-        if (
-            actor_org_id
-            and mode_for_resolution != CONCEPT_SCOPE_USER_ONLY_DEFAULT
-        ):
+        if actor_org_id and mode_for_resolution != CONCEPT_SCOPE_USER_ONLY_DEFAULT:
             relationships = set_specific_to_org_values(
                 relationships,
                 [actor_org_id],
@@ -935,7 +946,9 @@ def _find_raw_concept_by_exact_concept_id(
     *,
     concepts_coll: Any | None = None,
 ) -> Dict[str, Any] | None:
-    collection = concepts_coll if concepts_coll is not None else ConceptsRepository.collection()
+    collection = (
+        concepts_coll if concepts_coll is not None else ConceptsRepository.collection()
+    )
     if collection is None:
         raise ConceptServiceError("Database collection 'concepts' not available.")
 
@@ -1261,9 +1274,7 @@ def enrich_concept_with_text_relations(
         limit_per_concept=enrichment_batch_cap,
         query_metadata=batch_query_metadata,
     ).get(concept_id, [])
-    relation_query_truncated = batch_query_metadata.get(
-        "relation_query_truncated"
-    )
+    relation_query_truncated = batch_query_metadata.get("relation_query_truncated")
     batch_complete = (
         not relation_query_truncated
         if isinstance(relation_query_truncated, bool)
@@ -1343,7 +1354,11 @@ def enrich_concept_with_text_relations(
                 if isinstance(legacy_name, dict)
                 else "NL"
             )
-            key = (name_text, language.strip() or "en", name_type.strip().upper() or "NL")
+            key = (
+                name_text,
+                language.strip() or "en",
+                name_type.strip().upper() or "NL",
+            )
             if key in existing_name_keys:
                 continue
             concept["names"].append(
@@ -2024,7 +2039,7 @@ def list_concepts(
                 if descendant_ids:
                     query["relationships.is_an_instance_of"] = {"$in": descendant_ids}
                     logger.info(
-                        f"Querying for instances of {concept_id} and its {len(descendant_ids)-1} descendants"
+                        f"Querying for instances of {concept_id} and its {len(descendant_ids) - 1} descendants"
                     )
                 else:
                     # Fallback to direct instances only
@@ -2120,9 +2135,7 @@ def list_concepts(
                     limit=len(unique_type_ids),
                 )
             )
-        display_names = resolve_concept_display_names(
-            [*concept_docs, *type_docs]
-        )
+        display_names = resolve_concept_display_names([*concept_docs, *type_docs])
 
         concepts_list = []
         for concept_doc in concept_docs:
@@ -2746,6 +2759,200 @@ def _resolve_interaction_llm_runtime(
     return client, model, dict(params or {})
 
 
+def _store_concept_qa_input_assertion(
+    *,
+    interaction_id: str,
+    input_kind: str,
+    input_ordinal: int,
+    question_or_statement: str,
+    input_text: str,
+    concept: Mapping[str, Any],
+    session: Mapping[str, Any],
+    proposed_predicate: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Preserve one exact Q&A input before semantic enrichment.
+
+    The assertion remains user-scoped and is linked to the target concept.  It
+    is evidence supplied during elicitation, not canonical publication.  A
+    stable source-event identity makes a retried request idempotent while the
+    same answer position is still current.
+    """
+
+    concept_id = str(concept.get("concept_id") or "").strip()
+    if not concept_id.startswith("#V#"):
+        raise ConceptServiceError(
+            "Concept Q&A cannot represent an answer without a canonical concept ID"
+        )
+    user_id = str(session.get("user_id") or "").strip()
+    if not user_id.startswith("#V#"):
+        raise ConceptServiceError(
+            "Concept Q&A cannot represent an answer without a trusted user ID"
+        )
+
+    from .scoped_assertion_service import (
+        add_text_assertion_concept_links,
+        store_text_assertion,
+    )
+
+    resolved_input_kind = str(input_kind or "").strip().lower()
+    if resolved_input_kind not in {"answer", "question", "notes", "initial_notes"}:
+        raise InvalidConceptDataError("Unsupported concept Q&A input kind")
+    resolved_ordinal = max(1, input_ordinal)
+    source_event_id = (
+        f"concept_q_and_a:{interaction_id}:{resolved_input_kind}:{resolved_ordinal}"
+    )
+    organisation_concept_id = _canonical_organisation_concept_id(
+        session.get("organisation_concept_id")
+    )
+    namespace = str(session.get("namespace") or "").strip() or None
+    evidence = {
+        "source": "concept_q_and_a",
+        "interaction_id": interaction_id,
+        "input_kind": resolved_input_kind,
+        "input_ordinal": resolved_ordinal,
+        "question_or_statement": question_or_statement,
+        "target_concept_id": concept_id,
+    }
+    proposed_predicate_id = str(
+        (proposed_predicate or {}).get("predicate_concept_id") or ""
+    ).strip()
+    if proposed_predicate_id.startswith("#V#"):
+        evidence["proposed_formalisation"] = {
+            "predicate_concept_id": proposed_predicate_id,
+            "predicate_label": (proposed_predicate or {}).get("predicate_label"),
+            "status": "candidate_from_salient_question",
+        }
+    receipt = store_text_assertion(
+        text=input_text,
+        language="en-NZ",
+        scope_mode="user",
+        context_id=f"concept_q_and_a:{interaction_id}",
+        source_event_id=source_event_id,
+        evidence=evidence,
+        acting_user_concept_id=user_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        turn_id=source_event_id,
+        canonical_publication=False,
+    )
+    assertion_id = str(receipt.get("assertion_id") or "").strip()
+    if not assertion_id:
+        raise ConceptServiceError(
+            "Concept Q&A assertion storage returned no assertion identity"
+        )
+    link_evidence: Dict[str, Any] = {
+        "source": "concept_q_and_a",
+        "question_or_statement": question_or_statement,
+    }
+    if proposed_predicate_id:
+        link_evidence["proposed_predicate_concept_id"] = proposed_predicate_id
+    link_receipt = add_text_assertion_concept_links(
+        assertion_id=assertion_id,
+        links=[
+            {
+                "concept_id": concept_id,
+                "role": "about",
+                "method": "concept_q_and_a_target",
+                "confidence": 1.0,
+                "evidence": link_evidence,
+            }
+        ],
+        acting_user_concept_id=user_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        turn_id=source_event_id,
+    )
+    return {
+        "status": "stored",
+        "effect_status": "succeeded",
+        "assertion_id": assertion_id,
+        "storage_surface": receipt.get("storage_surface"),
+        "assertion_created": bool(receipt.get("changed")),
+        "concept_link_added": bool(link_receipt.get("links_added")),
+        "target_concept_id": concept_id,
+        "proposed_predicate_concept_id": proposed_predicate_id or None,
+        "formalisation_status": (
+            "candidate" if proposed_predicate_id else "not_proposed"
+        ),
+        "canonical_publication": False,
+    }
+
+
+def _record_initial_interaction_question(
+    *,
+    interaction_session: Mapping[str, Any],
+    question_or_statement: str,
+    elicitation_predicate: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Persist the first model question before accepting its answer."""
+
+    raw_session_id = interaction_session.get("_id")
+    try:
+        session_id = (
+            raw_session_id
+            if isinstance(raw_session_id, ObjectId)
+            else ObjectId(str(raw_session_id or ""))
+        )
+    except Exception as exc:
+        raise ConceptServiceError(
+            "Concept Q&A could not persist the initial question without a session ID"
+        ) from exc
+
+    question_text = str(question_or_statement or "").strip()
+    if not question_text:
+        raise ConceptServiceError("Concept Q&A generated an empty initial question")
+    interaction_type = (
+        "llm_question" if question_text.endswith("?") else "llm_statement"
+    )
+    detail_key = "question" if interaction_type == "llm_question" else "statement"
+    details: Dict[str, Any] = {detail_key: question_text}
+    if interaction_type == "llm_question" and elicitation_predicate:
+        details["elicitation_predicate"] = {
+            "predicate_concept_id": elicitation_predicate.get("predicate_concept_id"),
+            "predicate_label": elicitation_predicate.get("predicate_label"),
+            "priority": elicitation_predicate.get("priority"),
+        }
+    entry = InteractionEntry(
+        interaction_type=interaction_type,
+        details=details,
+        timestamp=datetime.now(timezone.utc),
+    ).model_dump()
+
+    db = get_db()
+    if db is None:
+        raise ConceptServiceError(
+            "Database connection not available for initial question persistence"
+        )
+    query: Dict[str, Any] = {
+        "_id": session_id,
+        "status": "active",
+        "user_id": interaction_session.get("user_id"),
+    }
+    org_scope_values = _organisation_scope_values(
+        interaction_session.get("organisation_concept_id")
+    )
+    query["organisation_concept_id"] = (
+        {"$in": org_scope_values} if org_scope_values else {"$in": [None, ""]}
+    )
+    result = db[interaction_session_collection_name].update_one(
+        query,
+        {
+            "$push": {"history": entry},
+            "$set": {
+                "last_updated_time": datetime.now(timezone.utc),
+                "indexing_status": "pending",
+            },
+        },
+    )
+    if result.matched_count != 1:
+        raise ConceptServiceError(
+            "Concept Q&A initial question could not be persisted to its active session"
+        )
+    history = interaction_session.get("history")
+    if isinstance(history, list):
+        history.append(entry)
+
+
 def get_interaction_sessions_collection_service() -> Optional[Collection]:
     """Helper to get the 'interaction_sessions' collection."""
     try:
@@ -2928,15 +3135,61 @@ def start_interaction_session(
         )
         raise ConceptServiceError(f"Could not start interaction session: {e}") from e
 
+    initial_notes_representation: Optional[Dict[str, Any]] = None
+    if initial_notes:
+        try:
+            initial_notes_representation = _store_concept_qa_input_assertion(
+                interaction_id=str(inserted_session_id),
+                input_kind="initial_notes",
+                input_ordinal=1,
+                question_or_statement="User-provided initial concept notes",
+                input_text=initial_notes,
+                concept=concept,
+                session=session_doc,
+            )
+        except Exception as e:
+            logger.error(
+                "Could not preserve initial concept Q&A notes for session %s: %s",
+                inserted_session_id,
+                e,
+                exc_info=True,
+            )
+            initial_notes_representation = {
+                "status": "failed",
+                "effect_status": "failed",
+                "error_code": "initial_notes_assertion_write_failed",
+                "target_concept_id": concept.get("concept_id"),
+                "canonical_publication": False,
+            }
+        if session_doc["history"] and isinstance(
+            session_doc["history"][-1].get("details"), dict
+        ):
+            session_doc["history"][-1]["details"]["representation"] = (
+                initial_notes_representation
+            )
+            sessions_coll.update_one(
+                {"_id": inserted_session_id},
+                {
+                    "$set": {
+                        "history": session_doc["history"],
+                        "last_updated_time": datetime.now(timezone.utc),
+                        "indexing_status": "pending",
+                    }
+                },
+            )
+
     # No static system question - the frontend will generate the first question dynamically
     # using the current concept state (name, type, notes) via the LLM
 
-    return {
+    response: Dict[str, Any] = {
         "interaction_id": str(inserted_session_id),
         "concept_id": actual_concept_id,
         "concept_name": concept.get("name", "Unknown concept"),
         "session_start_time": session_doc["start_time"].isoformat(),
     }
+    if initial_notes_representation is not None:
+        response["initial_notes_representation"] = initial_notes_representation
+    return response
 
 
 def get_active_interactions_for_concept(
@@ -3087,13 +3340,47 @@ def resume_interaction_session(
 
 PERSON_TYPE_CONCEPT_ID = "#V#person"
 MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION = (
-    "Task: Use existing context and available data/search first. "
+    "Task: Continue a mixed-initiative knowledge conversation. Use existing "
+    "context and available data/search first. Include represented data. "
+    "If the user's latest input asks a question, answer it directly from the "
+    "available evidence before deciding whether one follow-up question is useful. "
+    "If the user supplies knowledge, acknowledge it through the next useful "
+    "response without pretending that unverified formalisation is canonical. "
+    "Resolve first-person references such as 'I' to the known current user. "
+    "Do not ask the user for identity already present in user context; when they "
+    "state that they are a member of the focal organisation, prefer a useful "
+    "refinement such as their role or position over asking for their name. "
     "Only ask the human if their input is genuinely needed, likely known without extra work, "
     "and materially improves the concept. "
     "When asking, ask one concise, low-effort, high-value question. "
-    "Avoid broad or unrewarding requests. "
-    "Respond with ONLY the question."
+    "Prefer the highest-priority missing salient predicate when it fits the "
+    "conversation; its represented predicate ID is a proposed formalisation "
+    "target, not proof that the user's answer fills it. "
+    "Avoid broad or unrewarding requests. Ask at most one question in the response."
 )
+
+
+def _get_concept_elicitation_plan(
+    concept_id: str,
+    *,
+    limit: int = 6,
+) -> List[Dict[str, Any]]:
+    """Read a bounded salient-predicate plan for mixed-initiative elicitation."""
+
+    try:
+        from .relation_elicitation_service import RelationElicitationService
+
+        return RelationElicitationService(llm_client=False).get_elicitation_plan(
+            concept_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not resolve salient-predicate elicitation plan for %s: %s",
+            concept_id,
+            exc,
+        )
+        return []
 
 
 def _normalise_concept_id_list(raw_value: Any) -> List[str]:
@@ -3118,9 +3405,7 @@ def _is_person_instance_concept(concept: Dict[str, Any]) -> bool:
     if not isinstance(relationships, dict):
         return False
 
-    instance_of_ids = _normalise_concept_id_list(
-        relationships.get("is_an_instance_of")
-    )
+    instance_of_ids = _normalise_concept_id_list(relationships.get("is_an_instance_of"))
     return PERSON_TYPE_CONCEPT_ID in instance_of_ids
 
 
@@ -3134,7 +3419,6 @@ def _build_default_concept_question_template() -> str:
         "concept's current notes: {concept_notes}\n"
         "{history_section}"
         "{answer_section}"
-        f"{MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION}"
     )
 
 
@@ -3154,6 +3438,7 @@ def generate_concept_question(
     interaction_history: str = "",
     user_answer: str = "",
     is_initial: bool = True,
+    elicitation_plan: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Return a fully-rendered prompt for the LLM.
@@ -3170,6 +3455,8 @@ def generate_concept_question(
     name = get_concept_display_name_with_names_fallback(concept) or concept.get(
         "name", "this concept"
     )
+    if elicitation_plan is None:
+        elicitation_plan = _get_concept_elicitation_plan(concept_id)
 
     # ---------- fetch or create template ----------
     template: str | None = None
@@ -3311,6 +3598,27 @@ def generate_concept_question(
         if concept_context and not filled.startswith(concept_context.strip()):
             filled = concept_context + filled
 
+    salient_projection = [
+        {
+            "predicate_concept_id": item.get("predicate_concept_id"),
+            "predicate_label": item.get("predicate_label"),
+            "priority": item.get("priority"),
+            "suggested_question": item.get("question"),
+        }
+        for item in (elicitation_plan or [])[:6]
+        if isinstance(item, Mapping) and item.get("predicate_concept_id")
+    ]
+    filled = (
+        f"{filled.rstrip()}\n\n"
+        "CURRENT MIXED-INITIATIVE AND REPRESENTATION RULE:\n"
+        f"{MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION}\n"
+        "Missing salient-predicate opportunities, ordered by represented "
+        f"priority: {json.dumps(salient_projection, ensure_ascii=False)}\n"
+        "If the latest input is a user question, do not ignore it in order to "
+        "ask an elicitation question. If a follow-up is useful, answer first and "
+        "then ask at most one concise question."
+    )
+
     # Log the full prompt that will be sent to the LLM
     try:
         logger.info(
@@ -3326,7 +3634,12 @@ def generate_concept_question(
     return filled
 
 
-def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) -> dict:
+def submit_concept_answer(
+    interaction_id: str,
+    user_answer: str,
+    session: dict,
+    user_notes_input: Optional[str] = None,
+) -> dict:
     """
     Submits a user's answer during an concept interaction, gets the LLM's next question or conclusion,
     and updates the interaction state.
@@ -3342,6 +3655,18 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
         logger.error("Invalid user_answer provided (not a string).")
         return {
             "error": "Invalid user_answer (must be a string)",
+            "status": "error_validation",
+        }
+    if user_notes_input is not None and not isinstance(user_notes_input, str):
+        return {
+            "error": "Invalid user_notes_input (must be a string)",
+            "status": "error_validation",
+        }
+    answer_text = user_answer.strip()
+    notes_text = str(user_notes_input or "").strip()
+    if not answer_text and not notes_text:
+        return {
+            "error": "An answer, question, or notes input is required",
             "status": "error_validation",
         }
 
@@ -3410,31 +3735,56 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
     logger.info(f"concept type for prompt: {concept_type_concept_id}")
     logger.info(f"concept ID for prompt: {concept_id_str}")
 
-    now_utc = datetime.now(timezone.utc)
-    user_answer_interaction_entry = InteractionEntry(
-        interaction_type="user_answer",
-        details={"answer": user_answer},
-        timestamp=now_utc,
-    )
     # Ensure session["history"] is a list before appending
     if not isinstance(session.get("history"), list):
         session["history"] = []
     current_history = session[
         "history"
     ]  # This is a reference, changes will reflect in session dict
-    current_history.append(user_answer_interaction_entry.model_dump())
 
-    # Find the previous question from history for synthesis
+    # Find the previous question before recording this turn's user inputs.  The
+    # exact question is material provenance for short contextual answers.
     previous_question = "What would you like to tell me?"  # Default fallback
-    for entry in reversed(
-        current_history[:-1]
-    ):  # Look backwards, excluding the answer we just added
+    previous_question_entry: Mapping[str, Any] | None = None
+    for entry in reversed(current_history):
         if entry.get("interaction_type") in ["llm_question", "llm_statement"]:
             question_details = entry.get("details", {})
             previous_question = question_details.get(
                 "question"
             ) or question_details.get("statement", previous_question)
+            previous_question_entry = entry
             break
+    previous_elicitation_predicate: Optional[Mapping[str, Any]] = None
+    if previous_question_entry is not None:
+        previous_details = previous_question_entry.get("details")
+        if isinstance(previous_details, Mapping) and isinstance(
+            previous_details.get("elicitation_predicate"), Mapping
+        ):
+            previous_elicitation_predicate = previous_details["elicitation_predicate"]
+
+    now_utc = datetime.now(timezone.utc)
+    answer_history_entry: Dict[str, Any] | None = None
+    if answer_text:
+        input_kind = "question" if answer_text.endswith("?") else "answer"
+        user_answer_interaction_entry = InteractionEntry(
+            interaction_type=(
+                "user_question" if input_kind == "question" else "user_answer"
+            ),
+            details={"answer": answer_text, "input_kind": input_kind},
+            timestamp=now_utc,
+        )
+        answer_history_entry = user_answer_interaction_entry.model_dump()
+        current_history.append(answer_history_entry)
+
+    notes_history_entry: Dict[str, Any] | None = None
+    if notes_text:
+        notes_interaction_entry = InteractionEntry(
+            interaction_type="user_provided_notes",
+            details={"notes": notes_text},
+            timestamp=now_utc,
+        )
+        notes_history_entry = notes_interaction_entry.model_dump()
+        current_history.append(notes_history_entry)
 
     # Get concept type name for later use in synthesis and prompt
     concept_type_name_for_prompt = concept_type_concept_id  # Default to ID
@@ -3442,6 +3792,96 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
         concept_type_name_for_prompt = (
             f"{concept.get('name')} (instance of {concept_type_concept_id})"
         )
+
+    answer_representation: Dict[str, Any] = {
+        "status": "not_provided",
+        "effect_status": "not_needed",
+        "canonical_publication": False,
+    }
+    if answer_text and answer_history_entry is not None:
+        answer_ordinal = sum(
+            1
+            for entry in current_history
+            if entry.get("interaction_type") in {"user_answer", "user_question"}
+        )
+        try:
+            answer_representation = _store_concept_qa_input_assertion(
+                interaction_id=interaction_id,
+                input_kind=("question" if answer_text.endswith("?") else "answer"),
+                input_ordinal=answer_ordinal,
+                question_or_statement=previous_question,
+                input_text=answer_text,
+                concept=concept,
+                session=session,
+                proposed_predicate=(
+                    previous_elicitation_predicate
+                    if not answer_text.endswith("?")
+                    else None
+                ),
+            )
+            logger.info(
+                "Represented concept Q&A input as assertion %s about %s",
+                answer_representation.get("assertion_id"),
+                answer_representation.get("target_concept_id"),
+            )
+        except Exception as e:
+            logger.error(
+                "Could not preserve concept Q&A input %s for session %s: %s",
+                answer_ordinal,
+                interaction_id,
+                e,
+                exc_info=True,
+            )
+            answer_representation = {
+                "status": "failed",
+                "effect_status": "failed",
+                "error_code": "answer_assertion_write_failed",
+                "target_concept_id": concept.get("concept_id"),
+                "canonical_publication": False,
+            }
+        answer_history_entry["details"]["representation"] = answer_representation
+
+    notes_representation: Dict[str, Any] = {
+        "status": "not_provided",
+        "effect_status": "not_needed",
+        "canonical_publication": False,
+    }
+    if notes_text and notes_history_entry is not None:
+        notes_ordinal = sum(
+            1
+            for entry in current_history
+            if entry.get("interaction_type")
+            in {"user_provided_notes", "user_provided_initial_notes"}
+        )
+        try:
+            notes_representation = _store_concept_qa_input_assertion(
+                interaction_id=interaction_id,
+                input_kind="notes",
+                input_ordinal=notes_ordinal,
+                question_or_statement="User-provided concept notes during Q&A",
+                input_text=notes_text,
+                concept=concept,
+                session=session,
+                proposed_predicate=(
+                    previous_elicitation_predicate if not answer_text else None
+                ),
+            )
+        except Exception as e:
+            logger.error(
+                "Could not preserve concept Q&A notes %s for session %s: %s",
+                notes_ordinal,
+                interaction_id,
+                e,
+                exc_info=True,
+            )
+            notes_representation = {
+                "status": "failed",
+                "effect_status": "failed",
+                "error_code": "notes_assertion_write_failed",
+                "target_concept_id": concept.get("concept_id"),
+                "canonical_publication": False,
+            }
+        notes_history_entry["details"]["representation"] = notes_representation
 
     # IMPORTANT: Do synthesis FIRST before generating the next question
     # This ensures the next question is based on updated notes that include the current synthesis
@@ -3462,56 +3902,81 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
             "status": "error_llm_selection",
         }
 
-    synthesis_result = None
-    try:
-        synthesis_result = synthesize_and_update_concept_notes(
-            concept_id=concept_id_str,
-            concept=concept,
-            question_or_statement=previous_question,
-            user_answer=user_answer,
-            concept_type_name=concept_type_name_for_prompt,
-            ollama_client=llm_client,  # Pass the unified LLM client
-            model=safe_model,
-            llm_params=llm_params,
-            session=session,  # Pass session to access initial notes
-        )
+    synthesis_outcome: Dict[str, Any] = {
+        "status": "not_attempted",
+        "effect_status": "not_needed",
+        "synthesis": None,
+        "notes_updated": False,
+        "reason": (
+            "user_question"
+            if answer_text.endswith("?")
+            else "no_answer"
+            if not answer_text
+            else None
+        ),
+    }
+    if answer_text and not answer_text.endswith("?"):
+        try:
+            synthesis_outcome = synthesize_and_update_concept_notes(
+                concept_id=concept_id_str,
+                concept=concept,
+                question_or_statement=previous_question,
+                user_answer=answer_text,
+                concept_type_name=concept_type_name_for_prompt,
+                ollama_client=llm_client,  # Pass the unified LLM client
+                model=safe_model,
+                llm_params=llm_params,
+                session=session,  # Pass session to access initial notes
+                source_assertion_id=answer_representation.get("assertion_id"),
+            )
 
-        # Fetch the updated concept from the database to ensure we have the latest notes
-        if synthesis_result:  # Only re-fetch if synthesis actually happened
-            try:
-                updated_concept = get_concept_by_id(concept_id_str)
-                if updated_concept:
-                    concept = updated_concept  # Use the updated concept for the rest of the process
-                    concept_notes = get_concept_notes(concept) or ""
-                    try:
-                        logger.info(
-                            f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes)}"
+            # Fetch the updated concept from the database to ensure we have the latest notes
+            if synthesis_outcome.get("status") == "updated":
+                try:
+                    updated_concept = get_concept_by_id(concept_id_str)
+                    if updated_concept:
+                        concept = updated_concept  # Use the updated concept for the rest of the process
+                        concept_notes = get_concept_notes(concept) or ""
+                        try:
+                            logger.info(
+                                f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes)}"
+                            )
+                            logger.info(
+                                f"Re-fetched concept notes preview: {concept_notes[:200]}..."
+                            )
+                        except Exception:
+                            # In case concept_notes is not a string-like, coerce for logging
+                            concept_notes_str = (
+                                str(concept_notes) if concept_notes is not None else ""
+                            )
+                            logger.info(
+                                f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes_str)}"
+                            )
+                            logger.info(
+                                f"Re-fetched concept notes preview: {concept_notes_str[:200]}..."
+                            )
+                    else:
+                        logger.warning(
+                            f"Could not re-fetch concept {concept_id_str} after synthesis"
                         )
-                        logger.info(
-                            f"Re-fetched concept notes preview: {concept_notes[:200]}..."
-                        )
-                    except Exception:
-                        # In case concept_notes is not a string-like, coerce for logging
-                        concept_notes_str = (
-                            str(concept_notes) if concept_notes is not None else ""
-                        )
-                        logger.info(
-                            f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes_str)}"
-                        )
-                        logger.info(
-                            f"Re-fetched concept notes preview: {concept_notes_str[:200]}..."
-                        )
-                else:
-                    logger.warning(
-                        f"Could not re-fetch concept {concept_id_str} after synthesis"
+                except Exception as fetch_e:
+                    logger.error(
+                        f"Error re-fetching concept after synthesis: {fetch_e}"
                     )
-            except Exception as fetch_e:
-                logger.error(f"Error re-fetching concept after synthesis: {fetch_e}")
-                # Continue with the original concept
+                    # Continue with the original concept
 
-    except Exception as e:
-        logger.error(f"Error generating or updating concept notes synthesis: {e}")
-        # Continue without failing the entire interaction
+        except Exception as e:
+            logger.error(f"Error generating or updating concept notes synthesis: {e}")
+            synthesis_outcome = {
+                "status": "error",
+                "effect_status": "failed",
+                "synthesis": None,
+                "notes_updated": False,
+                "error_code": "synthesis_processing_failed",
+            }
+            # Continue because the exact answer may already be durably represented.
+    if answer_history_entry is not None:
+        answer_history_entry["details"]["concept_notes_synthesis"] = synthesis_outcome
 
     # NOW get the updated concept notes (after synthesis) for generating the next question
     concept_notes = get_concept_notes(concept) or ""
@@ -3520,23 +3985,47 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
     )
     logger.info(f"concept notes preview for LLM: {concept_notes[:200]}...")
 
-    recent_history_entries = current_history[-6:]  # Get user_answer + last 5 (or fewer)
+    prompt_concept = concept.copy()
+    if notes_text:
+        current_prompt_notes = get_concept_notes(concept) or ""
+        combined_prompt_notes = (
+            f"{current_prompt_notes}\n\nUser-provided Q&A notes: {notes_text}"
+            if current_prompt_notes
+            else notes_text
+        )
+        set_concept_notes(prompt_concept, combined_prompt_notes)
+
+    recent_history_entries = current_history[-6:]  # Get latest user input + context
     interaction_history_formatted = "\\n".join(
         [
-            f"{entry.get('interaction_type', 'Log')}: {entry.get('details', {}).get('question', entry.get('details', {}).get('answer', 'N/A'))}"
+            f"{entry.get('interaction_type', 'Log')}: "
+            f"{entry.get('details', {}).get('question', entry.get('details', {}).get('statement', entry.get('details', {}).get('answer', entry.get('details', {}).get('notes', 'N/A'))))}"
             for entry in recent_history_entries
         ]
     )
 
     # concept_type_name_for_prompt was already calculated above, no need to recalculate
+    elicitation_plan = _get_concept_elicitation_plan(
+        str(concept.get("concept_id") or concept_id_str)
+    )
 
     try:
         final_prompt_for_llm = generate_concept_question(
-            concept=concept,
+            concept=prompt_concept,
             db=db,
             interaction_history=interaction_history_formatted,
-            user_answer=user_answer,
+            user_answer=(
+                "\n".join(
+                    part
+                    for part in (
+                        f"Response or question: {answer_text}" if answer_text else "",
+                        f"Additional notes: {notes_text}" if notes_text else "",
+                    )
+                    if part
+                )
+            ),
             is_initial=False,
+            elicitation_plan=elicitation_plan,
         )
         logger.info(
             f"Generated final prompt using unified function (full):\n{final_prompt_for_llm}"
@@ -3590,9 +4079,16 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
         llm_interaction_type = "llm_statement"
         llm_details_key = "statement"
 
+    llm_response_details: Dict[str, Any] = {llm_details_key: llm_response_text}
+    if llm_interaction_type == "llm_question" and elicitation_plan:
+        llm_response_details["elicitation_predicate"] = {
+            "predicate_concept_id": elicitation_plan[0].get("predicate_concept_id"),
+            "predicate_label": elicitation_plan[0].get("predicate_label"),
+            "priority": elicitation_plan[0].get("priority"),
+        }
     llm_response_interaction_entry = InteractionEntry(
         interaction_type=llm_interaction_type,
-        details={llm_details_key: llm_response_text},
+        details=llm_response_details,
         timestamp=datetime.now(timezone.utc),
     )
     current_history.append(llm_response_interaction_entry.model_dump())
@@ -3647,7 +4143,13 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
         "next_step_content": llm_response_text,
         "status": "success",
         "interaction_id": interaction_id,  # Return the original string ID
-        "synthesis": synthesis_result,  # Include the synthesis result
+        "synthesis": synthesis_outcome.get("synthesis"),
+        "synthesis_status": synthesis_outcome.get("status"),
+        "representation": {
+            "exact_answer": answer_representation,
+            "notes_input": notes_representation,
+            "concept_notes": synthesis_outcome,
+        },
         "concept": {
             "_id": str(concept.get("_id", concept_id_str)),
             "name": get_concept_display_name_with_names_fallback(concept),
@@ -3657,7 +4159,13 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
     }
 
 
-def update_concept_notes(concept_id: str, new_notes: str) -> bool:
+def update_concept_notes(
+    concept_id: str,
+    new_notes: str,
+    *,
+    provenance: Optional[Mapping[str, Any]] = None,
+    context: Optional[Mapping[str, Any]] = None,
+) -> bool:
     """Update concept notes using text_relations only (Phase 1 preserved_fields deprecation).
 
     Behaviour:
@@ -3667,36 +4175,63 @@ def update_concept_notes(concept_id: str, new_notes: str) -> bool:
     Returns True on success; False on errors or if concept missing.
     """
     try:
-        # Confirm concept exists (cheap existence check without mutating preserved_fields)
+        # Resolve either a public concept_id or a Mongo _id to the canonical
+        # relation subject.  Interaction sessions intentionally store the
+        # internal _id, whereas text relations must use the public concept_id.
+        lookup_clauses: List[Dict[str, Any]] = [
+            {"concept_id": concept_id},
+            {"_id": concept_id},
+        ]
+        try:
+            lookup_clauses.insert(1, {"_id": ObjectId(concept_id)})
+        except Exception:
+            pass
         concept_result = ConceptsRepository.find_one(
-            {"concept_id": concept_id}, projection={"_id": 1}
+            {"$or": lookup_clauses},
+            projection={"_id": 1, "concept_id": 1},
         )
         if not concept_result:
             logger.warning(
                 f"update_concept_notes: No concept found with ID '{concept_id}'. Notes not updated."
             )
             return False
+        subject_concept_id = str(concept_result.get("concept_id") or "").strip()
+        if not subject_concept_id:
+            logger.warning(
+                "update_concept_notes: Concept reference '%s' has no public concept_id; notes not updated.",
+                concept_id,
+            )
+            return False
+
+        provenance_payload: Dict[str, Any] = {
+            "source": "update_concept_notes",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        if isinstance(provenance, Mapping):
+            provenance_payload.update(
+                {key: value for key, value in provenance.items() if value is not None}
+            )
+        context_payload: Dict[str, Any] = {"write_strategy": "relations_only_v2"}
+        if isinstance(context, Mapping):
+            context_payload.update(dict(context))
 
         try:
             tv_payload = upsert_text_for_concept(
-                subject_concept_id=concept_id,
+                subject_concept_id=subject_concept_id,
                 predicate="hasNote",
                 text=new_notes,
                 lang="en",
-                provenance={
-                    "source": "update_concept_notes",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                },
-                context={"write_strategy": "relations_only_v2"},
+                provenance=provenance_payload,
+                context=context_payload,
             )
             new_text_value_id = tv_payload.get("text_value_id")
             relation_id = tv_payload.get("relation_id")
             logger.info(
-                f"update_concept_notes: Upserted text_value {new_text_value_id} via relation {relation_id} for concept {concept_id}."
+                f"update_concept_notes: Upserted text_value {new_text_value_id} via relation {relation_id} for concept {subject_concept_id}."
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.error(
-                f"Failed creating text_value for notes concept_id={concept_id}: {e}"
+                f"Failed creating text_value for notes concept_id={subject_concept_id}: {e}"
             )
             return False
 
@@ -3704,33 +4239,33 @@ def update_concept_notes(concept_id: str, new_notes: str) -> bool:
         try:
             if new_text_value_id:
                 stale_filter = {
-                    "subject_concept_id": concept_id,
+                    "subject_concept_id": subject_concept_id,
                     "predicate": "hasNote",
                     "object_text_id": {"$ne": new_text_value_id},
                 }
                 deleted = TextRelationsRepository.delete_many(stale_filter)
                 if hasattr(deleted, "deleted_count") and deleted.deleted_count:
                     logger.info(
-                        f"update_concept_notes: Removed {deleted.deleted_count} stale hasNote relations for concept {concept_id}."
+                        f"update_concept_notes: Removed {deleted.deleted_count} stale hasNote relations for concept {subject_concept_id}."
                     )
         except Exception as e:  # pragma: no cover
             logger.error(
-                f"Failed pruning stale hasNote relations for concept {concept_id}: {e}"
+                f"Failed pruning stale hasNote relations for concept {subject_concept_id}: {e}"
             )
 
         # Touch last_updated_time separately (atomic minimal update)
         try:
             ConceptsRepository.update_one(
-                {"concept_id": concept_id},
+                {"concept_id": subject_concept_id},
                 {"$set": {"last_updated_time": datetime.now(timezone.utc)}},
             )
         except Exception as e:  # pragma: no cover
             logger.warning(
-                f"Non-fatal: failed to update last_updated_time for {concept_id}: {e}"
+                f"Non-fatal: failed to update last_updated_time for {subject_concept_id}: {e}"
             )
 
         logger.info(
-            f"Successfully updated notes (relations only) for concept '{concept_id}'."
+            f"Successfully updated notes (relations only) for concept '{subject_concept_id}'."
         )
         return True
     except PyMongoError as e:  # pragma: no cover
@@ -3812,7 +4347,9 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
             if not provenance_payload:
                 provenance_payload["source"] = "update_concept_description"
             provenance_payload["last_edited_at"] = now_iso
-            provenance_payload.setdefault("last_edited_by", "update_concept_description")
+            provenance_payload.setdefault(
+                "last_edited_by", "update_concept_description"
+            )
             context_payload.setdefault("write_strategy", "relations_only_v2")
 
             if extracted_inline_metadata:
@@ -3971,7 +4508,8 @@ def synthesize_and_update_concept_notes(
     model: str,
     llm_params: Optional[Dict[str, Any]] = None,
     session: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+    source_assertion_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Synthesizes a Q&A exchange into a factual statement and updates the concept's notes.
 
@@ -3986,7 +4524,11 @@ def synthesize_and_update_concept_notes(
         session: The interaction session containing initial notes
 
     Returns:
-        The synthesized text that was added to notes, or None if no update was made
+        A typed synthesis/persistence outcome.  ``updated`` means the generated
+        statement was read back through the canonical notes relation path;
+        ``no_update`` is reserved for an explicit model decision; and
+        ``persistence_failed`` preserves the distinction between generation
+        and a failed durable effect.
 
     Raises:
         Exception: If there's an error during synthesis or database update
@@ -4034,7 +4576,7 @@ def synthesize_and_update_concept_notes(
         f"Task: Based ONLY on the user's answer, create a concise factual statement that captures the new information about this concept. "
         f"Focus on what the user actually said, not on connecting it to existing notes. "
         f"The statement should be in third person and suitable for appending to the concept's notes. "
-        f"If the user's answer doesn't provide new meaningful information, respond with 'NO_UPDATE'. "
+        f"If the user's input is a question, request for information, or otherwise doesn't provide new meaningful information, respond with 'NO_UPDATE'. "
         f"Examples:\n"
         f"- If user says 'He is an author' → 'He is an author.'\n"
         f"- If user says 'She lives in New York' → 'She lives in New York.'\n"
@@ -4064,36 +4606,67 @@ def synthesize_and_update_concept_notes(
 
         updated_notes += synthesis_text
 
-        # Update the concept in database using the repository
-        # Use the correct concept ID field (_id for MongoDB ObjectId)
-        concept_filter = (
-            {"_id": ObjectId(concept_id)}
-            if len(concept_id) == 24
-            else {"concept_id": concept_id}
-        )
-
         logger.info(
-            f"Updating concept notes in DB. concept ID: {concept_id}, Filter: {concept_filter}, Updated notes length: {len(updated_notes)}"
+            "Updating concept notes in DB. concept reference: %s, Updated notes length: %d",
+            concept_id,
+            len(updated_notes),
         )
 
         # Use the canonical notes updater (relations only now) to persist
-        if update_concept_notes(concept_id, updated_notes):
+        provenance = {
+            "source": "concept_q_and_a_synthesis",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "interaction_id": str((session or {}).get("_id") or "").strip() or None,
+            "asserted_by_user_concept_id": (session or {}).get("user_id"),
+            "organisation_concept_id": (session or {}).get("organisation_concept_id"),
+            "source_assertion_id": source_assertion_id,
+            "model": model,
+        }
+        if update_concept_notes(
+            concept_id,
+            updated_notes,
+            provenance=provenance,
+            context={
+                "write_strategy": "relations_only_v2",
+                "source": "concept_q_and_a",
+                "source_assertion_id": source_assertion_id,
+            },
+        ):
             set_concept_notes(
                 concept, updated_notes
             )  # in-memory convenience for caller context (canonical notes field)
             logger.info(
                 f"Successfully updated concept notes (relations only) for {concept_id}. Added: {synthesis_text}"
             )
-            return synthesis_text
+            return {
+                "status": "updated",
+                "effect_status": "succeeded",
+                "synthesis": synthesis_text,
+                "notes_updated": True,
+                "source_assertion_id": source_assertion_id,
+            }
         logger.warning(
             f"Failed to update concept notes for {concept_id} via relations updater."
         )
-        return None
+        return {
+            "status": "persistence_failed",
+            "effect_status": "failed",
+            "synthesis": synthesis_text,
+            "notes_updated": False,
+            "error_code": "concept_notes_write_failed",
+            "source_assertion_id": source_assertion_id,
+        }
     else:
         logger.info(
             f"No meaningful synthesis generated for Q&A pair. Synthesis: {synthesis_text}"
         )
-        return None
+        return {
+            "status": "no_update",
+            "effect_status": "not_needed",
+            "synthesis": None,
+            "notes_updated": False,
+            "source_assertion_id": source_assertion_id,
+        }
 
 
 def export_concepts(
@@ -4408,7 +4981,9 @@ def import_concepts(
                 continue
 
             # Build an existence filter based on name+concept_id if available
-            exist_filter: Dict[str, Any] = {"$or": [{"name": name}, {"names.name": name}]}
+            exist_filter: Dict[str, Any] = {
+                "$or": [{"name": name}, {"names.name": name}]
+            }
             if type_concept_id:
                 exist_filter["concept_id"] = type_concept_id
 
@@ -4657,6 +5232,10 @@ def generate_initial_question(
             "Combined concept notes with initial_notes for concept_id: %s", concept_id
         )
 
+    elicitation_plan = _get_concept_elicitation_plan(
+        str(concept.get("concept_id") or concept_id)
+    )
+
     # ------------------------------------------------------------------ 2. prompt
     try:
         db_for_templates = get_db()
@@ -4668,6 +5247,7 @@ def generate_initial_question(
             concept=enhanced_concept,  # Use enhanced concept with combined notes
             db=db_for_templates,  # for template lookup / persistence
             is_initial=True,
+            elicitation_plan=elicitation_plan,
         )
     except Exception as e:
         logger.error("Failed to build prompt: %s", e, exc_info=True)
@@ -4695,12 +5275,24 @@ def generate_initial_question(
 
     # ------------------------------------------------------------------ 4. fallback & return
     from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+
     display_name = get_concept_display_name_with_names_fallback(concept)
     if not display_name:
         display_name = concept.get("name", "this concept")
 
     if not initial_question:
         initial_question = _build_minimal_imposition_fallback_question(display_name)
+
+    if interaction_session is not None:
+        _record_initial_interaction_question(
+            interaction_session=interaction_session,
+            question_or_statement=initial_question,
+            elicitation_predicate=(
+                elicitation_plan[0]
+                if initial_question.endswith("?") and elicitation_plan
+                else None
+            ),
+        )
 
     return {
         "question": initial_question,

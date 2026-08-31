@@ -27,9 +27,9 @@
   <button id="discussConceptButton" class="concept-discuss-button"
     title="Discuss this concept with Von">Discuss</button>
   <button id="startInteractionButton"
-    title="Answer guided questions to improve this concept; your answers may update its notes">Improve concept by Q&amp;A</button>
+    title="Answer guided questions to improve this concept; supplied knowledge is preserved with provenance and may update its notes">Improve concept by Q&amp;A</button>
   <p id="conceptInteractionDisclosure" class="concept-interaction-disclosure">
-    Guided Q&amp;A may update this concept's notes.
+    Guided Q&amp;A preserves supplied knowledge with provenance and tries to update this concept's notes.
   </p>
   <!-- Add Save Notes Button (initially hidden/disabled) -->
   <button id="saveNotesButton" class="concept-save-button" title="Save changes to concept notes">Save</button>
@@ -53,7 +53,7 @@
   <!-- Move status message right after the question -->
   <p id="conceptStep2Status" class="concept-step-status"></p>
 
-  <label for="conceptAnswer">Your Answer:</label><br>
+  <label for="conceptAnswer">Your response or question:</label><br>
   <div class="concept-answer-container">
     <input type="text" id="conceptAnswer" name="conceptAnswer" class="concept-answer-input"
       title="Enter your answer to the follow-up question">
@@ -71,7 +71,7 @@
       <strong>Question:</strong> <span id="lastQuestion" class="concept-last-question"></span>
     </div>
     <div class="concept-qa-item">
-      <strong>Your Answer:</strong> <span id="lastAnswer" class="concept-last-answer"></span>
+      <strong>Your response:</strong> <span id="lastAnswer" class="concept-last-answer"></span>
     </div>
     <div>
       <strong>Synthesis:</strong> <span id="lastSynthesis" class="concept-last-synthesis"></span>

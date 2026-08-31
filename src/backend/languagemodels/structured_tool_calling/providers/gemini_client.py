@@ -487,7 +487,10 @@ class GeminiClient(LLMClient):
             else None
         )
         provider_errors = _provider_error_evidence(_value(interaction, "errors"))
-        if (status is not None and status != "completed") or provider_errors:
+        actionable_statuses = {"completed", "requires_action"}
+        if (
+            status is not None and status not in actionable_statuses
+        ) or provider_errors:
             raise StructuredToolTransportError(
                 "Gemini Interactions returned an unsuccessful provider status.",
                 decision={
@@ -511,6 +514,16 @@ class GeminiClient(LLMClient):
             available_tools,
             surface=GEMINI_INTERACTIONS_SURFACE,
         )
+        if status == "requires_action" and not tool_calls:
+            raise StructuredToolProtocolError(
+                "Gemini Interactions required action without a correlated function call.",
+                decision={
+                    "provider": "gemini",
+                    "effective_api_surface": GEMINI_INTERACTIONS_SURFACE,
+                    "provider_status": status,
+                    "failure_kind": "missing_provider_call_correlation",
+                },
+            )
         actual_model = _value(interaction, "model")
         return self._response(
             text=text or "",

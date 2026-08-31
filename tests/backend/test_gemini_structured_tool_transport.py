@@ -148,7 +148,7 @@ def test_interactions_replays_exact_steps_and_correlated_function_result() -> No
     first = _Resource(
         id="interaction-1",
         model="gemini-3.7-flash-20260815",
-        status="completed",
+        status="requires_action",
         output_text="",
         steps=[thought, function_call],
         usage=_Resource(
@@ -259,6 +259,32 @@ def test_interactions_replays_exact_steps_and_correlated_function_result() -> No
     assert completed.text_response == "Grounded answer."
     assert completed.raw_response is not None
     assert "sdk_http_response" not in completed.raw_response
+
+
+def test_interactions_requires_action_without_function_call_is_protocol_failure() -> None:
+    interaction = _Resource(
+        id="interaction-missing-action",
+        model="gemini-3.7-flash",
+        status="requires_action",
+        output_text="",
+        steps=[],
+        usage=None,
+        errors=None,
+    )
+    client = _client(_Interactions([interaction]))
+
+    with pytest.raises(
+        StructuredToolProtocolError,
+        match="required action without a correlated function call",
+    ) as exc_info:
+        asyncio.run(client.generate_with_tools("Find evidence.", [_tool()]))
+
+    assert exc_info.value.decision == {
+        "provider": "gemini",
+        "effective_api_surface": "interactions",
+        "provider_status": "requires_action",
+        "failure_kind": "missing_provider_call_correlation",
+    }
 
 
 def test_interactions_missing_call_id_is_typed_protocol_failure() -> None:

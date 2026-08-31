@@ -54,6 +54,8 @@ describe("Concept interaction session recovery", () => {
 
       <p id="followUpQuestion_s1"></p>
       <textarea id="conceptNotes_s1"></textarea>
+      <div id="updatedNotesDisplay_s1"><textarea id="updatedNotesContent_s1"></textarea></div>
+      <span id="updatedNotesTitle_s1"></span>
       <input id="conceptAnswer_s1" />
 
       <button id="startInteractionButton_s1"></button>
@@ -64,6 +66,10 @@ describe("Concept interaction session recovery", () => {
       <button id="resetConceptTabButton_s1"></button>
 
       <p id="finalResult_s1"></p>
+      <div id="lastQADisplay_s1"></div>
+      <span id="lastQuestion_s1"></span>
+      <span id="lastAnswer_s1"></span>
+      <span id="lastSynthesis_s1"></span>
       <ul id="conceptListUl_s1"></ul>
     `;
 
@@ -139,6 +145,102 @@ describe("Concept interaction session recovery", () => {
         expect(JSON.parse(questionCall[1].body)).toMatchObject({
             interaction_id: "interaction-1",
         });
+    });
+
+    it("preserves unsaved notes and uses them to drive the first question", async () => {
+        document.getElementById("conceptNotes_s1").value = "I'm a member of Primary Labs.";
+        global.fetch = jest.fn(async (url) => {
+            const u = String(url);
+            if (u.includes("/start_interaction")) {
+                return okJson({
+                    interaction_id: "interaction-notes-1",
+                    initial_notes_representation: {
+                        status: "stored",
+                        assertion_id: "ska-initial-notes",
+                    },
+                });
+            }
+            if (u.includes("/generate_initial_question")) {
+                return okJson({ question: "What role do you have in Primary Labs?" });
+            }
+            throw new Error(`Unexpected fetch URL in test: ${u}`);
+        });
+
+        await handleStartInteraction();
+
+        const startCall = global.fetch.mock.calls.find(([url]) =>
+            String(url).includes("/start_interaction")
+        );
+        const questionCall = global.fetch.mock.calls.find(([url]) =>
+            String(url).includes("/generate_initial_question")
+        );
+        expect(JSON.parse(startCall[1].body)).toMatchObject({
+            initial_notes: "I'm a member of Primary Labs.",
+        });
+        expect(JSON.parse(questionCall[1].body)).toMatchObject({
+            interaction_id: "interaction-notes-1",
+            initial_notes: "I'm a member of Primary Labs.",
+        });
+        expect(document.getElementById("updatedNotesContent_s1").value).toBe(
+            "I'm a member of Primary Labs."
+        );
+        expect(document.getElementById("followUpQuestion_s1").textContent).toBe(
+            "What role do you have in Primary Labs?"
+        );
+        expect(document.getElementById("conceptStep2Status_s1").textContent).toContain(
+            "represented with provenance"
+        );
+    });
+
+    it("submits notes-only input for representation and keeps it visible", async () => {
+        global.fetch = jest.fn(async (url) => {
+            const u = String(url);
+            if (u.includes("/start_interaction")) {
+                return okJson({ interaction_id: "interaction-notes-only" });
+            }
+            if (u.includes("/generate_initial_question")) {
+                return okJson({ question: "What does Primary Labs do?" });
+            }
+            if (u.includes("/submit_answer")) {
+                return okJson({
+                    status: "success",
+                    next_step_type: "llm_question",
+                    next_step_content: "What role do you have in Primary Labs?",
+                    synthesis: null,
+                    synthesis_status: "not_attempted",
+                    representation: {
+                        exact_answer: { status: "not_provided" },
+                        notes_input: { status: "stored", assertion_id: "ska-notes" },
+                        concept_notes: { status: "not_attempted" },
+                    },
+                    concept: { concept_id: "#V#test_concept", notes: "" },
+                });
+            }
+            throw new Error(`Unexpected fetch URL in test: ${u}`);
+        });
+
+        await handleStartInteraction();
+        document.getElementById("updatedNotesContent_s1").value =
+            "I'm a member of Primary Labs.";
+        document.getElementById("submitAnswerButton_s1").click();
+        await new Promise((r) => setTimeout(r, 0));
+
+        const submitCall = global.fetch.mock.calls.find(([url]) =>
+            String(url).includes("/submit_answer")
+        );
+        expect(JSON.parse(submitCall[1].body)).toMatchObject({
+            answer: "",
+            notes_input: "I'm a member of Primary Labs.",
+        });
+        expect(document.getElementById("conceptStep2Status_s1").textContent).toContain(
+            "represented with provenance"
+        );
+        expect(document.getElementById("followUpQuestion_s1").textContent).toBe(
+            "What role do you have in Primary Labs?"
+        );
+        expect(document.getElementById("updatedNotesContent_s1").value).toBe(
+            "I'm a member of Primary Labs."
+        );
     });
 
     it("keeps ordinary discussion distinct from the guided interaction", () => {
