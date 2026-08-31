@@ -9656,18 +9656,20 @@ describe('chat session composer state', () => {
 
         const conceptRoot = document.createElement('div');
         conceptRoot.innerHTML = `
-            <span class="vontology-cartouche" data-full-concept-id="#V#slow_concept">
-                <span class="vontology-cartouche-name"></span>
-                <span class="vontology-cartouche-kind"></span>
-            </span>
+            ${Array.from({ length: 5 }, (_, index) => `
+                <span class="vontology-cartouche" data-full-concept-id="#V#slow_concept_${index}">
+                    <span class="vontology-cartouche-name"></span>
+                    <span class="vontology-cartouche-kind"></span>
+                </span>
+            `).join('')}
         `;
         document.body.appendChild(conceptRoot);
 
-        let conceptLookupSignal = null;
+        const conceptLookupSignals = [];
         global.fetch = jest.fn((url, options = {}) => {
             const requestUrl = String(url);
             if (requestUrl.startsWith('/vontology/api/vontology/node_content')) {
-                conceptLookupSignal = options.signal;
+                conceptLookupSignals.push(options.signal);
                 return new Promise((_, reject) => {
                     options.signal.addEventListener('abort', () => {
                         const error = new Error('aborted');
@@ -9706,14 +9708,18 @@ describe('chat session composer state', () => {
         });
 
         __testOnly_hydrateChatConceptCartouches(conceptRoot);
-        expect(conceptLookupSignal).toBeInstanceOf(AbortSignal);
-        expect(conceptLookupSignal.aborted).toBe(false);
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(conceptLookupSignals).toHaveLength(2);
+        expect(conceptLookupSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
+        expect(conceptLookupSignals.every(signal => !signal.aborted)).toBe(true);
 
         await expect(switchToChatSession('session-2')).resolves.toEqual(
             expect.objectContaining({ ok: true })
         );
 
-        expect(conceptLookupSignal.aborted).toBe(true);
+        expect(conceptLookupSignals).toHaveLength(2);
+        expect(conceptLookupSignals.every(signal => signal.aborted)).toBe(true);
         expect(document.getElementById('scrollableField').textContent).not.toContain('Switching chat');
         __testOnly_resetChatConceptMetaCaches();
     });
@@ -9752,15 +9758,23 @@ describe('chat session composer state', () => {
                         ok: true,
                         status: 200,
                         json: async () => ({
-                            history: [],
-                            segments_returned: 0,
-                            total_segments: 0,
-                            total_messages: 0
+                            history: [{
+                                role: 'user',
+                                content: 'Cached prior transcript',
+                                timestamp: '2026-08-30T20:00:00Z'
+                            }],
+                            segments_returned: 1,
+                            total_segments: 1,
+                            total_messages: 1
                         })
                     });
                 }
                 return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
             });
+
+            await expect(__testOnly_loadChatHistory({ segments: 1 })).resolves.toBe(true);
+            expect(document.getElementById('scrollableField').textContent)
+                .toContain('Cached prior transcript');
 
             const switching = switchToChatSession('session-2', { requestTimeoutMs: 25 });
             await Promise.resolve();
@@ -9776,6 +9790,8 @@ describe('chat session composer state', () => {
             expect(setSessionSignal.aborted).toBe(true);
             expect(__testOnly_buildConversationSituationExportPayload().session_id).toBe('session-1');
             expect(document.getElementById('scrollableField').textContent).not.toContain('Switching chat');
+            expect(document.getElementById('scrollableField').textContent)
+                .toContain('Cached prior transcript');
         } finally {
             jest.clearAllTimers();
             jest.useRealTimers();
