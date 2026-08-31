@@ -30,7 +30,7 @@ import os
 import uuid  # Added for GUID generation
 from datetime import datetime, timedelta, timezone  # Ensure timezone is imported
 import requests  # Added for requests.exceptions.ConnectionError
-from typing import Dict, Any, Optional, List, Tuple, Iterable  # Added Tuple
+from typing import Dict, Any, Optional, List, Tuple, Iterable, Mapping  # Added Tuple
 from pymongo.errors import PyMongoError  # Added for DB operations
 
 try:
@@ -2632,6 +2632,120 @@ def get_user_concept_tracking_collection_service() -> Optional[Collection]:
 # --- Interaction Session Management ---
 
 
+_INTERACTION_LLM_PROVIDERS = {"openai", "openrouter", "ollama", "gemini"}
+
+
+def _canonical_organisation_concept_id(value: Any) -> Optional[str]:
+    """Return the canonical concept-ID form used by trusted org context."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+
+def _organisation_scope_values(value: Any) -> list[str]:
+    """Return canonical and legacy encodings for a single organisation scope."""
+
+    canonical = _canonical_organisation_concept_id(value)
+    if not canonical:
+        return []
+    legacy = canonical.removeprefix("#V#")
+    return [canonical] if legacy == canonical else [canonical, legacy]
+
+
+def _normalise_interaction_llm_selection(
+    *,
+    provider: Any = None,
+    model: Any = None,
+    model_parameters: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Normalise an explicit browser-local model choice for session persistence."""
+
+    provider_name = provider.strip().lower() if isinstance(provider, str) else ""
+    model_name = model.strip() if isinstance(model, str) else ""
+    if not provider_name and not model_name:
+        return None
+    if provider_name not in _INTERACTION_LLM_PROVIDERS or not model_name:
+        raise InvalidConceptDataError(
+            "model_provider and model must identify a supported model together"
+        )
+
+    from .model_parameter_service import normalise_model_parameters_for_storage
+
+    normalised_parameters = normalise_model_parameters_for_storage(
+        model_parameters,
+        provider=provider_name,
+        model=model_name,
+        include_registry=True,
+    )
+    selection: Dict[str, Any] = {
+        "provider": provider_name,
+        "model": model_name,
+        "source": "browser_preference",
+    }
+    if normalised_parameters:
+        selection["model_parameters"] = normalised_parameters
+    return selection
+
+
+def _resolve_interaction_llm_runtime(
+    interaction_session: Optional[Mapping[str, Any]] = None,
+) -> tuple[Any, Optional[str], Dict[str, Any]]:
+    """Resolve one coherent actor-scoped client, model, and parameter bundle."""
+
+    from ..languagemodels.llm_interface import (
+        get_active_model_name,
+        get_active_model_parameters,
+        get_llm_client,
+    )
+    from .settings_service import resolve_llm_setting
+
+    session_doc = interaction_session or {}
+    user_concept_id = session_doc.get("user_id")
+    org_concept_id = _canonical_organisation_concept_id(
+        session_doc.get("organisation_concept_id")
+    )
+    selection = session_doc.get("llm_selection")
+    if isinstance(selection, Mapping):
+        provider = str(selection.get("provider") or "").strip().lower()
+        model = str(selection.get("model") or "").strip()
+        if provider in _INTERACTION_LLM_PROVIDERS and model:
+            params = selection.get("model_parameters")
+            client = get_llm_client(
+                client_type=provider,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+            return client, model, dict(params) if isinstance(params, Mapping) else {}
+
+    active_setting = resolve_llm_setting(
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    provider = None
+    if isinstance(active_setting, Mapping):
+        candidate_provider = str(active_setting.get("provider") or "").strip().lower()
+        if candidate_provider in _INTERACTION_LLM_PROVIDERS:
+            provider = candidate_provider
+    model = get_active_model_name(
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    params = get_active_model_parameters(
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    client = get_llm_client(
+        client_type=provider,
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    return client, model, dict(params or {})
+
+
 def get_interaction_sessions_collection_service() -> Optional[Collection]:
     """Helper to get the 'interaction_sessions' collection."""
     try:
@@ -2647,7 +2761,13 @@ def get_interaction_sessions_collection_service() -> Optional[Collection]:
 
 
 def start_interaction_session(
-    concept_id: str, user_id: Optional[str], initial_notes: Optional[str] = None
+    concept_id: str,
+    user_id: Optional[str],
+    initial_notes: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    model_provider: Optional[str] = None,
+    model: Optional[str] = None,
+    model_parameters: Any = None,
 ) -> Dict[str, Any]:
     """Starts a new interaction session with an concept.
 
@@ -2746,47 +2866,31 @@ def start_interaction_session(
 
     # Derive composite namespace for the session (user@org isolation for RAG/search)
     # Phase 1: Support basic user@org namespace with stubbed roles
-    from ..services.namespace_service import derive_namespace
+    from ..services.namespace_service import (
+        concept_id_to_namespace_slug,
+        derive_namespace_for_actor,
+    )
     from ..security.role_resolver import get_user_role
 
-    # Get org context from session (if available)
-    org_id = None
+    # Prefer the trusted request-scoped organisation supplied by the route.
+    org_id = _canonical_organisation_concept_id(organisation_concept_id)
     role_in_org = None
-    try:
-        from flask import session as flask_session
-
-        if flask_session:
-            org_id = flask_session.get("organisation_concept_id")
-            role_in_org = flask_session.get("role_in_org")
-    except Exception:
-        pass
-
-    # Derive namespace using user and org context
-    try:
-        # Clean user_id for namespace
-        user_slug = user_id.strip().lower().replace(" ", "_")
-
-        # If org_id available, derive composite namespace; otherwise user-only
-        if org_id:
-            session_namespace = derive_namespace(user_slug, org_id)
-            # Get role from resolver if not in session
-            if not role_in_org:
-                try:
-                    role_in_org = get_user_role(user_slug, org_id)
-                except Exception:
-                    role_in_org = "member"  # Default fallback
-        else:
-            session_namespace = derive_namespace(user_slug)
-            # No org context, no role
-    except Exception as e:
-        logger.warning(
-            f"Failed to derive composite namespace: {e}, falling back to default"
+    session_namespace = derive_namespace_for_actor(user_id, org_id)
+    if not session_namespace:
+        raise ConceptServiceError(
+            "Could not derive the interaction namespace from the authenticated actor scope"
         )
-        session_namespace = os.environ.get(
-            "VON_DEFAULT_NAMESPACE", "#V#default_namespace"
-        )
-        org_id = None
-        role_in_org = None
+    if org_id:
+        user_slug = concept_id_to_namespace_slug(user_id)
+        org_slug = concept_id_to_namespace_slug(org_id)
+        if user_slug and org_slug:
+            role_in_org = get_user_role(user_slug, org_slug)
+
+    llm_selection = _normalise_interaction_llm_selection(
+        provider=model_provider,
+        model=model,
+        model_parameters=model_parameters,
+    )
 
     session_doc = {
         "concept_id": ObjectId(actual_concept_id),
@@ -2800,6 +2904,8 @@ def start_interaction_session(
         "indexing_status": "pending",
         "namespace": session_namespace,  # Composite: #V#user@org or #V#user
     }
+    if llm_selection:
+        session_doc["llm_selection"] = llm_selection
 
     if initial_notes:
         session_doc["history"].append(
@@ -2834,7 +2940,9 @@ def start_interaction_session(
 
 
 def get_active_interactions_for_concept(
-    concept_id: str, user_id: Optional[str]
+    concept_id: str,
+    user_id: Optional[str],
+    organisation_concept_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Retrieves active interaction sessions for a specific concept and user.
 
@@ -2867,16 +2975,10 @@ def get_active_interactions_for_concept(
             "user_id": user_id,
         }
 
-        # If an organisation is selected in the current request context, scope
-        # active interactions to that organisation.
-        try:
-            from flask import session as flask_session
-
-            org_id = flask_session.get("organisation_concept_id")
-            if org_id:
-                query["organisation_concept_id"] = org_id
-        except Exception:
-            pass
+        org_scope_values = _organisation_scope_values(organisation_concept_id)
+        query["organisation_concept_id"] = (
+            {"$in": org_scope_values} if org_scope_values else {"$in": [None, ""]}
+        )
 
         active_sessions = list(
             sessions_coll.find(query).sort("last_updated_time", -1)
@@ -2906,6 +3008,7 @@ def get_active_interactions_for_concept(
 def resume_interaction_session(
     interaction_id: str,
     user_id: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resumes an existing interaction session by returning its current state.
 
@@ -2922,7 +3025,11 @@ def resume_interaction_session(
     logger.info(f"Resuming interaction session: {interaction_id}")
 
     try:
-        session = get_interaction_session_by_id(interaction_id, user_id=user_id)
+        session = get_interaction_session_by_id(
+            interaction_id,
+            user_id=user_id,
+            organisation_concept_id=organisation_concept_id,
+        )
         if not session:
             raise ConceptServiceError(f"Interaction session {interaction_id} not found")
 
@@ -3338,15 +3445,25 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
 
     # IMPORTANT: Do synthesis FIRST before generating the next question
     # This ensures the next question is based on updated notes that include the current synthesis
+    try:
+        llm_client, selected_model, llm_params = _resolve_interaction_llm_runtime(
+            session
+        )
+        safe_model = selected_model or "default"
+    except Exception as e:
+        logger.error(
+            "Could not resolve the interaction model for session %s: %s",
+            interaction_id,
+            e,
+            exc_info=True,
+        )
+        return {
+            "error": "Could not resolve the selected interaction model",
+            "status": "error_llm_selection",
+        }
+
     synthesis_result = None
     try:
-        from ..languagemodels.llm_interface import get_llm_client, get_active_model_name
-
-        llm_client = get_llm_client()
-        selected_model = get_active_model_name()
-
-        # Ensure model is a string; provide a safe default if None
-        safe_model = selected_model or "default"
         synthesis_result = synthesize_and_update_concept_notes(
             concept_id=concept_id_str,
             concept=concept,
@@ -3355,6 +3472,7 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
             concept_type_name=concept_type_name_for_prompt,
             ollama_client=llm_client,  # Pass the unified LLM client
             model=safe_model,
+            llm_params=llm_params,
             session=session,  # Pass session to access initial notes
         )
 
@@ -3434,16 +3552,10 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
 
     llm_response_text = None
     try:
-        # Use unified LLM interface instead of hardcoded Ollama
-        from ..languagemodels.llm_interface import get_llm_client, get_active_model_name
-
-        # Get the configured LLM client and model
-        llm_client = get_llm_client()
-        selected_model = get_active_model_name()
-
-        # Use the correct generate method with prompt parameter
         raw_llm_response = llm_client.generate(
-            prompt=final_prompt_for_llm, model=selected_model
+            prompt=final_prompt_for_llm,
+            model=safe_model,
+            llm_params=llm_params or None,
         )
         # The generate method returns a string directly
         if isinstance(raw_llm_response, str):
@@ -3827,16 +3939,10 @@ def get_interaction_session_by_id(
     if user_id:
         query["user_id"] = user_id
 
-    if organisation_concept_id is None:
-        try:
-            from flask import session as flask_session
-
-            organisation_concept_id = flask_session.get("organisation_concept_id")
-        except Exception:
-            organisation_concept_id = None
-
-    if organisation_concept_id:
-        query["organisation_concept_id"] = organisation_concept_id
+    org_scope_values = _organisation_scope_values(organisation_concept_id)
+    query["organisation_concept_id"] = (
+        {"$in": org_scope_values} if org_scope_values else {"$in": [None, ""]}
+    )
 
     try:
         session = sessions_coll.find_one(query)
@@ -3863,6 +3969,7 @@ def synthesize_and_update_concept_notes(
     concept_type_name: str,
     ollama_client,  # Generic LLM client (keeping name for compatibility)
     model: str,
+    llm_params: Optional[Dict[str, Any]] = None,
     session: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
@@ -3936,7 +4043,11 @@ def synthesize_and_update_concept_notes(
     )
 
     # Get synthesis from LLM
-    synthesis_response = ollama_client.generate(prompt=synthesis_prompt, model=model)
+    synthesis_response = ollama_client.generate(
+        prompt=synthesis_prompt,
+        model=model,
+        llm_params=llm_params or None,
+    )
 
     if isinstance(synthesis_response, str):
         synthesis_text = synthesis_response.strip()
@@ -4493,7 +4604,9 @@ def import_concepts(
 
 
 def generate_initial_question(
-    concept_id: str, initial_notes: Optional[str] = None
+    concept_id: str,
+    initial_notes: Optional[str] = None,
+    interaction_session: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """
     Ask the LLM for the *first* question to pose about an concept.
@@ -4565,16 +4678,20 @@ def generate_initial_question(
 
     # ------------------------------------------------------------------ 3. call LLM
     try:
-        from ..languagemodels.llm_interface import get_llm_client, get_active_model_name
-
-        llm_client = get_llm_client()
-        model_name = get_active_model_name()  # Get the active model from settings
-
-        raw = llm_client.generate(prompt=final_prompt, model=model_name)
+        llm_client, model_name, llm_params = _resolve_interaction_llm_runtime(
+            interaction_session
+        )
+        raw = llm_client.generate(
+            prompt=final_prompt,
+            model=model_name or "default",
+            llm_params=llm_params or None,
+        )
         initial_question = (raw if isinstance(raw, str) else str(raw)).strip()
     except Exception as e:
         logger.error("LLM call failed: %s", e, exc_info=True)
-        initial_question = ""
+        raise ConceptServiceError(
+            "The selected model could not generate the initial concept question"
+        ) from e
 
     # ------------------------------------------------------------------ 4. fallback & return
     from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback

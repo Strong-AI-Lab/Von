@@ -220,6 +220,51 @@ def test_gemini_factory_binds_the_trusted_actor_scope(
     assert captured["model_execution_actor_scope_bound"] is True
 
 
+def test_zero_argument_factory_resolves_provider_from_authenticated_actor_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import settings_service
+
+    app = Flask(__name__)
+    app.secret_key = "eligibility-test"
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(llm_interface, "initialize_clients", lambda **_kwargs: None)
+
+    def fake_resolve_llm_setting(**kwargs: Any) -> dict[str, str]:
+        captured["setting_scope"] = kwargs
+        return {
+            "provider": "gemini",
+            "model": "gemini-3.7-flash",
+            "scope": "user",
+        }
+
+    def fake_gemini_client(**kwargs: Any) -> object:
+        captured["client_scope"] = kwargs
+        return sentinel
+
+    monkeypatch.setattr(settings_service, "resolve_llm_setting", fake_resolve_llm_setting)
+    monkeypatch.setattr(llm_interface, "GeminiClient", fake_gemini_client)
+
+    with app.test_request_context():
+        session["user_concept_id"] = "#V#current_user"
+        session["organisation_concept_id"] = "#V#current_org"
+        result = llm_interface.get_llm_client()
+
+    assert result is sentinel
+    assert captured["setting_scope"] == {
+        "user_concept_id": "#V#current_user",
+        "org_concept_id": "#V#current_org",
+    }
+    assert captured["client_scope"]["model_execution_user_concept_id"] == (
+        "#V#current_user"
+    )
+    assert captured["client_scope"]["model_execution_org_concept_id"] == (
+        "#V#current_org"
+    )
+
+
 def test_actorless_factory_bound_gemini_embedding_is_denied_before_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
