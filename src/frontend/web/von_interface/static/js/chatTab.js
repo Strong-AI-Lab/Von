@@ -21997,6 +21997,9 @@ const chatConceptMetaCache = new Map();
 const chatConceptMetaPending = new Map();
 let chatConceptMetaHydrationGeneration = 0;
 const chatConceptMetaFetchAbortControllers = new Set();
+const CHAT_CONCEPT_META_MAX_CONCURRENT_REQUESTS = 2;
+let chatConceptMetaActiveRequestCount = 0;
+const chatConceptMetaRequestQueue = [];
 
 const CHAT_CONCEPT_META_MAX_RETRIES = 3;
 const chatConceptMetaRetryCounts = new Map();
@@ -22015,24 +22018,70 @@ function isChatConceptMetaHydrationCurrent(generation) {
     return generation === chatConceptMetaHydrationGeneration;
 }
 
-function fetchOptionalChatConceptResource(url, options = {}, generation = chatConceptMetaHydrationGeneration) {
+function createChatConceptHydrationAbortError() {
+    const error = new Error('Chat concept hydration superseded.');
+    error.name = 'AbortError';
+    return error;
+}
+
+function drainChatConceptMetaRequestQueue() {
+    while (
+        chatConceptMetaActiveRequestCount < CHAT_CONCEPT_META_MAX_CONCURRENT_REQUESTS
+        && chatConceptMetaRequestQueue.length > 0
+    ) {
+        const queued = chatConceptMetaRequestQueue.shift();
+        if (!queued) {
+            continue;
+        }
+        if (!isChatConceptMetaHydrationCurrent(queued.generation)) {
+            queued.reject(createChatConceptHydrationAbortError());
+            continue;
+        }
+        chatConceptMetaActiveRequestCount += 1;
+        queued.resolve();
+    }
+}
+
+function acquireChatConceptMetaRequestSlot(generation) {
     if (!isChatConceptMetaHydrationCurrent(generation)) {
-        const error = new Error('Chat concept hydration superseded.');
-        error.name = 'AbortError';
-        return Promise.reject(error);
+        return Promise.reject(createChatConceptHydrationAbortError());
+    }
+    if (chatConceptMetaActiveRequestCount < CHAT_CONCEPT_META_MAX_CONCURRENT_REQUESTS) {
+        chatConceptMetaActiveRequestCount += 1;
+        return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+        chatConceptMetaRequestQueue.push({ generation, resolve, reject });
+    });
+}
+
+function releaseChatConceptMetaRequestSlot() {
+    chatConceptMetaActiveRequestCount = Math.max(0, chatConceptMetaActiveRequestCount - 1);
+    drainChatConceptMetaRequestQueue();
+}
+
+async function fetchOptionalChatConceptResource(
+    url,
+    options = {},
+    generation = chatConceptMetaHydrationGeneration
+) {
+    await acquireChatConceptMetaRequestSlot(generation);
+    if (!isChatConceptMetaHydrationCurrent(generation)) {
+        releaseChatConceptMetaRequestSlot();
+        throw createChatConceptHydrationAbortError();
     }
 
     const abortController = new AbortController();
     chatConceptMetaFetchAbortControllers.add(abortController);
-    const request = fetch(url, {
-        ...options,
-        signal: abortController.signal
-    });
-    const releaseController = () => {
+    try {
+        return await fetch(url, {
+            ...options,
+            signal: abortController.signal
+        });
+    } finally {
         chatConceptMetaFetchAbortControllers.delete(abortController);
-    };
-    request.then(releaseController, releaseController);
-    return request;
+        releaseChatConceptMetaRequestSlot();
+    }
 }
 
 function cancelChatConceptMetaHydration() {
@@ -22045,6 +22094,10 @@ function cancelChatConceptMetaHydration() {
         }
     });
     chatConceptMetaFetchAbortControllers.clear();
+    const queuedRequests = chatConceptMetaRequestQueue.splice(0);
+    queuedRequests.forEach((queued) => {
+        queued.reject(createChatConceptHydrationAbortError());
+    });
     chatConceptMetaPending.clear();
     for (const timerId of chatConceptMetaRetryTimers.values()) {
         try {
@@ -27867,6 +27920,44 @@ async function switchToChatSession(sessionId, options = {}) {
         return { ok: false, error: 'Conversation panel unavailable.' };
     }
 
+    const restorePreviousSession = (failureMessage) => {
+        setActiveChatSession(previousSessionId, previousSessionName);
+        if (sessionTabsCache.length > 0) {
+            renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
+        }
+
+        chatSessionMetadataOpenKey = null;
+        if (previousSessionId) {
+            void loadChatSessionLinks(previousSessionId, { force: false });
+        } else {
+            _clearChatSessionMetadata();
+        }
+
+        setChatSessionTabLoading(sid, false);
+        const cached = previousSessionId
+            ? getSessionHistoryCache(previousSessionId)
+            : null;
+        const restoredFromCache = cached
+            ? rehydrateFromCache(scrollableField, cached)
+            : false;
+        if (restoredFromCache) {
+            displayedHistorySessionId = previousSessionId;
+            clearHistoryLoadState({ sessionId: previousSessionId });
+            return true;
+        }
+
+        scrollableField.innerHTML = (
+            `<div class="chat-session-loading">${escapeHtml(failureMessage)}</div>`
+        );
+        void loadChatHistory({
+            segments: 1,
+            scrollToBottom: true,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        });
+        return false;
+    };
+
     scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
     transcriptTurns.length = 0;
     clearLlmDebugDataEntries();
@@ -27936,26 +28027,7 @@ async function switchToChatSession(sessionId, options = {}) {
 
         if (!response.ok) {
             const msg = data?.error ? String(data.error) : 'Unable to switch session.';
-            setActiveChatSession(previousSessionId, previousSessionName);
-            if (sessionTabsCache.length > 0) {
-                renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
-            }
-
-            chatSessionMetadataOpenKey = null;
-            if (previousSessionId) {
-                void loadChatSessionLinks(previousSessionId, { force: false });
-            } else {
-                _clearChatSessionMetadata();
-            }
-
-            setChatSessionTabLoading(sid, false);
-            scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(msg)}</div>`;
-            void loadChatHistory({
-                segments: 1,
-                scrollToBottom: true,
-                showResetNotice: false,
-                forceScrollToBottom: true
-            });
+            restorePreviousSession(msg);
             return { ok: false, error: msg };
         }
 
@@ -28066,29 +28138,10 @@ async function switchToChatSession(sessionId, options = {}) {
         } else {
             console.error('Error switching chat session:', err);
         }
-        setActiveChatSession(previousSessionId, previousSessionName);
-        if (sessionTabsCache.length > 0) {
-            renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
-        }
-
-        chatSessionMetadataOpenKey = null;
-        if (previousSessionId) {
-            void loadChatSessionLinks(previousSessionId, { force: false });
-        } else {
-            _clearChatSessionMetadata();
-        }
-
-        setChatSessionTabLoading(sid, false);
         const failureMessage = timedOut
             ? 'Conversation switch timed out. Restoring the previous conversation…'
             : 'Unable to switch session.';
-        scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(failureMessage)}</div>`;
-        void loadChatHistory({
-            segments: 1,
-            scrollToBottom: true,
-            showResetNotice: false,
-            forceScrollToBottom: true
-        });
+        restorePreviousSession(failureMessage);
         console.log('[chatTab] switchToChatSession failed', {
             session_id: sid,
             reason: timedOut ? 'timeout' : 'error',
