@@ -960,6 +960,9 @@ TEXT_RELATIONS_COLLECTION_NAME = (
 SCOPED_KNOWLEDGE_ASSERTIONS_COLLECTION_NAME = "scoped_knowledge_assertions"
 ONTOLOGY_AUTHORITY_DELEGATIONS_COLLECTION_NAME = "ontology_authority_delegations"
 ONTOLOGY_MUTATION_RECEIPTS_COLLECTION_NAME = "ontology_mutation_receipts"
+ORGANISATION_MEMBERSHIP_RECEIPTS_COLLECTION_NAME = (
+    "organisation_membership_mutation_receipts"
+)
 META_RELATIONS_COLLECTION_NAME = "meta_relations"  # New collection for relation elicitation meta-data (JVNAUTOSCI-371)
 RELATIONSHIP_EXTENT_INDEX_COLLECTION_NAME = "relationship_extent_index"
 
@@ -2302,6 +2305,39 @@ def _ensure_ontology_mutation_receipt_indexes(coll: Collection) -> None:
     coll.create_index([("updated_at", DESCENDING)], name="updated_at_desc")
 
 
+def _ensure_organisation_membership_receipt_indexes(coll: Collection) -> None:
+    """Keep operational membership effects actor-bound and replayable."""
+
+    coll.create_index(
+        [("receipt_id", ASCENDING)],
+        name="receipt_id_unique",
+        unique=True,
+    )
+    coll.create_index(
+        [
+            ("actor_concept_id", ASCENDING),
+            ("request_id", ASCENDING),
+        ],
+        name="actor_request_unique",
+        unique=True,
+    )
+    coll.create_index(
+        [
+            ("actor_concept_id", ASCENDING),
+            ("created_at", DESCENDING),
+        ],
+        name="actor_created_at_desc",
+    )
+    coll.create_index(
+        [
+            ("organisation_concept_id", ASCENDING),
+            ("created_at", DESCENDING),
+        ],
+        name="organisation_created_at_desc",
+    )
+    coll.create_index([("status", ASCENDING)], name="status_1")
+
+
 def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
     existing = [idx for idx in coll.list_indexes() if isinstance(idx, Mapping)]
     existing_names = {str(idx.get("name") or "") for idx in existing if idx.get("name")}
@@ -2708,6 +2744,19 @@ def get_ontology_mutation_receipts_collection() -> Collection | None:
             db,
             ONTOLOGY_MUTATION_RECEIPTS_COLLECTION_NAME,
             _ensure_ontology_mutation_receipt_indexes,
+        )
+    return None
+
+
+def get_organisation_membership_receipts_collection() -> Collection | None:
+    """Return durable receipts for governed organisation membership effects."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            ORGANISATION_MEMBERSHIP_RECEIPTS_COLLECTION_NAME,
+            _ensure_organisation_membership_receipt_indexes,
         )
     return None
 

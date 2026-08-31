@@ -703,6 +703,91 @@ def _change_concept_publication_scope(**kwargs):
     )
 
 
+def _list_identity_organisation_options(**kwargs):
+    from ...services.organisation_membership_governance_service import (
+        list_identity_organisation_options,
+    )
+
+    try:
+        return list_identity_organisation_options(
+            acting_actor_concept_id=kwargs.get("acting_actor_concept_id")
+        )
+    except RuntimeError:
+        return make_error_response(
+            "organisation_membership_store_unavailable",
+            "The represented organisation membership store is unavailable.",
+        )
+
+
+def _manage_organisation_membership(**kwargs):
+    from ...services.organisation_membership_governance_service import (
+        manage_organisation_membership,
+    )
+    from .transport import record_internal_mcp_effect_receipt
+
+    try:
+        result = manage_organisation_membership(
+            action=kwargs.get("action"),
+            user_concept_id=kwargs.get("user_concept_id"),
+            organisation_concept_id=kwargs.get("organisation_concept_id"),
+            request_id=kwargs.get("request_id"),
+            role=kwargs.get("role"),
+            reason=kwargs.get("reason"),
+            acting_actor_concept_id=kwargs.get("acting_actor_concept_id"),
+        )
+    except RuntimeError:
+        return make_error_response(
+            "organisation_membership_governance_unavailable",
+            "Membership authority verification or durable receipts are unavailable.",
+        )
+    receipt = result.get("governance_receipt") if isinstance(result, dict) else None
+    if isinstance(receipt, Mapping) and receipt.get("receipt_id"):
+        record_internal_mcp_effect_receipt(
+            {
+                "schema_version": "internal_mcp_organisation_membership_effect.v1",
+                "success": bool(result.get("success")),
+                "effect_status": result.get("effect_status"),
+                "mutation_outcome": result.get("mutation_outcome"),
+                "changed": result.get("changed"),
+                "receipt_id": receipt.get("receipt_id"),
+                "request_id": receipt.get("request_id"),
+                "action": receipt.get("action"),
+                "user_concept_id": receipt.get("user_concept_id"),
+                "organisation_concept_id": receipt.get("organisation_concept_id"),
+                "governance_receipt_status": receipt.get("status"),
+                "canonical_read_back": result.get("canonical_read_back"),
+                "error_code": result.get("error_code"),
+                "outcome_finality": (
+                    result.get("outcome_finality")
+                    or (
+                        "terminal"
+                        if result.get("effect_status")
+                        in {"succeeded", "not_started"}
+                        else "requires_canonical_reconciliation"
+                    )
+                ),
+            }
+        )
+    return result
+
+
+def _get_organisation_membership_receipt(**kwargs):
+    from ...services.organisation_membership_governance_service import (
+        get_organisation_membership_receipt,
+    )
+
+    try:
+        return get_organisation_membership_receipt(
+            receipt_id=kwargs.get("receipt_id"),
+            acting_actor_concept_id=kwargs.get("acting_actor_concept_id"),
+        )
+    except RuntimeError:
+        return make_error_response(
+            "organisation_membership_receipt_store_unavailable",
+            "Organisation membership receipts are unavailable.",
+        )
+
+
 def _get_concept_by_concept_id(**kwargs):
     from ...security.access_control import describe_concept_access
     from ...services.concept_relation_service import build_concept_relations_payload
@@ -10260,6 +10345,112 @@ def _concept_fetch_input_schema() -> Schema:
             " uncertainty retrieval controls (include_uncertain, uncertainty_mode,"
             " uncertainty_statuses)."
         ),
+    )
+
+
+def _identity_organisation_options_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "namespace": (str, type(None)),
+            "acting_actor_concept_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "List the trusted actor's complete represented organisation selector "
+            "set; payload identity cannot select another actor."
+        ),
+    )
+
+
+def _identity_organisation_options_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "actor_concept_id": (str, type(None)),
+            "current_organisation_concept_id": (str, type(None)),
+            "personal_option_available": bool,
+            "organisations": list,
+            "total_count": int,
+            "complete": bool,
+            "classification_policy": str,
+            "error_code": str,
+            "error": str,
+        },
+        allow_unknown=True,
+        description="Exact actor-bound represented organisation options.",
+    )
+
+
+def _manage_organisation_membership_input_schema() -> Schema:
+    return Schema(
+        required={
+            "action": str,
+            "user_concept_id": str,
+            "organisation_concept_id": str,
+            "request_id": str,
+        },
+        optional={
+            "role": (str, type(None)),
+            "reason": (str, type(None)),
+            "namespace": (str, type(None)),
+            "acting_actor_concept_id": (str, type(None)),
+        },
+        enum_values={"action": ["add", "remove", "set_role"]},
+        allow_unknown=True,
+        description=(
+            "Execute one exact add, remove, or set_role membership effect. "
+            "request_id is actor-bound and idempotent."
+        ),
+    )
+
+
+def _manage_organisation_membership_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "effect_status": str,
+            "mutation_outcome": str,
+            "changed": (bool, type(None)),
+            "action": str,
+            "actor_concept_id": str,
+            "user_concept_id": str,
+            "organisation_concept_id": str,
+            "role": (str, type(None)),
+            "authority_decision": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "governance_receipt": dict,
+            "error_code": str,
+            "error": str,
+        },
+        allow_unknown=True,
+        description="Governed membership effect, receipt, and canonical read-back.",
+    )
+
+
+def _organisation_membership_receipt_input_schema() -> Schema:
+    return Schema(
+        required={"receipt_id": str},
+        optional={
+            "namespace": (str, type(None)),
+            "acting_actor_concept_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="Read one actor-owned organisation membership mutation receipt.",
+    )
+
+
+def _organisation_membership_receipt_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "governance_receipt": dict,
+            "response_projection": (dict, type(None)),
+            "error_code": str,
+            "error": str,
+        },
+        allow_unknown=True,
+        description="Actor-bound organisation membership receipt read-back.",
     )
 
 
@@ -38041,6 +38232,63 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
     concept_search_input_schema = _concept_search_input_schema()
     concept_search_output_schema = _concept_search_output_schema()
     definitions: List[MethodDefinition] = [
+        MethodDefinition(
+            name="list_identity_organisation_options",
+            handler=_list_identity_organisation_options,
+            input_schema=_identity_organisation_options_input_schema(),
+            output_schema=_identity_organisation_options_output_schema(),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_actor_concept_id": "actor_user_concept_id",
+            },
+            hard_timeout_enabled=False,
+            description=(
+                "Return the complete represented organisation membership set used "
+                "for the trusted actor's selector, including role, display name, "
+                "current selection, and whether each organisation is classified "
+                "under von_user_organisation. The classification is descriptive; "
+                "it does not filter selector membership. Use this instead of "
+                "enumerating von_user_organisation instances when answering which "
+                "organisations the user can select."
+            ),
+        ),
+        MethodDefinition(
+            name="manage_organisation_membership",
+            handler=_manage_organisation_membership,
+            input_schema=_manage_organisation_membership_input_schema(),
+            output_schema=_manage_organisation_membership_output_schema(),
+            category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_actor_concept_id": "actor_user_concept_id",
+            },
+            ordinary_turn_effect=True,
+            hard_timeout_enabled=False,
+            description=(
+                "Add or remove one represented organisation membership, or set its "
+                "operational role. The server derives the actor, requires live "
+                "MANAGE_MEMBERS permission in the exact organisation, additionally "
+                "requires MANAGE_ROLES for role assignment, protects the last owner, "
+                "and returns an actor-bound idempotency receipt plus canonical "
+                "read-back. Semantic ontology-administrator authority does not grant "
+                "membership-management authority. Generic relationship tools remain "
+                "ineligible for memberOf or hasRole."
+            ),
+        ),
+        MethodDefinition(
+            name="get_organisation_membership_receipt",
+            handler=_get_organisation_membership_receipt,
+            input_schema=_organisation_membership_receipt_input_schema(),
+            output_schema=_organisation_membership_receipt_output_schema(),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_actor_concept_id": "actor_user_concept_id",
+            },
+            hard_timeout_enabled=False,
+            description=(
+                "Read one durable organisation membership mutation receipt owned by "
+                "the trusted actor, including terminal outcome and canonical read-back."
+            ),
+        ),
         MethodDefinition(
             name="get_context",
             handler=_get_context,

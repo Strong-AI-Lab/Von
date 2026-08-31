@@ -383,6 +383,8 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "gmail_send_message",
         "message_send_direct",
         "conversation_manage",
+        "conversation_manage_batch",
+        "manage_organisation_membership",
         "task_create",
         "task_update_status",
         "task_add_comment",
