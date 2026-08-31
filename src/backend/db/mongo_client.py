@@ -2,6 +2,7 @@ import datetime  # Added for type hinting and __main__ example
 import ipaddress
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -456,6 +457,74 @@ MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS = _parse_ssh_tunnel_fallback_endpoints(
 MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET = _get_nonempty_env_value(
     "MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET"
 )
+MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS = _get_nonempty_env_value(
+    "MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS"
+)
+
+
+def _parse_mongo_dns_resolver_fallback_nameservers(
+    raw: str | None,
+) -> tuple[str, ...]:
+    """Return an ordered, literal-IP resolver list without accepting URLs."""
+
+    if not raw:
+        return ()
+    nameservers: list[str] = []
+    for index, value in enumerate(raw.split(","), start=1):
+        candidate = value.strip()
+        if not candidate:
+            continue
+        try:
+            normalised = str(ipaddress.ip_address(candidate))
+        except ValueError:
+            logger.warning(
+                "[mongo_dns_resolver_fallback] Ignoring invalid nameserver #%s; "
+                "only literal IP addresses are accepted.",
+                index,
+            )
+            continue
+        if normalised not in nameservers:
+            nameservers.append(normalised)
+    return tuple(nameservers)
+
+
+def _mongo_seed_hosts(uri: str | None) -> frozenset[str]:
+    """Extract lower-cased seed hosts without retaining URI credentials."""
+
+    if not uri:
+        return frozenset()
+    try:
+        authority = urlsplit(uri).netloc.rsplit("@", 1)[-1]
+    except (TypeError, ValueError):
+        return frozenset()
+    hosts: set[str] = set()
+    for raw_seed in authority.split(","):
+        seed = raw_seed.strip()
+        if not seed:
+            continue
+        try:
+            host = urlsplit(f"//{seed}").hostname
+        except ValueError:
+            continue
+        if host:
+            hosts.add(host.rstrip(".").lower())
+    return frozenset(hosts)
+
+
+_ORIGINAL_SOCKET_GETADDRINFO = socket.getaddrinfo
+_MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS = (
+    _parse_mongo_dns_resolver_fallback_nameservers(
+        MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS
+    )
+)
+_MONGO_DNS_RESOLVER_FALLBACK_HOSTS = _mongo_seed_hosts(MONGO_DNS_FALLBACK_URI)
+_MONGO_DNS_RESOLVER_FALLBACK_LOGGED_HOSTS: set[str] = set()
+_MONGO_DNS_RESOLVER_FALLBACK_LOG_LOCK = threading.Lock()
+_MONGO_DNS_RESOLVER_FALLBACK_CACHE: dict[
+    tuple[str, int], tuple[float, tuple[str, ...]]
+] = {}
+_MONGO_DNS_RESOLVER_FALLBACK_CACHE_LOCK = threading.Lock()
+_MONGO_DNS_RESOLVER_FALLBACK_INSTALLED = False
 
 
 @dataclass(frozen=True)
@@ -522,6 +591,142 @@ def _mongo_server_selection_timeout_ms() -> int:
 
 def _mongo_connect_timeout_ms() -> int:
     return _get_positive_int_env("MONGO_CONNECT_TIMEOUT_MS", 5000)
+
+
+def _mongo_dns_resolver_fallback_cache_seconds() -> float:
+    return _get_positive_float_env("MONGO_DNS_RESOLVER_FALLBACK_CACHE_SECONDS", 60.0)
+
+
+def _mongo_dns_resolver_fallback_prefer_direct() -> bool:
+    return get_env_bool("MONGO_DNS_RESOLVER_FALLBACK_PREFER_DIRECT", False)
+
+
+def _resolve_mongo_host_with_fallback_nameservers(host: str, family: int) -> list[str]:
+    """Resolve one configured Mongo host through explicitly selected resolvers."""
+
+    cache_key = (host, family)
+    with _MONGO_DNS_RESOLVER_FALLBACK_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _MONGO_DNS_RESOLVER_FALLBACK_CACHE.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return list(cached[1])
+
+        try:
+            import dns.exception
+            import dns.resolver
+        except ImportError:
+            return []
+
+        resolver = dns.resolver.Resolver(configure=False)
+        resolver.nameservers = list(_MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS)
+        resolver.timeout = _get_positive_float_env(
+            "MONGO_DNS_RESOLVER_FALLBACK_TIMEOUT_SECONDS", 2.0
+        )
+        resolver.lifetime = resolver.timeout
+        record_types: tuple[str, ...]
+        if family == socket.AF_INET:
+            record_types = ("A",)
+        elif family == socket.AF_INET6:
+            record_types = ("AAAA",)
+        else:
+            record_types = ("A", "AAAA")
+
+        addresses: list[str] = []
+        for record_type in record_types:
+            try:
+                answer = resolver.resolve(host, record_type, search=False)
+            except dns.exception.DNSException:
+                continue
+            for item in answer:
+                address = getattr(item, "address", None)
+                if isinstance(address, str) and address not in addresses:
+                    addresses.append(address)
+        if addresses:
+            _MONGO_DNS_RESOLVER_FALLBACK_CACHE[cache_key] = (
+                now + _mongo_dns_resolver_fallback_cache_seconds(),
+                tuple(addresses),
+            )
+        return addresses
+
+
+def _mongo_getaddrinfo_with_configured_fallback(
+    host,
+    port,
+    family=0,
+    type=0,
+    proto=0,
+    flags=0,
+):
+    """Use explicit DNS only for configured Mongo seeds after libc DNS fails.
+
+    PyMongo retains ``host`` as the TLS ``server_hostname`` after consuming
+    these address records, so certificate hostname verification is unchanged.
+    The fallback never applies to an unlisted host or before the system
+    resolver has failed.
+    """
+
+    try:
+        return _ORIGINAL_SOCKET_GETADDRINFO(host, port, family, type, proto, flags)
+    except socket.gaierror:
+        normalised_host = host.rstrip(".").lower() if isinstance(host, str) else None
+        if (
+            not normalised_host
+            or normalised_host not in _MONGO_DNS_RESOLVER_FALLBACK_HOSTS
+            or not _MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS
+        ):
+            raise
+        addresses = _resolve_mongo_host_with_fallback_nameservers(
+            normalised_host, family
+        )
+
+        resolved: list[tuple] = []
+        for address in addresses:
+            try:
+                candidates = _ORIGINAL_SOCKET_GETADDRINFO(
+                    address, port, family, type, proto, flags
+                )
+            except socket.gaierror:
+                continue
+            for candidate in candidates:
+                if candidate not in resolved:
+                    resolved.append(candidate)
+        if not resolved:
+            raise
+
+        with _MONGO_DNS_RESOLVER_FALLBACK_LOG_LOCK:
+            if normalised_host not in _MONGO_DNS_RESOLVER_FALLBACK_LOGGED_HOSTS:
+                _MONGO_DNS_RESOLVER_FALLBACK_LOGGED_HOSTS.add(normalised_host)
+                logger.warning(
+                    "[mongo_dns_resolver_fallback] Resolved configured Mongo "
+                    "seed host after system resolver failure: %s",
+                    normalised_host,
+                )
+        return resolved
+
+
+def _install_mongo_dns_resolver_fallback() -> bool:
+    """Install the opt-in, host-scoped resolver fallback once per process."""
+
+    global _MONGO_DNS_RESOLVER_FALLBACK_INSTALLED
+    if _MONGO_DNS_RESOLVER_FALLBACK_INSTALLED:
+        return True
+    if (
+        not _MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS
+        or not _MONGO_DNS_RESOLVER_FALLBACK_HOSTS
+    ):
+        return False
+    socket.getaddrinfo = _mongo_getaddrinfo_with_configured_fallback
+    _MONGO_DNS_RESOLVER_FALLBACK_INSTALLED = True
+    logger.info(
+        "[mongo_dns_resolver_fallback] Enabled for %s configured Mongo seed "
+        "host(s) using %s explicit resolver(s).",
+        len(_MONGO_DNS_RESOLVER_FALLBACK_HOSTS),
+        len(_MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS),
+    )
+    return True
+
+
+_install_mongo_dns_resolver_fallback()
 
 
 def _build_ssh_tunnel_mongo_uri(primary_uri: str, endpoint: str) -> str:
@@ -1072,12 +1277,52 @@ def _try_configured_fallback_candidate(
     return None
 
 
+def _try_initial_direct_dns_candidate() -> _MongoConnectionCandidate | None:
+    """Start on the direct route when its resolver recovery is explicit."""
+
+    if not (
+        _mongo_dns_resolver_fallback_prefer_direct()
+        and _MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS
+        and _MONGO_DNS_RESOLVER_FALLBACK_HOSTS
+    ):
+        return None
+    target = next(
+        (
+            item
+            for item in _connection_fallback_targets(prefer_dns=True)
+            if item.kind == "dns"
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    logger.warning(
+        "[mongo_fallback] Preferring the configured direct-host Atlas route "
+        "to avoid an unavailable primary SRV resolver."
+    )
+    try:
+        return _fallback_candidate(
+            target,
+            preference_reason="explicit direct-host resolver recovery",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[mongo_fallback] Initial direct-host Atlas connection failed: %s",
+            exc,
+        )
+        return None
+
+
 def _build_real_connection_candidate() -> tuple[_MongoConnectionCandidate | None, bool]:
     """Run one complete route-selection wave without publishing partial state."""
 
     preferred_candidate, preferred_failed = _try_preferred_fallback_candidate()
     if preferred_candidate is not None:
         return preferred_candidate, False
+
+    initial_direct_candidate = _try_initial_direct_dns_candidate()
+    if initial_direct_candidate is not None:
+        return initial_direct_candidate, False
 
     try:
         client = _try_connect_uri(MONGO_URI)
@@ -1489,6 +1734,21 @@ def get_mongo_fallback_policy_state() -> dict[str, object]:
                 _configured_replica_set_name()
             ),
             "dns_fallback_configured": bool(MONGO_DNS_FALLBACK_URI),
+            "dns_resolver_fallback_configured": bool(
+                _MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS
+                and _MONGO_DNS_RESOLVER_FALLBACK_HOSTS
+            ),
+            "dns_resolver_fallback_installed": (_MONGO_DNS_RESOLVER_FALLBACK_INSTALLED),
+            "dns_resolver_fallback_nameserver_count": len(
+                _MONGO_DNS_RESOLVER_FALLBACK_NAMESERVERS
+            ),
+            "dns_resolver_fallback_host_count": len(_MONGO_DNS_RESOLVER_FALLBACK_HOSTS),
+            "dns_resolver_fallback_cache_seconds": (
+                _mongo_dns_resolver_fallback_cache_seconds()
+            ),
+            "dns_resolver_fallback_prefer_direct": (
+                _mongo_dns_resolver_fallback_prefer_direct()
+            ),
             "dns_fallback_sticky": bool(
                 remaining_seconds > 0 and _preferred_fallback_kind in {None, "dns"}
             ),
