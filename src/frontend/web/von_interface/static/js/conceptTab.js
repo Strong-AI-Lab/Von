@@ -1,4 +1,13 @@
-import { createConcept, deleteJson, getJson, patchJson, postJson, putJson } from './apiService.js';
+import {
+  createConcept,
+  deleteJson,
+  ensureUniqueWindowSessionId,
+  getJson,
+  patchJson,
+  postJson,
+  putJson,
+  WINDOW_SESSION_HEADER,
+} from './apiService.js';
 import { elements, getCurrentUserConceptId, getUserClientId } from './domUtils.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import { renderMarkdownViaServer } from './markdownUtils.js';
@@ -13,6 +22,7 @@ import {
   setSelectedConceptOriginalName
 } from './state.js';
 import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
+import { buildLocalModelRequestFields } from './utils/localModelPreferences.js';
 import { annotateElementText, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { chooseBestTypeForIndividual, insertNodeIntoVontologyTree, selectVontologyNodeByIdentifier } from './vontology.js';
 
@@ -43,6 +53,15 @@ export function initializeConceptTabState() {
 
 // Global interaction state
 let currentInteractionId = null;
+
+async function buildConceptInteractionHeaders() {
+  const windowSessionId = await ensureUniqueWindowSessionId();
+  return {
+    'Content-Type': 'application/json',
+    [WINDOW_SESSION_HEADER]: windowSessionId,
+    'X-User-Concept-ID': getCurrentUserConceptId()
+  };
+}
 
 /**
  * Open the ordinary Von-conversation launcher for the currently selected
@@ -1777,24 +1796,18 @@ export async function handleStartInteraction() {
   elements.conceptStep2Status.style.color = "blue";
 
   try {
-    const userClientId = getUserClientId();
     console.log("[handleStartInteraction] Sending initial_notes:", originalNotes);
     console.log("[handleStartInteraction] originalNotes length:", originalNotes.length);
 
-    // Only send initial_notes if they are different from what's already in the database
-    // to avoid duplication in the backend's note combination logic
-    const requestBody = {};
-    // Don't send initial_notes if they're the same as the current concept notes
-    // The backend will combine them with existing notes, causing duplication
+    // Bind the browser-local model choice to this interaction. Initial notes
+    // stay out of the start call to avoid duplicating the concept's saved notes.
+    const requestBody = buildLocalModelRequestFields();
     console.log("[handleStartInteraction] Not sending initial_notes to prevent duplication");
 
     const response = await fetch(`/api/concepts/${encodeURIComponent(currentlySelectedconceptId)}/start_interaction`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-User-Concept-ID': getCurrentUserConceptId()
-      },
-      body: JSON.stringify(requestBody) // Send empty body to use only existing notes
+      headers: await buildConceptInteractionHeaders(),
+      body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
@@ -1810,11 +1823,11 @@ export async function handleStartInteraction() {
 
     const questionResponse = await fetch(`/api/concepts/${encodeURIComponent(currentlySelectedconceptId)}/generate_initial_question`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-User-Concept-ID': getCurrentUserConceptId()
-      },
-      body: JSON.stringify({ initial_notes: originalNotes }) // Pass the same notes to question generation
+      headers: await buildConceptInteractionHeaders(),
+      body: JSON.stringify({
+        interaction_id: currentInteractionId,
+        initial_notes: originalNotes
+      })
     });
 
     if (!questionResponse.ok) {
@@ -2016,13 +2029,9 @@ async function handleSubmitAnswer() {
   elements.conceptStep2Status.style.color = "blue";
 
   try {
-    const userClientId = getUserClientId();
     const response = await fetch(`/api/concepts/${encodeURIComponent(currentlySelectedconceptId)}/submit_answer`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-User-Concept-ID': getCurrentUserConceptId()
-      },
+      headers: await buildConceptInteractionHeaders(),
       body: JSON.stringify({
         interaction_id: currentInteractionId,
         answer: answer

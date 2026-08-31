@@ -54,6 +54,20 @@ from ...db.mongo_client import get_db
 concept_bp = Blueprint("concepts", __name__)  # Define blueprint
 
 
+def _get_trusted_interaction_user() -> str | None:
+    """Return authenticated interaction actor; legacy identity headers are not authority."""
+
+    from ...security.access_control import (
+        LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
+        get_effective_user_concept_id_with_source,
+    )
+
+    user_id, actor_source = get_effective_user_concept_id_with_source()
+    if actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+        return None
+    return user_id
+
+
 def _governed_mutation_response(
     result: dict[str, Any], *, success_status: int = 200
 ) -> ResponseReturnValue:
@@ -1147,21 +1161,27 @@ def start_concept_interaction_route(concept_id: str):
     """
     try:
         # Use the centralized and secure method to get the effective user concept ID
-        from ...security.access_control import get_effective_user_concept_id
+        from ...security.access_control import get_effective_organisation_concept_id
 
-        user_id = get_effective_user_concept_id()
+        user_id = _get_trusted_interaction_user()
         if not user_id:
             return (
-                jsonify(
-                    error="Missing user context: provide X-User-Client-ID header or establish session"
-                ),
-                400,
+                jsonify(error="Concept Q&A requires authenticated user context"),
+                401,
             )
 
-        initial_notes = request.json.get("initial_notes", "") if request.json else ""
+        organisation_concept_id = get_effective_organisation_concept_id()
+        data = request.get_json(silent=True) or {}
+        initial_notes = data.get("initial_notes", "")
 
         result = concept_service.start_interaction_session(
-            concept_id, user_id=user_id, initial_notes=initial_notes
+            concept_id,
+            user_id=user_id,
+            initial_notes=initial_notes,
+            organisation_concept_id=organisation_concept_id,
+            model_provider=data.get("model_provider"),
+            model=data.get("model"),
+            model_parameters=data.get("model_parameters"),
         )
         return jsonify(result), 200
     except ConceptNotFoundError as e:
@@ -1194,10 +1214,31 @@ def generate_initial_question_route(concept_id: str):
     API endpoint to generate an initial question for an concept based on its current state.
     """
     try:
-        # Get optional initial_notes from request body
-        initial_notes = request.json.get("initial_notes", "") if request.json else ""
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        user_id = _get_trusted_interaction_user()
+        if not user_id:
+            return jsonify(error="Concept Q&A requires authenticated user context"), 401
+
+        data = request.get_json(silent=True) or {}
+        interaction_id = data.get("interaction_id")
+        if not isinstance(interaction_id, str) or not interaction_id.strip():
+            return jsonify(error="interaction_id is required"), 400
+
+        organisation_concept_id = get_effective_organisation_concept_id()
+        interaction_session = concept_service.get_interaction_session_by_id(
+            interaction_id,
+            user_id=user_id,
+            organisation_concept_id=organisation_concept_id,
+        )
+        if not interaction_session:
+            return jsonify(error="Interaction session not found"), 404
+
+        initial_notes = data.get("initial_notes", "")
         question = concept_service.generate_initial_question(
-            concept_id, initial_notes=initial_notes
+            str(interaction_session["concept_id"]),
+            initial_notes=initial_notes,
+            interaction_session=interaction_session,
         )
         return jsonify({"question": question}), 200
     except ConceptNotFoundError as e:
@@ -1448,74 +1489,21 @@ def submit_concept_answer_route(concept_id: str):
         return jsonify(error="answer is required (can be an empty string)"), 400
 
     try:
-        # The concept_id from the path might be redundant if interaction_id is globally unique
-        # and contains enough context. However, it's good for namespacing/validation.
-        # The service layer's submit_concept_answer currently takes interaction_id and user_answer.
-        # It might internally fetch the session using interaction_id.
-        # We need to ensure the service layer handles the session context correctly.
-        # For now, we assume the service layer's submit_concept_answer can retrieve the session
-        # or that the session details are passed if needed.
-        # The current concept_service.submit_concept_answer expects `session` as a parameter.
-        # This route does not have the session object. This indicates a mismatch.
-        # For now, I will assume the service layer needs to be adapted or this route needs to fetch the session.
-        # Let's proceed by calling the service as it is defined in the provided concept_service.py snippet,
-        # which means this route is likely missing the logic to retrieve the session.
-        # This is a potential issue to flag.
-        #
-        # REVISITING: The concept_service.submit_concept_answer signature is:
-        # submit_concept_answer(interaction_id: str, user_answer: str, session: dict) -> dict:
-        # This route does not have `session`. This is a problem.
-        # For now, I will call it without `session` and assume the service might be updated,
-        # or this will highlight the discrepancy.
-        # A more robust solution would be to fetch the interaction session here first.
-        # However, without a `get_interaction_session_by_id` in the service, that's not possible.
+        from ...security.access_control import get_effective_organisation_concept_id
 
-        # Placeholder for fetching session if it were available:
-        # interaction_session = concept_service.get_interaction_session(interaction_id) # Fictional function
-        # if not interaction_session:
-        #    return jsonify(error="Interaction session not found"), 404
-        # result = concept_service.submit_concept_answer(interaction_id, answer, session=interaction_session)
-
-        # Given the current service signature, this call will fail if the service strictly requires `session`.
-        # This is a simplification for now, focusing on route structure.
-        # A proper implementation would require fetching the session or modifying the service.
-        # For the purpose of this exercise, I will call a hypothetical version or assume the service handles it.
-        # Let's assume the service layer's `submit_concept_answer` is updated to fetch the session itself
-        # or that the `session` parameter is optional / handled internally if not provided.
-        # The provided concept_service.py has `submit_concept_answer(interaction_id: str, user_answer: str, session: dict)`.
-        # This route cannot fulfill that contract without fetching the session.
-        #
-        # Let's assume a simplified service call for now, or that the service is more flexible.
-        # This is a point that needs clarification or refactoring in the service layer.
-        # For now, I will construct a dummy session or indicate this problem.
-        #
-        # Given the constraints, I will proceed as if the service layer's `submit_concept_answer`
-        # can function with just `interaction_id` and `user_answer`, or that the `session`
-        # parameter in the service is meant to be populated by the service itself.
-        # This is a common pattern where the route passes minimal info and the service handles the details.
-
-        # If the service strictly requires the session object, this route is incomplete.
-        # Let's assume for now the service can look up the session by interaction_id.
-        # The call below would be more like:
-        # result = concept_service.process_answer_for_interaction(interaction_id, answer, concept_id)
-        # Since `submit_concept_answer` is what's in the service, we'll call that,
-        # acknowledging the `session` parameter issue.
-
-        # Use the centralized and secure method to get the effective user concept ID
-        from ...security.access_control import get_effective_user_concept_id
-
-        user_id = get_effective_user_concept_id()
+        user_id = _get_trusted_interaction_user()
         if not user_id:
             return (
-                jsonify(
-                    error="Missing user context: provide X-User-Client-ID header or establish session"
-                ),
-                400,
+                jsonify(error="Concept Q&A requires authenticated user context"),
+                401,
             )
 
         # Fetch the interaction session by ID (scoped to effective user/org)
+        organisation_concept_id = get_effective_organisation_concept_id()
         session = concept_service.get_interaction_session_by_id(
-            interaction_id, user_id=user_id
+            interaction_id,
+            user_id=user_id,
+            organisation_concept_id=organisation_concept_id,
         )
         if not session:
             current_app.logger.warning(
@@ -1560,7 +1548,10 @@ def get_active_interactions_route(concept_id: str):
     """
     try:
         # Use the centralized and secure method to get the effective user concept ID
-        from ...security.access_control import get_effective_user_concept_id
+        from ...security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
 
         user_id = get_effective_user_concept_id()
         if not user_id:
@@ -1570,8 +1561,11 @@ def get_active_interactions_route(concept_id: str):
                 ),
                 400,
             )
+        organisation_concept_id = get_effective_organisation_concept_id()
         active_interactions = concept_service.get_active_interactions_for_concept(
-            concept_id, user_id
+            concept_id,
+            user_id,
+            organisation_concept_id=organisation_concept_id,
         )
 
         return (
@@ -1613,7 +1607,10 @@ def resume_interaction_route(concept_id: str):
         if not data or "interaction_id" not in data:
             return jsonify(error="interaction_id is required"), 400
 
-        from ...security.access_control import get_effective_user_concept_id
+        from ...security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
 
         user_id = get_effective_user_concept_id()
         if not user_id:
@@ -1625,8 +1622,11 @@ def resume_interaction_route(concept_id: str):
             )
 
         interaction_id = data["interaction_id"]
+        organisation_concept_id = get_effective_organisation_concept_id()
         resumed_session = concept_service.resume_interaction_session(
-            interaction_id, user_id=user_id
+            interaction_id,
+            user_id=user_id,
+            organisation_concept_id=organisation_concept_id,
         )
 
         return jsonify(resumed_session), 200

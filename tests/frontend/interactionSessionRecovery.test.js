@@ -12,6 +12,11 @@ import {
     setupConceptTabEventListenersWithSuffix,
 } from "../../src/frontend/web/von_interface/static/js/conceptTab.js";
 import { setCurrentlySelectedConceptId } from "../../src/frontend/web/von_interface/static/js/state.js";
+import {
+    setLocalPremiumModelUseEnabled,
+    setStoredGeminiSelectedModel,
+    setStoredPremiumModelProvider,
+} from "../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js";
 
 function okJson(data) {
     return {
@@ -31,6 +36,12 @@ function errorJson(status, data) {
 
 describe("Concept interaction session recovery", () => {
     beforeEach(() => {
+        localStorage.clear();
+        sessionStorage.clear();
+        setStoredPremiumModelProvider("gemini");
+        setStoredGeminiSelectedModel("gemini-3.7-flash");
+        setLocalPremiumModelUseEnabled(true, "gemini");
+
         document.body.innerHTML = `
       <div class="tab-content active" id="conceptTab_s1" data-concept-id="#V#test_concept" data-concept-name="Test concept"></div>
 
@@ -103,6 +114,31 @@ describe("Concept interaction session recovery", () => {
         const submitBtn = document.getElementById("submitAnswerButton_s1");
         expect(startBtn.disabled).toBe(false);
         expect(submitBtn.disabled).toBe(true);
+    });
+
+    it("binds the window scope and Gemini selection to the new session", async () => {
+        await handleStartInteraction();
+
+        const startCall = global.fetch.mock.calls.find(([url]) =>
+            String(url).includes("/start_interaction")
+        );
+        const questionCall = global.fetch.mock.calls.find(([url]) =>
+            String(url).includes("/generate_initial_question")
+        );
+
+        expect(startCall).toBeDefined();
+        expect(questionCall).toBeDefined();
+        expect(startCall[1].headers["X-Von-Window-Session"]).toMatch(/^ws_/);
+        expect(questionCall[1].headers["X-Von-Window-Session"]).toBe(
+            startCall[1].headers["X-Von-Window-Session"]
+        );
+        expect(JSON.parse(startCall[1].body)).toMatchObject({
+            model_provider: "gemini",
+            model: "gemini-3.7-flash",
+        });
+        expect(JSON.parse(questionCall[1].body)).toMatchObject({
+            interaction_id: "interaction-1",
+        });
     });
 
     it("keeps ordinary discussion distinct from the guided interaction", () => {

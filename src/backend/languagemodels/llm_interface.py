@@ -3100,6 +3100,14 @@ def get_llm_client(
     # Always ensure clients are up-to-date
     initialize_clients(force=force_init)
 
+    # Legacy HTTP callers often omit explicit actor arguments. Resolve the same
+    # trusted request scope used by model-name and eligibility lookup so the
+    # provider and model cannot silently come from different settings.
+    user_concept_id, org_concept_id = _resolve_effective_llm_actor_scope(
+        user_concept_id,
+        org_concept_id,
+    )
+
     provider = None
     model = None
     host = None
