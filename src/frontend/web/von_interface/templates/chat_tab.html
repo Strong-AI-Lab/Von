@@ -221,9 +221,9 @@
       </div>
     </div>
 
-    <section id="chatTaskQueuePanel" class="chat-task-queue-panel hidden" aria-live="polite" aria-label="Queued tasks">
+    <section id="chatTaskQueuePanel" class="chat-task-queue-panel hidden" aria-live="polite" aria-label="Queued prompts for this conversation">
       <div class="chat-task-queue-header">
-        <span class="chat-task-queue-title">Queued tasks</span>
+        <span class="chat-task-queue-title">Queued prompts</span>
         <span id="chatTaskQueueCount" class="chat-task-queue-count">0 queued</span>
       </div>
       <div id="chatTaskQueueList" class="chat-task-queue-list"></div>
@@ -387,6 +387,10 @@
         <textarea id="newTaskDescription" class="task-textarea" rows="2"
           placeholder="Task description…" aria-label="Task description" maxlength="2000"></textarea>
         <div class="task-create-row">
+          <select id="newTaskAssignee" class="task-select" aria-label="Assignee">
+            <option value="" selected>Unassigned</option>
+            <option value="#V#von_system">Assign to Von</option>
+          </select>
           <select id="newTaskPriority" class="task-select" aria-label="Priority">
             <option value="low">🟢 Low</option>
             <option value="medium" selected>🟡 Medium</option>

@@ -1313,6 +1313,23 @@ def _start_async_process_shutdown(
 
     def _run_shutdown() -> None:
         try:
+            from ..services.chat_prompt_queue_dispatch_service import (
+                stop_chat_prompt_queue_dispatcher,
+            )
+            from ..services.conversation_turn_admission_service import (
+                conversation_turn_admission_service,
+            )
+
+            stop_chat_prompt_queue_dispatcher(timeout=5.0)
+            conversation_turn_admission_service.shutdown(wait=True, timeout=5.0)
+        except Exception as exc:
+            try:
+                app_logger.warning(
+                    "[shutdown] Chat prompt dispatcher stop error: %s", exc
+                )
+            except Exception:
+                pass
+        try:
             _stop_durable_workflow_system()
         except Exception as exc:
             try:
@@ -1369,6 +1386,41 @@ def _maybe_start_external_conversation_import_worker(app: Flask) -> None:
     except Exception as exc:
         app.logger.warning(
             "[external_conversation_import] Worker startup deferred: %s", exc
+        )
+
+
+def _maybe_start_chat_prompt_queue_dispatcher(app: Flask) -> None:
+    """Resume durable server-dispatch queue rows without browser ownership."""
+
+    if not _env_bool("VON_CHAT_PROMPT_DISPATCHER_ENABLE", True):
+        app.config["CHAT_PROMPT_QUEUE_DISPATCHER_STATE"] = "disabled"
+        return
+    if (_is_running_under_pytest() or _is_agent_test_instance()) and not _env_bool(
+        "VON_CHAT_PROMPT_DISPATCHER_ENABLE_IN_TESTS", False
+    ):
+        app.config["CHAT_PROMPT_QUEUE_DISPATCHER_STATE"] = "skipped_test_runtime"
+        return
+    try:
+        import atexit
+
+        from ..services.chat_prompt_queue_dispatch_service import (
+            configure_chat_prompt_queue_dispatcher,
+            start_chat_prompt_queue_dispatcher,
+            stop_chat_prompt_queue_dispatcher,
+        )
+        from .routes.von_routes import submit_server_dispatched_chat_prompt
+
+        configure_chat_prompt_queue_dispatcher(
+            app=app,
+            submit=submit_server_dispatched_chat_prompt,
+        )
+        start_chat_prompt_queue_dispatcher()
+        atexit.register(stop_chat_prompt_queue_dispatcher)
+        app.config["CHAT_PROMPT_QUEUE_DISPATCHER_STATE"] = "running"
+    except Exception as exc:
+        app.config["CHAT_PROMPT_QUEUE_DISPATCHER_STATE"] = "startup_deferred"
+        app.logger.warning(
+            "[chat_prompt_dispatch] Worker startup deferred: %s", exc
         )
 
 
@@ -1507,6 +1559,7 @@ def create_flask_app(
     _bootstrap_publication_scope_profiles_for_startup(app)
     _configure_durable_workflow_startup(app)
     _maybe_start_external_conversation_import_worker(app)
+    _maybe_start_chat_prompt_queue_dispatcher(app)
     _log_prompt_concept_health(app)
 
     # (Prewarm logic moved below route registrations to avoid early first-request state.)
@@ -3237,11 +3290,33 @@ def _build_health_runtime_authority_projection(app: Flask) -> dict[str, object]:
             "last_refresh_succeeded": None,
         }
 
+    try:
+        from ..services.chat_prompt_queue_dispatch_service import (
+            get_chat_prompt_queue_dispatcher_snapshot,
+        )
+
+        prompt_queue_dispatcher: dict[str, object] = dict(
+            get_chat_prompt_queue_dispatcher_snapshot()
+        )
+        prompt_queue_dispatcher["startup_state"] = app.config.get(
+            "CHAT_PROMPT_QUEUE_DISPATCHER_STATE"
+        )
+    except Exception:
+        prompt_queue_dispatcher = {
+            "schema_version": "chat_prompt_queue_dispatcher.v1",
+            "configured": False,
+            "running": False,
+            "startup_state": app.config.get(
+                "CHAT_PROMPT_QUEUE_DISPATCHER_STATE"
+            ),
+        }
+
     return {
         "schema_version": "health_runtime_authority_projection.v1",
         "mongo": mongo,
         "durable_workflows": durable,
         "model_registry": model_registry,
+        "chat_prompt_queue_dispatcher": prompt_queue_dispatcher,
         "startup_seed_materialisations": (
             _build_startup_seed_materialisations_projection(app)
         ),

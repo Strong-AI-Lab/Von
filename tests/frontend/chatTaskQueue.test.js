@@ -135,7 +135,7 @@ describe('chat task queue', () => {
         }
     });
 
-    test('keeps same-session prompts FIFO while the first turn is active', async () => {
+    test('persists a same-session prompt while a turn is active and leaves dispatch to the backend', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { sendMessage } = require(chatTabModulePath);
 
@@ -147,6 +147,7 @@ describe('chat task queue', () => {
         });
 
         const generateBodies = [];
+        const queueBodies = [];
         let resolveFirstGenerate = null;
 
         global.fetch = jest.fn((url, options = {}) => {
@@ -162,6 +163,23 @@ describe('chat task queue', () => {
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const body = JSON.parse(options.body || '{}');
+                queueBodies.push(body);
+                return Promise.resolve({
+                    ok: true,
+                    status: 201,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            ...body,
+                            queue_id: `queue-${queueBodies.length}`,
+                            status: 'queued'
+                        }
+                    })
                 });
             }
 
@@ -206,6 +224,7 @@ describe('chat task queue', () => {
 
         const queuedEditor = document.querySelector('.chat-task-queue-edit');
         expect(queuedEditor).toBeTruthy();
+        expect(queuedEditor.readOnly).toBe(true);
         queuedEditor.value = 'Second edited';
         queuedEditor.dispatchEvent(new Event('input', { bubbles: true }));
 
@@ -216,16 +235,196 @@ describe('chat task queue', () => {
         await flushMicrotasks();
         await flushMicrotasks();
 
-        expect(generateBodies).toHaveLength(2);
-        expect(generateBodies[1].prompt).toBe('Second edited');
-        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+        expect(generateBodies).toHaveLength(1);
+        expect(queueBodies.map((body) => body.prompt_raw)).toEqual([
+            'First request',
+            'Second draft'
+        ]);
+        expect(queueBodies[0]).toMatchObject({
+            client_request_id: expect.any(String),
+            attempt_id: expect.any(String)
+        });
+        expect(queueBodies[0]).not.toHaveProperty('enqueue_submission_id');
+        expect(queueBodies[0]).not.toHaveProperty('dispatch_mode');
+        expect(queueBodies[1]).toMatchObject({
+            enqueue_submission_id: expect.any(String),
+            dispatch_mode: 'server',
+            execution_envelope_version: 1,
+            execution_envelope: {
+                language: 'en-NZ',
+                presenter_mode: true,
+                skip_buttonify: false,
+                thinking_card_mode: expect.any(String)
+            }
+        });
+        expect(queueBodies[1]).not.toHaveProperty('client_request_id');
+        expect(queueBodies[1]).not.toHaveProperty('attempt_id');
+        expect(queuedEditor.value).toBe('Second draft');
+        expect(document.querySelector('.chat-task-queue-item')).toBeTruthy();
+        expect(global.fetch.mock.calls.some(([, options]) => options?.method === 'PATCH')).toBe(false);
+        expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/claim'))).toBe(false);
+        expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/finish'))).toBe(false);
+    }, 15000);
+
+    test('guards one enqueue save per session while preserving a newly typed draft', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_setLiveChatRequestForSession,
+            sendMessage,
+        } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ'
+        });
+        __testOnly_setLiveChatRequestForSession('session-1', {
+            promptQueueRecordId: 'queue-active',
+            promptRaw: 'Active turn'
+        });
+
+        const queueBodies = [];
+        let resolveFirstQueuePost = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const body = JSON.parse(options.body || '{}');
+                queueBodies.push(body);
+                const response = {
+                    ok: true,
+                    status: 201,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            ...body,
+                            queue_id: `queue-${queueBodies.length}`,
+                            status: 'queued'
+                        }
+                    })
+                };
+                if (queueBodies.length === 1) {
+                    return new Promise((resolve) => {
+                        resolveFirstQueuePost = () => resolve(response);
+                    });
+                }
+                return Promise.resolve(response);
+            }
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) });
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        const sendButton = document.getElementById('sendButton');
+        promptInput.value = 'First queued prompt';
+        const firstQueuePromise = sendMessage();
+
+        expect(queueBodies).toHaveLength(1);
+        expect(promptInput.value).toBe('');
+        expect(sendButton.disabled).toBe(true);
+        expect(sendButton.textContent).toBe('Queueing…');
+
+        promptInput.value = 'A new draft typed during persistence';
+        await sendMessage();
+        expect(queueBodies).toHaveLength(1);
+        expect(promptInput.value).toBe('A new draft typed during persistence');
+
+        expect(resolveFirstQueuePost).toBeTruthy();
+        resolveFirstQueuePost();
+        await firstQueuePromise;
+
+        expect(promptInput.value).toBe('A new draft typed during persistence');
+        expect(queueBodies[0].enqueue_submission_id).toEqual(expect.any(String));
+
+        await sendMessage();
+        expect(queueBodies).toHaveLength(2);
+        expect(queueBodies[1].prompt_raw).toBe('A new draft typed during persistence');
+        expect(queueBodies[1].enqueue_submission_id).toEqual(expect.any(String));
+        expect(queueBodies[1].enqueue_submission_id)
+            .not.toBe(queueBodies[0].enqueue_submission_id);
+    }, 15000);
+
+    test('marks an ambiguous save as unconfirmed and retries the same immutable submission', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_setLiveChatRequestForSession,
+            sendMessage,
+        } = require(chatTabModulePath);
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ'
+        });
+        __testOnly_setLiveChatRequestForSession('session-1', {
+            promptQueueRecordId: 'queue-active',
+            promptRaw: 'Active turn'
+        });
+
+        const queueBodies = [];
+        let resolveFailedPost = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const body = JSON.parse(options.body || '{}');
+                queueBodies.push(body);
+                if (queueBodies.length === 1) {
+                    return new Promise((resolve) => {
+                        resolveFailedPost = () => resolve({
+                            ok: false,
+                            status: 503,
+                            json: async () => ({
+                                success: false,
+                                error_code: 'backend_unavailable'
+                            })
+                        });
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 201,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            ...body,
+                            queue_id: 'queue-after-retry',
+                            status: 'queued'
+                        }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) });
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'Prompt whose queue save fails';
+        const queuePromise = sendMessage();
+        promptInput.value = 'New draft preserved during failure';
+        expect(resolveFailedPost).toBeTruthy();
+        resolveFailedPost();
+        await queuePromise;
+
+        expect(promptInput.value).toBe('New draft preserved during failure');
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queue unconfirmed');
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent)
+            .toBe('Queue unconfirmed • Current');
+        expect(document.querySelector('.chat-task-queue-sync-warning')?.textContent)
+            .toBe('Queue storage is temporarily unavailable.');
+        expect(document.querySelector('.chat-task-queue-edit')?.readOnly).toBe(true);
+
+        document.querySelector('.chat-task-queue-enqueue-retry').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(queueBodies).toHaveLength(2);
+        expect(queueBodies[1]).toEqual(queueBodies[0]);
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queued');
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent)
+            .toBe('Next up • Current');
+        expect(global.fetch.mock.calls.some(([url]) => String(url).startsWith('/von/generate'))).toBe(false);
+        expect(global.fetch.mock.calls.some(([, options]) => options?.method === 'PATCH')).toBe(false);
     }, 15000);
 
     test.each([
         [409, 'conversation_turn_active', false],
         [429, 'turn_capacity_reached', false],
         [409, 'window_context_unavailable', true],
-    ])('retries retryable HTTP %i %s admission without client-owned transitions', async (status, errorCode, expectsWindowRepair) => {
+    ])('leaves retryable HTTP %i %s admission queued for the server dispatcher', async (status, errorCode, expectsWindowRepair) => {
         const { getUserContext, postJson } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { sendMessage } = require(chatTabModulePath);
 
@@ -245,7 +444,7 @@ describe('chat task queue', () => {
 
         const fetchCalls = [];
         const generateBodies = [];
-        let queueRecord = null;
+        const queueBodies = [];
         global.fetch = jest.fn((url, options = {}) => {
             fetchCalls.push({ url, options });
 
@@ -268,13 +467,12 @@ describe('chat task queue', () => {
 
             if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'POST') {
                 const body = JSON.parse(options.body || '{}');
-                queueRecord = {
-                    queue_id: 'queue-retry-contract',
-                    prompt_raw: body.prompt_raw,
-                    session_id: body.session_id,
-                    session_name: body.session_name,
-                    client_request_id: body.client_request_id,
-                    attempt_id: body.attempt_id,
+                queueBodies.push(body);
+                const queueRecord = {
+                    ...body,
+                    queue_id: body.dispatch_mode === 'server'
+                        ? 'queue-server-retry'
+                        : 'queue-direct-retry',
                     status: 'queued'
                 };
                 return Promise.resolve({
@@ -284,50 +482,22 @@ describe('chat task queue', () => {
                 });
             }
 
-            if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
-                return Promise.resolve({
-                    ok: true,
-                    status: 200,
-                    json: async () => ({ success: true, items: queueRecord ? [queueRecord] : [] })
-                });
-            }
-
-            if (url === '/von/api/chat_prompt_queue/queue-retry-contract' && options.method === 'PATCH') {
-                const body = JSON.parse(options.body || '{}');
-                queueRecord = { ...queueRecord, ...body, status: 'queued' };
-                return Promise.resolve({
-                    ok: true,
-                    status: 200,
-                    json: async () => ({ success: true, item: queueRecord })
-                });
-            }
-
             if (url === '/von/generate') {
                 const body = JSON.parse(options.body || '{}');
                 generateBodies.push(body);
                 lifecycleEvents.push(`generate:${generateBodies.length}`);
-                if (generateBodies.length === 1) {
-                    return Promise.resolve({
-                        ok: false,
-                        status,
-                        headers: { get: (name) => name === 'Retry-After' ? '0' : null },
-                        json: async () => ({
-                            error: errorCode,
-                            detail: 'Retry this queued turn.',
-                            retryable: true,
-                            ...(errorCode === 'window_context_unavailable' ? {} : {
-                                prompt_queue_id: 'queue-retry-contract'
-                            }),
-                            retry_after_seconds: 0
-                        })
-                    });
-                }
                 return Promise.resolve({
-                    ok: true,
-                    status: 200,
+                    ok: false,
+                    status,
+                    headers: { get: (name) => name === 'Retry-After' ? '0' : null },
                     json: async () => ({
-                        response: 'Retried response',
-                        llm_debug: { model: 'gpt-5.2' }
+                        error: errorCode,
+                        detail: 'Retry this queued turn.',
+                        retryable: true,
+                        ...(errorCode === 'window_context_unavailable' ? {} : {
+                            prompt_queue_id: 'queue-direct-retry'
+                        }),
+                        retry_after_seconds: 0
                     })
                 });
             }
@@ -338,37 +508,53 @@ describe('chat task queue', () => {
         document.getElementById('promptInput').value = 'Retry this exact turn';
         await expect(sendMessage()).resolves.toBeUndefined();
 
-        for (let attempt = 0; attempt < 80 && generateBodies.length < 2; attempt += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 10));
-        }
         await flushMicrotasks();
 
-        expect(generateBodies).toHaveLength(2);
-        expect(generateBodies[1]).toMatchObject({
-            prompt: 'Retry this exact turn',
-            prompt_queue_id: 'queue-retry-contract',
-            client_request_id: generateBodies[0].client_request_id,
-            attempt_id: generateBodies[0].attempt_id
-        });
+        expect(generateBodies).toHaveLength(1);
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queued');
         expect(fetchCalls.filter((call) => (
             call.url === '/von/api/chat_prompt_queue'
             && (call.options.method || 'GET') === 'POST'
-        ))).toHaveLength(1);
+        ))).toHaveLength(2);
+        expect(queueBodies[0]).toMatchObject({
+            client_request_id: generateBodies[0].client_request_id,
+            attempt_id: generateBodies[0].attempt_id
+        });
+        expect(queueBodies[0]).not.toHaveProperty('dispatch_mode');
+        expect(queueBodies[0]).not.toHaveProperty('enqueue_submission_id');
+        expect(queueBodies[1]).toMatchObject({
+            dispatch_mode: 'server',
+            enqueue_submission_id: expect.any(String),
+            execution_envelope_version: 1,
+            execution_envelope: expect.objectContaining({
+                language: 'en-NZ',
+                presenter_mode: true,
+                skip_buttonify: false,
+                thinking_card_mode: expect.any(String)
+            })
+        });
+        expect(queueBodies[1]).not.toHaveProperty('client_request_id');
+        expect(queueBodies[1]).not.toHaveProperty('attempt_id');
+        expect(fetchCalls.some((call) => (
+            call.url === '/von/api/chat_prompt_queue/queue-direct-retry'
+            && call.options.method === 'DELETE'
+        ))).toBe(true);
         expect(fetchCalls.some((call) => /\/(claim|requeue|finish)$/.test(String(call.url)))).toBe(false);
         if (expectsWindowRepair) {
             expect(postJson).toHaveBeenCalledWith('/von/api/session/set_organisation', {
                 organisation_concept_id: 'org'
             });
-            expect(lifecycleEvents.indexOf('repair:/von/api/session/set_organisation'))
-                .toBeLessThan(lifecycleEvents.indexOf('generate:2'));
         } else {
             expect(postJson).not.toHaveBeenCalled();
         }
     }, 15000);
 
-    test('repairs an expired window context before retrying the initial queue write', async () => {
+    test('reuses the immutable server enqueue identity after window-context repair', async () => {
         const { getUserContext, postJson } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
-        const { sendMessage } = require(chatTabModulePath);
+        const {
+            __testOnly_setLiveChatRequestForSession,
+            sendMessage,
+        } = require(chatTabModulePath);
         getUserContext.mockReturnValue({
             user_id: 'user',
             org_id: 'org-a',
@@ -378,10 +564,15 @@ describe('chat task queue', () => {
         postJson.mockResolvedValue({ success: true });
 
         const events = [];
+        const enqueueSubmissionIds = [];
+        const queueBodies = [];
         let queuePostCount = 0;
         global.fetch = jest.fn((url, options = {}) => {
             if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const body = JSON.parse(options.body || '{}');
+                queueBodies.push(body);
                 queuePostCount += 1;
+                enqueueSubmissionIds.push(body.enqueue_submission_id);
                 events.push(`queue-post-${queuePostCount}`);
                 if (queuePostCount === 1) {
                     return Promise.resolve({
@@ -393,7 +584,6 @@ describe('chat task queue', () => {
                         })
                     });
                 }
-                const body = JSON.parse(options.body || '{}');
                 return Promise.resolve({
                     ok: true,
                     status: 201,
@@ -403,19 +593,12 @@ describe('chat task queue', () => {
                             queue_id: 'queue-after-window-repair',
                             prompt_raw: body.prompt_raw,
                             session_id: body.session_id,
-                            client_request_id: body.client_request_id,
-                            attempt_id: body.attempt_id,
+                            enqueue_submission_id: body.enqueue_submission_id,
+                            dispatch_mode: body.dispatch_mode,
+                            execution_envelope_version: body.execution_envelope_version,
                             status: 'queued'
                         }
                     })
-                });
-            }
-            if (url === '/von/generate') {
-                events.push('generate');
-                return Promise.resolve({
-                    ok: true,
-                    status: 200,
-                    json: async () => ({ response: 'Repaired response' })
                 });
             }
             if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
@@ -431,6 +614,10 @@ describe('chat task queue', () => {
             return { success: true };
         });
 
+        __testOnly_setLiveChatRequestForSession('session-1', {
+            promptQueueRecordId: 'queue-active',
+            promptRaw: 'Active turn'
+        });
         document.getElementById('promptInput').value = 'Repair before persistence';
         await sendMessage();
 
@@ -438,83 +625,73 @@ describe('chat task queue', () => {
         expect(postJson).toHaveBeenCalledWith('/von/api/session/set_organisation', {
             organisation_concept_id: 'org-a'
         });
-        expect(events).toEqual(['queue-post-1', 'repair', 'queue-post-2', 'generate']);
+        expect(enqueueSubmissionIds[0]).toEqual(expect.any(String));
+        expect(enqueueSubmissionIds[1]).toBe(enqueueSubmissionIds[0]);
+        expect(queueBodies[0]).toEqual(queueBodies[1]);
+        expect(queueBodies[0]).toMatchObject({
+            dispatch_mode: 'server',
+            execution_envelope_version: 1,
+            execution_envelope: expect.objectContaining({
+                language: 'en-NZ',
+                presenter_mode: true,
+                thinking_card_mode: expect.any(String)
+            })
+        });
+        expect(queueBodies[0]).not.toHaveProperty('client_request_id');
+        expect(queueBodies[0]).not.toHaveProperty('attempt_id');
+        expect(events).toEqual(['queue-post-1', 'repair', 'queue-post-2']);
     }, 15000);
 
-    test('preserves a canonical current-server owner after deferred admission without retrying locally', async () => {
-        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
-        const { sendMessage } = require(chatTabModulePath);
-        getUserContext.mockReturnValue({
-            user_id: 'user',
-            org_id: 'org',
-            language: 'en-NZ'
-        });
-
-        let queueRecord = null;
-        const generateBodies = [];
+    test('does not execute a selected server-dispatch row in the browser', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+            sendMessage,
+        } = require(chatTabModulePath);
+        const originalAlert = window.alert;
+        window.alert = jest.fn();
+        const fetchCalls = [];
         global.fetch = jest.fn((url, options = {}) => {
-            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
-                const body = JSON.parse(options.body || '{}');
-                queueRecord = {
-                    queue_id: 'queue-owned-by-current-server',
-                    prompt_raw: body.prompt_raw,
-                    session_id: body.session_id,
-                    session_name: body.session_name,
-                    client_request_id: body.client_request_id,
-                    attempt_id: body.attempt_id,
-                    status: 'queued'
-                };
-                return Promise.resolve({
-                    ok: true,
-                    status: 201,
-                    json: async () => ({ success: true, item: queueRecord })
-                });
-            }
+            fetchCalls.push({ url, options });
             if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
-                queueRecord = {
-                    ...queueRecord,
-                    status: 'in_progress',
-                    server_instance_id: 'server-current'
-                };
                 return Promise.resolve({
                     ok: true,
                     status: 200,
                     json: async () => ({
                         success: true,
-                        turn_admission: { server_instance_id: 'server-current' },
-                        items: [queueRecord]
+                        items: [{
+                            queue_id: 'queue-server-owned',
+                            prompt_raw: 'Already owned by the server dispatcher',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            enqueue_submission_id: 'enqueue-server-owned',
+                            dispatch_mode: 'server',
+                            execution_envelope_version: 1
+                        }]
                     })
                 });
-            }
-            if (url === '/von/generate') {
-                generateBodies.push(JSON.parse(options.body || '{}'));
-                return Promise.resolve({
-                    ok: false,
-                    status: 409,
-                    headers: { get: () => '0' },
-                    json: async () => ({
-                        error: 'conversation_turn_active',
-                        retryable: true,
-                        prompt_queue_id: 'queue-owned-by-current-server',
-                        retry_after_seconds: 0
-                    })
-                });
-            }
-            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
-                return Promise.resolve({ ok: true, json: async () => ({ history_length: 0 }) });
             }
             return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) });
         });
 
-        document.getElementById('promptInput').value = 'Already owned elsewhere';
-        await sendMessage();
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        try {
+            await __testOnly_refreshChatPromptQueueFromServer();
+            const editor = document.querySelector('.chat-task-queue-edit');
+            expect(editor).toBeTruthy();
+            expect(editor.readOnly).toBe(true);
+            editor.focus();
+            editor.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
 
-        expect(generateBodies).toHaveLength(1);
-        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 running');
-        expect(document.querySelector('.chat-task-queue-item-running')).toBeTruthy();
-        expect(document.querySelector('.chat-task-queue-restart')).toBeNull();
-        expect(document.querySelector('.chat-task-queue-delete')).toBeNull();
+            await sendMessage();
+
+            expect(window.alert).toHaveBeenCalledWith('Please enter a prompt.');
+            expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/generate'))).toBe(false);
+            expect(fetchCalls.some(({ url }) => String(url).endsWith('/claim'))).toBe(false);
+            expect(fetchCalls.some(({ url }) => String(url).endsWith('/finish'))).toBe(false);
+            expect(fetchCalls.some(({ options }) => options?.method === 'PATCH')).toBe(false);
+        } finally {
+            window.alert = originalAlert;
+        }
     }, 15000);
 
     test('deleting a queued prompt prevents queued execution', async () => {
@@ -599,7 +776,7 @@ describe('chat task queue', () => {
         expect(document.getElementById('chatTaskQueuePanel')?.classList.contains('hidden')).toBe(true);
     }, 15000);
 
-    test('does not let a focused later prompt bypass the same-session FIFO head', async () => {
+    test('does not dispatch a focused later legacy row ahead of the same-session head', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const {
             __testOnly_refreshChatPromptQueueFromServer,
@@ -736,22 +913,21 @@ describe('chat task queue', () => {
         await flushMicrotasks();
         await flushMicrotasks();
 
-        expect(generateBodies[0].prompt).toBe('First queued');
-        expect(generateBodies[0].conversation_session_id).toBe('session-1');
+        expect(generateBodies).toHaveLength(0);
+        expect(document.querySelectorAll('.chat-task-queue-item')).toHaveLength(2);
         expect(fetchCalls.some((call) => (
             String(call.url) === '/von/api/chat_prompt_queue'
             && (call.options.method || 'GET') === 'POST'
         ))).toBe(false);
         expect(fetchCalls.some((call) => String(call.url).endsWith('/claim'))).toBe(false);
-        expect(generateBodies[0].prompt_queue_id).toBe('queue-1');
+        expect(fetchCalls.some((call) => String(call.url).endsWith('/finish'))).toBe(false);
     }, 15000);
 
-    test('starts an off-session selected prompt without switching the visible conversation', async () => {
+    test('projects queue rows only into their conversation while retaining actor-wide tab activity', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const {
             __testOnly_refreshChatPromptQueueFromServer,
             __testOnly_setSessionTabsCache,
-            sendMessage,
         } = require(chatTabModulePath);
 
         getUserContext.mockReturnValue({
@@ -760,6 +936,7 @@ describe('chat task queue', () => {
             language: 'en-NZ',
             gmail_profile: null
         });
+        document.body.insertAdjacentHTML('afterbegin', '<div id="chatSessionTabs"></div>');
         __testOnly_setSessionTabsCache([
             { session_id: 'session-1', session_name: 'Current' },
             { session_id: 'session-2', session_name: 'Target' }
@@ -767,7 +944,6 @@ describe('chat task queue', () => {
 
         const fetchCalls = [];
         const generateBodies = [];
-        let resolveGenerate = null;
         global.fetch = jest.fn((url, options = {}) => {
             fetchCalls.push({ url, options });
 
@@ -866,31 +1042,13 @@ describe('chat task queue', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
-                const parsed = JSON.parse(options.body || '{}');
-                generateBodies.push(parsed);
-                return new Promise((resolve) => {
-                    resolveGenerate = () => resolve({
-                        ok: true,
-                        json: async () => ({
-                            response: 'Off-session response',
-                            llm_debug: { model: 'gpt-5.2' }
-                        })
-                    });
-                });
+                generateBodies.push(JSON.parse(options.body || '{}'));
             }
 
             return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
         });
 
         await __testOnly_refreshChatPromptQueueFromServer();
-        const queuedEditor = document.querySelector('.chat-task-queue-edit');
-        expect(queuedEditor).toBeTruthy();
-        queuedEditor.focus();
-        queuedEditor.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-
-        await sendMessage();
-        await flushMicrotasks();
-        await flushMicrotasks();
 
         const setSessionIndex = fetchCalls.findIndex((call) => (
             String(call.url) === '/von/api/session/set_chat_session'
@@ -898,20 +1056,16 @@ describe('chat task queue', () => {
         const generateIndex = fetchCalls.findIndex((call) => String(call.url).startsWith('/von/generate'));
         expect(setSessionIndex).toBe(-1);
         expect(fetchCalls.some((call) => String(call.url).endsWith('/claim'))).toBe(false);
-        expect(generateIndex).toBeGreaterThanOrEqual(0);
-        expect(generateBodies[0].conversation_session_id).toBe('session-2');
-        expect(generateBodies[0].prompt_queue_id).toBe('queue-off-session');
-        expect(document.getElementById('scrollableField')?.textContent)
-            .not.toContain('Off-session selected queued');
-        expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden')).toBe('true');
-
-        expect(resolveGenerate).toBeTruthy();
-        resolveGenerate();
-        await flushMicrotasks();
-        await flushMicrotasks();
+        expect(generateIndex).toBe(-1);
+        expect(generateBodies).toHaveLength(0);
+        expect(document.querySelector('.chat-task-queue-edit')).toBeNull();
+        expect(document.getElementById('chatTaskQueuePanel')?.classList.contains('hidden')).toBe(true);
+        expect(document.querySelector(
+            '#chatSessionTabs [data-session-id="session-2"] .chat-session-tab-activity'
+        )?.textContent).toBe('Queued');
     }, 15000);
 
-    test('restores interrupted persisted prompts and restarts them explicitly', async () => {
+    test('requeues interrupted persisted prompts without browser-side dispatch', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const {
             __testOnly_refreshChatPromptQueueFromServer,
@@ -1025,22 +1179,25 @@ describe('chat task queue', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
         await flushMicrotasks();
 
-        expect(generateBodies).toHaveLength(1);
-        expect(generateBodies[0].prompt).toBe('Recovered task');
-        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+        expect(generateBodies).toHaveLength(0);
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent)
+            .toBe('Next up • Recovered');
+        expect(document.querySelector('.chat-task-queue-item')).toBeTruthy();
+        expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/claim'))).toBe(false);
+        expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/finish'))).toBe(false);
     }, 15000);
 
-    test('keeps off-session running queue records visible while current-session prompts wait', async () => {
+    test('keeps off-session queue activity on its tab, not in the active composer panel', async () => {
         const {
             __testOnly_refreshChatPromptQueueFromServer,
-            __testOnly_setLiveChatRequestForSession,
         } = require(chatTabModulePath);
 
-        __testOnly_setLiveChatRequestForSession('session-2', {
-            promptQueueRecordId: 'queue-running',
-            promptRaw: 'Background task'
-        });
-
+        document.body.insertAdjacentHTML('afterbegin', '<div id="chatSessionTabs"></div>');
+        const { __testOnly_setSessionTabsCache } = require(chatTabModulePath);
+        __testOnly_setSessionTabsCache([
+            { session_id: 'session-1', session_name: 'Current' },
+            { session_id: 'session-2', session_name: 'Background' }
+        ]);
         global.fetch = jest.fn((url) => {
             if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
                 return Promise.resolve({
@@ -1053,7 +1210,10 @@ describe('chat task queue', () => {
                                 prompt_raw: 'Background task',
                                 status: 'in_progress',
                                 session_id: 'session-2',
-                                session_name: 'Background'
+                                session_name: 'Background',
+                                enqueue_submission_id: 'enqueue-running',
+                                dispatch_mode: 'server',
+                                execution_envelope_version: 1
                             },
                             {
                                 queue_id: 'queue-waiting',
@@ -1072,14 +1232,14 @@ describe('chat task queue', () => {
 
         await __testOnly_refreshChatPromptQueueFromServer();
 
-        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 running, 1 queued');
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queued');
         const labels = Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
             .map((node) => node.textContent);
-        expect(labels).toEqual(['Running • Background', 'Next up • Current']);
-        const runningItem = document.querySelector('.chat-task-queue-item-running');
-        expect(runningItem?.querySelector('.chat-task-queue-delete')).toBeNull();
-        expect(runningItem?.querySelector('.chat-task-queue-dismiss')).toBeNull();
-        expect(runningItem?.querySelector('.chat-task-queue-restart')).toBeNull();
+        expect(labels).toEqual(['Next up • Current']);
+        expect(document.querySelector('.chat-task-queue-item-running')).toBeNull();
+        expect(document.querySelector(
+            '#chatSessionTabs [data-session-id="session-2"] .chat-session-tab-activity'
+        )?.textContent).toBe('Running');
     }, 15000);
 
     test('treats a current-server turn from another tab as running until canonical refresh removes it', async () => {
@@ -1126,7 +1286,71 @@ describe('chat task queue', () => {
         expect(document.getElementById('sendButton').textContent).toBe('Send Prompt');
     }, 15000);
 
-    test('a cross-tab queue signal refreshes canonical state and unblocks the next same-session turn', async () => {
+    test('polls server-owned queue work and refreshes active history after its row disappears', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+        const fetchCalls = [];
+        let queueGetCount = 0;
+
+        jest.useFakeTimers();
+        try {
+            global.fetch = jest.fn((url, options = {}) => {
+                fetchCalls.push({ url, options });
+                if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
+                    queueGetCount += 1;
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            success: true,
+                            items: queueGetCount === 1 ? [{
+                                queue_id: 'queue-polled',
+                                prompt_raw: 'Server-dispatched prompt',
+                                status: 'queued',
+                                session_id: 'session-1',
+                                session_name: 'Current',
+                                enqueue_submission_id: 'enqueue-polled',
+                                dispatch_mode: 'server',
+                                execution_envelope_version: 1
+                            }] : []
+                        })
+                    });
+                }
+                if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            history: [],
+                            segments_returned: 1,
+                            total_segments: 1
+                        })
+                    });
+                }
+                return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) });
+            });
+
+            await __testOnly_refreshChatPromptQueueFromServer();
+            expect(queueGetCount).toBe(1);
+            expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queued');
+
+            await jest.advanceTimersByTimeAsync(2000);
+
+            expect(queueGetCount).toBe(2);
+            expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+            expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/history?'))).toBe(true);
+            expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/generate'))).toBe(false);
+            expect(fetchCalls.some(({ url }) => /\/(claim|finish)$/.test(String(url)))).toBe(false);
+
+            await jest.advanceTimersByTimeAsync(4000);
+            expect(queueGetCount).toBe(2);
+        } finally {
+            jest.useRealTimers();
+        }
+    }, 15000);
+
+    test('a cross-tab queue signal refreshes canonical state without dispatching in the browser', async () => {
         const {
             __testOnly_handleChatPromptQueueStorageEvent,
             __testOnly_refreshChatPromptQueueFromServer,
@@ -1202,19 +1426,13 @@ describe('chat task queue', () => {
         __testOnly_handleChatPromptQueueStorageEvent({
             key: 'von:chatPromptQueueChanged:v1'
         });
-        for (let attempt = 0; attempt < 30 && generateBodies.length === 0; attempt += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 10));
-        }
+        await flushMicrotasks();
+        await flushMicrotasks();
 
-        expect(generateBodies).toHaveLength(1);
-        expect(generateBodies[0]).toMatchObject({
-            prompt: 'Run after the other tab finishes',
-            prompt_queue_id: 'queue-next-after-other-tab',
-            client_request_id: 'request-next',
-            attempt_id: 'attempt-next',
-            conversation_session_id: 'session-1'
-        });
+        expect(generateBodies).toHaveLength(0);
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queued');
         expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/claim'))).toBe(false);
+        expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/finish'))).toBe(false);
     }, 15000);
 
     test('shows recent failed persisted prompts without rerunning them', async () => {
@@ -1506,7 +1724,7 @@ describe('chat task queue', () => {
         expect(document.querySelector('.chat-task-queue-item-failed')).toBeNull();
     }, 15000);
 
-    test('shows a precise persisted update failure reason before server admission', async () => {
+    test('shows a precise persisted update failure for an editable legacy row', async () => {
         const {
             __testOnly_refreshChatPromptQueueFromServer,
         } = require(chatTabModulePath);
@@ -1545,11 +1763,449 @@ describe('chat task queue', () => {
         });
 
         await __testOnly_refreshChatPromptQueueFromServer();
-        await flushMicrotasks();
+        const editor = document.querySelector('.chat-task-queue-edit');
+        editor.value = 'Edited queued task';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 350));
         await flushMicrotasks();
 
         expect(document.querySelector('.chat-task-queue-sync-warning')?.textContent).toBe(
             'This queued task belongs to a different browser or organisation scope.'
         );
+    }, 15000);
+
+    test('retains a canonical queued row and surfaces the error when DELETE fails', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        items: [{
+                            queue_id: 'queue-delete-retained',
+                            prompt_raw: 'Keep me until cancellation is acknowledged',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Current'
+                        }]
+                    })
+                });
+            }
+            if (url === '/von/api/chat_prompt_queue/queue-delete-retained') {
+                return Promise.resolve({
+                    ok: false,
+                    status: 503,
+                    json: async () => ({
+                        success: false,
+                        error: 'queue backend unavailable',
+                        error_code: 'backend_unavailable'
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({ success: true })
+            });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        const deleteButton = document.querySelector('.chat-task-queue-delete');
+        expect(deleteButton).toBeTruthy();
+        deleteButton.click();
+
+        expect(document.querySelector('[data-queue-id="queue-delete-retained"]')).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-delete').disabled).toBe(true);
+
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('[data-queue-id="queue-delete-retained"]')).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-delete').disabled).toBe(false);
+        expect(document.querySelector('.chat-task-queue-sync-warning')?.textContent).toBe(
+            'Queue storage is temporarily unavailable.'
+        );
+    }, 15000);
+
+    test('treats a DELETE not-found response as canonical absence', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        items: [{
+                            queue_id: 'queue-already-absent',
+                            prompt_raw: 'Already cancelled elsewhere',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Current'
+                        }]
+                    })
+                });
+            }
+            if (url === '/von/api/chat_prompt_queue/queue-already-absent') {
+                return Promise.resolve({
+                    ok: false,
+                    status: 404,
+                    json: async () => ({
+                        success: false,
+                        error: 'cancellable prompt was not found',
+                        error_code: 'not_found'
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({ success: true })
+            });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        document.querySelector('.chat-task-queue-delete').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('[data-queue-id="queue-already-absent"]')).toBeNull();
+        expect(document.getElementById('chatTaskQueuePanel')?.classList.contains('hidden')).toBe(true);
+    }, 15000);
+
+    test('renders one terminal row when active and failed projections overlap', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                success: true,
+                items: [{
+                    queue_id: 'queue-transition-race',
+                    prompt_raw: 'Transitioning row',
+                    status: 'queued',
+                    session_id: 'session-1',
+                    session_name: 'Current'
+                }],
+                recent_failed_items: [{
+                    queue_id: 'queue-transition-race',
+                    prompt_raw: 'Transitioning row',
+                    status: 'failed',
+                    session_id: 'session-1',
+                    session_name: 'Current',
+                    last_error: 'Canonical terminal failure'
+                }]
+            })
+        }));
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+
+        expect(document.querySelectorAll('.chat-task-queue-item')).toHaveLength(1);
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent)
+            .toBe('Failed • Current');
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 failed');
+    }, 15000);
+
+    test('cancels an unresolved replacement before its legacy source', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+        const deleteOrder = [];
+        let queueReads = 0;
+        const replacement = {
+            queue_id: 'queue-handoff-replacement',
+            prompt_raw: 'Cancel this unresolved handoff',
+            status: 'queued',
+            session_id: 'session-1',
+            session_name: 'Current',
+            dispatch_mode: 'server',
+            dispatch_ready: false,
+            enqueue_submission_id: 'submission-handoff-cancel',
+            handoff_source_queue_id: 'queue-handoff-source'
+        };
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
+                queueReads += 1;
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        items: queueReads <= 2 ? [replacement] : [],
+                        recent_failed_items: []
+                    })
+                });
+            }
+            if (options.method === 'DELETE') {
+                deleteOrder.push(String(url));
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true, item: { status: 'cancelled' } })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({ success: true })
+            });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        document.querySelector('.chat-task-queue-handoff-cancel').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(deleteOrder).toEqual([
+            '/von/api/chat_prompt_queue/queue-handoff-replacement',
+            '/von/api/chat_prompt_queue/queue-handoff-source'
+        ]);
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+    }, 15000);
+
+    test('retains a manually sent legacy row until generate acknowledges it', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+            sendMessage,
+        } = require(chatTabModulePath);
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        let resolveGenerate = null;
+        const generateBodies = [];
+        const queued = {
+            queue_id: 'queue-manual-legacy',
+            prompt_raw: 'Manually dispatch this legacy prompt',
+            status: 'queued',
+            session_id: 'session-1',
+            session_name: 'Current'
+        };
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'GET') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true, items: [queued] })
+                });
+            }
+            if (url === '/von/api/chat_prompt_queue/queue-manual-legacy' && options.method === 'PATCH') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true, item: queued })
+                });
+            }
+            if (url === '/von/generate') {
+                generateBodies.push(JSON.parse(options.body || '{}'));
+                return new Promise((resolve) => {
+                    resolveGenerate = () => resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ response: 'Acknowledged response' })
+                    });
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ html: '' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({ success: true })
+            });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        const editor = document.querySelector('.chat-task-queue-edit');
+        editor.focus();
+        editor.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        await sendMessage();
+        await flushMicrotasks();
+
+        expect(resolveGenerate).toBeTruthy();
+        expect(generateBodies).toHaveLength(1);
+        expect(generateBodies[0].prompt_queue_id).toBe('queue-manual-legacy');
+        expect(document.querySelector('[data-queue-id="queue-manual-legacy"]')).toBeTruthy();
+
+        resolveGenerate();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('[data-queue-id="queue-manual-legacy"]')).toBeNull();
+    }, 15000);
+
+    test('retains the exact foreground row until an admission-deferred server enqueue is acknowledged', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const { sendMessage } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const events = [];
+        const serverQueueBodies = [];
+        const generateBodies = [];
+        let serverQueuePostCount = 0;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ html: '' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (url === '/von/api/chat_prompt_queue' && (options.method || 'GET') === 'POST') {
+                const body = JSON.parse(options.body || '{}');
+                if (body.dispatch_mode !== 'server') {
+                    events.push('direct-post');
+                    return Promise.resolve({
+                        ok: true,
+                        status: 201,
+                        json: async () => ({
+                            success: true,
+                            item: {
+                                ...body,
+                                queue_id: 'queue-direct-handoff',
+                                status: 'queued'
+                            }
+                        })
+                    });
+                }
+                serverQueuePostCount += 1;
+                serverQueueBodies.push(body);
+                events.push(`server-post-${serverQueuePostCount}`);
+                if (serverQueuePostCount === 1) {
+                    return Promise.reject(new TypeError('response lost after enqueue'));
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        idempotent_replay: true,
+                        item: {
+                            ...body,
+                            queue_id: 'queue-server-handoff',
+                            status: 'queued'
+                        }
+                    })
+                });
+            }
+            if (url === '/von/generate') {
+                events.push('generate');
+                generateBodies.push(JSON.parse(options.body || '{}'));
+                return Promise.resolve({
+                    ok: false,
+                    status: 429,
+                    headers: { get: () => '0' },
+                    json: async () => ({
+                        error: 'turn_capacity_reached',
+                        detail: 'Try this turn later.',
+                        retryable: true,
+                        prompt_queue_id: 'queue-direct-handoff'
+                    })
+                });
+            }
+            if (url === '/von/api/chat_prompt_queue/queue-direct-handoff') {
+                events.push('delete-source');
+                return Promise.resolve({
+                    ok: false,
+                    status: 503,
+                    json: async () => ({
+                        success: false,
+                        error: 'queue backend unavailable',
+                        error_code: 'backend_unavailable'
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({ success: true })
+            });
+        });
+
+        document.getElementById('promptInput').value = 'Preserve this exact prompt';
+        await sendMessage();
+        await flushMicrotasks();
+
+        expect(events).toEqual(['direct-post', 'generate', 'server-post-1']);
+        expect(events).not.toContain('delete-source');
+        expect(document.querySelectorAll('.chat-task-queue-item-label'))
+            .toHaveLength(2);
+        expect(Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
+            .map((element) => element.textContent)).toEqual(expect.arrayContaining([
+            'Queue unconfirmed • Current',
+            'Handoff pending • Current'
+        ]));
+        expect(document.querySelectorAll('.chat-task-queue-delete')).toHaveLength(0);
+
+        document.querySelector('.chat-task-queue-enqueue-retry').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(serverQueueBodies).toHaveLength(2);
+        expect(serverQueueBodies[1].enqueue_submission_id)
+            .toBe(serverQueueBodies[0].enqueue_submission_id);
+        expect(events).toEqual([
+            'direct-post',
+            'generate',
+            'server-post-1',
+            'server-post-2',
+            'delete-source'
+        ]);
+        expect(generateBodies).toHaveLength(1);
+        expect(Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
+            .map((element) => element.textContent)).toEqual(expect.arrayContaining([
+            'Next up • Current',
+            'Superseded • Current'
+        ]));
+        const supersededItem = Array.from(document.querySelectorAll('.chat-task-queue-item'))
+            .find((item) => item.querySelector('.chat-task-queue-item-label')?.textContent
+                === 'Superseded • Current');
+        expect(supersededItem).toBeTruthy();
+        expect(supersededItem.querySelector('.chat-task-queue-edit').readOnly).toBe(true);
+        expect(supersededItem.querySelector('.chat-task-queue-sync-warning').textContent).toBe(
+            'Queue storage is temporarily unavailable.'
+        );
+        expect(supersededItem.querySelector('.chat-task-queue-delete').textContent)
+            .toBe('Retry cleanup');
     }, 15000);
 });

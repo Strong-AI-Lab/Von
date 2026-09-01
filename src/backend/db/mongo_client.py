@@ -979,6 +979,7 @@ ROOM_DEVICES_COLLECTION_NAME = "room_devices"
 
 # Server-side persistence for prompts waiting behind active chat turns.
 CHAT_PROMPT_QUEUE_COLLECTION_NAME = "chat_prompt_queue"
+CHAT_PROMPT_QUEUE_COUNTERS_COLLECTION_NAME = "chat_prompt_queue_counters"
 
 # Restart-safe, actor-bound per-window organisation selections.
 WINDOW_SESSION_BINDINGS_COLLECTION_NAME = "window_session_bindings"
@@ -2391,16 +2392,18 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
         coll.create_index(
             [("queue_id", ASCENDING)], name="queue_id_1_unique", unique=True
         )
-    if "scope_status_created_at" not in existing_indexes:
+    if "scope_status_enqueue_sequence" not in existing_indexes:
         coll.create_index(
             [
                 ("user_concept_id", ASCENDING),
                 ("organisation_concept_id", ASCENDING),
                 ("namespace", ASCENDING),
                 ("status", ASCENDING),
+                ("enqueue_sequence", ASCENDING),
                 ("created_at", ASCENDING),
+                ("queue_id", ASCENDING),
             ],
-            name="scope_status_created_at",
+            name="scope_status_enqueue_sequence",
         )
     if "scope_session_status_created_at" not in existing_indexes:
         coll.create_index(
@@ -2421,6 +2424,38 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
             unique=True,
             partialFilterExpression={
                 "active_conversation_key": {"$exists": True, "$type": "string"}
+            },
+        )
+    if "scope_enqueue_submission_id_unique" not in existing_indexes:
+        coll.create_index(
+            [
+                ("user_concept_id", ASCENDING),
+                ("organisation_concept_id", ASCENDING),
+                ("namespace", ASCENDING),
+                ("enqueue_submission_id", ASCENDING),
+            ],
+            name="scope_enqueue_submission_id_unique",
+            unique=True,
+            partialFilterExpression={
+                "enqueue_submission_id": {"$exists": True, "$type": "string"}
+            },
+        )
+    if "active_task_execution_key_unique" not in existing_indexes:
+        coll.create_index(
+            [("active_task_execution_key", ASCENDING)],
+            name="active_task_execution_key_unique",
+            unique=True,
+            partialFilterExpression={
+                "active_task_execution_key": {"$exists": True, "$type": "string"}
+            },
+        )
+    if "handoff_source_queue_id_unique" not in existing_indexes:
+        coll.create_index(
+            [("handoff_source_queue_id", ASCENDING)],
+            name="handoff_source_queue_id_unique",
+            unique=True,
+            partialFilterExpression={
+                "handoff_source_queue_id": {"$exists": True, "$type": "string"}
             },
         )
     if "active_legacy_submission_key_unique" not in existing_indexes:
@@ -2454,15 +2489,75 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
             unique=True,
             partialFilterExpression={"queued_user_slot": {"$exists": True}},
         )
-    if "conversation_status_created_queue" not in existing_indexes:
+    if "conversation_status_enqueue_sequence" not in existing_indexes:
         coll.create_index(
             [
                 ("conversation_key", ASCENDING),
                 ("status", ASCENDING),
+                ("enqueue_sequence", ASCENDING),
                 ("created_at", ASCENDING),
                 ("queue_id", ASCENDING),
             ],
-            name="conversation_status_created_queue",
+            name="conversation_status_enqueue_sequence",
+        )
+    if "dispatch_status_next_enqueue_sequence" not in existing_indexes:
+        coll.create_index(
+            [
+                ("dispatch_mode", ASCENDING),
+                ("status", ASCENDING),
+                ("next_dispatch_at", ASCENDING),
+                ("enqueue_sequence", ASCENDING),
+                ("created_at", ASCENDING),
+                ("queue_id", ASCENDING),
+            ],
+            name="dispatch_status_next_enqueue_sequence",
+        )
+    if "dispatch_status_lease_expiry" not in existing_indexes:
+        coll.create_index(
+            [
+                ("dispatch_mode", ASCENDING),
+                ("status", ASCENDING),
+                ("dispatch_lease_expires_at", ASCENDING),
+            ],
+            name="dispatch_status_lease_expiry",
+        )
+    if "handoff_reconciliation_due" not in existing_indexes:
+        coll.create_index(
+            [
+                ("dispatch_mode", ASCENDING),
+                ("status", ASCENDING),
+                ("dispatch_ready", ASCENDING),
+                ("handoff_reconciliation_next_at", ASCENDING),
+                ("enqueue_sequence", ASCENDING),
+                ("created_at", ASCENDING),
+                ("queue_id", ASCENDING),
+            ],
+            name="handoff_reconciliation_due",
+        )
+    if "task_execution_reconciliation_due" not in existing_indexes:
+        coll.create_index(
+            [
+                ("task_execution_reconciliation_status", ASCENDING),
+                ("task_execution_reconciliation_next_at", ASCENDING),
+                ("task_execution_reconciliation_lease_expires_at", ASCENDING),
+                ("task_execution_reconciliation_pending_at", ASCENDING),
+                ("queue_id", ASCENDING),
+            ],
+            name="task_execution_reconciliation_due",
+        )
+    if "task_launch_reconciliation_due" not in existing_indexes:
+        coll.create_index(
+            [
+                ("dispatch_mode", ASCENDING),
+                ("status", ASCENDING),
+                ("dispatch_ready", ASCENDING),
+                ("task_launch_reconciliation_next_at", ASCENDING),
+                ("task_launch_reconciliation_lease_expires_at", ASCENDING),
+                ("enqueue_sequence", ASCENDING),
+                ("created_at", ASCENDING),
+                ("queue_id", ASCENDING),
+            ],
+            name="task_launch_reconciliation_due",
         )
     if "user_status_created_at" not in existing_indexes:
         coll.create_index(
@@ -2484,6 +2579,13 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
         )
     if "updated_at_-1" not in existing_indexes:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+    if "purge_after_ttl" not in existing_indexes:
+        coll.create_index(
+            [("purge_after", ASCENDING)],
+            name="purge_after_ttl",
+            expireAfterSeconds=0,
+            sparse=True,
+        )
 
 
 def _ensure_window_session_binding_indexes(coll: Collection) -> None:
@@ -2808,6 +2910,15 @@ def get_chat_prompt_queue_collection() -> Collection | None:
             CHAT_PROMPT_QUEUE_COLLECTION_NAME,
             _ensure_chat_prompt_queue_indexes,
         )
+    return None
+
+
+def get_chat_prompt_queue_counters_collection() -> Collection | None:
+    """Return atomic operational counters used to order queued prompts."""
+
+    db = get_db()
+    if db is not None:
+        return db[CHAT_PROMPT_QUEUE_COUNTERS_COLLECTION_NAME]
     return None
 
 

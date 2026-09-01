@@ -7,7 +7,9 @@ import pytest
 
 from src.backend.db import mongo_client
 from src.backend.services import chat_prompt_queue_service as queue_service
+from src.backend.services import task_execution_service
 from src.backend.services.conversation_turn_admission_service import (
+    SERVER_INSTANCE_ID,
     ConversationTurnActive,
     ConversationTurnAdmissionService,
     ConversationTurnCapacityReached,
@@ -104,6 +106,190 @@ def test_distinct_conversations_run_concurrently_and_release_exactly() -> None:
     assert service.snapshot()["active_global"] == 1
     service.release(second, status=queue_service.STATUS_COMPLETED)
     assert service.snapshot()["active_global"] == 0
+
+
+def test_active_durable_turn_renews_its_exact_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_TURN_LEASE_HEARTBEAT_SECONDS", "0.01")
+    scope = _scope()
+    service = ConversationTurnAdmissionService(per_user_limit=1, global_limit=1)
+    observed = threading.Event()
+    calls: list[dict[str, object]] = []
+    original_heartbeat = queue_service.heartbeat_bound_turn
+
+    def _heartbeat(**kwargs):
+        calls.append(kwargs)
+        observed.set()
+        return original_heartbeat(**kwargs)
+
+    monkeypatch.setattr(queue_service, "heartbeat_bound_turn", _heartbeat)
+    token = service.acquire(
+        scope=scope,
+        prompt_raw="heartbeat",
+        session_id="conversation-heartbeat",
+        session_name=None,
+        client_request_id="request-heartbeat",
+        conversation_key=_key("conversation-heartbeat"),
+        queue_id=_queued(scope, "conversation-heartbeat", "heartbeat"),
+    )
+    try:
+        assert observed.wait(timeout=1.0)
+        assert calls[-1] == {
+            "scope": token.scope,
+            "queue_id": token.queue_id,
+            "attempt_id": token.attempt_id,
+            "server_instance_id": SERVER_INSTANCE_ID,
+        }
+        assert service.snapshot()["lease_heartbeat_running"] is True
+    finally:
+        service.release(token, status=queue_service.STATUS_COMPLETED)
+        service.shutdown(wait=True)
+
+
+def _bound_task_queue_record(*, status: str = queue_service.STATUS_IN_PROGRESS):
+    return {
+        "queue_id": "queue-task-1",
+        "status": status,
+        "attempt_id": "attempt-task-1",
+        "enqueue_submission_id": "enqueue-task-1",
+        "task_concept_id": "#V#task_1",
+        "task_execution_concept_id": "#V#task_execution_1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("queue_status", "execution_status"),
+    [
+        (
+            queue_service.STATUS_COMPLETED,
+            task_execution_service.TASK_EXECUTION_STATUS_COMPLETED,
+        ),
+        (
+            queue_service.STATUS_FAILED,
+            task_execution_service.TASK_EXECUTION_STATUS_FAILED,
+        ),
+        (
+            queue_service.STATUS_CANCELLED,
+            task_execution_service.TASK_EXECUTION_STATUS_CANCELLED,
+        ),
+    ],
+)
+def test_linked_task_execution_follows_exact_admission_and_terminal_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    queue_status: str,
+    execution_status: str,
+) -> None:
+    scope = _scope()
+    transitions: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        queue_service,
+        "bind_queue_record_to_turn",
+        lambda **_kwargs: _bound_task_queue_record(),
+    )
+    monkeypatch.setattr(
+        queue_service,
+        "finish_prompt_record",
+        lambda **kwargs: _bound_task_queue_record(status=kwargs["status"]),
+    )
+    monkeypatch.setattr(
+        task_execution_service,
+        "transition_task_execution",
+        lambda execution_id, **kwargs: (
+            transitions.append({"execution_id": execution_id, **kwargs})
+            or {"status": kwargs["status"]}
+        ),
+    )
+    service = ConversationTurnAdmissionService(per_user_limit=1, global_limit=1)
+
+    token = service.acquire(
+        scope=scope,
+        prompt_raw="complete linked work",
+        session_id="conversation-task",
+        session_name=None,
+        client_request_id="request-task-1",
+        conversation_key=_key("conversation-task"),
+        queue_id="queue-task-1",
+        attempt_id="attempt-task-1",
+    )
+    terminal_error = None if queue_status == queue_service.STATUS_COMPLETED else "ended"
+    service.release(token, status=queue_status, error=terminal_error)
+
+    assert token.enqueue_submission_id == "enqueue-task-1"
+    assert [call["status"] for call in transitions] == [
+        task_execution_service.TASK_EXECUTION_STATUS_IN_PROGRESS,
+        execution_status,
+    ]
+    assert all(call["queue_id"] == "queue-task-1" for call in transitions)
+    assert all(
+        call["enqueue_submission_id"] == "enqueue-task-1" for call in transitions
+    )
+    assert transitions[-1]["result"] == terminal_error
+    assert service.snapshot()["active_global"] == 0
+    service.shutdown()
+
+
+def test_task_execution_admission_failure_terminalises_bound_attempt_before_capacity_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = _scope()
+    terminal_calls: list[dict[str, object]] = []
+    transitions: list[str] = []
+    monkeypatch.setattr(
+        queue_service,
+        "bind_queue_record_to_turn",
+        lambda **_kwargs: _bound_task_queue_record(),
+    )
+
+    def _transition(_execution_id: str, **kwargs):
+        transitions.append(kwargs["status"])
+        if kwargs["status"] == task_execution_service.TASK_EXECUTION_STATUS_IN_PROGRESS:
+            raise RuntimeError("concept persistence unavailable")
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(
+        task_execution_service,
+        "transition_task_execution",
+        _transition,
+    )
+
+    def _finish(**kwargs):
+        terminal_calls.append(kwargs)
+        return _bound_task_queue_record(status=kwargs["status"])
+
+    monkeypatch.setattr(queue_service, "finish_prompt_record", _finish)
+    service = ConversationTurnAdmissionService(per_user_limit=1, global_limit=1)
+
+    with pytest.raises(RuntimeError, match="concept persistence unavailable"):
+        service.acquire(
+            scope=scope,
+            prompt_raw="fail linked admission",
+            session_id="conversation-task",
+            session_name=None,
+            client_request_id="request-task-1",
+            conversation_key=_key("conversation-task"),
+            queue_id="queue-task-1",
+            attempt_id="attempt-task-1",
+        )
+
+    assert terminal_calls == [
+        {
+            "scope": scope,
+            "queue_id": "queue-task-1",
+            "status": queue_service.STATUS_FAILED,
+            "error": (
+                "TaskExecution admission transition failed: RuntimeError: "
+                "concept persistence unavailable"
+            ),
+            "attempt_id": "attempt-task-1",
+        }
+    ]
+    assert transitions == [
+        task_execution_service.TASK_EXECUTION_STATUS_IN_PROGRESS,
+        task_execution_service.TASK_EXECUTION_STATUS_FAILED,
+    ]
+    assert service.snapshot()["active_global"] == 0
+    service.shutdown()
 
 
 def test_legacy_queue_first_converges_with_generate_admission() -> None:
