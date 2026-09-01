@@ -12817,7 +12817,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
         )
         adaptive_partial_delivery = (
-            adaptive_terminal_status == "effect_partially_completed"
+            adaptive_terminal_status
+            in {"effect_partially_completed", "answer_partially_completed"}
             and isinstance(response_text, str)
             and bool(response_text.strip())
         )
