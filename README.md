@@ -130,6 +130,9 @@ documentation is classified and which sources govern which questions.
 - Bash on macOS/Linux, or PowerShell on Windows
 - a usable language-model route, such as local Ollama or an enabled hosted
   provider
+- Tesseract is optional for core Von, but required for image and scanned-PDF
+  OCR. The setup scripts detect and validate it without installing system
+  software unless you explicitly request that effect.
 
 ### macOS or Linux
 
@@ -140,6 +143,21 @@ cp .env.template .env
 ./setup_all.sh
 ```
 
+If setup reports `OCR STATUS: UNAVAILABLE`, run exactly this command from the
+repository as your ordinary user (do not prefix the whole command with
+`sudo`):
+
+```bash
+./setup_all.sh --install-system-deps
+```
+
+On apt-based Linux, the installer uses passwordless `sudo` only for the
+`apt-get` package operations when available; otherwise it installs the same
+distro packages under the current user's local prefix. On macOS it uses
+Homebrew. `--with-ocr` is also available when you want OCR to be mandatory but
+do not authorise package installation; `--install-system-deps` implies that
+strict check.
+
 ### Windows PowerShell
 
 ```powershell
@@ -148,6 +166,15 @@ Set-Location Von
 Copy-Item .env.template .env
 .\setup_all.ps1
 ```
+
+If setup reports `OCR STATUS: UNAVAILABLE`, run exactly:
+
+```powershell
+.\setup_all.ps1 -InstallSystemDeps
+```
+
+`-InstallSystemDeps` is the only setup option that authorises the Windows
+installer to invoke `winget`; it also makes working OCR mandatory.
 
 ### Configure data and models
 

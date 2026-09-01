@@ -526,6 +526,12 @@ else
 fi
 
 export PYTHONPATH="${ROOT}"
+if [ -x "${HOME}/.local/bin/tesseract" ]; then
+    # setup_all.sh may install the distro Tesseract packages in the ordinary
+    # user's local prefix when sudo is unavailable. Keep that PATH correction
+    # scoped to Von's launcher process rather than changing global shell files.
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 export PYTHONUTF8=1

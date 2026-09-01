@@ -28,6 +28,14 @@
 .PARAMETER SkipMongoDB
     Skip MongoDB installation checks (forwarded to setup_py.ps1).
 
+.PARAMETER WithOCR
+    Require image and scanned-PDF OCR support. This validates Tesseract but
+    does not install system software.
+
+.PARAMETER InstallSystemDeps
+    Explicitly authorise installation of required system dependencies. On
+    Windows this currently installs Tesseract with winget and implies -WithOCR.
+
 .EXAMPLES
     ./setup_all.ps1
     ./setup_all.ps1 -ConfigureVSCode
@@ -35,6 +43,8 @@
     ./setup_all.ps1 -SkipPy -Force
     ./setup_all.ps1 -CI -PythonVersion 3.12
     ./setup_all.ps1 -SkipMongoDB -ConfigureVSCode
+    ./setup_all.ps1 -WithOCR
+    ./setup_all.ps1 -InstallSystemDeps
 
 .NOTES
     Exit codes: 0 success, non-zero on any failed phase.
@@ -46,7 +56,9 @@ param(
     [switch]$CI,
     [switch]$ConfigureVSCode,
     [string]$PythonVersion,
-    [switch]$SkipMongoDB
+    [switch]$SkipMongoDB,
+    [switch]$WithOCR,
+    [switch]$InstallSystemDeps
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +69,43 @@ $start = Get-Date
 function Write-Phase { param([string]$Msg,[ConsoleColor]$Color=[ConsoleColor]::Cyan) Write-Host $Msg -ForegroundColor $Color }
 function Write-Err   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red }
 function Duration($since) { return [int]((Get-Date) - $since).TotalSeconds }
+
+function Write-OcrSummary {
+    param(
+        [ValidateSet('available', 'unavailable', 'failed')]
+        [string]$State,
+        [bool]$Required
+    )
+
+    $requiredText = if ($Required) { 'true' } else { 'false' }
+    Write-Phase '=== OCR Capability Summary ==='
+    switch ($State) {
+        'available' { Write-Host 'OCR AVAILABLE: Tesseract, English language data, and a real OCR smoke test passed.' -ForegroundColor Green }
+        'unavailable' { Write-Host 'OCR UNAVAILABLE: core setup can run, but image and scanned-PDF OCR is not available.' -ForegroundColor Yellow }
+        'failed' { Write-Host 'OCR FAILED: OCR setup or validation did not complete successfully.' -ForegroundColor Red }
+    }
+    Write-Host ("VON_SETUP_CAPABILITY name=ocr state={0} required={1}" -f $State, $requiredText)
+    if ($State -ne 'available') {
+        Write-Host 'NEXT ACTION: .\setup_all.ps1 -InstallSystemDeps' -ForegroundColor Yellow
+        Write-Host 'VON_SETUP_NEXT_ACTION command=".\setup_all.ps1 -InstallSystemDeps"'
+    }
+}
+
+if ($InstallSystemDeps) {
+    $WithOCR = $true
+}
+
+if ($SkipPy -and $WithOCR) {
+    Write-Err 'Invalid options: OCR setup requires the Python phase; do not combine -SkipPy with -WithOCR or -InstallSystemDeps.'
+    Write-OcrSummary -State 'failed' -Required $true
+    Write-Err '=== SETUP: INCOMPLETE (invalid OCR options) ==='
+    Write-Host 'VON_SETUP_RESULT state=incomplete scope=setup reason=invalid_ocr_options'
+    exit 2
+}
+
+# setup_py.ps1 runs in this PowerShell process and publishes its final OCR state
+# here so the unified summary can report optional as well as required outcomes.
+$env:VON_SETUP_OCR_STATE = ''
 
 Write-Phase "=== Von Unified Setup ==="
 Write-Host  ("Root: {0}" -f $root)
@@ -69,6 +118,8 @@ if (-not $SkipPy) {
     if ($Force) { $pyParams['Reset'] = $true }
     if ($PythonVersion) { $pyParams['PythonVersion'] = $PythonVersion }
     if ($SkipMongoDB) { $pyParams['SkipMongoDB'] = $true }
+    if ($WithOCR) { $pyParams['WithOCR'] = $true }
+    if ($InstallSystemDeps) { $pyParams['InstallSystemDeps'] = $true }
     $pyArgsDisplay = ($pyParams.GetEnumerator() | ForEach-Object {
         $arg = '-' + $_.Key
         if ($_.Value -is [string]) { $arg += ' ' + $_.Value }
@@ -82,6 +133,9 @@ if (-not $SkipPy) {
         Write-Phase ("Python setup completed in {0}s" -f (Duration $pyStart)) 'Green'
     } catch {
         Write-Err "Python setup failed: $($_.Exception.Message)"
+        if ($env:VON_SETUP_OCR_STATE -eq 'available' -or -not $env:VON_SETUP_OCR_STATE) {
+            $env:VON_SETUP_OCR_STATE = 'failed'
+        }
         $overallOk = $false
     }
 } else {
@@ -108,10 +162,27 @@ if (-not $SkipJS) {
 }
 
 $elapsed = Duration $start
+$ocrState = $env:VON_SETUP_OCR_STATE
+if ($ocrState -notin @('available', 'unavailable', 'failed')) {
+    $ocrState = if ($SkipPy) { 'unavailable' } else { 'failed' }
+}
+Write-OcrSummary -State $ocrState -Required ([bool]$WithOCR)
+if ($WithOCR -and $ocrState -ne 'available') {
+    $overallOk = $false
+}
+
 if ($overallOk) {
-    Write-Phase ("=== Unified setup SUCCESS in {0}s ===" -f $elapsed) 'Green'
+    if ($ocrState -eq 'available') {
+        Write-Phase ("=== FULL SETUP: COMPLETE in {0}s ===" -f $elapsed) 'Green'
+        Write-Host 'VON_SETUP_RESULT state=complete scope=full'
+    }
+    else {
+        Write-Phase ("=== CORE SETUP: COMPLETE (OCR unavailable) in {0}s ===" -f $elapsed) 'Yellow'
+        Write-Host 'VON_SETUP_RESULT state=complete scope=core reason=ocr_unavailable'
+    }
     exit 0
 } else {
-    Write-Err   ("=== Unified setup FAILED in {0}s (see above) ===" -f $elapsed)
+    Write-Err   ("=== SETUP: INCOMPLETE in {0}s (see above) ===" -f $elapsed)
+    Write-Host 'VON_SETUP_RESULT state=incomplete scope=setup'
     exit 1
 }

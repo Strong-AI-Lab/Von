@@ -15,6 +15,9 @@
 #   --configure-vscode  Forwarded to setup_py.sh to configure VS Code settings
 #   --python-version V  Forwarded to setup_py.sh to target a specific Python minor version
 #   --skip-mongodb      Skip MongoDB installation checks (forwarded to setup_py.sh)
+#   --with-ocr          Require working image/scanned-PDF OCR; never installs system packages
+#   --install-system-deps
+#                       Explicitly authorise Tesseract installation; implies --with-ocr
 #   --help, -h          Show this help message
 #
 # EXAMPLES:
@@ -24,6 +27,7 @@
 #   ./setup_all.sh --skip-py --force
 #   ./setup_all.sh --ci --python-version 3.12
 #   ./setup_all.sh --skip-mongodb --configure-vscode
+#   ./setup_all.sh --install-system-deps
 
 set -e
 
@@ -42,6 +46,8 @@ CI=0
 CONFIGURE_VSCODE=0
 PYTHON_VERSION=""
 SKIP_MONGODB=0
+WITH_OCR=0
+INSTALL_SYSTEM_DEPS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,6 +79,15 @@ while [[ $# -gt 0 ]]; do
             SKIP_MONGODB=1
             shift
             ;;
+        --with-ocr)
+            WITH_OCR=1
+            shift
+            ;;
+        --install-system-deps)
+            INSTALL_SYSTEM_DEPS=1
+            WITH_OCR=1
+            shift
+            ;;
         --help|-h)
             grep "^# " "$0" | sed 's/^# //'
             exit 0
@@ -85,8 +100,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ $SKIP_PY -eq 1 ]] && { [[ $WITH_OCR -eq 1 ]] || [[ $INSTALL_SYSTEM_DEPS -eq 1 ]]; }; then
+    echo -e "${RED}Invalid options: OCR setup cannot be combined with --skip-py.${NC}"
+    echo "Run OCR setup as your ordinary user with:"
+    echo "  ./setup_all.sh --install-system-deps"
+    exit 2
+fi
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "${HOME}/.local/bin" ]]; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
 OVERALL_OK=1
 START_TIME=$(date +%s)
 
@@ -115,6 +140,12 @@ if [[ $SKIP_PY -eq 0 ]]; then
     if [[ $SKIP_MONGODB -eq 1 ]]; then
         PY_ARGS="$PY_ARGS --skip-mongodb"
     fi
+    if [[ $WITH_OCR -eq 1 ]]; then
+        PY_ARGS="$PY_ARGS --with-ocr"
+    fi
+    if [[ $INSTALL_SYSTEM_DEPS -eq 1 ]]; then
+        PY_ARGS="$PY_ARGS --install-system-deps"
+    fi
     
     echo -e "${CYAN}[1/2] Python setup starting (args:$PY_ARGS)${NC}"
     PY_START=$(date +%s)
@@ -129,6 +160,28 @@ if [[ $SKIP_PY -eq 0 ]]; then
 else
     echo -e "${YELLOW}[1/2] Python setup skipped (--skip-py)${NC}"
 fi
+
+function final_ocr_check() {
+    local python_cmd=""
+    if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
+        python_cmd="$SCRIPT_DIR/.venv/bin/python"
+    elif [[ -x "$SCRIPT_DIR/.venv/Scripts/python.exe" ]]; then
+        python_cmd="$SCRIPT_DIR/.venv/Scripts/python.exe"
+    fi
+
+    [[ -n "$python_cmd" ]] && \
+        "$python_cmd" "$SCRIPT_DIR/scripts/verify_tesseract_ocr.py" --quiet
+}
+
+function print_final_ocr_unavailable() {
+    local required="$1"
+    echo "OCR STATUS: UNAVAILABLE"
+    echo "Image and scanned-PDF OCR will not work."
+    echo "NEXT ACTION: ./setup_all.sh --install-system-deps"
+    echo "Run that command from the Von repository as your ordinary user; do not prefix the whole command with sudo."
+    echo "VON_SETUP_CAPABILITY name=ocr state=unavailable required=${required}"
+    echo 'VON_SETUP_NEXT_ACTION command="./setup_all.sh --install-system-deps"'
+}
 
 # JavaScript Phase
 if [[ $SKIP_JS -eq 0 ]]; then
@@ -155,10 +208,28 @@ else
 fi
 
 ELAPSED=$(duration $START_TIME)
-if [[ $OVERALL_OK -eq 1 ]]; then
-    echo -e "${GREEN}=== Unified setup SUCCESS in ${ELAPSED}s ===${NC}"
+OCR_OK=0
+if final_ocr_check; then
+    OCR_OK=1
+fi
+
+if [[ $WITH_OCR -eq 1 ]] && [[ $OCR_OK -eq 0 ]]; then
+    OVERALL_OK=0
+fi
+
+if [[ $OVERALL_OK -eq 1 ]] && [[ $OCR_OK -eq 1 ]]; then
+    echo -e "${GREEN}=== FULL SETUP: COMPLETE in ${ELAPSED}s ===${NC}"
+    echo "OCR STATUS: AVAILABLE (executable, English data, and real OCR smoke passed)"
+    echo "VON_SETUP_CAPABILITY name=ocr state=available required=$([[ $WITH_OCR -eq 1 ]] && echo true || echo false)"
+    exit 0
+elif [[ $OVERALL_OK -eq 1 ]]; then
+    echo -e "${GREEN}=== CORE SETUP: COMPLETE in ${ELAPSED}s ===${NC}"
+    print_final_ocr_unavailable false
     exit 0
 else
-    echo -e "${RED}=== Unified setup FAILED in ${ELAPSED}s (see above) ===${NC}"
+    echo -e "${RED}=== SETUP: INCOMPLETE in ${ELAPSED}s (see above) ===${NC}"
+    if [[ $OCR_OK -eq 0 ]]; then
+        print_final_ocr_unavailable "$([[ $WITH_OCR -eq 1 ]] && echo true || echo false)"
+    fi
     exit 1
 fi

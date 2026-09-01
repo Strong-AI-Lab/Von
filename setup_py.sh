@@ -11,6 +11,9 @@
 #   --reset              Remove .venv and .vscode directories and start fresh
 #   --python-version VER Specify target Python minor version (e.g., "3.12")
 #   --skip-mongodb       Skip MongoDB installation checks
+#   --with-ocr           Require working OCR; never installs system packages
+#   --install-system-deps
+#                        Explicitly authorise Tesseract installation; implies --with-ocr
 #   --help, -h           Show this help message
 #
 # EXAMPLES:
@@ -20,6 +23,7 @@
 #   ./setup_py.sh --configure-vscode --python-version 3.12
 #   ./setup_py.sh --reset --configure-vscode --python-version 3.11
 #   ./setup_py.sh --skip-mongodb --configure-vscode
+#   ./setup_all.sh --install-system-deps
 
 set -e
 
@@ -35,6 +39,8 @@ CONFIGURE_VSCODE=0
 RESET=0
 PYTHON_VERSION=""
 SKIP_MONGODB=0
+WITH_OCR=0
+INSTALL_SYSTEM_DEPS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,6 +60,15 @@ while [[ $# -gt 0 ]]; do
             SKIP_MONGODB=1
             shift
             ;;
+        --with-ocr)
+            WITH_OCR=1
+            shift
+            ;;
+        --install-system-deps)
+            INSTALL_SYSTEM_DEPS=1
+            WITH_OCR=1
+            shift
+            ;;
         --help|-h)
             grep "^# " "$0" | sed 's/^# //'
             exit 0
@@ -66,9 +81,299 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "${HOME}/.local/bin" ]]; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
+OCR_BASIC_AVAILABLE=0
+OCR_REASON="not_checked"
+TESS_VERSION=""
+
 # Function to check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+print_ocr_unavailable() {
+    local reason="$1"
+    local required="$2"
+    echo ""
+    echo -e "${YELLOW}================================================================${NC}"
+    echo -e "${YELLOW}OCR STATUS: UNAVAILABLE${NC}"
+    echo "Reason: $reason"
+    echo "Image and scanned-PDF OCR will not work."
+    if [[ "$required" == "false" ]]; then
+        echo "Core Von setup will continue without OCR."
+    else
+        echo "OCR was requested, so setup cannot report completion."
+    fi
+    echo ""
+    echo "NEXT ACTION: ./setup_all.sh --install-system-deps"
+    echo "Run that command from the Von repository as your ordinary user."
+    echo "Do not prefix the whole setup command with sudo."
+    echo "VON_SETUP_CAPABILITY name=ocr state=unavailable required=${required}"
+    echo 'VON_SETUP_NEXT_ACTION command="./setup_all.sh --install-system-deps"'
+    echo -e "${YELLOW}================================================================${NC}"
+    echo ""
+}
+
+check_tesseract_basic() {
+    OCR_REASON=""
+    TESS_VERSION=""
+
+    if ! command_exists tesseract; then
+        OCR_REASON="the tesseract executable is not on PATH"
+        return 1
+    fi
+
+    if ! TESS_VERSION=$(tesseract --version 2>/dev/null | head -n1) || [[ -z "$TESS_VERSION" ]]; then
+        OCR_REASON="tesseract --version failed"
+        return 1
+    fi
+
+    local languages
+    if ! languages=$(tesseract --list-langs 2>/dev/null); then
+        OCR_REASON="tesseract --list-langs failed"
+        return 1
+    fi
+    if ! printf '%s\n' "$languages" | grep -qx 'eng'; then
+        OCR_REASON="the required English language data (eng) is missing"
+        return 1
+    fi
+
+    return 0
+}
+
+install_tesseract_debian_user_local() {
+    local command_name
+    for command_name in apt-get apt-cache dpkg dpkg-query dpkg-deb dpkg-architecture; do
+        if ! command_exists "$command_name"; then
+            echo -e "${RED}Cannot perform an ordinary-user install: $command_name is unavailable.${NC}"
+            return 1
+        fi
+    done
+
+    local candidate_version architecture safe_version base_dir target_dir current_link bin_dir
+    candidate_version=$(apt-cache policy tesseract-ocr | awk '/Candidate:/ {print $2; exit}')
+    if [[ -z "$candidate_version" ]] || [[ "$candidate_version" == "(none)" ]]; then
+        echo -e "${RED}No installable tesseract-ocr package is present in the current apt package lists.${NC}"
+        return 1
+    fi
+    architecture=$(dpkg --print-architecture 2>/dev/null || dpkg-architecture -qDEB_HOST_ARCH)
+    safe_version=$(printf '%s' "$candidate_version" | tr '/:+~' '____')
+    base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/von/system-deps"
+    target_dir="${base_dir}/tesseract-${safe_version}-${architecture}"
+    current_link="${base_dir}/tesseract-current"
+    bin_dir="${HOME}/.local/bin"
+
+    echo -e "${CYAN}sudo is unavailable without a password; installing Ubuntu/Debian Tesseract packages for this ordinary user.${NC}"
+    echo "User-local prefix: $target_dir"
+
+    local download_dir staging_dir
+    download_dir=$(mktemp -d "${TMPDIR:-/tmp}/von-tesseract.XXXXXX") || return 1
+    staging_dir="${download_dir}/root"
+    mkdir -p "$staging_dir"
+
+    local -a packages=( )
+    local -a queue=(tesseract-ocr tesseract-ocr-eng)
+    local -a processed=( )
+    local package status existing already_seen dependency package_candidate
+    while [[ ${#queue[@]} -gt 0 ]]; do
+        package="${queue[0]}"
+        queue=("${queue[@]:1}")
+        [[ "$package" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?$ ]] || continue
+        already_seen=0
+        for existing in "${processed[@]}"; do
+            if [[ "$existing" == "$package" ]]; then
+                already_seen=1
+                break
+            fi
+        done
+        [[ $already_seen -eq 1 ]] && continue
+        processed+=("$package")
+
+        # An installed dependency is already resolved by the host linker and
+        # package database; do not recursively download its unrelated subtree.
+        status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
+        if [[ "$status" == ii* ]]; then
+            continue
+        fi
+
+        package_candidate=$(apt-cache policy "$package" | awk '/Candidate:/ {print $2; exit}')
+        if [[ -z "$package_candidate" ]] || [[ "$package_candidate" == "(none)" ]]; then
+            echo -e "${RED}No downloadable apt candidate was found for required package $package.${NC}"
+            return 1
+        fi
+        packages+=("$package")
+
+        while IFS= read -r dependency; do
+            [[ -n "$dependency" ]] && queue+=("$dependency")
+        done < <(
+            apt-cache depends --important "$package" 2>/dev/null \
+                | sed -nE 's/^[[:space:]]*(Pre)?Depends:[[:space:]]+([^<[:space:]]+).*$/\2/p'
+        )
+    done
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        packages=(tesseract-ocr tesseract-ocr-eng)
+    fi
+
+    echo "Downloading distro packages without administrative privileges: ${packages[*]}"
+    if ! (cd "$download_dir" && apt-get download "${packages[@]}"); then
+        rm -rf -- "$download_dir"
+        echo -e "${RED}The ordinary-user apt package download failed.${NC}"
+        return 1
+    fi
+
+    local deb found_deb=0
+    for deb in "$download_dir"/*.deb; do
+        [[ -f "$deb" ]] || continue
+        found_deb=1
+        if ! dpkg-deb -x "$deb" "$staging_dir"; then
+            rm -rf -- "$download_dir"
+            echo -e "${RED}Failed to extract $(basename "$deb").${NC}"
+            return 1
+        fi
+    done
+    if [[ $found_deb -eq 0 ]] || [[ ! -x "$staging_dir/usr/bin/tesseract" ]]; then
+        rm -rf -- "$download_dir"
+        echo -e "${RED}Downloaded packages did not provide a Tesseract executable.${NC}"
+        return 1
+    fi
+
+    mkdir -p "$base_dir" "$bin_dir"
+    if [[ -e "$target_dir" ]]; then
+        if [[ ! -x "$target_dir/usr/bin/tesseract" ]]; then
+            rm -rf -- "$target_dir"
+            mv "$staging_dir" "$target_dir"
+        fi
+    else
+        mv "$staging_dir" "$target_dir"
+    fi
+    rm -rf -- "$download_dir"
+
+    if [[ -e "$current_link" ]] && [[ ! -L "$current_link" ]]; then
+        echo -e "${RED}Cannot update $current_link because it is not a symbolic link.${NC}"
+        return 1
+    fi
+    ln -sfn "$target_dir" "$current_link"
+
+    local wrapper_path="${bin_dir}/tesseract"
+    if [[ -e "$wrapper_path" ]] || [[ -L "$wrapper_path" ]]; then
+        if ! grep -q '^# Managed by Von setup_all.sh$' "$wrapper_path" 2>/dev/null; then
+            echo -e "${RED}Refusing to replace existing non-Von file: $wrapper_path${NC}"
+            return 1
+        fi
+    fi
+
+    local wrapper_tmp="${bin_dir}/.tesseract.von.$$"
+    cat > "$wrapper_tmp" <<'WRAPPER'
+#!/usr/bin/env sh
+# Managed by Von setup_all.sh
+set -eu
+prefix="${XDG_DATA_HOME:-${HOME}/.local/share}/von/system-deps/tesseract-current"
+architecture="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+library_path="${prefix}/usr/lib"
+if [ -n "$architecture" ]; then
+    library_path="${prefix}/usr/lib/${architecture}:${library_path}"
+fi
+export LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+for candidate in "${prefix}"/usr/share/tesseract-ocr/*/tessdata; do
+    if [ -d "$candidate" ]; then
+        export TESSDATA_PREFIX="${candidate}/"
+        break
+    fi
+done
+exec "${prefix}/usr/bin/tesseract" "$@"
+WRAPPER
+    chmod 0755 "$wrapper_tmp"
+    mv "$wrapper_tmp" "$wrapper_path"
+    export PATH="${bin_dir}:${PATH}"
+    return 0
+}
+
+install_tesseract_system_dependency() {
+    case "$(uname -s 2>/dev/null || true)" in
+        Darwin)
+            if ! command_exists brew; then
+                echo -e "${RED}Homebrew is required to install Tesseract on macOS.${NC}"
+                return 1
+            fi
+            echo "Installing Tesseract with: brew install tesseract"
+            brew install tesseract
+            ;;
+        Linux)
+            if ! command_exists apt-get; then
+                echo -e "${RED}Automatic Tesseract installation currently supports apt-based Linux distributions.${NC}"
+                return 1
+            fi
+            if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+                echo "Installing Tesseract with apt-get (already running as root)."
+                apt-get update
+                apt-get install -y tesseract-ocr tesseract-ocr-eng
+            elif command_exists sudo && sudo -n true >/dev/null 2>&1; then
+                echo "Installing Tesseract with: sudo apt-get update"
+                sudo -n apt-get update
+                echo "Installing Tesseract with: sudo apt-get install -y tesseract-ocr tesseract-ocr-eng"
+                sudo -n apt-get install -y tesseract-ocr tesseract-ocr-eng
+            else
+                install_tesseract_debian_user_local
+            fi
+            ;;
+        *)
+            echo -e "${RED}Automatic Tesseract installation is unsupported on this operating system.${NC}"
+            return 1
+            ;;
+    esac
+}
+
+prepare_tesseract() {
+    echo -e "${CYAN}Checking the Tesseract executable and English language data...${NC}"
+    if check_tesseract_basic; then
+        OCR_BASIC_AVAILABLE=1
+        echo -e "${GREEN}Tesseract basic checks passed: $TESS_VERSION; eng available.${NC}"
+        return 0
+    fi
+
+    print_ocr_unavailable "$OCR_REASON" "$([[ $WITH_OCR -eq 1 ]] && echo true || echo false)"
+    if [[ $INSTALL_SYSTEM_DEPS -eq 0 ]]; then
+        [[ $WITH_OCR -eq 0 ]]
+        return
+    fi
+
+    echo -e "${CYAN}--install-system-deps was provided; installing Tesseract now.${NC}"
+    if ! install_tesseract_system_dependency; then
+        OCR_REASON="the authorised Tesseract installation command failed"
+        print_ocr_unavailable "$OCR_REASON" true
+        return 1
+    fi
+    hash -r
+    if ! check_tesseract_basic; then
+        print_ocr_unavailable "installation completed but verification failed: $OCR_REASON" true
+        return 1
+    fi
+    OCR_BASIC_AVAILABLE=1
+    echo -e "${GREEN}Tesseract installation verified at the executable/language level: $TESS_VERSION; eng available.${NC}"
+}
+
+verify_tesseract_runtime() {
+    local required="$([[ $WITH_OCR -eq 1 ]] && echo true || echo false)"
+    if [[ $OCR_BASIC_AVAILABLE -eq 0 ]]; then
+        print_ocr_unavailable "$OCR_REASON" "$required"
+        [[ $WITH_OCR -eq 0 ]]
+        return
+    fi
+
+    if "$VENV_PYTHON" "$SCRIPT_DIR/scripts/verify_tesseract_ocr.py"; then
+        echo "OCR STATUS: AVAILABLE"
+        echo "VON_SETUP_CAPABILITY name=ocr state=available required=${required}"
+        return 0
+    fi
+
+    OCR_REASON="the real Pillow/pytesseract OCR smoke test failed"
+    print_ocr_unavailable "$OCR_REASON" "$required"
+    [[ $WITH_OCR -eq 0 ]]
 }
 
 # Function to reset environment
@@ -364,7 +669,7 @@ main() {
     if [[ $RESET -eq 1 ]]; then
         reset_environment
         # Check if ONLY reset was requested
-        if [[ $CONFIGURE_VSCODE -eq 0 ]] && [[ -z "$PYTHON_VERSION" ]]; then
+        if [[ $CONFIGURE_VSCODE -eq 0 ]] && [[ -z "$PYTHON_VERSION" ]] && [[ $WITH_OCR -eq 0 ]]; then
             echo -e "${GREEN}Environment reset complete. Exiting as no setup flags were provided.${NC}"
             exit 0
         fi
@@ -387,16 +692,8 @@ main() {
         echo -e "${YELLOW}Skipping MongoDB installation checks (-skip-mongodb flag set).${NC}"
     fi
 
-    echo -e "${CYAN}Checking for Tesseract OCR...${NC}"
-    if command_exists tesseract; then
-        TESS_VERSION=$(tesseract --version | head -n1)
-        echo -e "${GREEN}Tesseract OCR found: $TESS_VERSION${NC}"
-    else
-        echo -e "${YELLOW}Tesseract OCR not found. Please install manually:${NC}"
-        echo -e "  macOS: ${CYAN}brew install tesseract${NC}"
-        echo -e "  Ubuntu/Debian: ${CYAN}sudo apt install tesseract-ocr${NC}"
-        echo -e "  Or see: https://github.com/tesseract-ocr/tesseract"
-        echo -e "${YELLOW}Continuing with Python setup...${NC}"
+    if ! prepare_tesseract; then
+        exit 1
     fi
 
     # Ensure .env file exists
@@ -474,6 +771,10 @@ main() {
         else
             echo -e "${YELLOW}⚠ Some Python packages may not be installed correctly${NC}"
         fi
+    fi
+
+    if ! verify_tesseract_runtime; then
+        exit 1
     fi
 
     # Configure VS Code if requested
