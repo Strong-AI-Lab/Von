@@ -25,8 +25,9 @@ the internal MCP gateway, and the stdio MCP manifest.
 - `gmail_list_labels(profile)` lists labels.
 - `gmail_modify_labels(profile, message_id, allow_mutation, add_labels?,
   remove_labels?)` performs guarded label mutation.
-- `gmail_send_message(profile, to, subject, body_text, allow_send, cc?, bcc?,
-  reply_to?, body_html?)` sends outbound email and returns Gmail send metadata.
+- `gmail_send_message(profile, to, subject, body_text, allow_send, request_id,
+  cc?, bcc?, reply_to?)` sends outbound email and returns Gmail send metadata.
+  Ordinary turns additionally bind a hidden turn idempotency scope.
 
 The default posture remains read-only. Durable import, mutations, and sends are
 available only through explicit guard fields and the applicable actor,
@@ -80,6 +81,13 @@ side effect; that authority remains in Vontology/workflow/prompt/tool metadata.
   inspection never imports, indexes, enriches, or represents the source. The
   tool descriptions and prompt authority instruct planners not to treat reads
   or label changes as evidence of sending.
+- **Per-intent outbound idempotency**: Direct trusted callers use `request_id`
+  as the identity of one exact delivery; reusing it with different content
+  fails closed. Ordinary turns bind a separate trusted turn scope, and the
+  Gmail boundary derives a private digest from that scope plus the normalised
+  recipients, subject, body, language, and authorship. Distinct messages in one
+  turn can therefore proceed independently, while exact retries converge even
+  if provider call IDs change. Only hashes and counts enter the delivery ledger.
 - **Compact untrusted evidence**: Message detail keeps stable message/thread and
   attachment identifiers, normalised headers, labels, and bounded text only.
   MIME traversal, decoded body bytes, archive expansion, document structures,
@@ -164,6 +172,9 @@ Optional default:
 - Turn-level validation must not claim an email was sent unless authenticated
   Gmail send execution returned success evidence for the resolved profile,
   recipient, subject, and body.
+- Turn-level validation should cover two distinct sends in one turn, exact
+  replay of each without another provider dispatch or quota reservation, and
+  legacy changed-content reuse of one direct request ID failing closed.
 
 ## Risks and mitigations
 

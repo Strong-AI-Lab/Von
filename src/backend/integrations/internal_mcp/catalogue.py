@@ -28954,6 +28954,7 @@ def _gmail_send_message(**kwargs):
             allow_send=allow_send,
             profile_resource_concept_id=profile_resource_id,
             request_id=request_id_value,
+            idempotency_scope=kwargs.get("idempotency_scope"),
             acting_user_concept_id=principal.user_concept_id,
             organisation_concept_id=principal.organisation_concept_id,
             audit_context={
@@ -39527,6 +39528,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "reply_to": (str, list),
             "body_language": str,
             "body_authorship": str,
+            "idempotency_scope": str,
             "namespace": (str, type(None)),
             "acting_user_concept_id": (str, type(None)),
             "organisation_concept_id": (str, type(None)),
@@ -40239,6 +40241,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "acting_user_concept_id": "actor_user_concept_id",
                 "organisation_concept_id": "actor_organisation_concept_id",
                 "request_id": "turn_id",
+                "idempotency_scope": "turn_id",
                 "namespace": "turn_namespace",
             },
             ordinary_turn_trusted_argument_choice_bindings={

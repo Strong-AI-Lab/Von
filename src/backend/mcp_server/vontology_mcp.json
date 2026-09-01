@@ -3361,6 +3361,9 @@
                             "unspecified"
                         ]
                     },
+                    "idempotency_scope": {
+                        "type": "string"
+                    },
                     "namespace": {
                         "type": [
                             "string",

@@ -603,6 +603,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "acting_user_concept_id": "actor_user_concept_id",
         "organisation_concept_id": "actor_organisation_concept_id",
         "request_id": "turn_id",
+        "idempotency_scope": "turn_id",
         "namespace": "turn_namespace",
     }
     assert gmail_send_definition.ordinary_turn_trusted_argument_choice_bindings == {
@@ -1978,6 +1979,7 @@ def test_gmail_send_message_registered_and_gateway_invokes(
     assert captured["body_authorship"] == "von_drafted"
     assert captured["allow_send"] is True
     assert captured["request_id"] == "turn-send-1"
+    assert captured["idempotency_scope"] is None
     assert (
         captured["profile_resource_concept_id"]
         == "#V#gmail_profile_zhan_gmail"
