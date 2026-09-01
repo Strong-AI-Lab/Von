@@ -37718,7 +37718,7 @@ async function buildLlmDebugClipboardJsonForTurn(turnId) {
         && Number.isInteger(historyLocation.history_index)
         && historyLocation.history_index >= 0
     );
-    const fetchedCapsule = requestId && hasExactHistoryLocation
+    const fetchedCapsule = hasExactHistoryLocation
         ? await fetchTurnFailureCapsule({
             requestId,
             sessionId: historyLocation?.session_id || null,
@@ -38838,13 +38838,21 @@ async function fetchTurnFailureCapsule({
     historyIndex = null
 } = {}) {
     const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
-    if (!cleanRequestId) {
+    const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+    const hasExactHistoryLocation = Boolean(
+        cleanSessionId
+        && Number.isInteger(historyIndex)
+        && historyIndex >= 0
+    );
+    if (!cleanRequestId && !hasExactHistoryLocation) {
         return null;
     }
 
     try {
-        const params = new URLSearchParams({ request_id: cleanRequestId });
-        const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+        const params = new URLSearchParams();
+        if (cleanRequestId) {
+            params.set('request_id', cleanRequestId);
+        }
         if (cleanSessionId) {
             params.set('session_id', cleanSessionId);
         }
@@ -38862,7 +38870,9 @@ async function fetchTurnFailureCapsule({
         if (!response.ok || !body || typeof body !== 'object') {
             return null;
         }
-        return projectTurnFailureCapsule(body, { expectedRequestId: cleanRequestId });
+        return projectTurnFailureCapsule(body, {
+            expectedRequestId: cleanRequestId || null
+        });
     } catch (error) {
         console.warn('[chatTab] Failed to fetch bounded turn failure capsule:', error);
         return null;
