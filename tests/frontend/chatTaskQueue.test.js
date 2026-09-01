@@ -4,6 +4,7 @@ const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTa
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
+    fetchWithTimeout: jest.fn(),
     getUserContext: jest.fn(),
     getWindowSessionId: jest.fn(() => 'mock-window-session-id'),
     postJson: jest.fn(),
@@ -52,6 +53,8 @@ describe('chat task queue', () => {
             <textarea id="promptInput"></textarea>
             <input type="checkbox" id="annotationToggle" />
         `;
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        fetchWithTimeout.mockReset();
         const chatTab = require(chatTabModulePath);
         chatTab.__testOnly_resetChatRequestState();
         chatTab.__testOnly_setActiveChatSession('session-1', 'Current');
@@ -1697,6 +1700,209 @@ describe('chat task queue', () => {
         expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
         expect(fetchCalls.some((call) => String(call.url).includes('/claim'))).toBe(false);
         expect(fetchCalls.some((call) => String(call.url).includes('/finish'))).toBe(false);
+    }, 15000);
+
+    test('adopts an in-progress linked retry into the Thinking card and delivers its result', async () => {
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_getLiveChatRequestForSession,
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+        const fetchCalls = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+                fetchCalls.push({ url, options });
+                if (url === '/von/api/chat_prompt_queue') {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            success: true,
+                            items: [{
+                                queue_id: 'queue-retry',
+                                retry_source_queue_id: 'queue-failed',
+                                prompt_raw: 'Retry me with visible progress',
+                                status: 'in_progress',
+                                dispatch_mode: 'server',
+                                session_id: 'session-1',
+                                session_name: 'Current',
+                                enqueue_submission_id: 'enqueue-retry',
+                                client_request_id: 'request-retry',
+                                attempt_id: 'attempt-retry',
+                                claimed_at: '2026-09-01T19:42:00Z'
+                            }]
+                        })
+                    });
+                }
+                if (url === '/von/progress/request-retry') {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            request_id: 'request-retry',
+                            status: 'working',
+                            phase: 'adaptive_research',
+                            phase_label: 'Researching',
+                            result_summary: 'Retry is running on the server.'
+                        })
+                    });
+                }
+                if (url === '/von/api/task/status/request-retry') {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ status: 'completed' })
+                    });
+                }
+                if (url === '/von/api/task/result/request-retry') {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            status: 'completed',
+                            result: {
+                                response: 'The retried task completed visibly.',
+                                llm_debug: { model: 'test-model' }
+                            }
+                        })
+                    });
+                }
+                if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                    const body = JSON.parse(options.body || '{}');
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ html: String(body.text || '') })
+                    });
+                }
+                if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ history_length: 2, authenticated: true })
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true })
+                });
+        });
+        fetchWithTimeout.mockImplementation((url, options = {}) => global.fetch(url, options));
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const observedRequest = __testOnly_getLiveChatRequestForSession('session-1');
+        expect(observedRequest).toMatchObject({
+            aborted: false,
+            clientRequestId: 'request-retry',
+            observingServerDispatch: true,
+            sessionKey: 'session-1'
+        });
+        expect(observedRequest?.foregroundDeliveryCompleted).not.toBe(true);
+        expect(observedRequest?.foregroundTaskResultPoll).toBeTruthy();
+
+        expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden'))
+            .toBe('false');
+        expect(document.getElementById('abortButton')?.getAttribute('aria-hidden'))
+            .toBe('false');
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+        expect(document.getElementById('scrollableField')?.textContent)
+            .not.toContain('Retry me with visible progress');
+        expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/generate')))
+            .toBe(false);
+
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(observedRequest?.aborted).toBe(false);
+        expect(fetchCalls.map(({ url }) => url))
+            .toContain('/von/api/task/status/request-retry');
+        expect(fetchCalls.filter(({ url }) => url === '/von/api/task/result/request-retry'))
+            .toHaveLength(1);
+        expect(document.querySelector('.chat-message-text')?.dataset.originalText)
+            .toBe('The retried task completed visibly.');
+        expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/generate')))
+            .toBe(false);
+    }, 15000);
+
+    test('Stop cancels the exact server-owned retry without submitting another generation', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+        const fetchCalls = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+            if (url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        items: [{
+                            queue_id: 'queue-retry-stop',
+                            retry_source_queue_id: 'queue-failed-stop',
+                            prompt_raw: 'Retry and then stop me',
+                            status: 'in_progress',
+                            dispatch_mode: 'server',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            enqueue_submission_id: 'enqueue-retry-stop',
+                            client_request_id: 'request-retry-stop',
+                            attempt_id: 'attempt-retry-stop'
+                        }]
+                    })
+                });
+            }
+            if (url === '/von/progress/request-retry-stop') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        request_id: 'request-retry-stop',
+                        status: 'working',
+                        result_summary: 'Still running.'
+                    })
+                });
+            }
+            if (
+                url === '/von/api/task/cancel/request-retry-stop'
+                && options.method === 'POST'
+            ) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true, status: 'cancelled' })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({ success: true })
+            });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        await Promise.resolve();
+        expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden'))
+            .toBe('false');
+
+        document.getElementById('abortButton').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(fetchCalls.filter(({ url }) => (
+            url === '/von/api/task/cancel/request-retry-stop'
+        ))).toHaveLength(1);
+        expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/generate')))
+            .toBe(false);
+        expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden'))
+            .toBe('true');
+        expect(document.getElementById('promptInput')?.value).toBe('');
     }, 15000);
 
     test('retains failure evidence when linked retry is not accepted', async () => {
