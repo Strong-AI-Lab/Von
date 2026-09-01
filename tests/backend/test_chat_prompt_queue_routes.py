@@ -345,6 +345,190 @@ def test_chat_prompt_queue_route_dismisses_failed_record_durably(client) -> None
     assert payload["turn_admission"]["pending_admission"] == 0
 
 
+def test_failed_queue_retry_creates_one_linked_successor_across_request_ids(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.wake_chat_prompt_queue_dispatcher",
+        lambda: None,
+    )
+    created = client.post(
+        "/von/api/chat_prompt_queue",
+        json={
+            "prompt_raw": "Try the research task again",
+            "session_id": "session-retry",
+            "session_name": "Research",
+        },
+    ).get_json()["item"]
+    failure_message = "model_error"
+    failed = client.post(
+        f"/von/api/chat_prompt_queue/{created['queue_id']}/finish",
+        json={"status": "failed", "error": failure_message},
+    ).get_json()["item"]
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    completed_at_before_retry = coll.find_one(
+        {"queue_id": created["queue_id"]}
+    )["completed_at"]
+
+    first = client.post(
+        f"/von/api/chat_prompt_queue/{created['queue_id']}/retry",
+        json={"retry_request_id": "retry-tab-a"},
+    )
+    second = client.post(
+        f"/von/api/chat_prompt_queue/{created['queue_id']}/retry",
+        json={"retry_request_id": "retry-tab-b"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    first_payload = first.get_json()
+    second_payload = second.get_json()
+    successor = first_payload["item"]
+    assert successor["queue_id"] != created["queue_id"]
+    assert successor["retry_source_queue_id"] == created["queue_id"]
+    assert successor["retry_request_id"] == "retry-tab-a"
+    assert successor["status"] == "queued"
+    assert successor["dispatch_mode"] == "server"
+    assert successor["dispatch_ready"] is True
+    assert second_payload["item"]["queue_id"] == successor["queue_id"]
+    assert second_payload["idempotent_replay"] is True
+
+    assert coll.count_documents({}) == 2
+    source = coll.find_one({"queue_id": created["queue_id"]})
+    assert source is not None
+    assert source["status"] == "failed"
+    assert source["last_error"] == failure_message
+    assert source["completed_at"] == completed_at_before_retry
+    assert failed["completed_at"] is not None
+    assert source["retried_by_queue_id"] == successor["queue_id"]
+    persisted_successor = coll.find_one({"queue_id": successor["queue_id"]})
+    assert persisted_successor is not None
+    assert persisted_successor["execution_envelope"] == {
+        "initiation_id": f"queue-retry:{created['queue_id']}",
+        "turn_kind": "user_message",
+    }
+
+    visible = client.get("/von/api/chat_prompt_queue").get_json()
+    assert [row["queue_id"] for row in visible["items"]] == [
+        successor["queue_id"]
+    ]
+    assert visible["recent_failed_items"] == []
+
+
+def test_failed_task_retry_preserves_task_and_conversation_lineage(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services.task_execution_service import (
+        task_execution_concept_id_for_launch,
+        task_execution_enqueue_submission_id_for_launch,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.wake_chat_prompt_queue_dispatcher",
+        lambda: None,
+    )
+    reconciled: dict = {}
+
+    def _reconcile(queue_record):
+        reconciled.update(queue_record)
+        return {
+            "task_execution_concept_id": queue_record[
+                "task_execution_concept_id"
+            ],
+            "queue_id": queue_record["queue_id"],
+            "enqueue_submission_id": queue_record["enqueue_submission_id"],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.reconcile_task_execution_queue_record",
+        _reconcile,
+    )
+    scope = chat_prompt_queue_service.build_queue_scope(
+        user_concept_id="#V#test_user",
+        organisation_concept_id="#V#test_org",
+        namespace="#V#test_user@test_org",
+    )
+    task_id = "#V#task_retry_test"
+    initial_launch_id = "initial-task-launch"
+    initial_execution_id = task_execution_concept_id_for_launch(
+        task_concept_id=task_id,
+        creator_concept_id="#V#test_user",
+        organisation_concept_id="#V#test_org",
+        launch_request_id=initial_launch_id,
+    )
+    initial_enqueue_id = task_execution_enqueue_submission_id_for_launch(
+        task_concept_id=task_id,
+        creator_concept_id="#V#test_user",
+        organisation_concept_id="#V#test_org",
+        launch_request_id=initial_launch_id,
+    )
+    source = chat_prompt_queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Execute the assigned task",
+        session_id="session-task-retry",
+        session_name="Task conversation",
+        source="von_task",
+        conversation_key="conversation-task-retry",
+        enqueue_submission_id=initial_enqueue_id,
+        dispatch_mode="server",
+        execution_envelope_version=1,
+        execution_envelope={
+            "initiation_id": initial_launch_id,
+            "turn_kind": "user_message",
+            "workflow_inputs": {
+                "task_concept_id": task_id,
+                "task_execution_concept_id": initial_execution_id,
+                "originating_conversation_concept_id": "#V#conversation_retry",
+                "conversation_session_id": "session-task-retry",
+                "authority_actor_concept_id": "#V#test_user",
+                "authority_organisation_concept_id": "#V#test_org",
+                "authority_namespace": "#V#test_user@test_org",
+                "executor_concept_id": "#V#von",
+            },
+        },
+        task_concept_id=task_id,
+        task_execution_concept_id=initial_execution_id,
+    )
+    reservation = chat_prompt_queue_service.reserve_next_server_dispatch(
+        server_instance_id="test-server"
+    )
+    assert reservation is not None
+    assert chat_prompt_queue_service.fail_server_dispatch_reservation(
+        queue_id=source["queue_id"],
+        dispatch_reservation_token=reservation["dispatch_reservation_token"],
+        server_instance_id="test-server",
+        error="model_error",
+    )
+
+    response = client.post(
+        f"/von/api/chat_prompt_queue/{source['queue_id']}/retry",
+        json={"retry_request_id": "task-retry-click"},
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    successor = payload["item"]
+    assert successor["task_concept_id"] == task_id
+    assert successor["task_execution_concept_id"] != initial_execution_id
+    assert successor["retry_source_task_execution_concept_id"] == (
+        initial_execution_id
+    )
+    assert successor["dispatch_ready"] is True
+    assert reconciled["session_id"] == "session-task-retry"
+    assert reconciled["conversation_key"] == "conversation-task-retry"
+    workflow_inputs = reconciled["execution_envelope"]["workflow_inputs"]
+    assert workflow_inputs["task_execution_concept_id"] == successor[
+        "task_execution_concept_id"
+    ]
+    assert workflow_inputs["retry_of_queue_id"] == source["queue_id"]
+    assert workflow_inputs["retry_of_task_execution_concept_id"] == (
+        initial_execution_id
+    )
+
+
 def test_queue_routes_cannot_release_a_live_server_bound_turn(client) -> None:
     created = client.post(
         "/von/api/chat_prompt_queue",

@@ -2458,6 +2458,15 @@ def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
                 "handoff_source_queue_id": {"$exists": True, "$type": "string"}
             },
         )
+    if "retry_source_queue_id_unique" not in existing_indexes:
+        coll.create_index(
+            [("retry_source_queue_id", ASCENDING)],
+            name="retry_source_queue_id_unique",
+            unique=True,
+            partialFilterExpression={
+                "retry_source_queue_id": {"$exists": True, "$type": "string"}
+            },
+        )
     if "active_legacy_submission_key_unique" not in existing_indexes:
         coll.create_index(
             [("active_legacy_submission_key", ASCENDING)],

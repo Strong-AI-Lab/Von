@@ -34285,6 +34285,26 @@ function normaliseChatPromptQueueEntry(rawEntry, fallback = {}) {
         enqueueUnconfirmed: rawEntry.enqueueUnconfirmed === true
             || fallback.enqueueUnconfirmed === true,
         deleteInFlight: rawEntry.deleteInFlight === true || fallback.deleteInFlight === true,
+        retryInFlight: rawEntry.retryInFlight === true || fallback.retryInFlight === true,
+        retryRequestId: rawEntry.retryRequestId
+            || fallback.retryRequestId
+            || null,
+        acceptedRetryRequestId: rawEntry.retry_request_id
+            || rawEntry.acceptedRetryRequestId
+            || fallback.acceptedRetryRequestId
+            || null,
+        retrySourceQueueId: rawEntry.retry_source_queue_id
+            || rawEntry.retrySourceQueueId
+            || fallback.retrySourceQueueId
+            || null,
+        retrySourceTaskExecutionConceptId: rawEntry.retry_source_task_execution_concept_id
+            || rawEntry.retrySourceTaskExecutionConceptId
+            || fallback.retrySourceTaskExecutionConceptId
+            || null,
+        retriedByQueueId: rawEntry.retried_by_queue_id
+            || rawEntry.retriedByQueueId
+            || fallback.retriedByQueueId
+            || null,
         handoffSourceQueueId: rawEntry.handoff_source_queue_id
             || rawEntry.handoffSourceQueueId
             || fallback.handoffSourceQueueId
@@ -34470,6 +34490,7 @@ function getSelectedChatPromptQueueEntryForSend() {
         || !isDisplayedChatPromptQueueEntry(entry)
         || !isChatPromptQueueEntryForSession(entry)
         || isServerDispatchedChatPromptQueueEntry(entry)
+        || entry.status === CHAT_PROMPT_QUEUE_STATUS_FAILED
         || entry.enqueueFailed === true
         || entry.handoffEnqueueSubmissionId
         || entry.supersededByQueueId
@@ -34481,7 +34502,6 @@ function getSelectedChatPromptQueueEntryForSend() {
     }
     if (
         entry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED
-        && entry.status !== CHAT_PROMPT_QUEUE_STATUS_FAILED
     ) {
         return null;
     }
@@ -34985,6 +35005,30 @@ async function deletePersistedChatPromptQueueEntry(entry) {
     return true;
 }
 
+async function retryFailedChatPromptQueueEntry(entry) {
+    if (!entry?.queueId) {
+        throw new Error('The canonical failed queue record is unavailable.');
+    }
+    const retryRequestId = (
+        typeof entry.retryRequestId === 'string'
+        && entry.retryRequestId.trim()
+    )
+        ? entry.retryRequestId.trim()
+        : createClientRequestId();
+    entry.retryRequestId = retryRequestId;
+    const data = await fetchChatPromptQueueJson(
+        `/${encodeURIComponent(entry.queueId)}/retry`,
+        {
+            method: 'POST',
+            body: JSON.stringify({ retry_request_id: retryRequestId })
+        }
+    );
+    if (!data.item) {
+        throw new Error('Retry returned no canonical successor.');
+    }
+    return normaliseChatPromptQueueEntry(data.item);
+}
+
 async function completePersistedChatPromptQueueHandoff(entry) {
     if (!entry?.queueId) {
         throw new Error('The canonical handoff queue record is unavailable.');
@@ -35226,10 +35270,10 @@ function ensureChatTaskQueuePanel() {
         panel.id = CHAT_TASK_QUEUE_PANEL_ID;
         panel.className = 'chat-task-queue-panel hidden';
         panel.setAttribute('aria-live', 'polite');
-        panel.setAttribute('aria-label', 'Queued prompts for this conversation');
+        panel.setAttribute('aria-label', 'Conversation activity and queued prompts');
         panel.innerHTML = `
             <div class="chat-task-queue-header">
-                <span class="chat-task-queue-title">Queued prompts</span>
+                <span class="chat-task-queue-title">Conversation activity</span>
                 <span id="${CHAT_TASK_QUEUE_COUNT_ID}" class="chat-task-queue-count">0 queued</span>
             </div>
             <div id="${CHAT_TASK_QUEUE_LIST_ID}" class="chat-task-queue-list"></div>
@@ -35442,10 +35486,17 @@ function ensureChatTaskQueuePanel() {
                     return;
                 }
                 const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
-                if (!queued || queued.status !== CHAT_PROMPT_QUEUE_STATUS_FAILED) {
+                if (
+                    !queued
+                    || queued.status !== CHAT_PROMPT_QUEUE_STATUS_FAILED
+                    || queued.retryInFlight === true
+                ) {
                     return;
                 }
+                queued.deleteInFlight = true;
+                queued.syncError = null;
                 dismissButton.disabled = true;
+                renderChatTaskQueuePanel();
                 void (async () => {
                     try {
                         await deletePersistedChatPromptQueueEntry(queued);
@@ -35458,11 +35509,59 @@ function ensureChatTaskQueuePanel() {
                         updateSendButtonForCurrentChatState();
                         publishChatPromptQueueChange('failed_prompt_dismissed');
                     } catch (error) {
+                        queued.deleteInFlight = false;
                         queued.syncError = describeChatPromptQueueApiError(
                             error,
                             'Failed task could not be dismissed on the server.'
                         );
                         console.warn('[chatTab] Unable to dismiss failed prompt:', error);
+                        renderChatTaskQueuePanel();
+                    }
+                })();
+                return;
+            }
+            const failedRetryButton = target.closest('.chat-task-queue-failed-retry');
+            if (failedRetryButton) {
+                const queueId = String(
+                    failedRetryButton.getAttribute('data-queue-id') || ''
+                ).trim();
+                const failedEntry = queuedChatPrompts.find(
+                    (entry) => entry.id === queueId
+                );
+                if (
+                    !failedEntry
+                    || failedEntry.status !== CHAT_PROMPT_QUEUE_STATUS_FAILED
+                    || failedEntry.retryInFlight === true
+                    || failedEntry.deleteInFlight === true
+                ) {
+                    return;
+                }
+                failedEntry.retryInFlight = true;
+                failedEntry.syncError = null;
+                renderChatTaskQueuePanel();
+                void (async () => {
+                    try {
+                        const successor = await retryFailedChatPromptQueueEntry(
+                            failedEntry
+                        );
+                        queuedChatPrompts = queuedChatPrompts.filter((entry) => (
+                            entry.id !== failedEntry.id
+                            && entry.queueId !== failedEntry.queueId
+                        ));
+                        const merged = mergePersistedChatPromptQueueEntry(successor);
+                        selectedChatPromptQueueEntryId = merged?.id || null;
+                        publishChatPromptQueueChange('failed_prompt_retried');
+                        renderChatTaskQueuePanel();
+                        refreshChatSessionTabActivityIndicators();
+                        updateSendButtonForCurrentChatState();
+                        syncChatPromptQueuePolling();
+                    } catch (error) {
+                        failedEntry.retryInFlight = false;
+                        failedEntry.syncError = describeChatPromptQueueApiError(
+                            error,
+                            'Failed task could not be retried on the server.'
+                        );
+                        console.warn('[chatTab] Unable to retry failed prompt:', error);
                         renderChatTaskQueuePanel();
                     }
                 })();
@@ -35753,10 +35852,26 @@ function renderChatTaskQueuePanel() {
             actions.appendChild(deleteButton);
         }
         if (isFailed) {
+            const retryButton = document.createElement('button');
+            retryButton.type = 'button';
+            retryButton.className = 'btn-mini chat-task-queue-failed-retry';
+            retryButton.textContent = entry.retryInFlight === true
+                ? 'Retrying…'
+                : 'Retry';
+            retryButton.disabled = entry.retryInFlight === true
+                || entry.deleteInFlight === true;
+            retryButton.setAttribute('data-queue-id', entry.id);
+            retryButton.setAttribute('aria-label', `Retry failed task ${index + 1}`);
+            actions.appendChild(retryButton);
+
             const dismissButton = document.createElement('button');
             dismissButton.type = 'button';
             dismissButton.className = 'btn-mini chat-task-queue-dismiss';
-            dismissButton.textContent = 'Dismiss';
+            dismissButton.textContent = entry.deleteInFlight === true
+                ? 'Dismissing…'
+                : 'Dismiss';
+            dismissButton.disabled = entry.deleteInFlight === true
+                || entry.retryInFlight === true;
             dismissButton.setAttribute('data-queue-id', entry.id);
             dismissButton.setAttribute('aria-label', `Dismiss failed task ${index + 1}`);
             actions.appendChild(dismissButton);

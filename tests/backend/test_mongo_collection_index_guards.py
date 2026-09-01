@@ -552,6 +552,14 @@ def test_chat_prompt_queue_indexes_support_idempotent_dispatch_and_retention() -
     assert handoff_source["partialFilterExpression"] == {
         "handoff_source_queue_id": {"$exists": True, "$type": "string"}
     }
+    retry_source = indexes["retry_source_queue_id_unique"]
+    assert list(retry_source["key"].items()) == [
+        ("retry_source_queue_id", mc.ASCENDING)
+    ]
+    assert retry_source["unique"] is True
+    assert retry_source["partialFilterExpression"] == {
+        "retry_source_queue_id": {"$exists": True, "$type": "string"}
+    }
     assert list(indexes["scope_status_enqueue_sequence"]["key"].items()) == [
         ("user_concept_id", mc.ASCENDING),
         ("organisation_concept_id", mc.ASCENDING),
