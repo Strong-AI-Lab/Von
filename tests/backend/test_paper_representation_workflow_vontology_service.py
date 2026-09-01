@@ -2275,6 +2275,73 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
     assert second_report.get("typed_step_ids") == []
 
 
+def test_bootstrap_migrates_reviewed_v35_outcome_prompt_map_gap(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    _delete_workflow_text_relations(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowOutcomeExplanationPromptMapJson",
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRepoSeedVersionJson",
+        text=json.dumps(
+            {
+                "schema_version": "workflow_repo_seed_version.v1",
+                "seed_version": "35",
+                "family_id": "paper_representation_workflow_seed_bundle",
+                "source_tag": "JVNAUTOSCI-2244",
+                "authority_payload_sha256": (
+                    "ee4466476050ae4d69bad80fdedd658e299d5734aaa28ccf937be0426a7a3c0a"
+                ),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_reviewed_v35_outcome_prompt_map_gap"},
+        garbage_collect=True,
+    )
+    invalidate_workflow_discovery_executability_caches()
+
+    repair_report = bootstrap_canonical_paper_representation_workflows()
+    publication = repair_report.get("publication") or {}
+    adjudication = (
+        (repair_report.get("repo_seed_version_gate") or {}).get(
+            "authority_adjudication_by_workflow"
+        )
+        or {}
+    ).get(SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID) or {}
+
+    assert repair_report.get("success") is True
+    assert publication.get("materialisation_status") == "repo_seed_version_refresh"
+    assert (publication.get("counts") or {}).get("errors") == 0
+    assert adjudication.get("observed_authority_payload_sha256") == (
+        "103f9fe684d88329878358645945b21eaf502676067ae39d233be432d1e743ed"
+    )
+    assert adjudication.get("reason") == "exact_reviewed_legacy_migration"
+    assert adjudication.get("publication_authorised") is True
+
+    prompt_map_rows = get_texts_for_concept(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowOutcomeExplanationPromptMapJson",
+        limit=2,
+    )
+    assert prompt_map_rows
+    marker_rows = get_texts_for_concept(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRepoSeedVersionJson",
+        limit=2,
+    )
+    assert any(
+        json.loads(row.get("text") or "{}").get("seed_version") == "36"
+        for row in marker_rows
+        if isinstance(row.get("text"), str)
+    )
+
+
 def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     _reset_mock_db: Any,
 ) -> None:
