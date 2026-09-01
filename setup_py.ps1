@@ -20,6 +20,14 @@
 .PARAMETER SkipMongoDB
     Optional flag to skip MongoDB installation checks and continue setup.
 
+.PARAMETER WithOCR
+    Require image and scanned-PDF OCR support. This validates Tesseract but
+    does not install system software.
+
+.PARAMETER InstallSystemDeps
+    Explicitly authorise installation of required system dependencies. On
+    Windows this currently installs Tesseract with winget and implies -WithOCR.
+
 .EXAMPLES
     ./setup_py.ps1
     ./setup_py.ps1 -ConfigureVSCode
@@ -27,6 +35,10 @@
     ./setup_py.ps1 -ConfigureVSCode -PythonVersion 3.12
     ./setup_py.ps1 -Reset -ConfigureVSCode -PythonVersion 3.11
     ./setup_py.ps1 -SkipMongoDB -ConfigureVSCode
+    ./setup_py.ps1 -WithOCR
+
+    If OCR is unavailable, use the unified installer exactly as printed:
+    .\setup_all.ps1 -InstallSystemDeps
 #>
 # PSScriptAnalyzer -DisableRule PSUseApprovedVerbs
 param (
@@ -40,8 +52,25 @@ param (
     [string]$PythonVersion,
 
     [Parameter(Mandatory = $false)]
-    [switch]$SkipMongoDB
+    [switch]$SkipMongoDB,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$WithOCR,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$InstallSystemDeps
 )
+
+if ($InstallSystemDeps) {
+    $WithOCR = $true
+}
+
+$script:OcrRequired = [bool]$WithOCR
+$script:OcrState = 'unavailable'
+$script:OcrReason = 'not_checked'
+$script:OcrPreflightAvailable = $false
+$script:TesseractExecutable = $null
+$env:VON_SETUP_OCR_STATE = $script:OcrState
 
 # Function to reset the environment
 function Reset-Environment {
@@ -654,71 +683,266 @@ function Install-MongoDB {
     throw "MongoDB installation failed. Run setup with -SkipMongoDB to bypass this check."
 }
 
-# Function to install Tesseract OCR (Windows)
-function Install-Tesseract {
-    Write-Host "Checking for Tesseract OCR installation..." -ForegroundColor Cyan
+# OCR capability helpers. Detection is always read-only; winget is called only
+# when -InstallSystemDeps explicitly authorises a system dependency mutation.
+function Get-TesseractDefaultDirectories {
+    $directories = @()
+    if ($env:ProgramFiles) {
+        $directories += (Join-Path $env:ProgramFiles 'Tesseract-OCR')
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $directories += (Join-Path ${env:ProgramFiles(x86)} 'Tesseract-OCR')
+    }
+    if ($env:LOCALAPPDATA) {
+        $directories += (Join-Path $env:LOCALAPPDATA 'Programs\Tesseract-OCR')
+    }
+    return @($directories | Select-Object -Unique)
+}
 
+function Resolve-TesseractExecutable {
     $tesseractCmd = Get-Command tesseract.exe -ErrorAction SilentlyContinue
     if ($tesseractCmd) {
-        Write-Host "Tesseract OCR is already installed at $($tesseractCmd.Source)" -ForegroundColor Green
-        return
+        return $tesseractCmd.Source
     }
 
-    $defaultDirs = @(
-        "C:\Program Files\Tesseract-OCR",
-        "C:\Program Files (x86)\Tesseract-OCR"
-    )
-    foreach ($dir in $defaultDirs) {
-        $exe = Join-Path $dir "tesseract.exe"
-        if (Test-Path $exe) {
-            Write-Host "Tesseract OCR found at $exe (not in PATH). Adding to PATH for this session." -ForegroundColor Yellow
-            $env:Path = $env:Path + ";" + $dir
-            return
+    foreach ($dir in (Get-TesseractDefaultDirectories)) {
+        $exe = Join-Path $dir 'tesseract.exe'
+        if (Test-Path -LiteralPath $exe) {
+            if (($env:Path -split ';') -notcontains $dir) {
+                $env:Path = $env:Path + ';' + $dir
+            }
+            Write-Host "Tesseract found at $exe (not previously on PATH); added it for this setup session." -ForegroundColor Yellow
+            return $exe
         }
     }
 
-    Write-Host "Tesseract OCR not found. Attempting to install via winget..." -ForegroundColor Yellow
+    return $null
+}
+
+function Test-TesseractEngine {
+    $executable = Resolve-TesseractExecutable
+    if (-not $executable) {
+        return [pscustomobject]@{
+            Available = $false
+            State = 'unavailable'
+            Reason = 'tesseract_executable_not_found'
+            Executable = $null
+            Version = $null
+        }
+    }
+
+    try {
+        $versionOutput = @(& $executable --version 2>&1)
+        $versionExitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $false
+            State = 'failed'
+            Reason = "tesseract_version_invocation_failed: $($_.Exception.Message)"
+            Executable = $executable
+            Version = $null
+        }
+    }
+    if ($versionExitCode -ne 0) {
+        return [pscustomobject]@{
+            Available = $false
+            State = 'failed'
+            Reason = "tesseract_version_exit_$versionExitCode"
+            Executable = $executable
+            Version = $null
+        }
+    }
+
+    try {
+        $languageOutput = @(& $executable --list-langs 2>&1)
+        $languageExitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $false
+            State = 'failed'
+            Reason = "tesseract_language_invocation_failed: $($_.Exception.Message)"
+            Executable = $executable
+            Version = ([string]($versionOutput[0])).Trim()
+        }
+    }
+    if ($languageExitCode -ne 0) {
+        return [pscustomobject]@{
+            Available = $false
+            State = 'failed'
+            Reason = "tesseract_language_exit_$languageExitCode"
+            Executable = $executable
+            Version = ([string]($versionOutput[0])).Trim()
+        }
+    }
+
+    $languages = @($languageOutput | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($languages -notcontains 'eng') {
+        return [pscustomobject]@{
+            Available = $false
+            State = 'unavailable'
+            Reason = 'tesseract_english_language_not_found'
+            Executable = $executable
+            Version = ([string]($versionOutput[0])).Trim()
+        }
+    }
+
+    return [pscustomobject]@{
+        Available = $true
+        State = 'available'
+        Reason = 'engine_and_english_language_validated'
+        Executable = $executable
+        Version = ([string]($versionOutput[0])).Trim()
+    }
+}
+
+function Set-OcrState {
+    param(
+        [ValidateSet('available', 'unavailable', 'failed')]
+        [string]$State,
+        [string]$Reason
+    )
+
+    $script:OcrState = $State
+    $script:OcrReason = $Reason
+    $env:VON_SETUP_OCR_STATE = $State
+}
+
+function Write-OcrStatus {
+    $requiredText = if ($script:OcrRequired) { 'true' } else { 'false' }
+    switch ($script:OcrState) {
+        'available' {
+            Write-Host "OCR AVAILABLE: $($script:OcrReason)" -ForegroundColor Green
+        }
+        'unavailable' {
+            Write-Host "OCR UNAVAILABLE: $($script:OcrReason)" -ForegroundColor Yellow
+            if (-not $script:OcrRequired) {
+                Write-Host 'Core setup will continue, but image and scanned-PDF OCR will not be available.' -ForegroundColor Yellow
+            }
+        }
+        'failed' {
+            Write-Host "OCR FAILED: $($script:OcrReason)" -ForegroundColor Red
+            if (-not $script:OcrRequired) {
+                Write-Host 'Core setup will continue, but image and scanned-PDF OCR will not be available.' -ForegroundColor Yellow
+            }
+        }
+    }
+    Write-Host ("VON_SETUP_CAPABILITY name=ocr state={0} required={1}" -f $script:OcrState, $requiredText)
+    if ($script:OcrState -ne 'available') {
+        Write-Host 'NEXT ACTION: .\setup_all.ps1 -InstallSystemDeps' -ForegroundColor Yellow
+        Write-Host 'VON_SETUP_NEXT_ACTION command=".\setup_all.ps1 -InstallSystemDeps"'
+    }
+}
+
+function Install-TesseractSystemDependency {
+    if (-not $InstallSystemDeps) {
+        throw 'Internal setup error: Tesseract installation was requested without -InstallSystemDeps.'
+    }
+
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if ($winget) {
+    if (-not $winget) {
+        throw 'winget.exe is unavailable. Install Microsoft App Installer, then run the exact next-action command again.'
+    }
+
+    Write-Host 'Installing Tesseract OCR with winget (explicitly authorised by -InstallSystemDeps)...' -ForegroundColor Cyan
+    try {
+        $wingetOutput = @(& $winget.Source install --id UB-Mannheim.TesseractOCR --exact --silent --accept-package-agreements --accept-source-agreements 2>&1)
+        $wingetExitCode = $LASTEXITCODE
+        foreach ($line in $wingetOutput) {
+            Write-Host ([string]$line)
+        }
+    }
+    catch {
+        throw "winget could not be invoked: $($_.Exception.Message)"
+    }
+
+    if ($wingetExitCode -ne 0) {
+        throw "winget Tesseract installation exited with code $wingetExitCode"
+    }
+}
+
+function Initialize-OcrCapability {
+    Write-Host ''
+    Write-Host '=== OCR Capability Check ===' -ForegroundColor Cyan
+    Write-Host 'Tesseract is optional for core setup and required for image and scanned-PDF OCR.' -ForegroundColor Cyan
+    if ($script:OcrRequired) {
+        Write-Host 'OCR is required for this run.' -ForegroundColor Cyan
+    }
+
+    $engineResult = Test-TesseractEngine
+    if (-not $engineResult.Available -and $InstallSystemDeps) {
+        Write-Host "Tesseract is not usable yet: $($engineResult.Reason)" -ForegroundColor Yellow
         try {
-            & $winget.Source install --id UB-Mannheim.TesseractOCR -e --silent --accept-package-agreements --accept-source-agreements
+            Install-TesseractSystemDependency
         }
         catch {
-            Write-Host "Winget installation failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Set-OcrState -State 'failed' -Reason $_.Exception.Message
+            Write-OcrStatus
+            throw
         }
-    }
-    else {
-        Write-Host "winget not found. Skipping automatic installation." -ForegroundColor Yellow
+        $engineResult = Test-TesseractEngine
     }
 
-    $tesseractCmd = Get-Command tesseract.exe -ErrorAction SilentlyContinue
-    if ($tesseractCmd) {
-        Write-Host "Tesseract OCR installed at $($tesseractCmd.Source)" -ForegroundColor Green
+    if (-not $engineResult.Available) {
+        Set-OcrState -State $engineResult.State -Reason $engineResult.Reason
+        Write-OcrStatus
+        if ($script:OcrRequired) {
+            throw 'Required OCR capability is unavailable. Run the exact NEXT ACTION command shown above.'
+        }
         return
     }
 
-    foreach ($dir in $defaultDirs) {
-        $exe = Join-Path $dir "tesseract.exe"
-        if (Test-Path $exe) {
-            Write-Host "Tesseract OCR found at $exe after install. Adding to PATH for this session." -ForegroundColor Yellow
-            $env:Path = $env:Path + ";" + $dir
-            return
-        }
+    $script:OcrPreflightAvailable = $true
+    $script:TesseractExecutable = $engineResult.Executable
+    Set-OcrState -State 'available' -Reason "$($engineResult.Version); executable and exact eng language data validated"
+    Write-OcrStatus
+}
+
+function Complete-OcrValidation {
+    if (-not $script:OcrPreflightAvailable) {
+        return
     }
 
-    Write-Host "Tesseract OCR still not detected. Please install manually:" -ForegroundColor Yellow
-    Write-Host "- Windows installer: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Cyan
-    Write-Host "- Ensure tesseract.exe is on PATH for OCR to work." -ForegroundColor Yellow
+    Write-Host 'Running shared real Pillow + pytesseract OCR smoke test...' -ForegroundColor Cyan
+    $verifier = Join-Path $PSScriptRoot 'scripts\verify_tesseract_ocr.py'
+    if (-not (Test-Path -LiteralPath $verifier)) {
+        Set-OcrState -State 'failed' -Reason 'shared_ocr_verifier_not_found'
+        return
+    }
+
+    try {
+        $smokeOutput = @(& .venv\Scripts\python.exe $verifier --tesseract-command $script:TesseractExecutable 2>&1)
+        $smokeExitCode = $LASTEXITCODE
+        foreach ($line in $smokeOutput) {
+            Write-Host ([string]$line) -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Set-OcrState -State 'failed' -Reason "ocr_smoke_invocation_failed: $($_.Exception.Message)"
+        return
+    }
+
+    if ($smokeExitCode -ne 0) {
+        Set-OcrState -State 'unavailable' -Reason "shared_pillow_pytesseract_verifier_exit_$smokeExitCode"
+        return
+    }
+
+    $script:OcrState = 'available'
+    $script:OcrReason = 'Tesseract executable, exact eng language data, and Pillow+pytesseract smoke validated'
+    $env:VON_SETUP_OCR_STATE = $script:OcrState
 }
 
 ## Validate parameters and provide an explanatory message
-if (-not $ConfigureVSCode -and -not $Reset -and -not $PythonVersion) {
+if (-not $ConfigureVSCode -and -not $Reset -and -not $PythonVersion -and -not $WithOCR -and -not $InstallSystemDeps) {
     # Check if any action parameter is provided
     Write-Host "No action parameters provided. Please specify one or more of the following parameters:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  -Reset            : Resets the environment by removing the .venv and .vscode directories." -ForegroundColor Cyan
     Write-Host "  -ConfigureVSCode  : Configures VS Code settings for the Python environment." -ForegroundColor Cyan
     Write-Host '  -PythonVersion <ver> : Specify the target Python minor version (e.g., "3.12").' -ForegroundColor Cyan
+    Write-Host "  -WithOCR          : Requires OCR and validates it without installing system software." -ForegroundColor Cyan
+    Write-Host "  -InstallSystemDeps: Installs Tesseract with winget and implies -WithOCR." -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Examples:" -ForegroundColor Yellow
     Write-Host "  ./setup_py.ps1 -Reset" -ForegroundColor Green
@@ -726,6 +950,8 @@ if (-not $ConfigureVSCode -and -not $Reset -and -not $PythonVersion) {
     Write-Host ""
     Write-Host "  ./setup_py.ps1 -ConfigureVSCode" -ForegroundColor Green
     Write-Host "      Sets up the Python environment (using detected Python) and configures VS Code." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host 'If OCR is unavailable, run exactly: .\setup_all.ps1 -InstallSystemDeps' -ForegroundColor Yellow
 }
 
 # Check if Reset is set
@@ -733,7 +959,7 @@ if ($Reset) {
     # Renamed from RESET_FLAG
     Reset-Environment
     # Check if ONLY reset was requested
-    if (-not $ConfigureVSCode -and [string]::IsNullOrEmpty($PythonVersion)) {
+    if (-not $ConfigureVSCode -and [string]::IsNullOrEmpty($PythonVersion) -and -not $WithOCR -and -not $InstallSystemDeps) {
         # Renamed from VSCODE_FLAG
         Write-Host "Environment reset complete. Exiting script as no setup flags were provided." -ForegroundColor Green
         exit 0
@@ -742,6 +968,10 @@ if ($Reset) {
 
 # Main script logic
 # Pass the PythonVersion parameter to Initialize-Windows
+
+# Detect OCR before performing the rest of setup. Default setup never invokes
+# winget; a missing optional OCR capability is reported with one exact command.
+Initialize-OcrCapability
 
 # Ensure MongoDB is installed before proceeding (unless skipped)
 if (-not $SkipMongoDB) {
@@ -757,15 +987,6 @@ else {
     Write-Host "Skipping MongoDB installation checks (-SkipMongoDB flag set)." -ForegroundColor Yellow
 }
 
-# Ensure Tesseract OCR is installed for PDF/image OCR support
-try {
-    Install-Tesseract
-}
-catch {
-    Write-Host "Tesseract setup encountered an error: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "Continuing with Python setup..." -ForegroundColor Yellow
-}
-
 # Ensure .env file exists (create from template if missing)
 New-EnvFile
 
@@ -773,6 +994,17 @@ New-EnvFile
 Install-UvAndArxiv
 
 Initialize-Windows -RequestedPythonVersion $PythonVersion
+
+# The executable/language preflight is necessary but not sufficient: exercise
+# the same Python libraries Von uses against a generated image after PDM install.
+Complete-OcrValidation
+
+Write-Host ''
+Write-Host '=== OCR Capability Summary ===' -ForegroundColor Cyan
+Write-OcrStatus
+if ($script:OcrRequired -and $script:OcrState -ne 'available') {
+    throw 'Required OCR capability failed its final smoke test. Run the exact NEXT ACTION command shown above.'
+}
 
 if ($ConfigureVSCode) {
     # Renamed from VSCODE_FLAG
