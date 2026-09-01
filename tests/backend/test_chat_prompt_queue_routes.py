@@ -383,3 +383,117 @@ def test_queue_routes_cannot_release_a_live_server_bound_turn(client) -> None:
         status=chat_prompt_queue_service.STATUS_COMPLETED,
         attempt_id="attempt-live",
     )
+
+
+def test_legacy_routes_cannot_complete_or_replay_server_dispatch_rows(client) -> None:
+    created_response = client.post(
+        "/von/api/chat_prompt_queue",
+        json={
+            "prompt_raw": "Server owns this turn",
+            "session_id": "session-server-owned",
+            "enqueue_submission_id": "submission-server-owned",
+            "dispatch_mode": "server",
+            "execution_envelope_version": 1,
+            "execution_envelope": {"language": "en-NZ"},
+        },
+    )
+    assert created_response.status_code == 201
+    created = created_response.get_json()["item"]
+
+    false_finish = client.post(
+        f"/von/api/chat_prompt_queue/{created['queue_id']}/finish",
+        json={"status": "completed"},
+    )
+    assert false_finish.status_code == 409
+    assert (
+        false_finish.get_json()["error_code"]
+        == "server_dispatch_reconciliation_required"
+    )
+
+    reservation = chat_prompt_queue_service.reserve_next_server_dispatch(
+        server_instance_id=SERVER_INSTANCE_ID,
+    )
+    assert reservation is not None
+    scope = chat_prompt_queue_service.build_queue_scope(
+        user_concept_id="#V#test_user",
+        organisation_concept_id="#V#test_org",
+        namespace="#V#test_user@test_org",
+    )
+    chat_prompt_queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=created["queue_id"],
+        client_request_id=reservation["client_request_id"],
+        attempt_id=reservation["attempt_id"],
+        conversation_key=created["conversation_key"],
+        server_instance_id=SERVER_INSTANCE_ID,
+        dispatch_reservation_token=reservation["dispatch_reservation_token"],
+    )
+
+    ambiguous_replay = client.post(
+        f"/von/api/chat_prompt_queue/{created['queue_id']}/requeue"
+    )
+    assert ambiguous_replay.status_code == 409
+    assert (
+        ambiguous_replay.get_json()["error_code"]
+        == "server_dispatch_reconciliation_required"
+    )
+
+
+def test_server_handoff_route_links_replays_and_rejects_second_replacement(
+    client,
+) -> None:
+    source_response = client.post(
+        "/von/api/chat_prompt_queue",
+        json={
+            "prompt_raw": "Preserve this exact prompt",
+            "session_id": "session-handoff",
+            "session_name": "Handoff conversation",
+        },
+    )
+    assert source_response.status_code == 201
+    source = source_response.get_json()["item"]
+    replacement_payload = {
+        "prompt_raw": "Preserve this exact prompt",
+        "session_id": "session-handoff",
+        "session_name": "Handoff conversation",
+        "enqueue_submission_id": "submission-handoff-route",
+        "dispatch_mode": "server",
+        "execution_envelope_version": 1,
+        "execution_envelope": {"language": "en-NZ"},
+        "handoff_source_queue_id": source["queue_id"],
+    }
+
+    created_response = client.post(
+        "/von/api/chat_prompt_queue",
+        json=replacement_payload,
+    )
+    replay_response = client.post(
+        "/von/api/chat_prompt_queue",
+        json=replacement_payload,
+    )
+    conflicting_response = client.post(
+        "/von/api/chat_prompt_queue",
+        json={
+            **replacement_payload,
+            "enqueue_submission_id": "submission-handoff-route-conflict",
+        },
+    )
+
+    assert created_response.status_code == 201
+    created = created_response.get_json()["item"]
+    assert created["dispatch_ready"] is True
+    assert created["handoff_source_queue_id"] == source["queue_id"]
+    assert created["handoff_completed_at"] is not None
+    assert replay_response.status_code == 200
+    assert replay_response.get_json()["item"]["queue_id"] == created["queue_id"]
+    assert replay_response.get_json()["idempotent_replay"] is True
+    assert conflicting_response.status_code == 409
+    assert conflicting_response.get_json()["error_code"] == "queue_handoff_conflict"
+
+    scope = chat_prompt_queue_service.build_queue_scope(
+        user_concept_id="#V#test_user",
+        organisation_concept_id="#V#test_org",
+        namespace="#V#test_user@test_org",
+    )
+    queue_rows = chat_prompt_queue_service.list_active_queue_records(scope=scope)
+    assert [row["queue_id"] for row in queue_rows] == [created["queue_id"]]

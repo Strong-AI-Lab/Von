@@ -54,6 +54,11 @@ from ...services.request_progress_service import (
 )
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
+from ...services.chat_prompt_queue_dispatch_service import (
+    ChatPromptDispatchOutcome,
+    reconcile_linked_task_execution_terminal,
+    wake_chat_prompt_queue_dispatcher,
+)
 from ...services import conversation_management_service
 from ...services import conversation_search_service
 from ...services.external_conversation_import_service import (
@@ -241,6 +246,88 @@ von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
 _TURN_ADMISSION_CONTEXT_KEY = "von_conversation_turn_admission"
 
 
+def _bound_task_execution_correlation(token: Any) -> dict[str, str] | None:
+    """Return only server-bound task correlation from an admission token."""
+
+    task_id = _normalise_non_empty_text(getattr(token, "task_concept_id", None))
+    execution_id = _normalise_non_empty_text(
+        getattr(token, "task_execution_concept_id", None)
+    )
+    if not task_id and not execution_id:
+        return None
+    correlation = {
+        "request_id": _normalise_non_empty_text(
+            getattr(token, "client_request_id", None)
+        ),
+        "conversation_session_id": _normalise_non_empty_text(
+            getattr(token, "session_id", None)
+        ),
+        "queue_id": _normalise_non_empty_text(getattr(token, "queue_id", None)),
+        "enqueue_submission_id": _normalise_non_empty_text(
+            getattr(token, "enqueue_submission_id", None)
+        ),
+        "task_concept_id": task_id,
+        "task_execution_concept_id": execution_id,
+    }
+    missing = [key for key, value in correlation.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "bound task execution correlation is incomplete: " + ", ".join(missing)
+        )
+    return cast(dict[str, str], correlation)
+
+
+def _stamp_bound_task_execution_turn_projection(
+    llm_debug_info: dict[str, Any],
+    token: Any,
+    *,
+    completion_gate_source: Mapping[str, Any] | None = None,
+) -> None:
+    """Stamp server-owned queue/task identity into the persisted turn record."""
+
+    correlation = _bound_task_execution_correlation(token)
+    if correlation is None:
+        return
+    record = llm_debug_info.get("turn_execution_record")
+    if not isinstance(record, Mapping):
+        raise RuntimeError("task-linked turn has no persistable turn execution record")
+    stamped = dict(record)
+    stamped.update(correlation)
+    stamped["session_id"] = correlation["conversation_session_id"]
+    gate = llm_debug_info.get("completion_gate")
+    if not isinstance(gate, Mapping):
+        gate = llm_debug_info.get("completion_gate_verdict")
+    if not isinstance(gate, Mapping) and isinstance(completion_gate_source, Mapping):
+        gate = completion_gate_source.get("completion_gate")
+        if not isinstance(gate, Mapping):
+            gate = completion_gate_source.get("completion_gate_verdict")
+        if not isinstance(gate, Mapping):
+            gate_fields = {
+                "decision": completion_gate_source.get("completion_gate_decision"),
+                "decision_reason": completion_gate_source.get(
+                    "completion_gate_decision_reason"
+                ),
+                "requires_follow_up": completion_gate_source.get(
+                    "completion_gate_requires_follow_up"
+                ),
+                "safe_to_claim_completion": completion_gate_source.get(
+                    "completion_gate_safe_to_claim_completion"
+                ),
+                "terminal_outcome": completion_gate_source.get(
+                    "completion_gate_terminal_outcome"
+                ),
+                "evidence_payload": completion_gate_source.get(
+                    "completion_gate_evidence_payload"
+                ),
+            }
+            gate = {
+                key: value for key, value in gate_fields.items() if value is not None
+            }
+    if isinstance(gate, Mapping):
+        stamped["completion_gate"] = dict(gate)
+    llm_debug_info["turn_execution_record"] = stamped
+
+
 def _release_request_turn_admission(
     *,
     response: Any | None = None,
@@ -308,6 +395,7 @@ def _release_request_turn_admission(
             status=terminal_status,
             error=error_text,
         )
+        wake_chat_prompt_queue_dispatcher()
     except Exception:
         current_app.logger.exception(
             "[turn_admission] Failed to release queue_id=%s request_id=%s",
@@ -1036,15 +1124,17 @@ def _chat_prompt_queue_error_response(
         response.headers["Retry-After"] = "1"
         return response, 429
     if isinstance(exc, chat_prompt_queue_service.InvalidChatPromptQueueInput):
+        error_code = str(getattr(exc, "error_code", "invalid_input"))
+        status_code = int(getattr(exc, "status_code", 400) or 400)
         return (
             jsonify(
                 {
                     "success": False,
                     "error": str(exc),
-                    "error_code": "invalid_input",
+                    "error_code": error_code,
                 }
             ),
-            400,
+            status_code,
         )
     if isinstance(exc, chat_prompt_queue_service.ConversationTurnAlreadyActive):
         return (
@@ -1180,6 +1270,9 @@ def create_chat_prompt_queue_route():
                     history_namespace=history_namespace,
                     conversation_session_id=session_id,
                 )
+        handoff_source_queue_id = _normalise_non_empty_text(
+            payload.get("handoff_source_queue_id")
+        )
         record = chat_prompt_queue_service.create_queue_record(
             scope=scope,
             prompt_raw=payload.get("prompt_raw"),
@@ -1201,10 +1294,67 @@ def create_chat_prompt_queue_route():
                 else None
             ),
             window_session_id=request.headers.get(_WINDOW_SESSION_HEADER_NAME),
+            enqueue_submission_id=payload.get("enqueue_submission_id"),
+            dispatch_mode=payload.get("dispatch_mode"),
+            execution_envelope_version=payload.get("execution_envelope_version"),
+            execution_envelope=payload.get("execution_envelope"),
+            handoff_source_queue_id=handoff_source_queue_id,
+            server_dispatch_ready=(False if handoff_source_queue_id else None),
         )
-        return jsonify({"success": True, "item": record}), 201
+        idempotent_replay = bool(record.get("idempotent_replay"))
+        if (
+            handoff_source_queue_id
+            and record.get("status") == chat_prompt_queue_service.STATUS_QUEUED
+            and not record.get("dispatch_ready")
+        ):
+            record = chat_prompt_queue_service.complete_server_dispatch_handoff(
+                scope=scope,
+                queue_id=str(record.get("queue_id") or ""),
+                enqueue_submission_id=_normalise_non_empty_text(
+                    record.get("enqueue_submission_id")
+                ),
+            )
+            record["idempotent_replay"] = idempotent_replay
+        if record.get("dispatch_mode") == "server":
+            wake_chat_prompt_queue_dispatcher()
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "item": record,
+                    "idempotent_replay": idempotent_replay,
+                }
+            ),
+            200 if idempotent_replay else 201,
+        )
     except Exception as exc:
         return _chat_prompt_queue_error_response(exc, action="create", scope=scope)
+
+
+@von_bp.route(
+    "/api/chat_prompt_queue/<queue_id>/complete-handoff",
+    methods=["POST"],
+)
+def complete_chat_prompt_queue_handoff_route(queue_id: str):
+    """Retry the server-owned retirement/activation half of a durable handoff."""
+
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    try:
+        record = chat_prompt_queue_service.complete_server_dispatch_handoff(
+            scope=scope,
+            queue_id=queue_id,
+        )
+        wake_chat_prompt_queue_dispatcher()
+        return jsonify({"success": True, "item": record})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(
+            exc,
+            action="complete_handoff",
+            queue_id=queue_id,
+            scope=scope,
+        )
 
 
 @von_bp.route("/api/chat_prompt_queue/<queue_id>", methods=["PATCH"])
@@ -1278,6 +1428,28 @@ def cancel_chat_prompt_queue_route(queue_id: str):
             scope=scope,
             queue_id=queue_id,
         )
+        try:
+            reconcile_linked_task_execution_terminal(
+                {
+                    **record,
+                    "user_concept_id": scope.get("user_concept_id"),
+                    "organisation_concept_id": scope.get(
+                        "organisation_concept_id"
+                    ),
+                    "namespace": scope.get("namespace"),
+                },
+                status=chat_prompt_queue_service.STATUS_CANCELLED,
+                source="queue_cancellation",
+            )
+        except Exception as exc:
+            _safe_app_log(
+                "warning",
+                "TaskExecution cancellation reconciliation deferred for %s: %s",
+                queue_id,
+                exc,
+            )
+        finally:
+            wake_chat_prompt_queue_dispatcher()
         return jsonify({"success": True, "item": record})
     except Exception as exc:
         return _chat_prompt_queue_error_response(
@@ -7266,10 +7438,33 @@ def cancel_task(task_id: str):
     queue_id = _normalise_non_empty_text(getattr(status, "queue_id", None))
     if queue_id:
         try:
-            chat_prompt_queue_service.cancel_prompt_record(
+            cancelled_record = chat_prompt_queue_service.cancel_prompt_record(
                 scope=scope,
                 queue_id=queue_id,
             )
+            try:
+                reconcile_linked_task_execution_terminal(
+                    {
+                        **cancelled_record,
+                        "user_concept_id": scope.get("user_concept_id"),
+                        "organisation_concept_id": scope.get(
+                            "organisation_concept_id"
+                        ),
+                        "namespace": scope.get("namespace"),
+                    },
+                    status=chat_prompt_queue_service.STATUS_CANCELLED,
+                    source="background_queue_cancellation",
+                )
+            except Exception as exc:
+                _safe_app_log(
+                    "warning",
+                    "TaskExecution background cancellation reconciliation "
+                    "deferred for %s: %s",
+                    queue_id,
+                    exc,
+                )
+            finally:
+                wake_chat_prompt_queue_dispatcher()
         except chat_prompt_queue_service.ConversationTurnAlreadyActive:
             # The running generate request owns this fence and observes the
             # cancellation flag; its teardown will terminalise the exact
@@ -10709,6 +10904,18 @@ def _submit_generate_background_request(
     background_attempt_id = _normalise_non_empty_text(
         background_payload.get("attempt_id")
     )
+    background_dispatch_reservation_token = _normalise_non_empty_text(
+        background_payload.get("dispatch_reservation_token")
+    )
+    background_enqueue_submission_id = _normalise_non_empty_text(
+        background_payload.get("enqueue_submission_id")
+    )
+    background_task_concept_id = _normalise_non_empty_text(
+        background_payload.get("task_concept_id")
+    )
+    background_task_execution_concept_id = _normalise_non_empty_text(
+        background_payload.get("task_execution_concept_id")
+    )
     background_user_id = _normalise_non_empty_text(actor_scope.get("user_concept_id"))
     background_org_id = _normalise_non_empty_text(
         actor_scope.get("organisation_concept_id")
@@ -10735,6 +10942,94 @@ def _submit_generate_background_request(
     else:
         frozen_session_snapshot.pop(_LEGACY_SUBMISSION_WINDOW_SESSION_KEY, None)
 
+    def _reconcile_unadmitted_background_response(
+        *,
+        generated_response: Any | None = None,
+        exception: BaseException | None = None,
+    ) -> None:
+        # Once admission exists, its exact attempt token owns terminalisation.
+        # This fallback is only for validation/capacity failures that happen
+        # before the durable queue reservation can be upgraded.
+        if getattr(g, _TURN_ADMISSION_CONTEXT_KEY, None) is not None:
+            return
+        if not all(
+            (
+                background_queue_id,
+                background_attempt_id,
+                background_dispatch_reservation_token,
+            )
+        ):
+            return
+
+        retryable = exception is not None
+        error_text = (
+            f"background generate raised {type(exception).__name__}: {exception}"
+            if exception is not None
+            else "background generate ended before turn admission"
+        )
+        if generated_response is not None:
+            status_code = int(getattr(generated_response, "status_code", 500) or 500)
+            payload = None
+            try:
+                payload = generated_response.get_json(silent=True)
+            except Exception:
+                payload = None
+            retryable = status_code in {429, 500, 502, 503, 504}
+            if isinstance(payload, Mapping):
+                retryable = retryable or payload.get("retryable") is True
+                error_text = str(
+                    payload.get("error")
+                    or payload.get("detail")
+                    or f"background generate returned HTTP {status_code}"
+                )
+            else:
+                error_text = f"background generate returned HTTP {status_code}"
+
+        if retryable:
+            released = chat_prompt_queue_service.release_server_dispatch_reservation(
+                queue_id=str(background_queue_id),
+                dispatch_reservation_token=str(background_dispatch_reservation_token),
+                server_instance_id=SERVER_INSTANCE_ID,
+                retry_after_seconds=1.0,
+                error=error_text[:4_000],
+            )
+            if released:
+                wake_chat_prompt_queue_dispatcher()
+            return
+        failed = chat_prompt_queue_service.fail_server_dispatch_reservation(
+            queue_id=str(background_queue_id),
+            dispatch_reservation_token=str(background_dispatch_reservation_token),
+            server_instance_id=SERVER_INSTANCE_ID,
+            error=error_text[:4_000],
+        )
+        if failed:
+            try:
+                reconcile_linked_task_execution_terminal(
+                    {
+                        "queue_id": background_queue_id,
+                        "enqueue_submission_id": background_enqueue_submission_id,
+                        "task_concept_id": background_task_concept_id,
+                        "task_execution_concept_id": (
+                            background_task_execution_concept_id
+                        ),
+                        "user_concept_id": background_user_id,
+                        "organisation_concept_id": background_org_id,
+                        "namespace": background_namespace,
+                    },
+                    status=chat_prompt_queue_service.STATUS_FAILED,
+                    source="background_pre_admission_failure",
+                    error=error_text[:4_000],
+                )
+            except Exception as exc:
+                _safe_app_log(
+                    "warning",
+                    "TaskExecution pre-admission reconciliation deferred for %s: %s",
+                    background_queue_id,
+                    exc,
+                )
+            finally:
+                wake_chat_prompt_queue_dispatcher()
+
     def _run_generate_request_in_background() -> dict[str, Any]:
         with app.test_request_context(
             "/von/generate",
@@ -10747,9 +11042,18 @@ def _submit_generate_background_request(
             session.modified = True
             try:
                 generated = make_response(generate())
+                _reconcile_unadmitted_background_response(generated_response=generated)
                 _release_request_turn_admission(response=generated)
                 return _normalise_background_generate_result(generated)
             except BaseException as exc:
+                try:
+                    _reconcile_unadmitted_background_response(exception=exc)
+                except Exception:
+                    current_app.logger.exception(
+                        "[chat_prompt_dispatch] Failed to reconcile unadmitted "
+                        "queue_id=%s",
+                        background_queue_id,
+                    )
                 _release_request_turn_admission(exception=exc)
                 raise
 
@@ -10802,6 +11106,199 @@ def _submit_generate_background_request(
         ),
         202,
     )
+
+
+def _server_dispatch_retry_after_seconds(response: Any) -> float:
+    raw_header = None
+    try:
+        raw_header = response.headers.get("Retry-After")
+    except Exception:
+        raw_header = None
+    try:
+        return max(0.0, min(float(raw_header), 60.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def submit_server_dispatched_chat_prompt(
+    app: Any,
+    record: Mapping[str, Any],
+) -> ChatPromptDispatchOutcome:
+    """Submit one trusted queue reservation through the normal generate path.
+
+    The row is a bounded launch capability issued by the server at enqueue
+    time.  Persisted actor identifiers set the maximum scope, while current
+    organisation membership and the normal generate authorisation checks are
+    evaluated again before execution.  No browser session or model-supplied
+    identity can enlarge that scope.
+    """
+
+    user_concept_id = _normalise_non_empty_text(record.get("user_concept_id"))
+    organisation_concept_id = _normalise_non_empty_text(
+        record.get("organisation_concept_id")
+    )
+    namespace = _normalise_non_empty_text(record.get("namespace"))
+    queue_id = _normalise_non_empty_text(record.get("queue_id"))
+    attempt_id = _normalise_non_empty_text(record.get("attempt_id"))
+    request_id = _normalise_non_empty_text(record.get("client_request_id"))
+    reservation_token = _normalise_non_empty_text(
+        record.get("dispatch_reservation_token")
+    )
+    conversation_session_id = _normalise_non_empty_text(record.get("session_id"))
+    if not all(
+        (
+            user_concept_id,
+            namespace,
+            queue_id,
+            attempt_id,
+            request_id,
+            reservation_token,
+            conversation_session_id,
+        )
+    ):
+        return ChatPromptDispatchOutcome(
+            accepted=False,
+            error="server queue entry is missing its bounded launch identity",
+        )
+
+    expected_namespace = _derive_namespace_for_user_org(
+        user_concept_id,
+        organisation_concept_id,
+    )
+    if expected_namespace != namespace:
+        return ChatPromptDispatchOutcome(
+            accepted=False,
+            error="server queue namespace no longer matches its actor scope",
+        )
+
+    role_in_org: str | None = None
+    if organisation_concept_id:
+        try:
+            from ...services.organisation_membership_service import (
+                resolve_user_organisation_membership,
+            )
+
+            membership = resolve_user_organisation_membership(
+                user_concept_id,
+                organisation_concept_id,
+            )
+        except Exception as exc:
+            return ChatPromptDispatchOutcome(
+                accepted=False,
+                retryable=True,
+                retry_after_seconds=2.0,
+                error=(
+                    "organisation membership could not be revalidated: "
+                    f"{type(exc).__name__}"
+                ),
+            )
+        if not isinstance(membership, Mapping):
+            return ChatPromptDispatchOutcome(
+                accepted=False,
+                error="organisation membership was revoked before dispatch",
+            )
+        role_in_org = _normalise_non_empty_text(membership.get("role")) or "member"
+
+    raw_envelope = record.get("execution_envelope")
+    if not isinstance(raw_envelope, Mapping):
+        return ChatPromptDispatchOutcome(
+            accepted=False,
+            error="server queue entry has no valid execution envelope",
+        )
+    payload = dict(raw_envelope)
+    # These fields are server-owned even if a legacy or malformed envelope
+    # happens to contain names that look like identity/correlation inputs.
+    for key in (
+        "user_id",
+        "organisation_concept_id",
+        "namespace",
+        "background_task_id",
+        "prompt_queue_id",
+        "client_request_id",
+        "attempt_id",
+        "dispatch_reservation_token",
+        "enqueue_submission_id",
+        "task_concept_id",
+        "task_execution_concept_id",
+    ):
+        payload.pop(key, None)
+    payload.update(
+        {
+            "prompt": str(record.get("prompt_raw") or ""),
+            "conversation_session_id": conversation_session_id,
+            "conversation_session_name": record.get("session_name"),
+            "background": True,
+            "prompt_queue_id": queue_id,
+            "client_request_id": request_id,
+            "attempt_id": attempt_id,
+            "dispatch_reservation_token": reservation_token,
+        }
+    )
+    if record.get("task_concept_id") or record.get("task_execution_concept_id"):
+        # Correlation is stamped from the reserved row after envelope fields
+        # with the same names have been removed above.
+        payload.update(
+            {
+                "enqueue_submission_id": record.get("enqueue_submission_id"),
+                "task_concept_id": record.get("task_concept_id"),
+                "task_execution_concept_id": record.get("task_execution_concept_id"),
+            }
+        )
+
+    frozen_session: dict[str, Any] = {
+        "user_concept_id": user_concept_id,
+        "namespace": namespace,
+        "session_id": conversation_session_id,
+    }
+    if organisation_concept_id:
+        frozen_session["organisation_concept_id"] = organisation_concept_id
+        frozen_session["org_id"] = organisation_concept_id
+        frozen_session["role_in_org"] = role_in_org
+
+    with app.test_request_context(
+        "/von/generate",
+        method="POST",
+        json=payload,
+    ):
+        session.clear()
+        session.update(frozen_session)
+        session.modified = True
+        try:
+            response = make_response(generate())
+        except Exception as exc:
+            return ChatPromptDispatchOutcome(
+                accepted=False,
+                retryable=True,
+                retry_after_seconds=1.0,
+                error=f"generate submission raised {type(exc).__name__}: {exc}",
+            )
+
+        response_payload = None
+        try:
+            response_payload = response.get_json(silent=True)
+        except Exception:
+            response_payload = None
+        status_code = int(getattr(response, "status_code", 500) or 500)
+        if status_code == 202 and isinstance(response_payload, Mapping):
+            if response_payload.get("background") is True:
+                return ChatPromptDispatchOutcome(accepted=True)
+
+        retryable = status_code in {429, 500, 502, 503, 504}
+        if isinstance(response_payload, Mapping):
+            retryable = retryable or response_payload.get("retryable") is True
+            error = str(
+                response_payload.get("error")
+                or response_payload.get("detail")
+                or f"generate submission returned HTTP {status_code}"
+            )
+        else:
+            error = f"generate submission returned HTTP {status_code}"
+        return ChatPromptDispatchOutcome(
+            accepted=False,
+            retryable=retryable,
+            retry_after_seconds=_server_dispatch_retry_after_seconds(response),
+            error=error[:4_000],
+        )
 
 
 def _persist_terminal_failure_turn_record_best_effort(
@@ -11545,10 +12042,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             raw_active_session_id = effective.get("chat_session_id")
             if isinstance(raw_active_session_id, str) and raw_active_session_id.strip():
                 background_session_id = raw_active_session_id.strip()
-        if background_session_id and chat_history_service.is_external_conversation_read_only(
-            user_id=user_concept_id,
-            session_id=background_session_id,
-            namespace=user_namespace,
+        if (
+            background_session_id
+            and chat_history_service.is_external_conversation_read_only(
+                user_id=user_concept_id,
+                session_id=background_session_id,
+                namespace=user_namespace,
+            )
         ):
             return _external_conversation_read_only_response()
         return _submit_generate_background_request(
@@ -11624,6 +12124,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if isinstance(raw_prompt_queue_id, str) and raw_prompt_queue_id.strip()
         else None
     )
+    dispatch_reservation_token = _normalise_non_empty_text(
+        data.get("dispatch_reservation_token")
+    )
     try:
         if user_concept_id and history_user_id and history_namespace:
             raw_attempt_id = data.get("attempt_id")
@@ -11655,6 +12158,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 ),
                 queue_id=prompt_queue_id,
                 attempt_id=attempt_id,
+                dispatch_reservation_token=dispatch_reservation_token,
                 window_session_id=legacy_submission_window_session_id,
             )
         else:
@@ -14529,6 +15033,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
 
         _refresh_llm_debug_timing_payload(llm_debug_info)
+        admission_token = getattr(g, _TURN_ADMISSION_CONTEXT_KEY, None)
+        if admission_token is not None:
+            _stamp_bound_task_execution_turn_projection(
+                llm_debug_info,
+                admission_token,
+                completion_gate_source=(
+                    tool_progress_snapshot
+                    if isinstance(tool_progress_snapshot, Mapping)
+                    else None
+                ),
+            )
 
         current_app.config["CONTEXT"] = _persist_generate_turn_messages(
             history_user_id=history_user_id,
@@ -15666,8 +16181,7 @@ def history_turn_failure_capsule():
         not isinstance(projected_capsule, Mapping)
         or projected_capsule.get("schema_version")
         != TURN_FAILURE_CAPSULE_SCHEMA_VERSION
-        or _progress_str(projected_capsule.get("request_id"))
-        != resolved_request_id
+        or _progress_str(projected_capsule.get("request_id")) != resolved_request_id
         or turn_failure_capsule_size_bytes(projected_capsule)
         > TURN_FAILURE_CAPSULE_MAX_BYTES
     ):
@@ -17036,10 +17550,13 @@ def reset_context():
                 ),
                 shared_invite=shared_invite,
             )
-            if owner_namespace and chat_history_service.is_external_conversation_read_only(
-                user_id=owner_user_id,
-                session_id=session_id,
-                namespace=owner_namespace,
+            if (
+                owner_namespace
+                and chat_history_service.is_external_conversation_read_only(
+                    user_id=owner_user_id,
+                    session_id=session_id,
+                    namespace=owner_namespace,
+                )
             ):
                 return _external_conversation_read_only_response()
             reset_outcome = chat_history_service.reset_chat_history_conversation_state(
@@ -18108,7 +18625,9 @@ def import_external_conversation_route():
 
     user_concept_id = session.get("user_concept_id")
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
-        return jsonify({"error": "Not authenticated", "error_code": "not_authenticated"}), 401
+        return jsonify(
+            {"error": "Not authenticated", "error_code": "not_authenticated"}
+        ), 401
 
     upload = request.files.get("file")
     if upload is None:
@@ -18403,7 +18922,9 @@ def continue_external_conversation_route():
 
     user_concept_id = session.get("user_concept_id")
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
-        return jsonify({"error": "Not authenticated", "error_code": "not_authenticated"}), 401
+        return jsonify(
+            {"error": "Not authenticated", "error_code": "not_authenticated"}
+        ), 401
     data = request.get_json(silent=True) or {}
     source_session_id = data.get("session_id") or data.get("source_session_id")
     if not isinstance(source_session_id, str) or not source_session_id.strip():
@@ -18431,7 +18952,9 @@ def continue_external_conversation_route():
         )
         return jsonify(result), 201
     except ExternalConversationImportError as exc:
-        status_code = 404 if exc.error_code == "external_conversation_not_found" else 409
+        status_code = (
+            404 if exc.error_code == "external_conversation_not_found" else 409
+        )
         return jsonify({"error": str(exc), "error_code": exc.error_code}), status_code
     except WindowSessionOwnershipError:
         return (

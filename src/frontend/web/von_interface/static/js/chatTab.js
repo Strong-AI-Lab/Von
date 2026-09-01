@@ -5835,8 +5835,17 @@ function getQueuedChatPromptCountForSession(sessionId = activeChatSessionId) {
     return queuedChatPrompts.filter((entry) => entry?.sessionKey === sessionKey).length;
 }
 
+function getQueuedChatPromptSubmissionInFlight(sessionId = activeChatSessionId) {
+    return queuedChatPromptSubmissionsInFlight.get(
+        getChatRequestSessionKey(sessionId)
+    ) || null;
+}
+
 function isRestartableChatPromptQueueEntry(entry) {
     if (!entry || entry.status !== CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS) {
+        return false;
+    }
+    if (isServerDispatchedChatPromptQueueEntry(entry)) {
         return false;
     }
     if (getLiveChatRequestForPromptQueueRecord(entry.queueId)) {
@@ -5872,7 +5881,7 @@ function getChatPromptQueueCountsForSession(sessionId = activeChatSessionId) {
         failed: 0
     };
     queuedChatPrompts.forEach((entry) => {
-        if (!entry || entry.sessionKey !== sessionKey) {
+        if (!entry || entry.sessionKey !== sessionKey || entry.enqueueFailed === true) {
             return;
         }
         counts.total += 1;
@@ -6016,22 +6025,28 @@ function updateSendButtonForCurrentChatState() {
         return;
     }
     const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
+    const queueSubmissionInFlight = !!getQueuedChatPromptSubmissionInFlight(
+        activeChatSessionId
+    );
     const queueCounts = getChatPromptQueueCountsForSession(activeChatSessionId);
     const sessionBusy = hasLiveChatRequestForSession(activeChatSessionId)
         || queueCounts.running > 0
         || queueCounts.queued > 0
         || queueCounts.restartable > 0;
     const readOnly = isExternalConversationReadOnly();
-    sendButton.disabled = uploadInFlight || readOnly;
+    sendButton.disabled = uploadInFlight || queueSubmissionInFlight || readOnly;
+    sendButton.setAttribute('aria-busy', queueSubmissionInFlight ? 'true' : 'false');
     if (readOnly) {
         sendButton.textContent = 'Read-only import';
         sendButton.title = 'Continue this imported snapshot before sending a new message.';
         return;
     }
-    sendButton.textContent = sessionBusy
-        ? 'Queue Prompt'
-        : 'Send Prompt';
-    if (uploadInFlight) {
+    sendButton.textContent = queueSubmissionInFlight
+        ? 'Queueing…'
+        : (sessionBusy ? 'Queue Prompt' : 'Send Prompt');
+    if (queueSubmissionInFlight) {
+        sendButton.title = 'Saving this prompt to the conversation queue.';
+    } else if (uploadInFlight) {
         sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
     } else {
         sendButton.removeAttribute('title');
@@ -23722,10 +23737,11 @@ const liveChatRequestsBySession = new Map();
 const finishedThinkingCardsBySession = new Map();
 let queuedChatPrompts = [];
 let queuedChatPromptCounter = 0;
-let queuedChatPromptDrainTimer = null;
-let queuedChatPromptDrainPromise = null;
-let queuedChatPromptDrainRequested = false;
+let chatPromptQueuePollTimerId = null;
+let chatPromptQueuePollInFlight = false;
+let chatPromptQueuePollAbortController = null;
 const queuedChatPromptClaimsInFlight = new Set();
+const queuedChatPromptSubmissionsInFlight = new Map();
 const queuedChatPromptSyncTimers = new Map();
 let chatPromptQueueAdmissionServerInstanceId = null;
 let selectedChatPromptQueueEntryId = null;
@@ -23742,6 +23758,7 @@ const CHAT_PROMPT_QUEUE_STATUS_COMPLETED = 'completed';
 const CHAT_PROMPT_QUEUE_STATUS_FAILED = 'failed';
 const CHAT_PROMPT_QUEUE_STATUS_CANCELLED = 'cancelled';
 const CHAT_PROMPT_QUEUE_SYNC_STORAGE_KEY = 'von:chatPromptQueueChanged:v1';
+const CHAT_PROMPT_QUEUE_POLL_INTERVAL_MS = 2000;
 
 const CHAT_TTS_STORAGE_KEY = 'chatTtsEnabled';
 
@@ -24366,6 +24383,7 @@ function setActiveChatSession(sessionId, sessionName, externalConversation = und
     renderActiveChatSessionFocusChips(activeChatSessionFocus);
 
     if (previousSessionId !== activeChatSessionId) {
+        setSelectedChatPromptQueueEntryId(null);
         chatSessionSelectionGeneration += 1;
         synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
         if (activeChatSessionId) {
@@ -24410,6 +24428,7 @@ function setActiveChatSession(sessionId, sessionName, externalConversation = und
     refreshConversationInfoCopyButtonState();
     renderPendingAttachmentState();
     renderActiveUploadUi();
+    renderChatTaskQueuePanel();
     updateExternalConversationUi();
 }
 
@@ -32546,6 +32565,7 @@ function handleRealtimeConnectionsVisibilityChange() {
         clearWorkflowStatusSnapshotRetryTimer();
         stopIncomingInvitePolling();
         stopSharedSessionBadgePolling();
+        stopChatPromptQueuePolling();
         try {
             incomingInviteAbortController?.abort();
         } catch (_) {
@@ -32590,13 +32610,9 @@ function detachChatWorkForOrganisationSwitch() {
     });
 
     queuedChatPrompts = [];
-    if (queuedChatPromptDrainTimer !== null) {
-        clearTimeout(queuedChatPromptDrainTimer);
-        queuedChatPromptDrainTimer = null;
-    }
-    queuedChatPromptDrainPromise = null;
-    queuedChatPromptDrainRequested = false;
+    stopChatPromptQueuePolling();
     queuedChatPromptClaimsInFlight.clear();
+    queuedChatPromptSubmissionsInFlight.clear();
     chatPromptQueueAdmissionServerInstanceId = null;
     for (const timer of queuedChatPromptSyncTimers.values()) {
         clearTimeout(timer);
@@ -32838,13 +32854,21 @@ function handleAuthStatusChangeForChatTab(detail) {
         void refreshWorkflowStatusSnapshot({ silent: true });
         startIncomingInvitePolling();
         startSharedSessionBadgePolling();
+        void refreshChatPromptQueueFromServer({ silent: true });
     } else {
         stopIncomingInvitePolling();
         stopSharedSessionBadgePolling();
+        stopChatPromptQueuePolling();
+        queuedChatPrompts = [];
+        queuedChatPromptSubmissionsInFlight.clear();
+        selectedChatPromptQueueEntryId = null;
+        locallyHiddenChatPromptQueueEntryKeys.clear();
+        renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
     }
 
     scheduleChatSessionTabsRefresh(true);
-    void refreshChatPromptQueueFromServer({ silent: true });
     void loadIncomingInvites({ silent: true });
     publishRealtimeConnectionTelemetry('auth_status_changed');
 }
@@ -33243,6 +33267,7 @@ export function initializeChatTab() {
         stopWorkflowStatusStream('workflow_stream_stopped_unload');
         stopIncomingInvitePolling();
         stopSharedSessionBadgePolling();
+        stopChatPromptQueuePolling();
     }, { once: true });
 
     // JVNAUTOSCI-1040: Initialize task panel
@@ -34256,7 +34281,48 @@ function normaliseChatPromptQueueEntry(rawEntry, fallback = {}) {
         fileCopyConceptId,
         localOnly: queueId ? false : rawEntry.localOnly === true,
         syncError: rawEntry.syncError || null,
+        enqueueFailed: rawEntry.enqueueFailed === true || fallback.enqueueFailed === true,
+        enqueueUnconfirmed: rawEntry.enqueueUnconfirmed === true
+            || fallback.enqueueUnconfirmed === true,
+        deleteInFlight: rawEntry.deleteInFlight === true || fallback.deleteInFlight === true,
+        handoffSourceQueueId: rawEntry.handoff_source_queue_id
+            || rawEntry.handoffSourceQueueId
+            || fallback.handoffSourceQueueId
+            || null,
+        handoffCompletedAt: rawEntry.handoff_completed_at
+            || rawEntry.handoffCompletedAt
+            || fallback.handoffCompletedAt
+            || null,
+        handoffEnqueueSubmissionId: rawEntry.handoffEnqueueSubmissionId
+            || fallback.handoffEnqueueSubmissionId
+            || null,
+        supersededByQueueId: rawEntry.supersededByQueueId
+            || fallback.supersededByQueueId
+            || null,
         lastError: rawEntry.last_error || rawEntry.lastError || null,
+        enqueueSubmissionId: rawEntry.enqueue_submission_id
+            || rawEntry.enqueueSubmissionId
+            || fallback.enqueueSubmissionId
+            || null,
+        dispatchMode: rawEntry.dispatch_mode
+            || rawEntry.dispatchMode
+            || fallback.dispatchMode
+            || null,
+        dispatchReady: typeof rawEntry.dispatch_ready === 'boolean'
+            ? rawEntry.dispatch_ready
+            : (typeof rawEntry.dispatchReady === 'boolean'
+                ? rawEntry.dispatchReady
+                : (typeof fallback.dispatchReady === 'boolean'
+                    ? fallback.dispatchReady
+                    : null)),
+        executionEnvelopeVersion: rawEntry.execution_envelope_version
+            || rawEntry.executionEnvelopeVersion
+            || fallback.executionEnvelopeVersion
+            || null,
+        executionEnvelope: rawEntry.execution_envelope
+            || rawEntry.executionEnvelope
+            || fallback.executionEnvelope
+            || null,
         clientRequestId: rawEntry.client_request_id || rawEntry.clientRequestId || fallback.clientRequestId || null,
         attemptId: rawEntry.attempt_id || rawEntry.attemptId || fallback.attemptId || null,
         serverInstanceId: rawEntry.server_instance_id || rawEntry.serverInstanceId || fallback.serverInstanceId || null,
@@ -34328,6 +34394,20 @@ function isDisplayedChatPromptQueueEntry(entry) {
     return true;
 }
 
+function isChatPromptQueueEntryForSession(
+    entry,
+    sessionId = activeChatSessionId
+) {
+    return Boolean(
+        entry
+        && entry.sessionKey === getChatRequestSessionKey(sessionId)
+    );
+}
+
+function isServerDispatchedChatPromptQueueEntry(entry) {
+    return entry?.dispatchMode === 'server';
+}
+
 function getChatPromptQueueEntryById(entryId) {
     const cleanEntryId = (typeof entryId === 'string' && entryId.trim())
         ? entryId.trim()
@@ -34385,7 +34465,15 @@ function getSelectedChatPromptQueueEntryForSend() {
         : null;
     const selectedId = activeQueueId || selectedChatPromptQueueEntryId;
     const entry = getChatPromptQueueEntryById(selectedId);
-    if (!entry || !isDisplayedChatPromptQueueEntry(entry)) {
+    if (
+        !entry
+        || !isDisplayedChatPromptQueueEntry(entry)
+        || !isChatPromptQueueEntryForSession(entry)
+        || isServerDispatchedChatPromptQueueEntry(entry)
+        || entry.enqueueFailed === true
+        || entry.handoffEnqueueSubmissionId
+        || entry.supersededByQueueId
+    ) {
         return null;
     }
     if (getLiveChatRequestForPromptQueueRecord(entry.queueId)) {
@@ -34479,6 +34567,23 @@ function describeChatPromptQueueApiError(error, fallbackMessage) {
     return fallbackMessage;
 }
 
+function isAmbiguousChatPromptQueueEnqueueError(error) {
+    const status = Number(error?.httpStatus);
+    return !Number.isInteger(status) || status >= 500;
+}
+
+function isCanonicalChatPromptQueueAbsenceError(error) {
+    return error?.errorCode === 'not_found'
+        || (
+            error?.errorCode === 'wrong_state'
+            && error?.details?.current_status === CHAT_PROMPT_QUEUE_STATUS_CANCELLED
+        )
+        || (
+            Number(error?.httpStatus) === 404
+            && error?.errorCode !== 'scope_mismatch'
+        );
+}
+
 function publishChatPromptQueueChange(reason = 'changed') {
     try {
         localStorage.setItem(CHAT_PROMPT_QUEUE_SYNC_STORAGE_KEY, JSON.stringify({
@@ -34501,6 +34606,118 @@ function handleChatPromptQueueStorageEvent(event) {
     void refreshChatPromptQueueFromServer({ silent: true });
 }
 
+function isCanonicalChatPromptQueuePollingEntry(entry) {
+    return Boolean(
+        entry?.queueId
+        && isServerDispatchedChatPromptQueueEntry(entry)
+        && (
+            entry.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
+            || entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
+        )
+    );
+}
+
+function stopChatPromptQueuePolling({ abortInFlight = true } = {}) {
+    if (chatPromptQueuePollTimerId !== null) {
+        clearTimeout(chatPromptQueuePollTimerId);
+        chatPromptQueuePollTimerId = null;
+    }
+    if (abortInFlight && chatPromptQueuePollAbortController) {
+        const controller = chatPromptQueuePollAbortController;
+        chatPromptQueuePollAbortController = null;
+        chatPromptQueuePollInFlight = false;
+        try {
+            controller.abort();
+        } catch (_) {
+            // Ignore abort races; the controller identity still retires this poll.
+        }
+    }
+}
+
+function syncChatPromptQueuePolling() {
+    const shouldPoll = (
+        pendingChatOrganisationSwitchId === null
+        && isDocumentVisibleForRealtimeConnections()
+        && queuedChatPrompts.some(isCanonicalChatPromptQueuePollingEntry)
+    );
+    if (!shouldPoll) {
+        stopChatPromptQueuePolling();
+        return;
+    }
+    if (chatPromptQueuePollTimerId !== null || chatPromptQueuePollInFlight) {
+        return;
+    }
+    chatPromptQueuePollTimerId = window.setTimeout(async () => {
+        chatPromptQueuePollTimerId = null;
+        const controller = new AbortController();
+        chatPromptQueuePollAbortController = controller;
+        chatPromptQueuePollInFlight = true;
+        try {
+            await refreshChatPromptQueueFromServer({
+                silent: true,
+                pollTriggered: true,
+                signal: controller.signal
+            });
+        } finally {
+            if (chatPromptQueuePollAbortController === controller) {
+                chatPromptQueuePollAbortController = null;
+                chatPromptQueuePollInFlight = false;
+                syncChatPromptQueuePolling();
+            }
+        }
+    }, CHAT_PROMPT_QUEUE_POLL_INTERVAL_MS);
+}
+
+function getChatPromptQueueStatusByIdForSession(entries, sessionId) {
+    const statusById = new Map();
+    const sessionKey = getChatRequestSessionKey(sessionId);
+    entries.forEach((entry) => {
+        if (
+            !entry?.queueId
+            || entry.sessionKey !== sessionKey
+            || !isServerDispatchedChatPromptQueueEntry(entry)
+        ) {
+            return;
+        }
+        statusById.set(entry.queueId, entry.status);
+    });
+    return statusById;
+}
+
+function activeConversationQueueStateChanged(previousEntries, nextEntries) {
+    const sessionId = normaliseHistorySessionId(activeChatSessionId);
+    if (!sessionId) {
+        return false;
+    }
+    const previousStatusById = getChatPromptQueueStatusByIdForSession(
+        previousEntries,
+        sessionId
+    );
+    if (previousStatusById.size === 0) {
+        return false;
+    }
+    const nextStatusById = getChatPromptQueueStatusByIdForSession(
+        nextEntries,
+        sessionId
+    );
+    return Array.from(previousStatusById.entries()).some(([queueId, status]) => (
+        (
+            status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
+            || status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
+        )
+        && nextStatusById.get(queueId) !== status
+    ));
+}
+
+function refreshActiveConversationHistoryAfterQueueChange() {
+    const sessionId = normaliseHistorySessionId(activeChatSessionId);
+    if (!sessionId) {
+        return;
+    }
+    invalidateSessionHistoryCache(sessionId);
+    scheduleSharedHistoryResync(sessionId);
+}
+
 function mergePersistedChatPromptQueueEntry(entry) {
     const normalised = normaliseChatPromptQueueEntry(entry);
     if (!normalised) {
@@ -34508,6 +34725,10 @@ function mergePersistedChatPromptQueueEntry(entry) {
     }
     const existingIndex = queuedChatPrompts.findIndex((candidate) => (
         (normalised.queueId && candidate.queueId === normalised.queueId)
+        || (
+            normalised.enqueueSubmissionId
+            && candidate.enqueueSubmissionId === normalised.enqueueSubmissionId
+        )
         || candidate.id === normalised.id
     ));
     if (existingIndex >= 0) {
@@ -34518,6 +34739,7 @@ function mergePersistedChatPromptQueueEntry(entry) {
     } else {
         queuedChatPrompts.push(normalised);
     }
+    syncChatPromptQueuePolling();
     return normalised;
 }
 
@@ -34526,8 +34748,11 @@ async function refreshChatPromptQueueFromServer(options = {}) {
         return false;
     }
     const organisationGenerationAtStart = chatOrganisationGeneration;
+    const previousEntries = [...queuedChatPrompts];
     try {
-        const data = await fetchChatPromptQueueJson('');
+        const data = await fetchChatPromptQueueJson('', {
+            signal: options.signal
+        });
         if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
             return false;
         }
@@ -34558,17 +34783,39 @@ async function refreshChatPromptQueueFromServer(options = {}) {
                 ))
                 .filter(Boolean)
             : [];
+        const recentFailedQueueIds = new Set(
+            canonicalRecentFailedEntries
+                .map((entry) => entry?.queueId)
+                .filter(Boolean)
+        );
         const persistedEntries = canonicalPersistedEntries
+            .filter((entry) => !entry?.queueId || !recentFailedQueueIds.has(entry.queueId))
             .filter(isDisplayedChatPromptQueueEntry);
         const recentFailedEntries = canonicalRecentFailedEntries
             .filter(isDisplayedChatPromptQueueEntry);
-        const localOnlyEntries = queuedChatPrompts.filter((entry) => entry?.localOnly === true);
+        const canonicalSubmissionIds = new Set(
+            [...persistedEntries, ...recentFailedEntries]
+                .map((entry) => entry?.enqueueSubmissionId)
+                .filter(Boolean)
+        );
+        const localOnlyEntries = queuedChatPrompts.filter((entry) => (
+            entry?.localOnly === true
+            && (
+                !entry.enqueueSubmissionId
+                || !canonicalSubmissionIds.has(entry.enqueueSubmissionId)
+            )
+        ));
         queuedChatPrompts = [...persistedEntries, ...localOnlyEntries, ...recentFailedEntries];
+        const shouldRefreshActiveHistory = activeConversationQueueStateChanged(
+            previousEntries,
+            queuedChatPrompts
+        );
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
         updateSendButtonForCurrentChatState();
-        if (!options.skipDrain) {
-            scheduleQueuedChatPromptDrain();
+        syncChatPromptQueuePolling();
+        if (shouldRefreshActiveHistory) {
+            refreshActiveConversationHistoryAfterQueueChange();
         }
         return {
             items: canonicalPersistedEntries,
@@ -34578,30 +34825,101 @@ async function refreshChatPromptQueueFromServer(options = {}) {
         if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
             return false;
         }
-        if (!options.silent) {
+        if (!options.silent && error?.name !== 'AbortError') {
             console.warn('[chatTab] Unable to load persisted chat prompt queue:', error);
         }
         return false;
+    } finally {
+        syncChatPromptQueuePolling();
     }
 }
 
+function buildChatPromptExecutionEnvelope({
+    fileCopyConceptId = null,
+    turnKind = null,
+    initiationId = null
+} = {}) {
+    const userContext = getUserContext() || {};
+    const localModelRequestFields = buildLocalModelRequestFields(
+        resolveLocalRequestedLlm()
+    );
+    return {
+        ...(turnKind ? { turn_kind: turnKind } : {}),
+        ...(initiationId ? { initiation_id: initiationId } : {}),
+        language: (typeof userContext.language === 'string' && userContext.language.trim())
+            ? userContext.language.trim()
+            : 'en-NZ',
+        ...localModelRequestFields,
+        ...(fileCopyConceptId ? {
+            workflow_inputs: {
+                file_copy_concept_id: fileCopyConceptId
+            }
+        } : {}),
+        presenter_mode: true,
+        skip_buttonify: false,
+        thinking_card_mode: getThinkingCardMode()
+    };
+}
+
 async function createPersistedChatPromptQueueEntry(entry, status = CHAT_PROMPT_QUEUE_STATUS_QUEUED) {
+    const serverDispatch = isServerDispatchedChatPromptQueueEntry(entry);
+    let enqueueSubmissionId = null;
+    if (serverDispatch) {
+        enqueueSubmissionId = (
+            typeof entry?.enqueueSubmissionId === 'string'
+            && entry.enqueueSubmissionId.trim()
+        )
+            ? entry.enqueueSubmissionId.trim()
+            : createClientRequestId();
+        entry.enqueueSubmissionId = enqueueSubmissionId;
+    }
+    const body = {
+        prompt_raw: entry.promptRaw,
+        session_id: entry.sessionId || null,
+        session_name: entry.sessionName || null,
+        status
+    };
+    if (serverDispatch) {
+        Object.assign(body, {
+            enqueue_submission_id: enqueueSubmissionId,
+            dispatch_mode: 'server',
+            execution_envelope_version: 1,
+            execution_envelope: (
+                entry.executionEnvelope
+                && typeof entry.executionEnvelope === 'object'
+                && !Array.isArray(entry.executionEnvelope)
+            )
+                ? entry.executionEnvelope
+                : {}
+        });
+        if (
+            typeof entry?.handoffSourceQueueId === 'string'
+            && entry.handoffSourceQueueId.trim()
+        ) {
+            body.handoff_source_queue_id = entry.handoffSourceQueueId.trim();
+        }
+    } else {
+        Object.assign(body, {
+            client_request_id: entry.clientRequestId || null,
+            attempt_id: entry.attemptId || null
+        });
+    }
     const data = await fetchChatPromptQueueJson('', {
         method: 'POST',
-        body: JSON.stringify({
-            prompt_raw: entry.promptRaw,
-            session_id: entry.sessionId || null,
-            session_name: entry.sessionName || null,
-            client_request_id: entry.clientRequestId || null,
-            attempt_id: entry.attemptId || null,
-            status
-        })
+        body: JSON.stringify(body)
     });
-    return data.item ? normaliseChatPromptQueueEntry(data.item, entry) : null;
+    if (!data.item) {
+        throw new Error('Queue persistence returned no canonical record.');
+    }
+    return normaliseChatPromptQueueEntry(data.item, entry);
 }
 
 async function persistQueuedPromptUpdateNow(entry) {
-    if (!entry?.queueId || entry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED) {
+    if (
+        !entry?.queueId
+        || entry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED
+        || isServerDispatchedChatPromptQueueEntry(entry)
+    ) {
         return entry;
     }
     const existingTimer = queuedChatPromptSyncTimers.get(entry.id);
@@ -34621,7 +34939,11 @@ async function persistQueuedPromptUpdateNow(entry) {
 }
 
 function schedulePersistedQueuedPromptUpdate(entry) {
-    if (!entry?.queueId || entry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED) {
+    if (
+        !entry?.queueId
+        || entry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED
+        || isServerDispatchedChatPromptQueueEntry(entry)
+    ) {
         return;
     }
     const existingTimer = queuedChatPromptSyncTimers.get(entry.id);
@@ -34651,10 +34973,230 @@ async function deletePersistedChatPromptQueueEntry(entry) {
     if (!entry?.queueId) {
         return true;
     }
-    await fetchChatPromptQueueJson(`/${encodeURIComponent(entry.queueId)}`, {
-        method: 'DELETE'
-    });
+    try {
+        await fetchChatPromptQueueJson(`/${encodeURIComponent(entry.queueId)}`, {
+            method: 'DELETE'
+        });
+    } catch (error) {
+        if (!isCanonicalChatPromptQueueAbsenceError(error)) {
+            throw error;
+        }
+    }
     return true;
+}
+
+async function completePersistedChatPromptQueueHandoff(entry) {
+    if (!entry?.queueId) {
+        throw new Error('The canonical handoff queue record is unavailable.');
+    }
+    const data = await fetchChatPromptQueueJson(
+        `/${encodeURIComponent(entry.queueId)}/complete-handoff`,
+        { method: 'POST' }
+    );
+    if (!data.item) {
+        throw new Error('Queue handoff returned no canonical record.');
+    }
+    return normaliseChatPromptQueueEntry(data.item, entry);
+}
+
+function isPendingServerDispatchHandoff(entry) {
+    return Boolean(
+        entry?.handoffSourceQueueId
+        && isServerDispatchedChatPromptQueueEntry(entry)
+        && entry.dispatchReady === false
+        && entry.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
+    );
+}
+
+async function cancelUnresolvedChatPromptQueueHandoff(entry) {
+    const sourceQueueId = (
+        typeof entry?.handoffSourceQueueId === 'string'
+        && entry.handoffSourceQueueId.trim()
+    )
+        ? entry.handoffSourceQueueId.trim()
+        : null;
+    const enqueueSubmissionId = (
+        typeof entry?.enqueueSubmissionId === 'string'
+        && entry.enqueueSubmissionId.trim()
+    )
+        ? entry.enqueueSubmissionId.trim()
+        : null;
+    if (!sourceQueueId) {
+        throw new Error('The durable handoff source is unavailable.');
+    }
+
+    const data = await fetchChatPromptQueueJson('');
+    const canonicalEntries = [
+        ...(Array.isArray(data?.items) ? data.items : []),
+        ...(Array.isArray(data?.recent_failed_items) ? data.recent_failed_items : [])
+    ]
+        .map((item) => normaliseChatPromptQueueEntry(item))
+        .filter(Boolean);
+    const replacementQueueIds = new Set();
+    if (entry?.queueId && entry.queueId !== sourceQueueId) {
+        replacementQueueIds.add(entry.queueId);
+    }
+    canonicalEntries.forEach((candidate) => {
+        if (
+            candidate.queueId
+            && candidate.queueId !== sourceQueueId
+            && enqueueSubmissionId
+            && candidate.enqueueSubmissionId === enqueueSubmissionId
+        ) {
+            replacementQueueIds.add(candidate.queueId);
+        }
+    });
+
+    // Cancel the dispatch-ineligible replacement first. The durable server
+    // handoff guarantees it cannot start before its exact source is retired.
+    for (const queueId of replacementQueueIds) {
+        await deletePersistedChatPromptQueueEntry({ queueId });
+    }
+    await deletePersistedChatPromptQueueEntry({ queueId: sourceQueueId });
+
+    queuedChatPrompts = queuedChatPrompts.filter((candidate) => (
+        candidate?.queueId !== sourceQueueId
+        && !replacementQueueIds.has(candidate?.queueId)
+        && (
+            !enqueueSubmissionId
+            || candidate?.enqueueSubmissionId !== enqueueSubmissionId
+            || !candidate?.handoffSourceQueueId
+        )
+        && (
+            !enqueueSubmissionId
+            || candidate?.handoffEnqueueSubmissionId !== enqueueSubmissionId
+        )
+    ));
+    if (!getChatPromptQueueEntryById(selectedChatPromptQueueEntryId)) {
+        selectedChatPromptQueueEntryId = null;
+    }
+    publishChatPromptQueueChange('queue_handoff_cancelled');
+    renderChatTaskQueuePanel();
+    refreshChatSessionTabActivityIndicators();
+    updateSendButtonForCurrentChatState();
+}
+
+function ensureAdmissionDeferredSourceQueueEntry(
+    handoffEntry,
+    { replacementQueueId = null, syncError = null } = {}
+) {
+    const sourceQueueId = (
+        typeof handoffEntry?.handoffSourceQueueId === 'string'
+        && handoffEntry.handoffSourceQueueId.trim()
+    )
+        ? handoffEntry.handoffSourceQueueId.trim()
+        : null;
+    if (!sourceQueueId) {
+        return null;
+    }
+    const existingIndex = queuedChatPrompts.findIndex((entry) => (
+        entry?.queueId === sourceQueueId
+    ));
+    const existing = existingIndex >= 0 ? queuedChatPrompts[existingIndex] : {};
+    const sourceEntry = normaliseChatPromptQueueEntry({
+        queue_id: sourceQueueId,
+        prompt_raw: handoffEntry.promptRaw,
+        session_id: handoffEntry.sessionId,
+        session_name: handoffEntry.sessionName,
+        status: CHAT_PROMPT_QUEUE_STATUS_QUEUED,
+        handoffEnqueueSubmissionId: handoffEntry.enqueueSubmissionId,
+        supersededByQueueId: replacementQueueId
+    }, existing);
+    if (!sourceEntry) {
+        return null;
+    }
+    sourceEntry.syncError = syncError || existing.syncError || null;
+    if (existingIndex >= 0) {
+        queuedChatPrompts[existingIndex] = sourceEntry;
+    } else {
+        queuedChatPrompts.push(sourceEntry);
+    }
+    return sourceEntry;
+}
+
+async function retireAdmissionDeferredSourceAfterCanonicalEnqueue(
+    handoffEntry,
+    persistedEntry
+) {
+    const sourceQueueId = (
+        typeof handoffEntry?.handoffSourceQueueId === 'string'
+        && handoffEntry.handoffSourceQueueId.trim()
+    )
+        ? handoffEntry.handoffSourceQueueId.trim()
+        : null;
+    const replacementQueueId = (
+        typeof persistedEntry?.queueId === 'string'
+        && persistedEntry.queueId.trim()
+    )
+        ? persistedEntry.queueId.trim()
+        : null;
+    if (!sourceQueueId || !replacementQueueId || sourceQueueId === replacementQueueId) {
+        return false;
+    }
+
+    if (
+        persistedEntry?.dispatchReady === true
+        && persistedEntry?.handoffSourceQueueId === sourceQueueId
+    ) {
+        // The v2 server handoff activates a replacement only after the exact
+        // source has been cancelled and read back. Do not issue a second
+        // browser-owned cancellation or retain a phantom source row.
+        queuedChatPrompts = queuedChatPrompts.filter((entry) => (
+            entry?.queueId !== sourceQueueId
+        ));
+        publishChatPromptQueueChange('foreground_prompt_replaced_by_server_queue');
+        renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
+        return true;
+    }
+
+    // Keep the source visible and non-dispatchable during the non-atomic
+    // cleanup window. It is removed from the client projection only after the
+    // canonical DELETE acknowledges cancellation.
+    ensureAdmissionDeferredSourceQueueEntry(handoffEntry, {
+        replacementQueueId
+    });
+    renderChatTaskQueuePanel();
+    refreshChatSessionTabActivityIndicators();
+    updateSendButtonForCurrentChatState();
+
+    try {
+        await deletePersistedChatPromptQueueEntry({ queueId: sourceQueueId });
+        queuedChatPrompts = queuedChatPrompts.filter((entry) => (
+            entry?.queueId !== sourceQueueId
+        ));
+        const replacement = queuedChatPrompts.find((entry) => (
+            entry?.queueId === replacementQueueId
+        ));
+        if (replacement) {
+            replacement.handoffSourceQueueId = null;
+        }
+        publishChatPromptQueueChange('foreground_prompt_replaced_by_server_queue');
+        renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
+        return true;
+    } catch (error) {
+        const sourceEntry = ensureAdmissionDeferredSourceQueueEntry(handoffEntry, {
+            replacementQueueId,
+            syncError: describeChatPromptQueueApiError(
+                error,
+                'The prior queue record could not be retired on the server.'
+            )
+        });
+        if (sourceEntry) {
+            sourceEntry.deleteInFlight = false;
+        }
+        console.warn(
+            '[chatTab] Unable to retire foreground queue record after server enqueue:',
+            error
+        );
+        renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
+        return false;
+    }
 }
 
 async function requeuePersistedChatPromptQueueEntry(entry) {
@@ -34684,10 +35226,10 @@ function ensureChatTaskQueuePanel() {
         panel.id = CHAT_TASK_QUEUE_PANEL_ID;
         panel.className = 'chat-task-queue-panel hidden';
         panel.setAttribute('aria-live', 'polite');
-        panel.setAttribute('aria-label', 'Queued tasks');
+        panel.setAttribute('aria-label', 'Queued prompts for this conversation');
         panel.innerHTML = `
             <div class="chat-task-queue-header">
-                <span class="chat-task-queue-title">Queued tasks</span>
+                <span class="chat-task-queue-title">Queued prompts</span>
                 <span id="${CHAT_TASK_QUEUE_COUNT_ID}" class="chat-task-queue-count">0 queued</span>
             </div>
             <div id="${CHAT_TASK_QUEUE_LIST_ID}" class="chat-task-queue-list"></div>
@@ -34732,7 +35274,10 @@ function ensureChatTaskQueuePanel() {
                 return;
             }
             const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
-            if (!queued) {
+            if (!queued || isServerDispatchedChatPromptQueueEntry(queued)) {
+                if (queued) {
+                    target.value = queued.promptRaw;
+                }
                 return;
             }
             queued.promptRaw = target.value;
@@ -34743,6 +35288,115 @@ function ensureChatTaskQueuePanel() {
         panel.addEventListener('click', (event) => {
             const target = event.target;
             if (!(target instanceof HTMLElement)) {
+                return;
+            }
+            const handoffCompleteButton = target.closest('.chat-task-queue-handoff-complete');
+            if (handoffCompleteButton) {
+                const queueId = String(
+                    handoffCompleteButton.getAttribute('data-queue-id') || ''
+                ).trim();
+                const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
+                if (!queued || !isPendingServerDispatchHandoff(queued)) {
+                    return;
+                }
+                handoffCompleteButton.disabled = true;
+                void (async () => {
+                    try {
+                        const completed = await completePersistedChatPromptQueueHandoff(queued);
+                        mergePersistedChatPromptQueueEntry(completed);
+                        await retireAdmissionDeferredSourceAfterCanonicalEnqueue(
+                            queued,
+                            completed
+                        );
+                        publishChatPromptQueueChange('queue_handoff_completed');
+                        renderChatTaskQueuePanel();
+                        refreshChatSessionTabActivityIndicators();
+                        updateSendButtonForCurrentChatState();
+                    } catch (error) {
+                        queued.syncError = describeChatPromptQueueApiError(
+                            error,
+                            'Queue handoff could not be completed on the server.'
+                        );
+                        renderChatTaskQueuePanel();
+                    }
+                })();
+                return;
+            }
+            const handoffCancelButton = target.closest('.chat-task-queue-handoff-cancel');
+            if (handoffCancelButton) {
+                const queueId = String(
+                    handoffCancelButton.getAttribute('data-queue-id') || ''
+                ).trim();
+                const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
+                if (
+                    !queued
+                    || !queued.handoffSourceQueueId
+                    || queued.deleteInFlight === true
+                ) {
+                    return;
+                }
+                queued.deleteInFlight = true;
+                queued.syncError = null;
+                renderChatTaskQueuePanel();
+                void (async () => {
+                    try {
+                        await cancelUnresolvedChatPromptQueueHandoff(queued);
+                    } catch (error) {
+                        queued.deleteInFlight = false;
+                        queued.syncError = describeChatPromptQueueApiError(
+                            error,
+                            'The unresolved queue handoff could not be cancelled.'
+                        );
+                        renderChatTaskQueuePanel();
+                    }
+                })();
+                return;
+            }
+            const enqueueRetryButton = target.closest('.chat-task-queue-enqueue-retry');
+            if (enqueueRetryButton) {
+                const queueId = String(enqueueRetryButton.getAttribute('data-queue-id') || '').trim();
+                const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
+                if (!queued || queued.enqueueFailed !== true) {
+                    return;
+                }
+                enqueueRetryButton.disabled = true;
+                void (async () => {
+                    try {
+                        const persisted = await createPersistedChatPromptQueueEntry(queued);
+                        if (!persisted) {
+                            throw new Error('Queue persistence returned no record.');
+                        }
+                        const index = queuedChatPrompts.findIndex((entry) => entry.id === queued.id);
+                        if (index >= 0) {
+                            queuedChatPrompts[index] = {
+                                ...queued,
+                                ...persisted,
+                                enqueueFailed: false,
+                                enqueueUnconfirmed: false,
+                                syncError: null,
+                                id: persisted.id || queued.id
+                            };
+                        }
+                        await retireAdmissionDeferredSourceAfterCanonicalEnqueue(
+                            queued,
+                            persisted
+                        );
+                        renderChatTaskQueuePanel();
+                        refreshChatSessionTabActivityIndicators();
+                        updateSendButtonForCurrentChatState();
+                        publishChatPromptQueueChange('queued_prompt_retry_saved');
+                        syncChatPromptQueuePolling();
+                    } catch (error) {
+                        queued.enqueueUnconfirmed = isAmbiguousChatPromptQueueEnqueueError(error);
+                        queued.syncError = describeChatPromptQueueApiError(
+                            error,
+                            queued.enqueueUnconfirmed
+                                ? 'Queue acknowledgement was not received. Retry safely to reconcile this exact prompt.'
+                                : 'Prompt was not queued. Retry when queue storage is available.'
+                        );
+                        renderChatTaskQueuePanel();
+                    }
+                })();
                 return;
             }
             const restartButton = target.closest('.chat-task-queue-restart');
@@ -34769,7 +35423,7 @@ function ensureChatTaskQueuePanel() {
                         refreshChatSessionTabActivityIndicators();
                         updateSendButtonForCurrentChatState();
                         publishChatPromptQueueChange('queued_prompt_restarted');
-                        scheduleQueuedChatPromptDrain();
+                        syncChatPromptQueuePolling();
                     } catch (error) {
                         queued.syncError = describeChatPromptQueueApiError(
                             error,
@@ -34823,17 +35477,46 @@ function ensureChatTaskQueuePanel() {
                 return;
             }
             const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
-            queuedChatPrompts = queuedChatPrompts.filter((entry) => entry.id !== queueId);
-            renderChatTaskQueuePanel();
-            refreshChatSessionTabActivityIndicators();
-            updateSendButtonForCurrentChatState();
-            if (queued) {
-                void deletePersistedChatPromptQueueEntry(queued)
-                    .then(() => publishChatPromptQueueChange('queued_prompt_deleted'))
-                    .catch((error) => {
-                        console.warn('[chatTab] Unable to delete persisted queued prompt:', error);
-                    });
+            if (!queued || queued.deleteInFlight === true) {
+                return;
             }
+            if (!queued.queueId) {
+                queuedChatPrompts = queuedChatPrompts.filter((entry) => entry.id !== queueId);
+                renderChatTaskQueuePanel();
+                refreshChatSessionTabActivityIndicators();
+                updateSendButtonForCurrentChatState();
+                return;
+            }
+            queued.deleteInFlight = true;
+            queued.syncError = null;
+            renderChatTaskQueuePanel();
+            void (async () => {
+                try {
+                    await deletePersistedChatPromptQueueEntry(queued);
+                    queuedChatPrompts = queuedChatPrompts.filter((entry) => (
+                        entry.id !== queueId
+                        && entry.queueId !== queued.queueId
+                    ));
+                    if (selectedChatPromptQueueEntryId === queueId) {
+                        selectedChatPromptQueueEntryId = null;
+                    }
+                    publishChatPromptQueueChange('queued_prompt_deleted');
+                } catch (error) {
+                    const retained = queuedChatPrompts.find((entry) => (
+                        entry.id === queueId
+                        || entry.queueId === queued.queueId
+                    )) || queued;
+                    retained.deleteInFlight = false;
+                    retained.syncError = describeChatPromptQueueApiError(
+                        error,
+                        'Queued task could not be deleted on the server.'
+                    );
+                    console.warn('[chatTab] Unable to delete persisted queued prompt:', error);
+                }
+                renderChatTaskQueuePanel();
+                refreshChatSessionTabActivityIndicators();
+                updateSendButtonForCurrentChatState();
+            })();
         });
     }
 
@@ -34853,14 +35536,31 @@ function renderChatTaskQueuePanel() {
     }
 
     const { panel, list, count } = elements;
-    const displayEntries = queuedChatPrompts.filter(isDisplayedChatPromptQueueEntry);
+    const displayEntries = queuedChatPrompts.filter((entry) => (
+        isDisplayedChatPromptQueueEntry(entry)
+        && isChatPromptQueueEntryForSession(entry)
+    ));
     const queueSize = displayEntries.length;
     let runningCount = 0;
     let interruptedCount = 0;
     let failedCount = 0;
     let queuedCount = 0;
+    let enqueueFailedCount = 0;
+    let enqueueUnconfirmedCount = 0;
+    let cleanupPendingCount = 0;
     displayEntries.forEach((entry) => {
-        if (isRunningChatPromptQueueEntry(entry)) {
+        if (
+            entry.supersededByQueueId
+            || entry.handoffEnqueueSubmissionId
+            || isPendingServerDispatchHandoff(entry)
+        ) {
+            cleanupPendingCount += 1;
+        } else if (entry.enqueueFailed === true) {
+            enqueueFailedCount += 1;
+            if (entry.enqueueUnconfirmed === true) {
+                enqueueUnconfirmedCount += 1;
+            }
+        } else if (isRunningChatPromptQueueEntry(entry)) {
             runningCount += 1;
         } else if (isRestartableChatPromptQueueEntry(entry)) {
             interruptedCount += 1;
@@ -34887,6 +35587,22 @@ function renderChatTaskQueuePanel() {
         if (failedCount > 0) {
             countParts.push(failedCount === 1 ? '1 failed' : `${failedCount} failed`);
         }
+        if (enqueueFailedCount > 0) {
+            const definitelyFailedCount = enqueueFailedCount - enqueueUnconfirmedCount;
+            if (enqueueUnconfirmedCount > 0) {
+                countParts.push(enqueueUnconfirmedCount === 1
+                    ? '1 queue unconfirmed'
+                    : `${enqueueUnconfirmedCount} queues unconfirmed`);
+            }
+            if (definitelyFailedCount > 0) {
+                countParts.push(definitelyFailedCount === 1
+                    ? '1 not queued'
+                    : `${definitelyFailedCount} not queued`);
+            }
+        }
+        if (cleanupPendingCount > 0) {
+            countParts.push(cleanupPendingCount === 1 ? '1 handoff pending' : `${cleanupPendingCount} handoffs pending`);
+        }
         count.textContent = countParts.join(', ');
     }
     list.innerHTML = '';
@@ -34903,6 +35619,19 @@ function renderChatTaskQueuePanel() {
         const isRunning = isRunningChatPromptQueueEntry(entry);
         const isInterrupted = isRestartableChatPromptQueueEntry(entry);
         const isFailed = !isRunning && entry.status === CHAT_PROMPT_QUEUE_STATUS_FAILED;
+        const isServerDispatched = isServerDispatchedChatPromptQueueEntry(entry);
+        const isEnqueueFailed = entry.enqueueFailed === true;
+        const isEnqueueUnconfirmed = entry.enqueueUnconfirmed === true;
+        const isSuperseded = Boolean(entry.supersededByQueueId);
+        const isHandoffPendingSource = Boolean(
+            entry.handoffEnqueueSubmissionId
+            && !entry.supersededByQueueId
+        );
+        const isPendingHandoffReplacement = isPendingServerDispatchHandoff(entry);
+        const hasUnresolvedHandoff = Boolean(
+            entry.handoffSourceQueueId
+            && (isEnqueueFailed || isPendingHandoffReplacement)
+        );
         const item = document.createElement('div');
         item.className = 'chat-task-queue-item';
         if (isRunning) {
@@ -34911,6 +35640,8 @@ function renderChatTaskQueuePanel() {
             item.classList.add('chat-task-queue-item-interrupted');
         } else if (isFailed) {
             item.classList.add('chat-task-queue-item-failed');
+        } else if (isEnqueueFailed) {
+            item.classList.add('chat-task-queue-item-enqueue-failed');
         }
         if (entry.id === selectedChatPromptQueueEntryId) {
             item.classList.add('chat-task-queue-item-selected');
@@ -34921,7 +35652,17 @@ function renderChatTaskQueuePanel() {
         const label = document.createElement('div');
         label.className = 'chat-task-queue-item-label';
         const sessionLabel = getQueuedChatPromptSessionLabel(entry);
-        if (isRunning) {
+        if (isSuperseded) {
+            label.textContent = `Superseded • ${sessionLabel}`;
+        } else if (isHandoffPendingSource) {
+            label.textContent = `Handoff pending • ${sessionLabel}`;
+        } else if (isPendingHandoffReplacement) {
+            label.textContent = `Handoff pending • ${sessionLabel}`;
+        } else if (isEnqueueFailed) {
+            label.textContent = isEnqueueUnconfirmed
+                ? `Queue unconfirmed • ${sessionLabel}`
+                : `Not queued • ${sessionLabel}`;
+        } else if (isRunning) {
             label.textContent = `Running • ${sessionLabel}`;
         } else if (isInterrupted) {
             label.textContent = `Interrupted • ${sessionLabel}`;
@@ -34939,13 +35680,41 @@ function renderChatTaskQueuePanel() {
         editor.rows = 2;
         editor.value = entry.promptRaw;
         editor.setAttribute('data-queue-id', entry.id);
-        editor.readOnly = isRunning || isInterrupted || isFailed;
-        editor.setAttribute('aria-label', isRunning ? `Running task ${index + 1}` : (isInterrupted ? `Interrupted task ${index + 1}` : (isFailed ? `Failed task ${index + 1}` : `Queued task ${index + 1}`)));
+        editor.readOnly = isRunning
+            || isInterrupted
+            || isFailed
+            || isServerDispatched
+            || isEnqueueFailed
+            || isSuperseded
+            || isHandoffPendingSource
+            || isPendingHandoffReplacement;
+        editor.setAttribute('aria-label', isEnqueueFailed ? `Prompt not queued ${index + 1}` : (isRunning ? `Running task ${index + 1}` : (isInterrupted ? `Interrupted task ${index + 1}` : (isFailed ? `Failed task ${index + 1}` : (isServerDispatched ? `Server-dispatched queued task ${index + 1}` : `Queued task ${index + 1}`)))));
 
         const actions = document.createElement('div');
         actions.className = 'chat-task-queue-actions';
 
-        if (isInterrupted) {
+        if (isEnqueueFailed) {
+            const retryButton = document.createElement('button');
+            retryButton.type = 'button';
+            retryButton.className = 'btn-mini chat-task-queue-enqueue-retry';
+            retryButton.textContent = isEnqueueUnconfirmed
+                ? 'Reconcile queueing'
+                : 'Retry queueing';
+            retryButton.setAttribute('data-queue-id', entry.id);
+            retryButton.setAttribute('aria-label', `Retry queueing prompt ${index + 1}`);
+            actions.appendChild(retryButton);
+        } else if (isPendingHandoffReplacement) {
+            const retryHandoffButton = document.createElement('button');
+            retryHandoffButton.type = 'button';
+            retryHandoffButton.className = 'btn-mini chat-task-queue-handoff-complete';
+            retryHandoffButton.textContent = 'Complete handoff';
+            retryHandoffButton.setAttribute('data-queue-id', entry.id);
+            retryHandoffButton.setAttribute(
+                'aria-label',
+                `Complete queue handoff ${index + 1}`
+            );
+            actions.appendChild(retryHandoffButton);
+        } else if (isInterrupted) {
             const restartButton = document.createElement('button');
             restartButton.type = 'button';
             restartButton.className = 'btn-mini chat-task-queue-restart';
@@ -34955,11 +35724,30 @@ function renderChatTaskQueuePanel() {
             actions.appendChild(restartButton);
         }
 
-        if (!isRunning && !isFailed) {
+        if (hasUnresolvedHandoff) {
+            const cancelHandoffButton = document.createElement('button');
+            cancelHandoffButton.type = 'button';
+            cancelHandoffButton.className = 'btn-mini chat-task-queue-handoff-cancel';
+            cancelHandoffButton.textContent = entry.deleteInFlight
+                ? 'Cancelling…'
+                : 'Cancel prompt';
+            cancelHandoffButton.disabled = entry.deleteInFlight === true;
+            cancelHandoffButton.setAttribute('data-queue-id', entry.id);
+            cancelHandoffButton.setAttribute(
+                'aria-label',
+                `Cancel unresolved queue handoff ${index + 1}`
+            );
+            actions.appendChild(cancelHandoffButton);
+        }
+
+        if (!isRunning && !isFailed && !isHandoffPendingSource && !hasUnresolvedHandoff) {
             const deleteButton = document.createElement('button');
             deleteButton.type = 'button';
             deleteButton.className = 'btn-mini chat-task-queue-delete';
-            deleteButton.textContent = 'Delete';
+            deleteButton.textContent = entry.deleteInFlight
+                ? (isSuperseded ? 'Cleaning…' : 'Deleting…')
+                : (isSuperseded ? 'Retry cleanup' : 'Delete');
+            deleteButton.disabled = entry.deleteInFlight === true;
             deleteButton.setAttribute('data-queue-id', entry.id);
             deleteButton.setAttribute('aria-label', isInterrupted ? `Delete interrupted task ${index + 1}` : `Delete queued task ${index + 1}`);
             actions.appendChild(deleteButton);
@@ -34980,6 +35768,21 @@ function renderChatTaskQueuePanel() {
             const syncWarning = document.createElement('div');
             syncWarning.className = 'chat-task-queue-sync-warning';
             syncWarning.textContent = entry.syncError;
+            item.appendChild(syncWarning);
+        } else if (isSuperseded) {
+            const syncWarning = document.createElement('div');
+            syncWarning.className = 'chat-task-queue-sync-warning';
+            syncWarning.textContent = 'Server dispatch is canonical; this prior row is retained until cleanup succeeds.';
+            item.appendChild(syncWarning);
+        } else if (isHandoffPendingSource) {
+            const syncWarning = document.createElement('div');
+            syncWarning.className = 'chat-task-queue-sync-warning';
+            syncWarning.textContent = 'This durable row is retained until server queueing is acknowledged.';
+            item.appendChild(syncWarning);
+        } else if (isPendingHandoffReplacement) {
+            const syncWarning = document.createElement('div');
+            syncWarning.className = 'chat-task-queue-sync-warning';
+            syncWarning.textContent = 'The server is safely reconciling this durable queue handoff.';
             item.appendChild(syncWarning);
         }
         if (isFailed && entry.lastError) {
@@ -35005,6 +35808,22 @@ async function queuePromptForLater(promptRaw, options = {}) {
     const sessionName = (typeof options.sessionName === 'string' && options.sessionName.trim())
         ? options.sessionName.trim()
         : null;
+    const enqueueSubmissionId = (
+        typeof options.enqueueSubmissionId === 'string'
+        && options.enqueueSubmissionId.trim()
+    )
+        ? options.enqueueSubmissionId.trim()
+        : createClientRequestId();
+    const fileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
+        options.fileCopyConceptId
+    );
+    const executionEnvelope = (
+        options.executionEnvelope
+        && typeof options.executionEnvelope === 'object'
+        && !Array.isArray(options.executionEnvelope)
+    )
+        ? options.executionEnvelope
+        : buildChatPromptExecutionEnvelope({ fileCopyConceptId });
     const localEntry = normaliseChatPromptQueueEntry({
         id: createQueuedChatPromptId(),
         promptRaw: value,
@@ -35014,15 +35833,21 @@ async function queuePromptForLater(promptRaw, options = {}) {
         sessionKey: getChatRequestSessionKey(sessionId),
         sessionName,
         session_name: sessionName,
-        fileCopyConceptId: normaliseTrustedUploadedFileCopyConceptId(
-            options.fileCopyConceptId
-        ),
-        clientRequestId: (typeof options.clientRequestId === 'string' && options.clientRequestId.trim())
-            ? options.clientRequestId.trim()
+        enqueueSubmissionId,
+        enqueue_submission_id: enqueueSubmissionId,
+        dispatchMode: 'server',
+        dispatch_mode: 'server',
+        executionEnvelopeVersion: 1,
+        execution_envelope_version: 1,
+        executionEnvelope,
+        execution_envelope: executionEnvelope,
+        handoffSourceQueueId: (
+            typeof options.handoffSourceQueueId === 'string'
+            && options.handoffSourceQueueId.trim()
+        )
+            ? options.handoffSourceQueueId.trim()
             : null,
-        attemptId: (typeof options.attemptId === 'string' && options.attemptId.trim())
-            ? options.attemptId.trim()
-            : null,
+        fileCopyConceptId,
         status: CHAT_PROMPT_QUEUE_STATUS_QUEUED,
         localOnly: true
     });
@@ -35048,21 +35873,32 @@ async function queuePromptForLater(promptRaw, options = {}) {
                     id: persisted.id || localEntry.id
                 };
             } else {
-                queuedChatPrompts.push(persisted);
+                mergePersistedChatPromptQueueEntry(persisted);
             }
             renderChatTaskQueuePanel();
             refreshChatSessionTabActivityIndicators();
             updateSendButtonForCurrentChatState();
+            await retireAdmissionDeferredSourceAfterCanonicalEnqueue(
+                localEntry,
+                persisted
+            );
             publishChatPromptQueueChange('queued_prompt_created');
             return persisted;
         }
     } catch (error) {
+        localEntry.enqueueFailed = true;
+        localEntry.enqueueUnconfirmed = isAmbiguousChatPromptQueueEnqueueError(error);
         localEntry.syncError = describeChatPromptQueueApiError(
             error,
-            'Queued locally; server persistence failed.'
+            localEntry.enqueueUnconfirmed
+                ? 'Queue acknowledgement was not received. Retry safely to reconcile this exact prompt.'
+                : 'Prompt was not queued. Retry when queue storage is available.'
         );
         console.warn('[chatTab] Unable to persist queued prompt:', error);
+        ensureAdmissionDeferredSourceQueueEntry(localEntry);
         renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
     }
     return localEntry;
 }
@@ -35073,6 +35909,7 @@ function isChatPromptSessionBusy(sessionId, { includeQueued = false } = {}) {
         || queuedChatPromptClaimsInFlight.has(sessionKey)
         || queuedChatPrompts.some((entry) => (
             entry?.sessionKey === sessionKey
+            && entry.enqueueFailed !== true
             && (
                 entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
                 || (includeQueued && entry.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED)
@@ -35093,7 +35930,11 @@ async function sendQueuedChatPromptEntry(entryId) {
     }
 
     let nextEntry = getChatPromptQueueEntryById(cleanEntryId);
-    if (!nextEntry || isChatPromptSessionBusy(nextEntry.sessionId)) {
+    if (
+        !nextEntry
+        || isServerDispatchedChatPromptQueueEntry(nextEntry)
+        || isChatPromptSessionBusy(nextEntry.sessionId)
+    ) {
         return false;
     }
     const sessionHead = getQueuedChatPromptHeadsBySession().get(nextEntry.sessionKey);
@@ -35105,7 +35946,6 @@ async function sendQueuedChatPromptEntry(entryId) {
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
         updateSendButtonForCurrentChatState();
-        scheduleQueuedChatPromptDrain();
         return false;
     }
 
@@ -35142,11 +35982,6 @@ async function sendQueuedChatPromptEntry(entryId) {
             queuedChatPrompts[updatedIndex] = nextEntry;
         }
 
-        queuedChatPrompts = queuedChatPrompts.filter((entry) => entry?.id !== cleanEntryId);
-        renderChatTaskQueuePanel();
-        refreshChatSessionTabActivityIndicators();
-        updateSendButtonForCurrentChatState();
-
         // Release the short claim guard before dispatch. handleSendPrompt runs
         // synchronously until it installs the live request for this session.
         queuedChatPromptClaimsInFlight.delete(sessionKey);
@@ -35156,9 +35991,11 @@ async function sendQueuedChatPromptEntry(entryId) {
             sessionId: nextEntry.sessionId || null,
             sessionName: nextEntry.sessionName || null,
             promptQueueRecordId: nextEntry.queueId || null,
+            enqueueSubmissionId: nextEntry.enqueueSubmissionId || null,
             clientRequestId: nextEntry.clientRequestId || null,
             attemptId: nextEntry.attemptId || null,
-            fileCopyConceptId: nextEntry.fileCopyConceptId || null
+            fileCopyConceptId: nextEntry.fileCopyConceptId || null,
+            queuedSourceEntryId: cleanEntryId
         });
         return true;
     } catch (error) {
@@ -35192,68 +36029,6 @@ function getQueuedChatPromptHeadsBySession() {
         }
     });
     return heads;
-}
-
-async function drainQueuedChatPromptsForFreeSessions() {
-    if (pendingChatOrganisationSwitchId !== null) {
-        return false;
-    }
-    const organisationGenerationAtStart = chatOrganisationGeneration;
-    if (queuedChatPrompts.length === 0) {
-        return false;
-    }
-
-    let startedAny = false;
-    while (true) {
-        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
-            return startedAny;
-        }
-        const eligibleEntries = Array.from(getQueuedChatPromptHeadsBySession().values())
-            .filter((entry) => (
-                entry.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
-                && !isChatPromptSessionBusy(entry.sessionId)
-            ));
-        if (eligibleEntries.length === 0) {
-            return startedAny;
-        }
-
-        let startedThisPass = false;
-        for (const entry of eligibleEntries) {
-            if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
-                return startedAny;
-            }
-            const started = await sendQueuedChatPromptEntry(entry.id);
-            startedAny = startedAny || started;
-            startedThisPass = startedThisPass || started;
-        }
-        if (!startedThisPass) {
-            return startedAny;
-        }
-    }
-}
-
-function scheduleQueuedChatPromptDrain() {
-    queuedChatPromptDrainRequested = true;
-    if (queuedChatPromptDrainTimer !== null || queuedChatPromptDrainPromise !== null) {
-        return;
-    }
-    queuedChatPromptDrainTimer = setTimeout(() => {
-        queuedChatPromptDrainTimer = null;
-        queuedChatPromptDrainRequested = false;
-        const drainPromise = drainQueuedChatPromptsForFreeSessions()
-            .catch((error) => {
-                console.warn('[chatTab] Unable to drain queued prompts:', error);
-            })
-            .finally(() => {
-                if (queuedChatPromptDrainPromise === drainPromise) {
-                    queuedChatPromptDrainPromise = null;
-                }
-                if (queuedChatPromptDrainRequested) {
-                    scheduleQueuedChatPromptDrain();
-                }
-            });
-        queuedChatPromptDrainPromise = drainPromise;
-    }, 0);
 }
 
 async function handleSendPrompt(options = {}) {
@@ -35366,22 +36141,46 @@ async function handleSendPrompt(options = {}) {
 
     if (isChatPromptSessionBusy(targetSessionId, { includeQueued: !fromQueue })) {
         if (fromQueue) {
-            scheduleQueuedChatPromptDrain();
             return;
         }
         if (!promptText) {
             return;
         }
+        const submissionSessionKey = getChatRequestSessionKey(targetSessionId);
+        if (queuedChatPromptSubmissionsInFlight.has(submissionSessionKey)) {
+            return;
+        }
+        const enqueueSubmissionId = createClientRequestId();
+        queuedChatPromptSubmissionsInFlight.set(
+            submissionSessionKey,
+            enqueueSubmissionId
+        );
         const queuedFileCopyConceptId = takePendingUploadedFileCopyConceptId(
             targetSessionId
         );
-        await queuePromptForLater(promptRaw, {
-            sessionId: targetSessionId,
-            sessionName: targetSessionName,
+        const executionEnvelope = buildChatPromptExecutionEnvelope({
             fileCopyConceptId: queuedFileCopyConceptId
         });
         rememberLastSubmittedUserPrompt(promptRaw);
         setPromptComposerValue('', { promptInput });
+        updateSendButtonForCurrentChatState();
+        try {
+            await queuePromptForLater(promptRaw, {
+                sessionId: targetSessionId,
+                sessionName: targetSessionName,
+                fileCopyConceptId: queuedFileCopyConceptId,
+                executionEnvelope,
+                enqueueSubmissionId
+            });
+        } finally {
+            if (
+                queuedChatPromptSubmissionsInFlight.get(submissionSessionKey)
+                === enqueueSubmissionId
+            ) {
+                queuedChatPromptSubmissionsInFlight.delete(submissionSessionKey);
+            }
+            updateSendButtonForCurrentChatState();
+        }
         return;
     }
 
@@ -35398,6 +36197,12 @@ async function handleSendPrompt(options = {}) {
     const attemptId = (typeof options?.attemptId === 'string' && options.attemptId.trim())
         ? options.attemptId.trim()
         : createClientRequestId();
+    const enqueueSubmissionId = (
+        typeof options?.enqueueSubmissionId === 'string'
+        && options.enqueueSubmissionId.trim()
+    )
+        ? options.enqueueSubmissionId.trim()
+        : createClientRequestId();
     const executionContextBinding = synchroniseLlmExecutionContext();
     const explicitFileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
         options?.fileCopyConceptId
@@ -35411,6 +36216,15 @@ async function handleSendPrompt(options = {}) {
     const pendingFileCopyDisplayName = explicitFileCopyConceptId
         ? normalisePendingAttachmentDisplayName(options?.fileCopyDisplayName)
         : (pendingFileCopyBinding?.displayName || null);
+    const turnKind = assistantOpening ? 'assistant_opening' : null;
+    const initiationId = assistantOpening
+        ? String(options?.initiationId || '').trim() || null
+        : null;
+    const executionEnvelope = buildChatPromptExecutionEnvelope({
+        fileCopyConceptId: pendingFileCopyConceptId,
+        turnKind,
+        initiationId
+    });
     const request = {
         abortController: new AbortController(),
         organisationGeneration: chatOrganisationGeneration,
@@ -35418,8 +36232,8 @@ async function handleSendPrompt(options = {}) {
         sessionKey: getChatRequestSessionKey(targetSessionId),
         sessionName: targetSessionName,
         promptRaw,
-        turnKind: assistantOpening ? 'assistant_opening' : null,
-        initiationId: assistantOpening ? String(options?.initiationId || '').trim() || null : null,
+        turnKind,
+        initiationId,
         promptQueueRecordId,
         selectionStart,
         selectionEnd,
@@ -35429,6 +36243,8 @@ async function handleSendPrompt(options = {}) {
         attachmentBindingTransferred: false,
         attachmentBindingReleased: false,
         aborted: false,
+        enqueueSubmissionId,
+        executionEnvelope,
         clientRequestId,
         attemptId,
         executionContextBinding,
@@ -35445,6 +36261,30 @@ async function handleSendPrompt(options = {}) {
         turnOutcome: null,
         thinkingCardMode: loadStoredThinkingCardMode(),
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
+    };
+    const queuedSourceEntryId = (
+        fromQueue
+        && typeof options?.queuedSourceEntryId === 'string'
+        && options.queuedSourceEntryId.trim()
+    )
+        ? options.queuedSourceEntryId.trim()
+        : null;
+    let queuedSourceAcknowledged = false;
+    const acknowledgeQueuedSource = () => {
+        if (!queuedSourceEntryId || queuedSourceAcknowledged) {
+            return;
+        }
+        queuedSourceAcknowledged = true;
+        queuedChatPrompts = queuedChatPrompts.filter((entry) => (
+            entry?.id !== queuedSourceEntryId
+        ));
+        if (selectedChatPromptQueueEntryId === queuedSourceEntryId) {
+            selectedChatPromptQueueEntryId = null;
+        }
+        publishChatPromptQueueChange('legacy_queued_prompt_acknowledged');
+        renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
     };
     request.promptQueueRecordPromise = request.promptQueueRecordId || options?.skipPromptQueueRecord === true
         ? null
@@ -35750,12 +36590,6 @@ async function handleSendPrompt(options = {}) {
 
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
-        const localRequestedLlm = resolveLocalRequestedLlm();
-        const localModelRequestFields = buildLocalModelRequestFields(localRequestedLlm);
-        // Presenter-mode controls whether the backend produces two-channel output
-        // (screen + spoken). This should be enabled regardless of whether auto-TTS
-        // is enabled, so clicking Speak later never needs to read raw markdown.
-        const presenterMode = true;
 
         // The server queue record is the authoritative admission/correlation
         // carrier. Await its creation before generate; if persistence is
@@ -35804,20 +36638,9 @@ async function handleSendPrompt(options = {}) {
                 ...(request.promptQueueRecordId ? {
                     prompt_queue_id: request.promptQueueRecordId
                 } : {}),
-                ...(request.turnKind ? { turn_kind: request.turnKind } : {}),
-                ...(request.initiationId ? { initiation_id: request.initiationId } : {}),
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
-                language: userContext.language,
-                ...localModelRequestFields,
-                ...(request.pendingFileCopyConceptId ? {
-                    workflow_inputs: {
-                        file_copy_concept_id: request.pendingFileCopyConceptId
-                    }
-                } : {}),
-                presenter_mode: presenterMode,
-                skip_buttonify: false,
-                thinking_card_mode: getThinkingCardMode()
+                ...request.executionEnvelope
             })
         });
         startToolUseProgressPolling(request);
@@ -35825,6 +36648,7 @@ async function handleSendPrompt(options = {}) {
             onCompleted: async (generateBody) => {
                 request.serverQueueTerminalObserved = true;
                 request.attachmentBindingAccepted = true;
+                acknowledgeQueuedSource();
                 const delivered = deliverSuccessfulResponseData(generateBody, 'task_result');
                 if (delivered) {
                     try {
@@ -35836,6 +36660,7 @@ async function handleSendPrompt(options = {}) {
             },
             onFailed: async (statusPayload, status) => {
                 request.serverQueueTerminalObserved = true;
+                acknowledgeQueuedSource();
                 const delivered = status === 'cancelled'
                     ? deliverCancelledResponseData(statusPayload)
                     : deliverErrorResponseData(
@@ -35893,14 +36718,15 @@ async function handleSendPrompt(options = {}) {
 
         if (response.ok) {
             request.serverQueueTerminalObserved = true;
+            acknowledgeQueuedSource();
             deliverSuccessfulResponseData(data, 'generate_response');
         } else if (
             data?.retryable === true
             || response.status === 429
         ) {
             // Admission backpressure is not a failed user task. Restore the
-            // durable row to queued state and retry after the server's hint;
-            // another conversation can continue independently meanwhile.
+            // durable row to queued state; the server-side dispatcher owns
+            // its next attempt while other conversations remain usable.
             request.admissionDeferred = true;
             request.foregroundDeliveryCompleted = true;
             request.turnOutcome = {
@@ -35908,12 +36734,11 @@ async function handleSendPrompt(options = {}) {
                 phase_label: 'Queued',
                 summary: data?.detail || 'Waiting for this conversation or server capacity.'
             };
-            const responseQueueId = (typeof data?.prompt_queue_id === 'string' && data.prompt_queue_id.trim())
-                ? data.prompt_queue_id.trim()
-                : null;
-            if (!request.promptQueueRecordId && responseQueueId) {
-                request.promptQueueRecordId = responseQueueId;
-            }
+            // Only a row created and read back for this exact request is safe
+            // to retire. An admission error's queue id may identify the turn
+            // currently holding the conversation fence rather than this prompt.
+            const foregroundQueueRecordId = request.promptQueueRecordId;
+            let deferredServerQueueAcknowledged = false;
             if (data?.error === 'window_context_unavailable') {
                 try {
                     await repairCurrentWindowOrganisationBinding();
@@ -35922,64 +36747,31 @@ async function handleSendPrompt(options = {}) {
                 }
             }
             try {
-                if (request.promptQueueRecordId) {
-                    const refreshed = await refreshChatPromptQueueFromServer({
-                        silent: true,
-                        skipDrain: true
-                    });
-                    const canonicalEntry = refreshed
-                        ? refreshed.items.find((entry) => (
-                            entry?.queueId === request.promptQueueRecordId
-                        ))
-                        : null;
-                    const recovered = canonicalEntry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED;
-                    if (canonicalEntry) {
-                        // This exact row can be hidden while the retiring live
-                        // request still owns the active conversation UI. Keep
-                        // it locally so it can drain or render after teardown.
-                        mergePersistedChatPromptQueueEntry(canonicalEntry);
-                    }
-                    if (
-                        canonicalEntry
-                        && canonicalEntry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED
-                    ) {
-                        // Another tab/server attempt already owns this exact
-                        // record. Preserve canonical ownership and wait for a
-                        // queue-change signal instead of locally downgrading it.
-                        request.admissionRetrySuppressed = true;
-                    } else if (!recovered) {
-                        mergePersistedChatPromptQueueEntry({
-                            queue_id: request.promptQueueRecordId,
-                            prompt_raw: request.promptRaw,
-                            session_id: request.sessionId,
-                            session_name: request.sessionName,
-                            client_request_id: request.clientRequestId,
-                            attempt_id: request.attemptId,
-                            status: CHAT_PROMPT_QUEUE_STATUS_QUEUED
-                        });
-                    }
-                } else {
-                    const requeued = await queuePromptForLater(request.promptRaw, {
-                        sessionId: request.sessionId,
-                        sessionName: request.sessionName,
-                        clientRequestId: request.clientRequestId,
-                        attemptId: request.attemptId
-                    });
+                const requeued = await queuePromptForLater(request.promptRaw, {
+                    sessionId: request.sessionId,
+                    sessionName: request.sessionName,
+                    fileCopyConceptId: request.pendingFileCopyConceptId,
+                    enqueueSubmissionId: request.enqueueSubmissionId,
+                    executionEnvelope: request.executionEnvelope,
+                    handoffSourceQueueId: foregroundQueueRecordId
+                });
+                if (requeued?.queueId) {
                     request.promptQueueRecordId = requeued?.queueId || null;
+                    deferredServerQueueAcknowledged = true;
+                    request.attachmentBindingTransferred = Boolean(
+                        request.pendingFileCopyConceptId
+                    );
                 }
             } catch (requeueError) {
                 console.info('[chatTab] Admission-deferred row recovery:', requeueError);
             }
-            const retryAfterSeconds = Number.parseInt(
-                response.headers?.get?.('Retry-After') || data?.retry_after_seconds || '1',
-                10
-            );
-            request.admissionRetryAfterMs = Math.max(
-                250,
-                (Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : 1) * 1000
-            );
             if (isRequestVisible()) {
-                showToast('Prompt queued until this conversation is free.', 'info');
+                showToast(
+                    deferredServerQueueAcknowledged
+                        ? 'Prompt queued until this conversation is free.'
+                        : 'Prompt remains durable; retry server queueing from the queue panel.',
+                    'info'
+                );
             }
         } else {
             request.serverQueueTerminalObserved = true;
@@ -36028,10 +36820,9 @@ async function handleSendPrompt(options = {}) {
                 setFinishedThinkingCardForSession(request.sessionId, null);
             }
             setLiveChatRequestForSession(request.sessionId, null);
-            if (request.admissionRetrySuppressed) {
-                renderChatTaskQueuePanel();
-                refreshChatSessionTabActivityIndicators();
-            }
+            renderChatTaskQueuePanel();
+            refreshChatSessionTabActivityIndicators();
+            updateSendButtonForCurrentChatState();
             if (request.sessionId === activeChatSessionId) {
                 void refreshConversationRuntimeCostSnapshot({
                     observeRequestId: request.clientRequestId,
@@ -36045,14 +36836,7 @@ async function handleSendPrompt(options = {}) {
         if (request.serverQueueTerminalObserved) {
             publishChatPromptQueueChange('turn_terminal');
         }
-        if (request.admissionDeferred && !request.admissionRetrySuppressed) {
-            setTimeout(
-                () => scheduleQueuedChatPromptDrain(),
-                request.admissionRetryAfterMs || 1000
-            );
-        } else if (!request.admissionRetrySuppressed) {
-            scheduleQueuedChatPromptDrain();
-        }
+        syncChatPromptQueuePolling();
     }
 }
 
@@ -39794,13 +40578,10 @@ export function __testOnly_resetChatRequestState() {
     renderActiveUploadUi();
     renderPendingAttachmentState();
     queuedChatPrompts = [];
-    if (queuedChatPromptDrainTimer !== null) {
-        clearTimeout(queuedChatPromptDrainTimer);
-        queuedChatPromptDrainTimer = null;
-    }
-    queuedChatPromptDrainPromise = null;
-    queuedChatPromptDrainRequested = false;
+    stopChatPromptQueuePolling();
+    chatPromptQueuePollInFlight = false;
     queuedChatPromptClaimsInFlight.clear();
+    queuedChatPromptSubmissionsInFlight.clear();
     chatPromptQueueAdmissionServerInstanceId = null;
     for (const timer of queuedChatPromptSyncTimers.values()) {
         clearTimeout(timer);

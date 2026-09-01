@@ -519,6 +519,105 @@ def test_chat_prompt_queue_indexes_include_active_legacy_submission_fence() -> N
     ]
 
 
+def test_chat_prompt_queue_indexes_support_idempotent_dispatch_and_retention() -> None:
+    coll = mongomock.MongoClient().db.chat_prompt_queue_dispatch_indexes
+
+    mc._ensure_chat_prompt_queue_indexes(coll)
+
+    indexes = {index["name"]: index for index in coll.list_indexes()}
+    submission = indexes["scope_enqueue_submission_id_unique"]
+    assert list(submission["key"].items()) == [
+        ("user_concept_id", mc.ASCENDING),
+        ("organisation_concept_id", mc.ASCENDING),
+        ("namespace", mc.ASCENDING),
+        ("enqueue_submission_id", mc.ASCENDING),
+    ]
+    assert submission["unique"] is True
+    assert submission["partialFilterExpression"] == {
+        "enqueue_submission_id": {"$exists": True, "$type": "string"}
+    }
+    active_task = indexes["active_task_execution_key_unique"]
+    assert list(active_task["key"].items()) == [
+        ("active_task_execution_key", mc.ASCENDING)
+    ]
+    assert active_task["unique"] is True
+    assert active_task["partialFilterExpression"] == {
+        "active_task_execution_key": {"$exists": True, "$type": "string"}
+    }
+    handoff_source = indexes["handoff_source_queue_id_unique"]
+    assert list(handoff_source["key"].items()) == [
+        ("handoff_source_queue_id", mc.ASCENDING)
+    ]
+    assert handoff_source["unique"] is True
+    assert handoff_source["partialFilterExpression"] == {
+        "handoff_source_queue_id": {"$exists": True, "$type": "string"}
+    }
+    assert list(indexes["scope_status_enqueue_sequence"]["key"].items()) == [
+        ("user_concept_id", mc.ASCENDING),
+        ("organisation_concept_id", mc.ASCENDING),
+        ("namespace", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("enqueue_sequence", mc.ASCENDING),
+        ("created_at", mc.ASCENDING),
+        ("queue_id", mc.ASCENDING),
+    ]
+    assert list(
+        indexes["conversation_status_enqueue_sequence"]["key"].items()
+    ) == [
+        ("conversation_key", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("enqueue_sequence", mc.ASCENDING),
+        ("created_at", mc.ASCENDING),
+        ("queue_id", mc.ASCENDING),
+    ]
+    assert list(
+        indexes["dispatch_status_next_enqueue_sequence"]["key"].items()
+    ) == [
+        ("dispatch_mode", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("next_dispatch_at", mc.ASCENDING),
+        ("enqueue_sequence", mc.ASCENDING),
+        ("created_at", mc.ASCENDING),
+        ("queue_id", mc.ASCENDING),
+    ]
+    assert list(indexes["dispatch_status_lease_expiry"]["key"].items()) == [
+        ("dispatch_mode", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("dispatch_lease_expires_at", mc.ASCENDING),
+    ]
+    assert list(indexes["handoff_reconciliation_due"]["key"].items()) == [
+        ("dispatch_mode", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("dispatch_ready", mc.ASCENDING),
+        ("handoff_reconciliation_next_at", mc.ASCENDING),
+        ("enqueue_sequence", mc.ASCENDING),
+        ("created_at", mc.ASCENDING),
+        ("queue_id", mc.ASCENDING),
+    ]
+    assert list(indexes["task_launch_reconciliation_due"]["key"].items()) == [
+        ("dispatch_mode", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("dispatch_ready", mc.ASCENDING),
+        ("task_launch_reconciliation_next_at", mc.ASCENDING),
+        ("task_launch_reconciliation_lease_expires_at", mc.ASCENDING),
+        ("enqueue_sequence", mc.ASCENDING),
+        ("created_at", mc.ASCENDING),
+        ("queue_id", mc.ASCENDING),
+    ]
+    assert list(indexes["task_execution_reconciliation_due"]["key"].items()) == [
+        ("task_execution_reconciliation_status", mc.ASCENDING),
+        ("task_execution_reconciliation_next_at", mc.ASCENDING),
+        ("task_execution_reconciliation_lease_expires_at", mc.ASCENDING),
+        ("task_execution_reconciliation_pending_at", mc.ASCENDING),
+        ("queue_id", mc.ASCENDING),
+    ]
+    assert list(indexes["purge_after_ttl"]["key"].items()) == [
+        ("purge_after", mc.ASCENDING)
+    ]
+    assert indexes["purge_after_ttl"]["expireAfterSeconds"] == 0
+    assert indexes["purge_after_ttl"]["sparse"] is True
+
+
 def test_window_session_binding_indexes_support_owner_cleanup_and_expiry() -> None:
     coll = mongomock.MongoClient().db.window_session_binding_indexes
 

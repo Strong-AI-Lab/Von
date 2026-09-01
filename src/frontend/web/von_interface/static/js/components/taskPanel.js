@@ -51,12 +51,23 @@ let _selectedTaskGroupIds = new Set();  // Selected ontology-backed task groups.
 let _taskGroupOptions = [];
 const _taskGroupDisplayNameCache = new Map();
 const _taskGroupNameFetchInFlight = new Set();
+let _taskQueueActivity = [];
+let _taskQueueActivityError = '';
+let _taskQueueActivityLoadPromise = null;
+let _taskQueueActivityPollTimerId = null;
+let _taskQueueActivityGeneration = 0;
+let _taskPanelAuthenticated = null;
+const _taskExecutionLaunchesInFlight = new Set();
 
 const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
+const TASK_EXECUTION_LAUNCH_STORAGE_KEY_PREFIX = 'von_task_execution_launch_v1';
 const TASK_LIST_LIMIT = '500';
 const GLOBAL_TASK_PAGE_SIZE = 50;
 const TASK_PANEL_LOAD_TELEMETRY_SCHEMA_VERSION = 'task_panel_load_telemetry.v1';
 const TASK_PANEL_ORG_SWITCH_HANDLER_KEY = '__vonTaskPanelOrgSwitchHandler';
+const TASK_PANEL_AUTH_STATUS_HANDLER_KEY = '__vonTaskPanelAuthStatusHandler';
+const TASK_QUEUE_ACTIVITY_LISTENER_KEY = '__vonTaskQueueActivityListener';
+const TASK_QUEUE_ACTIVITY_POLL_INTERVAL_MS = 5000;
 const TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN = /^\/api\/tasks\/[A-Za-z0-9%_-]+\/external-resource-actions\/[A-Za-z0-9._%-]+$/;
 
 // Constants
@@ -156,10 +167,11 @@ async function ensureTaskOrganisationOptionsLoaded() {
     }
 }
 
-function handleTaskPanelOrganisationSwitch(event) {
-    _activeOrganisationConceptId = normaliseTaskConceptId(
-        event?.detail?.organisation_id || '',
-    );
+function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged = false } = {}) {
+    _taskQueueActivityGeneration += 1;
+    stopTaskQueueActivityPolling();
+    _taskQueueActivityLoadPromise = null;
+    _activeOrganisationConceptId = activeOrganisationConceptId;
     _globalTaskLoadGeneration += 1;
     _isLoading = false;
     _tasks = [];
@@ -170,15 +182,44 @@ function handleTaskPanelOrganisationSwitch(event) {
     _globalTaskTotal = null;
     _hiddenBulkTaskTotal = 0;
     _hiddenBulkTaskCollections = [];
+    _taskQueueActivity = [];
+    _taskQueueActivityError = '';
+    if (actorChanged) {
+        _taskOrganisationOptions = [];
+        _taskOrganisationOptionsLoaded = false;
+        _taskGroupDisplayNameCache.clear();
+        _taskGroupNameFetchInFlight.clear();
+    }
     loadTaskGroupSelectionFromStorage();
+}
+
+function refreshTaskPanelAfterScopeChange({ allowLoads = true } = {}) {
+    renderTaskList();
+    renderTaskQueueActivity();
+    refreshTaskExecutionButtonStates();
+    updateTaskCountBadge();
+
+    if (!allowLoads) return;
 
     if (_isGlobalTabMode) {
-        renderTaskList();
-        void loadGlobalTasks();
+        void Promise.all([loadGlobalTasks(), loadTaskQueueActivity()]);
     } else if (_isVisible) {
-        renderTaskList();
         void refreshTasks();
     }
+}
+
+function handleTaskPanelOrganisationSwitch(event) {
+    resetTaskPanelScopedState(normaliseTaskConceptId(
+        event?.detail?.organisation_id || '',
+    ));
+    refreshTaskPanelAfterScopeChange();
+}
+
+function handleTaskPanelAuthStatusChange(event) {
+    const authenticated = event?.detail?.authenticated === true;
+    _taskPanelAuthenticated = authenticated;
+    resetTaskPanelScopedState(authenticated ? undefined : '', { actorChanged: true });
+    refreshTaskPanelAfterScopeChange({ allowLoads: authenticated });
 }
 
 function ensureTaskPanelOrganisationSwitchListener() {
@@ -188,6 +229,82 @@ function ensureTaskPanelOrganisationSwitchListener() {
     }
     document[TASK_PANEL_ORG_SWITCH_HANDLER_KEY] = handleTaskPanelOrganisationSwitch;
     document.addEventListener('orgSwitched', handleTaskPanelOrganisationSwitch);
+}
+
+function ensureTaskPanelAuthStatusListener() {
+    const previousHandler = document[TASK_PANEL_AUTH_STATUS_HANDLER_KEY];
+    if (typeof previousHandler === 'function') {
+        document.removeEventListener('authStatusChanged', previousHandler);
+    }
+    document[TASK_PANEL_AUTH_STATUS_HANDLER_KEY] = handleTaskPanelAuthStatusChange;
+    document.addEventListener('authStatusChanged', handleTaskPanelAuthStatusChange);
+}
+
+function isGlobalTaskQueueActivityViewActive() {
+    if (!_isGlobalTabMode || !_globalTasksContainer) return false;
+    if (document.visibilityState === 'hidden') return false;
+    if (document.body?.dataset?.activeTab === 'globalTasksTab') return true;
+    return _globalTasksContainer.closest('.tab-content')?.classList.contains('active') === true;
+}
+
+function hasAcknowledgedTaskLaunch() {
+    return _tasks.some((task) => {
+        const taskId = getTaskId(task);
+        return taskId && getStoredTaskLaunchState(taskId)?.acknowledged === true;
+    });
+}
+
+function shouldObserveTaskQueueActivity() {
+    if (_taskPanelAuthenticated === false) return false;
+    if (document.visibilityState === 'hidden') return false;
+    return isGlobalTaskQueueActivityViewActive() || hasAcknowledgedTaskLaunch();
+}
+
+function stopTaskQueueActivityPolling() {
+    if (_taskQueueActivityPollTimerId === null) return;
+    clearTimeout(_taskQueueActivityPollTimerId);
+    _taskQueueActivityPollTimerId = null;
+}
+
+function syncTaskQueueActivityPolling() {
+    if (!shouldObserveTaskQueueActivity()) {
+        stopTaskQueueActivityPolling();
+        return;
+    }
+    if (_taskQueueActivityPollTimerId !== null || _taskQueueActivityLoadPromise) {
+        return;
+    }
+    _taskQueueActivityPollTimerId = window.setTimeout(async () => {
+        _taskQueueActivityPollTimerId = null;
+        try {
+            await loadTaskQueueActivity();
+        } finally {
+            syncTaskQueueActivityPolling();
+        }
+    }, TASK_QUEUE_ACTIVITY_POLL_INTERVAL_MS);
+}
+
+function handleTaskQueueActivityVisibilityChange() {
+    syncTaskQueueActivityPolling();
+}
+
+function handleTaskQueueActivityTabActivation() {
+    syncTaskQueueActivityPolling();
+}
+
+function ensureTaskQueueActivityPollingListeners() {
+    const previous = document[TASK_QUEUE_ACTIVITY_LISTENER_KEY];
+    if (previous && typeof previous === 'object') {
+        document.removeEventListener('von:tab-activated', previous.tabActivation);
+        document.removeEventListener('visibilitychange', previous.visibilityChange);
+    }
+    const listeners = {
+        tabActivation: handleTaskQueueActivityTabActivation,
+        visibilityChange: handleTaskQueueActivityVisibilityChange,
+    };
+    document[TASK_QUEUE_ACTIVITY_LISTENER_KEY] = listeners;
+    document.addEventListener('von:tab-activated', listeners.tabActivation);
+    document.addEventListener('visibilitychange', listeners.visibilityChange);
 }
 
 function getTaskTypeOptions() {
@@ -577,6 +694,7 @@ export function initializeTaskPanel() {
     }
     loadTaskGroupSelectionFromStorage();
     ensureTaskPanelOrganisationSwitchListener();
+    ensureTaskPanelAuthStatusListener();
     renderTaskGroupFilterControls();
 
     // Set up close button
@@ -641,6 +759,7 @@ export function showTaskPanel(options = {}) {
     if (_panelEl) {
         loadTaskGroupSelectionFromStorage();
         _isGlobalTabMode = false;
+        syncTaskQueueActivityPolling();
         _taskListEl = document.getElementById('taskList') || _taskListEl;
         _panelEl.classList.remove('hidden');
         _panelEl.setAttribute('aria-hidden', 'false');
@@ -697,6 +816,8 @@ async function openGlobalTasks() {
     _taskDetailState = {};
     _selectedTaskId = '';
     ensureTaskPanelOrganisationSwitchListener();
+    ensureTaskPanelAuthStatusListener();
+    ensureTaskQueueActivityPollingListeners();
 
     // Initialize the global tasks container if needed
     if (!_globalTasksContainer) {
@@ -720,7 +841,11 @@ async function openGlobalTasks() {
     renderGlobalTasksTabContent();
     markTaskLoadStage(telemetry, 'shell_rendered', 'Task controls ready');
     renderTaskLoadProgress('Task controls ready', telemetry);
-    await loadGlobalTasks({ telemetry });
+    await Promise.all([
+        loadGlobalTasks({ telemetry }),
+        loadTaskQueueActivity(),
+    ]);
+    syncTaskQueueActivityPolling();
 }
 
 export function showGlobalTasks() {
@@ -800,6 +925,7 @@ function renderGlobalTasksTabContent() {
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
             <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
             <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
+            <section id="globalTaskQueueActivity" class="task-detail-section" aria-live="polite"></section>
             <div class="global-tasks-create">
                 <input type="text" id="globalNewTaskTitle" class="task-input" placeholder="Task title...">
                 <textarea id="globalNewTaskDescription" class="task-textarea" placeholder="Task description..." rows="2"></textarea>
@@ -902,7 +1028,9 @@ function renderGlobalTasksTabContent() {
 
     const refreshBtn = _globalTasksContainer.querySelector('#refreshGlobalTasksBtn');
     if (refreshBtn) {
-        refreshBtn.addEventListener('click', () => loadGlobalTasks());
+        refreshBtn.addEventListener('click', () => {
+            void Promise.all([loadGlobalTasks(), loadTaskQueueActivity()]);
+        });
     }
 
     const createBtn = _globalTasksContainer.querySelector('#globalCreateTaskBtn');
@@ -915,6 +1043,7 @@ function renderGlobalTasksTabContent() {
     renderTaskGroupFilterControls();
     renderGlobalTaskSummary();
     renderBulkTaskVisibilityControls();
+    renderTaskQueueActivity();
     renderGlobalTaskInspector();
 }
 
@@ -1290,6 +1419,156 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
     `;
 }
 
+function normaliseTaskQueueActivityItem(item, kind) {
+    if (!item || typeof item !== 'object') return null;
+    const queueId = typeof item.queue_id === 'string' ? item.queue_id.trim() : '';
+    if (!queueId) return null;
+    return {
+        ...item,
+        queue_id: queueId,
+        activity_kind: kind,
+    };
+}
+
+function getActiveTaskExecutionIdsFromQueueActivity(items = _taskQueueActivity) {
+    return new Set(
+        items
+            .filter((item) => (
+                item?.activity_kind === 'active'
+                && ['queued', 'in_progress'].includes(item?.status)
+                && typeof item?.task_concept_id === 'string'
+                && item.task_concept_id.trim()
+            ))
+            .map((item) => item.task_concept_id.trim()),
+    );
+}
+
+function taskQueueActivitySortValue(item) {
+    const raw = item?.updated_at || item?.created_at || item?.queued_at || '';
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function loadTaskQueueActivity() {
+    if (!_isGlobalTabMode && !hasAcknowledgedTaskLaunch()) return;
+    if (_taskQueueActivityLoadPromise) return _taskQueueActivityLoadPromise;
+    const requestGeneration = _taskQueueActivityGeneration;
+    const loadPromise = (async () => {
+        try {
+            const response = await getJson('/von/api/chat_prompt_queue');
+            if (requestGeneration !== _taskQueueActivityGeneration) return;
+            const active = Array.isArray(response?.items) ? response.items : [];
+            const recentFailed = Array.isArray(response?.recent_failed_items)
+                ? response.recent_failed_items
+                : [];
+            const recentFailedQueueIds = new Set(
+                recentFailed
+                    .map((item) => (
+                        typeof item?.queue_id === 'string' ? item.queue_id.trim() : ''
+                    ))
+                    .filter(Boolean),
+            );
+            const seen = new Set();
+            const normalisedActivity = [
+                ...active
+                    .filter((item) => !recentFailedQueueIds.has(
+                        typeof item?.queue_id === 'string' ? item.queue_id.trim() : '',
+                    ))
+                    .map((item) => normaliseTaskQueueActivityItem(item, 'active')),
+                ...recentFailed.map((item) => normaliseTaskQueueActivityItem(item, 'recent_failed')),
+            ]
+                .filter((item) => {
+                    if (!item || seen.has(item.queue_id)) return false;
+                    seen.add(item.queue_id);
+                    return true;
+                })
+                .sort((left, right) => taskQueueActivitySortValue(right) - taskQueueActivitySortValue(left));
+            _taskQueueActivity = normalisedActivity.slice(0, 12);
+            _taskQueueActivityError = '';
+            reconcileAcknowledgedTaskLaunches(normalisedActivity);
+        } catch (err) {
+            if (requestGeneration !== _taskQueueActivityGeneration) return;
+            console.debug('[taskPanel] Failed to load queue activity:', err);
+            _taskQueueActivity = [];
+            _taskQueueActivityError = 'Queue activity is temporarily unavailable.';
+        }
+        if (requestGeneration !== _taskQueueActivityGeneration) return;
+        renderTaskQueueActivity();
+        refreshTaskExecutionButtonStates();
+    })().finally(() => {
+        if (_taskQueueActivityLoadPromise === loadPromise) {
+            _taskQueueActivityLoadPromise = null;
+            if (requestGeneration === _taskQueueActivityGeneration) {
+                syncTaskQueueActivityPolling();
+            }
+        }
+    });
+    _taskQueueActivityLoadPromise = loadPromise;
+    return loadPromise;
+}
+
+function renderTaskQueueActivity() {
+    const activityEl = _globalTasksContainer?.querySelector('#globalTaskQueueActivity');
+    if (!activityEl) return;
+    if (_taskQueueActivityError) {
+        activityEl.innerHTML = `
+            <h3>Activity</h3>
+            <p class="task-detail-error">${escapeHtml(_taskQueueActivityError)}</p>
+        `;
+        return;
+    }
+    if (_taskQueueActivity.length === 0) {
+        activityEl.innerHTML = `
+            <h3>Activity</h3>
+            <p class="task-empty-inline">No active or recently failed Von work.</p>
+        `;
+        return;
+    }
+    activityEl.innerHTML = `
+        <h3>Activity</h3>
+        <div class="task-timeline">
+            ${_taskQueueActivity.map((item) => {
+                const status = String(item.status || 'queued').trim() || 'queued';
+                const conversationLabel = String(
+                    item.session_name
+                    || (item.session_id ? `Conversation ${String(item.session_id).slice(0, 8)}` : '')
+                    || 'Conversation unavailable',
+                );
+                const taskLabel = String(
+                    item.task_concept_id
+                    || item.prompt_raw
+                    || 'Queued conversation turn',
+                ).trim().slice(0, 160);
+                const conversationControl = item.session_id
+                    ? `<button type="button" class="task-conversation-link task-queue-conversation-link"
+                            data-session-id="${escapeHtml(item.session_id)}"
+                            title="Open conversation: ${escapeHtml(conversationLabel)}">
+                            ${escapeHtml(conversationLabel)}
+                       </button>`
+                    : `<span>${escapeHtml(conversationLabel)}</span>`;
+                return `
+                    <div class="task-timeline-entry" data-queue-id="${escapeHtml(item.queue_id)}">
+                        <div class="task-timeline-marker" aria-hidden="true"></div>
+                        <div class="task-timeline-content">
+                            <strong>${escapeHtml(status.replace(/_/g, ' '))}</strong>
+                            <span>${escapeHtml(taskLabel)}</span>
+                            ${conversationControl}
+                            <time>${escapeHtml(formatDateTimeOrDash(item.updated_at || item.created_at))}</time>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+    activityEl.querySelectorAll('.task-queue-conversation-link').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void openTaskConversation(event.currentTarget.dataset.sessionId);
+        });
+    });
+}
+
 function renderGlobalTaskPagination() {
     const paginationEl = _globalTasksContainer?.querySelector('#globalTaskPagination');
     if (!paginationEl) return;
@@ -1523,6 +1802,286 @@ function renderTaskDiscussButton(task, className = '') {
     const title = String(task?.title || 'this task').trim() || 'this task';
     return `<button type="button" class="task-discuss-btn ${className}" data-concept-id="${escapeHtml(taskId)}"
         data-concept-name="${escapeHtml(title)}" title="Discuss this task with Von">Discuss</button>`;
+}
+
+function canExecuteTaskWithVon(task) {
+    const currentUserId = getCurrentUserConceptId();
+    return Boolean(
+        task
+        && task.assignee_concept_id === '#V#von_system'
+        && task.created_by_concept_id === currentUserId
+        && task.originating_conversation_id
+        && task.conversation_session_id
+        && ['pending', 'in_progress'].includes(task.status),
+    );
+}
+
+function renderTaskExecuteWithVonButton(task, className = '') {
+    if (!canExecuteTaskWithVon(task)) return '';
+    const taskId = String(getTaskId(task) || '').trim();
+    if (!taskId) return '';
+    const conversationLabel = String(
+        task.conversation_name || task.conversation_session_id || 'originating conversation',
+    ).trim();
+    const executionActive = isTaskExecutionLaunchSuppressed(taskId);
+    return `<button type="button" class="task-execute-with-von-btn ${className}"
+        data-task-id="${escapeHtml(taskId)}"
+        title="${executionActive ? 'Von work is already active' : `Execute with Von in ${escapeHtml(conversationLabel)}`}"
+        ${executionActive ? 'disabled aria-busy="true"' : ''}>${executionActive ? 'Von work active' : 'Execute with Von'}</button>`;
+}
+
+function createTaskLaunchRequestId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+        return globalThis.crypto.randomUUID();
+    }
+    return `task-launch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getTaskExecutionLaunchStorageKey(taskId) {
+    const actorId = getCurrentUserConceptId() || 'unknown-actor';
+    const organisationId = getCurrentOrganisationConceptId() || 'unknown-organisation';
+    return [
+        TASK_EXECUTION_LAUNCH_STORAGE_KEY_PREFIX,
+        encodeURIComponent(actorId),
+        encodeURIComponent(organisationId),
+        encodeURIComponent(taskId),
+    ].join(':');
+}
+
+function getOrCreateTaskLaunchRequestId(taskId) {
+    const storageKey = getTaskExecutionLaunchStorageKey(taskId);
+    try {
+        const existing = localStorage.getItem(storageKey);
+        if (typeof existing === 'string' && existing.trim()) {
+            try {
+                const parsed = JSON.parse(existing);
+                if (
+                    parsed
+                    && typeof parsed === 'object'
+                    && typeof parsed.launch_request_id === 'string'
+                    && parsed.launch_request_id.trim()
+                ) {
+                    return parsed.launch_request_id.trim();
+                }
+            } catch (_) {
+                // Pre-structured values remain valid durable launch identities.
+            }
+            return existing.trim();
+        }
+    } catch (_) {
+        // The request remains idempotent for this page lifetime without storage.
+    }
+    const launchRequestId = createTaskLaunchRequestId();
+    try {
+        localStorage.setItem(storageKey, JSON.stringify({
+            launch_request_id: launchRequestId,
+            acknowledged: false,
+            canonical_active_observed: false,
+        }));
+    } catch (_) {
+        // Storage can be unavailable in private or restricted browser contexts.
+    }
+    return launchRequestId;
+}
+
+function getStoredTaskLaunchState(taskId) {
+    const storageKey = getTaskExecutionLaunchStorageKey(taskId);
+    try {
+        const raw = localStorage.getItem(storageKey);
+        if (typeof raw !== 'string' || !raw.trim()) return null;
+        try {
+            const parsed = JSON.parse(raw);
+            if (
+                parsed
+                && typeof parsed === 'object'
+                && typeof parsed.launch_request_id === 'string'
+                && parsed.launch_request_id.trim()
+            ) {
+                return {
+                    launchRequestId: parsed.launch_request_id.trim(),
+                    acknowledged: parsed.acknowledged === true,
+                    canonicalActiveObserved: (
+                        parsed.canonical_active_observed === true
+                    ),
+                };
+            }
+        } catch (_) {
+            return {
+                launchRequestId: raw.trim(),
+                acknowledged: false,
+                canonicalActiveObserved: false,
+            };
+        }
+    } catch (_) {
+        return null;
+    }
+    return null;
+}
+
+function markTaskLaunchAcknowledged(
+    taskId,
+    launchRequestId,
+    { canonicalActiveObserved = false } = {},
+) {
+    const storageKey = getTaskExecutionLaunchStorageKey(taskId);
+    try {
+        const current = getStoredTaskLaunchState(taskId);
+        if (current?.launchRequestId !== launchRequestId) return;
+        localStorage.setItem(storageKey, JSON.stringify({
+            launch_request_id: launchRequestId,
+            acknowledged: true,
+            canonical_active_observed: (
+                current.canonicalActiveObserved === true
+                || canonicalActiveObserved === true
+            ),
+        }));
+    } catch (_) {
+        // The active queue observer still suppresses duplicate launches.
+    }
+}
+
+function markTaskLaunchCanonicalActiveObserved(taskId, launchState) {
+    if (!launchState?.launchRequestId || launchState.canonicalActiveObserved) return;
+    const storageKey = getTaskExecutionLaunchStorageKey(taskId);
+    try {
+        localStorage.setItem(storageKey, JSON.stringify({
+            launch_request_id: launchState.launchRequestId,
+            acknowledged: launchState.acknowledged === true,
+            canonical_active_observed: true,
+        }));
+    } catch (_) {
+        // Queue activity still suppresses duplicate launches for this page.
+    }
+}
+
+function clearTaskLaunchRequestId(taskId, launchRequestId = null) {
+    const storageKey = getTaskExecutionLaunchStorageKey(taskId);
+    try {
+        const current = getStoredTaskLaunchState(taskId);
+        if (
+            current
+            && (!launchRequestId || current.launchRequestId === launchRequestId)
+        ) {
+            localStorage.removeItem(storageKey);
+        }
+    } catch (_) {
+        // A successful server response is sufficient if cleanup is unavailable.
+    }
+}
+
+function isTaskExecutionLaunchSuppressed(taskId) {
+    if (_taskExecutionLaunchesInFlight.has(taskId)) return true;
+    if (getStoredTaskLaunchState(taskId)?.acknowledged === true) return true;
+    return getActiveTaskExecutionIdsFromQueueActivity().has(taskId);
+}
+
+function reconcileAcknowledgedTaskLaunches(activity = _taskQueueActivity) {
+    const activeTaskIds = getActiveTaskExecutionIdsFromQueueActivity(activity);
+    const terminalTaskIds = new Set(
+        activity
+            .filter((item) => (
+                item?.activity_kind === 'recent_failed'
+                || ['completed', 'failed', 'cancelled'].includes(item?.status)
+            ))
+            .map((item) => (
+                typeof item?.task_concept_id === 'string'
+                    ? item.task_concept_id.trim()
+                    : ''
+            ))
+            .filter(Boolean),
+    );
+    _tasks.forEach((task) => {
+        const taskId = getTaskId(task);
+        const launchState = taskId ? getStoredTaskLaunchState(taskId) : null;
+        if (launchState?.acknowledged !== true) return;
+        if (activeTaskIds.has(taskId)) {
+            markTaskLaunchCanonicalActiveObserved(taskId, launchState);
+            return;
+        }
+        if (
+            terminalTaskIds.has(taskId)
+            || launchState.canonicalActiveObserved === true
+        ) {
+            clearTaskLaunchRequestId(taskId, launchState.launchRequestId);
+        }
+    });
+}
+
+function refreshTaskExecutionButtonStates() {
+    document.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
+        const taskId = String(button.dataset.taskId || '').trim();
+        const suppressed = taskId && isTaskExecutionLaunchSuppressed(taskId);
+        button.disabled = Boolean(suppressed);
+        button.textContent = suppressed ? 'Von work active' : 'Execute with Von';
+        button.setAttribute('aria-busy', suppressed ? 'true' : 'false');
+    });
+}
+
+function setTaskExecutionButtonsDisabled(taskId, disabled) {
+    document.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
+        if (button.dataset.taskId !== taskId) return;
+        const suppressed = disabled || isTaskExecutionLaunchSuppressed(taskId);
+        button.disabled = suppressed;
+        button.textContent = disabled
+            ? 'Queuing…'
+            : (suppressed ? 'Von work active' : 'Execute with Von');
+        button.setAttribute('aria-busy', suppressed ? 'true' : 'false');
+    });
+}
+
+async function executeTaskWithVon(taskId) {
+    const cleanedTaskId = String(taskId || '').trim();
+    if (!cleanedTaskId || _taskExecutionLaunchesInFlight.has(cleanedTaskId)) return;
+    _taskExecutionLaunchesInFlight.add(cleanedTaskId);
+    setTaskExecutionButtonsDisabled(cleanedTaskId, true);
+    const launchRequestId = getOrCreateTaskLaunchRequestId(cleanedTaskId);
+    const scopeGenerationAtStart = _taskQueueActivityGeneration;
+    try {
+        const response = await postJson(
+            `/api/tasks/${encodeURIComponent(cleanedTaskId)}/execute-with-von`,
+            { launch_request_id: launchRequestId },
+        );
+        if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
+        const queueStatus = String(response?.queue_item?.status || '').trim().toLowerCase();
+        if (['completed', 'failed', 'cancelled'].includes(queueStatus)) {
+            // A retry after a lost response can replay an attempt that already
+            // reached terminal state. Do not leave the local launch fence set
+            // when no active queue row can ever be observed to clear it.
+            clearTaskLaunchRequestId(cleanedTaskId, launchRequestId);
+        } else {
+            markTaskLaunchAcknowledged(cleanedTaskId, launchRequestId, {
+                canonicalActiveObserved: ['queued', 'in_progress'].includes(queueStatus),
+            });
+        }
+        const conversationName = response?.task?.conversation_name;
+        if (queueStatus === 'completed') {
+            showToast(
+                conversationName
+                    ? `Von work already completed in ${conversationName}`
+                    : 'Von work already completed',
+                'success',
+            );
+        } else if (queueStatus === 'failed') {
+            showToast('Von work failed; the task can be retried', 'error');
+        } else if (queueStatus === 'cancelled') {
+            showToast('Von work was cancelled; the task can be retried', 'info');
+        } else {
+            showToast(
+                conversationName
+                    ? `Von work queued in ${conversationName}`
+                    : 'Von work queued',
+                'success',
+            );
+        }
+        await loadTaskQueueActivity();
+    } catch (err) {
+        if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
+        console.error('[taskPanel] Failed to execute task with Von:', err);
+        showToast('Failed to queue Von task execution', 'error');
+    } finally {
+        _taskExecutionLaunchesInFlight.delete(cleanedTaskId);
+        setTaskExecutionButtonsDisabled(cleanedTaskId, false);
+    }
 }
 
 function normaliseTaskConceptId(value) {
@@ -2254,6 +2813,7 @@ function renderTaskInspector(task, detailState) {
                 <div class="task-inspector-badges">
                     <span class="task-status-badge">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
                     <span class="task-priority-chip">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</span>
+                    ${renderTaskExecuteWithVonButton(detailTask, 'task-inspector-execute-btn')}
                     ${renderTaskDiscussButton(detailTask, 'task-inspector-discuss-btn')}
                 </div>
             </div>
@@ -2606,6 +3166,7 @@ function renderTaskItem(task) {
                     🔗 ${linksCount}
                 </span>
                 <div class="task-actions">
+                    ${renderTaskExecuteWithVonButton(task)}
                     ${renderTaskDiscussButton(task)}
                     <button class="task-detail-toggle-btn" data-task-id="${taskId}" title="${_isGlobalTabMode ? 'Inspect task details' : 'Show task details'}">
                         ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Details')}
@@ -2810,6 +3371,19 @@ async function addTaskAttachment(taskId, panelEl) {
     await loadTaskDetails(taskId, { refreshList: true });
 }
 
+async function openTaskConversation(sessionId) {
+    const cleanedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!cleanedSessionId) return;
+    activateTab('chatTab');
+    try {
+        const { switchToChatSession } = await import('../chatTab.js');
+        await switchToChatSession(cleanedSessionId);
+    } catch (err) {
+        console.warn('[taskPanel] Failed to switch to conversation:', err);
+        showToast('Could not open conversation', 'error');
+    }
+}
+
 /**
  * Attach event listeners to task items.
  */
@@ -2822,6 +3396,14 @@ function attachTaskEventListeners() {
     if (roots.length === 0) return;
 
     roots.forEach((root) => {
+        root.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
+            button.addEventListener('click', async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                await executeTaskWithVon(event.currentTarget.dataset.taskId);
+            });
+        });
+
         root.querySelectorAll('.task-concept-link').forEach((btn) => {
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -2949,16 +3531,7 @@ function attachTaskEventListeners() {
                 e.preventDefault();
                 e.stopPropagation();
                 const sessionId = e.currentTarget.dataset.sessionId;
-                if (sessionId) {
-                    activateTab('chatTab');
-                    try {
-                        const { switchToChatSession } = await import('../chatTab.js');
-                        await switchToChatSession(sessionId);
-                    } catch (err) {
-                        console.warn('[taskPanel] Failed to switch to conversation:', err);
-                        showToast('Could not open conversation', 'error');
-                    }
-                }
+                await openTaskConversation(sessionId);
             });
         });
 
@@ -3007,6 +3580,7 @@ async function handleCreateTask() {
     const titleInput = document.getElementById('newTaskTitle');
     const descInput = document.getElementById('newTaskDescription');
     const prioritySelect = document.getElementById('newTaskPriority');
+    const assigneeSelect = document.getElementById('newTaskAssignee');
 
     if (!titleInput || !descInput) return;
 
@@ -3031,6 +3605,10 @@ async function handleCreateTask() {
             priority: prioritySelect?.value || 'medium',
         };
 
+        if (assigneeSelect?.value === '#V#von_system') {
+            payload.assignee_concept_id = '#V#von_system';
+        }
+
         // Link to current conversation if available
         if (_currentSessionId) {
             payload.session_id = _currentSessionId;
@@ -3042,6 +3620,7 @@ async function handleCreateTask() {
         titleInput.value = '';
         descInput.value = '';
         if (prioritySelect) prioritySelect.value = 'medium';
+        if (assigneeSelect) assigneeSelect.value = '';
 
         showToast('Task created', 'success');
 

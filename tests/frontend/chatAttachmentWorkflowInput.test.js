@@ -772,13 +772,14 @@ describe('chat attachment workflow input binding', () => {
         });
     }, 15000);
 
-    test('queued prompts carry only the attachment bound to that prompt', async () => {
+    test('server-queued prompts carry only the attachment bound to that prompt', async () => {
         const {
             __testOnly_uploadFilesToVon,
             sendMessage
         } = require(chatTabModulePath);
         const fileCopyConceptId = '#V#uploaded_file_copy_attachment_queue_test';
         const generateBodies = [];
+        const queuePostBodies = [];
         let resolveFirstGenerate;
         let queueCounter = 0;
         const queueRecords = new Map();
@@ -804,13 +805,12 @@ describe('chat attachment workflow input binding', () => {
             }
             if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
                 const body = JSON.parse(options.body || '{}');
+                queuePostBodies.push(body);
                 queueCounter += 1;
                 const queueId = `queue-${queueCounter}`;
                 queueRecords.set(queueId, {
+                    ...body,
                     queue_id: queueId,
-                    prompt_raw: body.prompt_raw,
-                    session_id: body.session_id,
-                    session_name: body.session_name,
                     status: body.status || 'queued'
                 });
                 return Promise.resolve({
@@ -902,14 +902,19 @@ describe('chat attachment workflow input binding', () => {
         });
         await firstSend;
 
-        for (let attempt = 0; attempt < 40 && generateBodies.length < 3; attempt += 1) {
+        for (let attempt = 0; attempt < 40 && queuePostBodies.length < 3; attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 10));
         }
 
-        expect(generateBodies).toHaveLength(3);
+        // Only the foreground turn is browser-owned. The two deferred turns
+        // remain durable server-dispatch rows, including their frozen and
+        // prompt-specific attachment envelopes.
+        expect(generateBodies).toHaveLength(1);
         expect(generateBodies[0]).not.toHaveProperty('workflow_inputs');
-        expect(generateBodies[1]).not.toHaveProperty('workflow_inputs');
-        expect(generateBodies[2].workflow_inputs).toEqual({
+        expect(queuePostBodies).toHaveLength(3);
+        expect(queuePostBodies[0]).not.toHaveProperty('execution_envelope');
+        expect(queuePostBodies[1].execution_envelope).not.toHaveProperty('workflow_inputs');
+        expect(queuePostBodies[2].execution_envelope.workflow_inputs).toEqual({
             file_copy_concept_id: fileCopyConceptId
         });
     }, 15000);
