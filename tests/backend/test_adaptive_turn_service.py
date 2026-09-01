@@ -2655,6 +2655,28 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
     assert allocation["enforcement"] == "advisory"
     assert allocation["model_call_advisory_seconds"] == 120.0
     assert allocation["model_call_hard_timeout_seconds"] is None
+    assert allocation["provider_retry_wait_max_seconds"] == 90.0
+
+
+@pytest.mark.parametrize("invalid_wait_max", [0.0, -1.0, float("nan"), float("inf")])
+def test_provider_retry_wait_max_must_be_finite_and_positive(
+    invalid_wait_max: float,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="provider_retry_wait_max_seconds must be finite and positive",
+    ):
+        execute_adaptive_turn(
+            gateway=None,
+            prompt="A short request.",
+            context=[],
+            llm_client=_SequenceClient(LLMResponse(text_response="unused")),
+            model="test-model",
+            turn_id="invalid-provider-retry-wait-max",
+            turn_budget_seconds=10,
+            final_synthesis_reserve_seconds=2,
+            provider_retry_wait_max_seconds=invalid_wait_max,
+        )
 
 
 @pytest.mark.parametrize(
@@ -9182,6 +9204,333 @@ def test_structured_transport_failure_after_evidence_gets_one_tool_free_answer()
     assert recovery["context_max_bytes"] == 64_000
 
 
+def test_typed_connection_failure_after_evidence_gets_one_tool_free_answer() -> (
+    None
+):
+    connection_failure = StructuredToolTransportError(
+        "Gemini could not be reached for the structured-tool request.",
+        decision={
+            "provider": "gemini",
+            "effective_api_surface": "interactions",
+            "model": "gemini-3.7-flash",
+            "failure_kind": "provider_connection_failed",
+            "provider_request_sent": False,
+        },
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-connection-failure",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="gemini",
+                api_surface="interactions",
+                model="gemini-3.7-flash",
+                state_mode="stateless",
+                input_items=[{"type": "user_input", "content": []}],
+                output_items=[
+                    {
+                        "type": "function_call",
+                        "id": "read-before-connection-failure",
+                        "name": "turn_invoke_capability",
+                        "arguments": {},
+                    }
+                ],
+            ),
+        ),
+        connection_failure,
+        LLMResponse(text_response="Recovered after the connection failure."),
+    )
+    sleeps: list[float] = []
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "students": [{"name": "Student A", "expected_end": "2027"}],
+            }
+        ),
+        prompt="Make a table of my current students.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-connection-failure-recovery",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        sleeper=lambda seconds: sleeps.append(seconds),
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Recovered after the connection failure."
+    assert len(client.calls) == 3
+    assert sleeps == []
+    assert client.calls[2]["available_tools"] == []
+    assert "continuation" not in client.calls[2]
+    assert "tool_results" not in client.calls[2]
+    assert result.llm_calls[1]["failure_kind"] == "provider_connection_failed"
+    assert result.llm_calls[1]["provider_request_sent"] is False
+    recovery = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_model_transport_recovery"
+    )
+    assert recovery["reason"] == "provider_connection_failed_after_evidence"
+
+
+def test_typed_rate_limit_after_evidence_waits_then_recovers_without_tools() -> (
+    None
+):
+    retry_after_seconds = 43.424416244
+    rate_limit = StructuredToolTransportError(
+        "Gemini temporarily rate-limited the structured-tool request.",
+        decision={
+            "provider": "gemini",
+            "effective_api_surface": "interactions",
+            "model": "gemini-3.7-flash",
+            "provider_status": "RESOURCE_EXHAUSTED",
+            "provider_status_code": 429,
+            "provider_error_code": "too_many_requests",
+            "failure_kind": "provider_rate_limited",
+            "provider_request_sent": True,
+            "retry_after_seconds": retry_after_seconds,
+            "retry_after_source": "provider_message",
+        },
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            usage={"input_tokens": 229_113, "output_tokens": 31},
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-rate-limit",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="gemini",
+                api_surface="interactions",
+                model="gemini-3.7-flash",
+                state_mode="stateless",
+                input_items=[{"type": "user_input", "content": []}],
+                output_items=[
+                    {
+                        "type": "function_call",
+                        "id": "read-before-rate-limit",
+                        "name": "turn_invoke_capability",
+                        "arguments": {},
+                    }
+                ],
+            ),
+        ),
+        rate_limit,
+        LLMResponse(text_response="Recovered after the provider-directed wait."),
+    )
+    clock = _ManualClock()
+    sleep_slices: list[float] = []
+    progress_events: list[dict[str, Any]] = []
+
+    def sleep_and_advance(seconds: float) -> None:
+        sleep_slices.append(seconds)
+        clock.now += seconds
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "students": [{"name": "Student A", "expected_end": "2027"}],
+            }
+        ),
+        prompt="Make a table of my current students.",
+        context=[{"role": "assistant", "content": "old context " * 20_000}],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event))
+        ),
+        turn_id="turn-rate-limit-recovery",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        clock=clock,
+        sleeper=sleep_and_advance,
+        provider_retry_wait_max_seconds=90,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Recovered after the provider-directed wait."
+    assert len(client.calls) == 3
+    assert sum(sleep_slices) == pytest.approx(retry_after_seconds)
+    assert max(sleep_slices) <= 1.0
+    assert client.calls[2]["available_tools"] == []
+    assert "continuation" not in client.calls[2]
+    assert "tool_results" not in client.calls[2]
+    assert len(_json_bytes(client.calls[2]["context"])) <= 64_512
+    failed_call = result.llm_calls[1]
+    assert failed_call["failure_kind"] == "provider_rate_limited"
+    assert failed_call["provider_status_code"] == 429
+    assert failed_call["provider_error_code"] == "too_many_requests"
+    assert failed_call["provider_request_sent"] is True
+    assert failed_call["retry_after_seconds"] == retry_after_seconds
+    wait_receipt = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_provider_retry_wait"
+    )
+    assert wait_receipt["action"] == "wait_then_fresh_answer_without_tools"
+    assert wait_receipt["wait_completed"] is True
+    assert wait_receipt["observed_input_tokens"] == 229_113
+    assert wait_receipt["retry_after_source"] == "provider_message"
+    recovery = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_model_transport_recovery"
+    )
+    assert recovery["reason"] == "provider_rate_limited_after_evidence"
+    assert [
+        event["event_kind"]
+        for event in progress_events
+        if event.get("event_kind", "").startswith("provider_retry_wait_")
+    ] == ["provider_retry_wait_start", "provider_retry_wait_end"]
+
+
+def test_rate_limit_recovery_is_not_repeated_for_answer_only_failure() -> None:
+    def rate_limit() -> StructuredToolTransportError:
+        return StructuredToolTransportError(
+            "Gemini temporarily rate-limited the structured-tool request.",
+            decision={
+                "provider": "gemini",
+                "provider_status_code": 429,
+                "provider_error_code": "too_many_requests",
+                "failure_kind": "provider_rate_limited",
+                "provider_request_sent": True,
+                "retry_after_seconds": 0.0,
+                "retry_after_source": "response_header",
+            },
+        )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-two-rate-limits",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+        ),
+        rate_limit(),
+        rate_limit(),
+        LLMResponse(text_response="A fourth call must not happen."),
+    )
+    sleeps: list[float] = []
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True, "students": []}),
+        prompt="Make a table of my current students.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-rate-limit-single-recovery",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        sleeper=lambda seconds: sleeps.append(seconds),
+    )
+
+    assert result.terminal_status == "model_error"
+    assert len(client.calls) == 3
+    assert sleeps == []
+    assert "temporarily rate-limited" in result.response_text
+    assert len(
+        [
+            item
+            for item in result.aux_llm_calls
+            if item.get("type") == "adaptive_turn_provider_retry_wait"
+        ]
+    ) == 1
+    assert len(
+        [
+            item
+            for item in result.aux_llm_calls
+            if item.get("type") == "adaptive_turn_model_transport_recovery"
+        ]
+    ) == 1
+
+
+@pytest.mark.parametrize("retry_after_seconds", [None, 120.0])
+def test_rate_limit_after_evidence_without_safe_wait_returns_retry_later(
+    retry_after_seconds: float | None,
+) -> None:
+    decision: dict[str, Any] = {
+        "provider": "gemini",
+        "provider_status_code": 429,
+        "failure_kind": "provider_rate_limited",
+        "provider_request_sent": True,
+    }
+    if retry_after_seconds is not None:
+        decision["retry_after_seconds"] = retry_after_seconds
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-unsafe-rate-limit-wait",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+        ),
+        StructuredToolTransportError(
+            "Gemini temporarily rate-limited the structured-tool request.",
+            decision=decision,
+        ),
+        LLMResponse(text_response="A third call must not happen."),
+    )
+    sleeps: list[float] = []
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True, "students": []}),
+        prompt="Make a table of my current students.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-rate-limit-no-safe-wait",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        sleeper=lambda seconds: sleeps.append(seconds),
+        provider_retry_wait_max_seconds=90,
+    )
+
+    assert result.terminal_status == "model_error"
+    assert len(client.calls) == 2
+    assert sleeps == []
+    assert "I gathered evidence" in result.response_text
+    wait_receipt = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_provider_retry_wait"
+    )
+    assert wait_receipt["action"] == "return_typed_retry_later_outcome"
+    assert wait_receipt["wait_completed"] is False
+
+
 def test_consecutive_incomplete_responses_deliver_visible_partial_answer() -> None:
     first_incomplete = StructuredToolTransportError(
         "Gemini Interactions returned an unsuccessful provider status.",
@@ -9398,6 +9747,49 @@ def test_structured_transport_failure_without_evidence_remains_terminal() -> Non
     assert result.llm_calls[0]["provider_status"] == "failed"
     assert not any(
         item.get("type") == "adaptive_turn_model_transport_recovery"
+        for item in result.aux_llm_calls
+    )
+
+
+def test_rate_limit_without_evidence_does_not_wait_or_retry() -> None:
+    client = _SequenceClient(
+        StructuredToolTransportError(
+            "Gemini temporarily rate-limited the structured-tool request.",
+            decision={
+                "provider": "gemini",
+                "provider_status_code": 429,
+                "failure_kind": "provider_rate_limited",
+                "provider_request_sent": True,
+                "retry_after_seconds": 43.424416244,
+                "retry_after_source": "provider_message",
+            },
+        ),
+        LLMResponse(text_response="This response must not be requested."),
+    )
+    sleeps: list[float] = []
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Answer without any prior evidence.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-rate-limit-without-evidence",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        sleeper=lambda seconds: sleeps.append(seconds),
+    )
+
+    assert len(client.calls) == 1
+    assert sleeps == []
+    assert result.terminal_status == "model_error"
+    assert "temporarily rate-limited" in result.response_text
+    assert not any(
+        item.get("type")
+        in {
+            "adaptive_turn_provider_retry_wait",
+            "adaptive_turn_model_transport_recovery",
+        }
         for item in result.aux_llm_calls
     )
 

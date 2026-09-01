@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import threading
 import time
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
@@ -89,6 +90,11 @@ _SUCCESSFUL_MODEL_DURATION_ADVISORY_MULTIPLIER = 1.25
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_TRANSPORT_RECOVERY_CONTEXT_MAX_BYTES = 64_000
+# Twice the observed 43.424-second provider-directed wait, rounded up. Longer
+# delays return an honest retry-later outcome instead of holding a turn worker.
+_DEFAULT_PROVIDER_RETRY_WAIT_MAX_SECONDS = 90.0
+_PROVIDER_RETRY_WAIT_SLICE_SECONDS = 1.0
+_MAX_PROVIDER_RETRY_METADATA_SECONDS = 3_600.0
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
 _CAPABILITY_PURPOSE_MAX_CHARS = 160
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
@@ -1269,6 +1275,9 @@ def _structured_transport_failure_telemetry(
             "provider_status_code",
             "provider_error_code",
             "provider_errors",
+            "provider_request_sent",
+            "retry_after_seconds",
+            "retry_after_source",
             "failure_kind",
             "partial_response_available",
             "partial_response_char_count",
@@ -1277,6 +1286,23 @@ def _structured_transport_failure_telemetry(
         )
         if key in decision
     }
+    if not isinstance(retained_decision.get("provider_request_sent"), bool):
+        retained_decision.pop("provider_request_sent", None)
+    retry_after_seconds = retained_decision.get("retry_after_seconds")
+    if (
+        not isinstance(retry_after_seconds, (int, float))
+        or isinstance(retry_after_seconds, bool)
+        or not math.isfinite(float(retry_after_seconds))
+        or float(retry_after_seconds) < 0.0
+        or float(retry_after_seconds) > _MAX_PROVIDER_RETRY_METADATA_SECONDS
+    ):
+        retained_decision.pop("retry_after_seconds", None)
+        retained_decision.pop("retry_after_source", None)
+    elif retained_decision.get("retry_after_source") not in {
+        "provider_message",
+        "response_header",
+    }:
+        retained_decision.pop("retry_after_source", None)
     telemetry: dict[str, Any] = {
         "failure_kind": failure_kind or "structured_tool_transport_error",
     }
@@ -1284,6 +1310,9 @@ def _structured_transport_failure_telemetry(
         "provider_status",
         "provider_status_code",
         "provider_error_code",
+        "provider_request_sent",
+        "retry_after_seconds",
+        "retry_after_source",
         "partial_response_available",
         "partial_response_char_count",
         "partial_response_sha256",
@@ -6422,6 +6451,8 @@ def execute_adaptive_turn(
     final_synthesis_reserve_seconds: float | None = None,
     final_answer_reserve_seconds: float | None = None,
     clock: Any = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+    provider_retry_wait_max_seconds: float | None = None,
 ) -> AdaptiveTurnResult:
     """Run one ordinary turn without a selector, master workflow, critic, or gate."""
 
@@ -6450,6 +6481,11 @@ def execute_adaptive_turn(
             _DEFAULT_FINAL_ANSWER_RESERVE_SECONDS,
         )
     )
+    provider_retry_wait_max = float(
+        provider_retry_wait_max_seconds
+        if provider_retry_wait_max_seconds is not None
+        else _DEFAULT_PROVIDER_RETRY_WAIT_MAX_SECONDS
+    )
     if turn_budget <= 0.0:
         raise ValueError("turn_budget_seconds must be positive")
     if not 0.0 < final_reserve < turn_budget:
@@ -6459,6 +6495,10 @@ def execute_adaptive_turn(
         )
     if requested_final_answer_reserve < 0.0:
         raise ValueError("final_answer_reserve_seconds must be non-negative")
+    if not math.isfinite(provider_retry_wait_max) or provider_retry_wait_max <= 0.0:
+        raise ValueError(
+            "provider_retry_wait_max_seconds must be finite and positive"
+        )
     final_answer_reserve = min(
         requested_final_answer_reserve,
         final_reserve,
@@ -6566,6 +6606,7 @@ def execute_adaptive_turn(
             "enforcement": "advisory",
             "model_call_advisory_seconds": model_call_advisory,
             "model_call_hard_timeout_seconds": None,
+            "provider_retry_wait_max_seconds": provider_retry_wait_max,
         }
     ]
     usage_totals: dict[str, float] = {}
@@ -6615,6 +6656,8 @@ def execute_adaptive_turn(
                 "provider_status": call.get("provider_status"),
                 "provider_status_code": call.get("provider_status_code"),
                 "provider_error_code": call.get("provider_error_code"),
+                "retry_after_seconds": call.get("retry_after_seconds"),
+                "retry_after_source": call.get("retry_after_source"),
                 "transport_decision": call.get("transport_decision"),
                 "llm_usage_cost_summary": current_llm_usage_cost_summary(),
                 "result_summary": (
@@ -8504,6 +8547,71 @@ def execute_adaptive_turn(
             }
         )
 
+    def wait_for_provider_retry(
+        *,
+        retry_after_seconds: float,
+        call_id: str,
+        failure_telemetry: Mapping[str, Any],
+        evidence_count: int,
+    ) -> None:
+        """Wait once in cancellable slices before a materially smaller retry."""
+
+        wait_receipt = {
+            "type": "adaptive_turn_provider_retry_wait",
+            "schema_version": "adaptive_turn_provider_retry_wait.v1",
+            "call_id": call_id,
+            "reason": "provider_rate_limited_after_evidence",
+            "action": "wait_then_fresh_answer_without_tools",
+            "requested_wait_seconds": retry_after_seconds,
+            "wait_max_seconds": provider_retry_wait_max,
+            "wait_slice_seconds": _PROVIDER_RETRY_WAIT_SLICE_SECONDS,
+            "prior_model_call_count": model_call_sequence,
+            "tool_invocation_count": len(tool_invocations),
+            "evidence_count": evidence_count,
+            "observed_input_tokens": usage_totals.get("input_tokens"),
+            **dict(failure_telemetry),
+        }
+        aux_calls.append(wait_receipt)
+        _emit(
+            progress_tracker,
+            {
+                "status": "provider_retry_wait_start",
+                "event_kind": "provider_retry_wait_start",
+                "stage": "model_transport_recovery",
+                "phase": "model_transport_recovery",
+                "call_id": call_id,
+                "retry_after_seconds": retry_after_seconds,
+                "result_summary": (
+                    "The provider requested a bounded delay before one compact "
+                    "answer-only recovery call."
+                ),
+            },
+        )
+        remaining = retry_after_seconds
+        while remaining > 0.0:
+            _check_cancellation(progress_tracker)
+            wait_slice = min(_PROVIDER_RETRY_WAIT_SLICE_SECONDS, remaining)
+            sleeper(wait_slice)
+            remaining = max(0.0, remaining - wait_slice)
+        _check_cancellation(progress_tracker)
+        wait_receipt["wait_completed"] = True
+        _emit(
+            progress_tracker,
+            {
+                "status": "provider_retry_wait_end",
+                "event_kind": "provider_retry_wait_end",
+                "stage": "model_transport_recovery",
+                "phase": "model_transport_recovery",
+                "call_id": call_id,
+                "retry_after_seconds": retry_after_seconds,
+                "success": True,
+                "result_summary": (
+                    "The provider-directed wait completed; generating from "
+                    "retained evidence without tools."
+                ),
+            },
+        )
+
     while True:
         model_call_sequence += 1
         model_call_id = f"{turn_id or 'adaptive-turn'}:llm:{model_call_sequence}"
@@ -8691,6 +8799,10 @@ def execute_adaptive_turn(
                 if isinstance(exc, StructuredToolTransportError)
                 else {}
             )
+            if "provider_request_sent" in transport_failure_telemetry:
+                provider_request_sent = transport_failure_telemetry[
+                    "provider_request_sent"
+                ]
             partial_response = getattr(exc, "partial_response", None)
             partial_response_text = (
                 partial_response.text_response.strip()
@@ -8779,9 +8891,6 @@ def execute_adaptive_turn(
                     "be missing.\n\n" + partial_response_text,
                     status=terminal_status,
                 )
-            if final_synthesis and not answer_only:
-                enter_answer_only("evidence_call_failed")
-                continue
             available_evidence_count = len(evidence_store.index())
             # A provider may exhaust its own interaction budget only after a
             # long, otherwise successful tool continuation. Preserve that work
@@ -8789,17 +8898,63 @@ def execute_adaptive_turn(
             # exception and discarding every completed observation.
             if (
                 isinstance(exc, StructuredToolTransportError)
-                and not final_synthesis
+                and not answer_only
                 and (available_evidence_count > 0 or bool(evidence_views))
             ):
                 provider_status = transport_failure_telemetry.get(
                     "provider_status"
                 )
-                recovery_reason = (
-                    "provider_budget_exhausted_after_evidence"
-                    if provider_status == "budget_exceeded"
-                    else "structured_transport_failed_after_evidence"
-                )
+                failure_kind = transport_failure_telemetry.get("failure_kind")
+                if provider_status == "budget_exceeded":
+                    recovery_reason = "provider_budget_exhausted_after_evidence"
+                elif failure_kind == "provider_rate_limited":
+                    recovery_reason = "provider_rate_limited_after_evidence"
+                elif failure_kind == "provider_connection_failed":
+                    recovery_reason = "provider_connection_failed_after_evidence"
+                else:
+                    recovery_reason = "structured_transport_failed_after_evidence"
+                if recovery_reason == "provider_rate_limited_after_evidence":
+                    retry_after_seconds = transport_failure_telemetry.get(
+                        "retry_after_seconds"
+                    )
+                    if (
+                        not isinstance(retry_after_seconds, (int, float))
+                        or isinstance(retry_after_seconds, bool)
+                        or not math.isfinite(float(retry_after_seconds))
+                        or float(retry_after_seconds) < 0.0
+                        or float(retry_after_seconds) > provider_retry_wait_max
+                    ):
+                        aux_calls.append(
+                            {
+                                "type": "adaptive_turn_provider_retry_wait",
+                                "schema_version": (
+                                    "adaptive_turn_provider_retry_wait.v1"
+                                ),
+                                "call_id": model_call_id,
+                                "reason": (
+                                    "provider_retry_delay_missing_or_exceeds_bound"
+                                ),
+                                "action": "return_typed_retry_later_outcome",
+                                "requested_wait_seconds": retry_after_seconds,
+                                "wait_max_seconds": provider_retry_wait_max,
+                                "wait_completed": False,
+                                **transport_failure_telemetry,
+                            }
+                        )
+                        terminal_status = "model_error"
+                        return finish(
+                            "I gathered evidence for the request, but the model "
+                            "provider is temporarily rate-limited and did not "
+                            "supply a delay this turn could safely wait. Please "
+                            "try again later.",
+                            status=terminal_status,
+                        )
+                    wait_for_provider_retry(
+                        retry_after_seconds=float(retry_after_seconds),
+                        call_id=model_call_id,
+                        failure_telemetry=transport_failure_telemetry,
+                        evidence_count=available_evidence_count,
+                    )
                 recovery_context_before_bytes = len(_json_bytes(current_context))
                 enter_answer_only(recovery_reason)
                 compact_answer_context = _compact_context_after_limit(
@@ -8846,6 +9001,9 @@ def execute_adaptive_turn(
                         **transport_failure_telemetry,
                     }
                 )
+                continue
+            if final_synthesis and not answer_only:
+                enter_answer_only("evidence_call_failed")
                 continue
             if not final_synthesis and _is_transient_model_request_liveness_failure(
                 exc
@@ -8913,6 +9071,19 @@ def execute_adaptive_turn(
                         pending_results = []
                         continue
             terminal_status = "model_error"
+            failure_kind = transport_failure_telemetry.get("failure_kind")
+            if failure_kind == "provider_rate_limited":
+                text = last_partial_text.strip() or (
+                    "I could not complete the request because the model provider "
+                    "is temporarily rate-limited. Please try again later."
+                )
+                return finish(text, status=terminal_status)
+            if failure_kind == "provider_connection_failed":
+                text = last_partial_text.strip() or (
+                    "I could not complete the request because the model provider "
+                    "connection failed. Please try again."
+                )
+                return finish(text, status=terminal_status)
             text = last_partial_text.strip() or (
                 "I could not complete the request because the model call failed: "
                 f"{type(exc).__name__}."

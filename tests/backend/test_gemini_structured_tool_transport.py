@@ -4,8 +4,10 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from google import genai
+from google.genai import errors as genai_errors
 
 from src.backend.languagemodels.structured_tool_calling.client import (
     LLMClient,
@@ -17,6 +19,7 @@ from src.backend.languagemodels.structured_tool_calling.providers.gemini_client 
 from src.backend.languagemodels.structured_tool_calling.types import (
     StructuredToolProtocolError,
     StructuredToolTransportError,
+    ToolCallError,
     ToolDefinition,
     ToolResult,
 )
@@ -37,7 +40,10 @@ class _Interactions:
 
     async def create(self, **kwargs: Any) -> Any:
         self.requests.append(dict(kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 class _Models:
@@ -399,6 +405,106 @@ def test_gemini_37_fails_clearly_without_interactions_sdk_surface() -> None:
             SimpleNamespace(aio=SimpleNamespace()),
             "gemini-3.7-flash",
         )
+
+
+def test_interactions_connection_failure_is_typed_without_raw_sdk_text() -> None:
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com")
+    connection_error = httpx.ConnectError(
+        "Connection error. api_key=secret-provider-value",
+        request=request,
+    )
+    client = _client(_Interactions([connection_error]))
+
+    with pytest.raises(StructuredToolTransportError) as exc_info:
+        asyncio.run(client.generate_with_tools("Find evidence.", [_tool()]))
+
+    error = exc_info.value
+    assert str(error) == (
+        "Gemini could not be reached for the structured-tool request."
+    )
+    assert error.decision == {
+        "provider": "gemini",
+        "effective_api_surface": "interactions",
+        "model": "gemini-3.7-flash",
+        "failure_kind": "provider_connection_failed",
+        "provider_request_sent": False,
+    }
+    assert "secret-provider-value" not in str(error.decision)
+
+
+@pytest.mark.parametrize(
+    ("retry_header", "expected_source"),
+    [
+        ("43.424416244", "response_header"),
+        (None, "provider_message"),
+    ],
+)
+def test_interactions_rate_limit_retains_only_safe_retry_decision(
+    retry_header: str | None,
+    expected_source: str,
+) -> None:
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com")
+    headers = {"Retry-After": retry_header} if retry_header is not None else {}
+    response = httpx.Response(429, headers=headers, request=request)
+    rate_limit = genai_errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": "too_many_requests",
+                "status": "RESOURCE_EXHAUSTED",
+                "message": (
+                    "api_key=secret-provider-value. Please retry in "
+                    "43.424416244s."
+                ),
+            }
+        },
+        response,
+    )
+    client = _client(_Interactions([rate_limit]))
+
+    with pytest.raises(StructuredToolTransportError) as exc_info:
+        asyncio.run(client.generate_with_tools("Find evidence.", [_tool()]))
+
+    error = exc_info.value
+    assert str(error) == (
+        "Gemini temporarily rate-limited the structured-tool request."
+    )
+    assert error.decision == {
+        "provider": "gemini",
+        "effective_api_surface": "interactions",
+        "model": "gemini-3.7-flash",
+        "provider_status_code": 429,
+        "provider_status": "RESOURCE_EXHAUSTED",
+        "provider_error_code": "too_many_requests",
+        "failure_kind": "provider_rate_limited",
+        "provider_request_sent": True,
+        "retry_after_seconds": 43.424416244,
+        "retry_after_source": expected_source,
+    }
+    assert "secret-provider-value" not in str(error.decision)
+
+
+def test_interactions_authentication_error_remains_non_retryable() -> None:
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com")
+    response = httpx.Response(401, request=request)
+    authentication_error = genai_errors.ClientError(
+        401,
+        {
+            "error": {
+                "code": "unauthenticated",
+                "status": "UNAUTHENTICATED",
+                "message": "api_key=secret-provider-value",
+            }
+        },
+        response,
+    )
+    client = _client(_Interactions([authentication_error]))
+
+    with pytest.raises(ToolCallError) as exc_info:
+        asyncio.run(client.generate_with_tools("Find evidence.", [_tool()]))
+
+    assert type(exc_info.value) is ToolCallError
+    assert "secret-provider-value" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
