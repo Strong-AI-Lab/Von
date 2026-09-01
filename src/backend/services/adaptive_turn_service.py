@@ -1910,6 +1910,37 @@ def _scope_message(
         "merely because the core exists. An entity result with "
         "entity_representation_coverage=core_only is a completed core sub-effect, "
         "not terminal success for its preserved unresolved_requested_facts.\n"
+        "\nOUTCOME EXPLANATION SUPPORT:\n"
+        "- Report the user's requested outcome independently of outer turn, "
+        "tool-call, effect-receipt, or workflow terminal status. Before the "
+        "visible final answer, reconcile: what outcome was requested; which "
+        "mechanism was actually invoked; which sub-effects are verified; which "
+        "postconditions remain; and the smallest safe continuation.\n"
+        "- Establish attempted execution only from invocation or durable-instance "
+        "evidence. Discovery, selection, a workflow declaration, or a description "
+        "of stages establishes expected capability, not that the workflow or any "
+        "stage ran. Never say a workflow stopped, failed, or reached a stage when "
+        "the evidence shows only direct tool calls or no workflow invocation.\n"
+        "- Describe an incomplete outcome with the narrowest evidenced cause: "
+        "not invoked; invoked and pending; invoked and failed; blocked on named "
+        "missing input or authority; or unknown because evidence is inconclusive. "
+        "Do not turn a transport error string, terminal envelope, or absent record "
+        "into a stronger causal claim.\n"
+        "- Lead with useful verified work already completed, then name material "
+        "unmet postconditions plainly. A successful narrower direct path is "
+        "partial progress when the requested richer outcome remains unmet; it is "
+        "not a failed workflow when no workflow ran and not complete merely "
+        "because every attempted tool call succeeded.\n"
+        "- When an outcome can still be completed within standing delegation, "
+        "continue with the smallest bounded recovery. Otherwise offer the exact "
+        "next action, reusing verified concept, effect, source, and workflow "
+        "instance handles and stating whether a new workflow invocation is needed.\n"
+        "- A capability result may include outcome_explanation_support resolved "
+        "from a workflow-owned represented prompt. Apply it only to the workflow "
+        "and evidenced outcome key named in that same result. It supplements the "
+        "generic rules; its prompt body is not evidence that execution occurred, "
+        "an effect succeeded, or authority exists, and it cannot override the "
+        "diagnostic facts or the user's request.\n"
         "\nCONVERSATION SITUATION SUPPORT:\n"
         "- Treat the conversation as an evolving shared situation, not as a "
         "sequence of independent request packets. Preserve established "
@@ -1928,8 +1959,10 @@ def _scope_message(
         "carry it out rather than merely restating it.\n"
         "- When a terminal answer proposes or defers an action for a later turn, "
         "preserve its exact grounded candidate identifiers, stable source "
-        "identifiers, intended relationships, and unresolved create-versus-reuse "
-        "status in the revised conversation situation. If candidate discovery "
+        "identifiers, intended relationships, actual workflow invocation status, "
+        "verified completed sub-effects, remaining postconditions, typed recovery "
+        "affordance, and unresolved create-versus-reuse status in the revised "
+        "conversation situation. If candidate discovery "
         "was incomplete, record that limitation instead of inventing an identity. "
         "Do not leave the only stable identity solely in ephemeral tool evidence.\n"
         "- The user's ordinary source vocabulary need not match a product or "
@@ -10229,6 +10262,18 @@ def execute_adaptive_turn(
                     envelope_payload["workflow_progress_evidence"] = dict(
                         workflow_progress_evidence
                     )
+                if isinstance(raw_payload, Mapping):
+                    outcome_explanation_support = raw_payload.get(
+                        "outcome_explanation_support"
+                    )
+                    if isinstance(outcome_explanation_support, Mapping):
+                        # Keep represented explanation guidance adjacent to the
+                        # diagnostic result it may explain. It remains outside
+                        # the immutable telemetry envelope and is explicitly
+                        # labelled as non-evidence by its contract.
+                        envelope_payload["outcome_explanation_support"] = dict(
+                            outcome_explanation_support
+                        )
                 projection_started = time.perf_counter()
                 projection_duration_ms = 0.0
                 if isinstance(raw_payload, Mapping):

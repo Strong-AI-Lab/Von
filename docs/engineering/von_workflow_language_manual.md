@@ -915,6 +915,17 @@ produce the relevant evidence. A missing receipt is an error only when the
 selected workflow contract requires it; it must never erase committed effects
 or safe recovery opportunities.
 
+A workflow may separately publish
+`#V#hasWorkflowOutcomeExplanationPromptMapJson` with schema
+`workflow_outcome_explanation_prompt_map.v1`. Its `prompt_concept_ids` object
+maps supported outcome keys (`failed`, `partial`, `not_started`,
+`indeterminate`, semantic non-completion keys, and optional `default`) to
+Vontology prompt concepts. This metadata guides the containing turn model's
+user-facing explanation after an actual workflow capability call. It does not
+establish invocation, state transitions, effects, terminal success, or
+authority; those remain grounded in execution telemetry, receipts, and
+canonical read-back. No extra VWL state or universal critic is implied.
+
 Validation phases:
 
 - pre-action: preconditions/reads checks,

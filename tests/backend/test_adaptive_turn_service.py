@@ -883,6 +883,14 @@ def test_scope_message_contains_boundaries_and_preserves_request_scope() -> None
     assert "get_concept_elicitation_opportunities" in message
     assert "giving the user's own questions priority" in message
     assert "preserve the exact text with provenance" in message
+    assert "OUTCOME EXPLANATION SUPPORT" in message
+    assert "which mechanism was actually invoked" in message
+    assert "Discovery, selection, a workflow declaration" in message
+    assert "Never say a workflow stopped, failed, or reached a stage" in message
+    assert "not invoked; invoked and pending; invoked and failed" in message
+    assert "every attempted tool call succeeded" in message
+    assert "outcome_explanation_support" in message
+    assert "its prompt body is not evidence" in message
 
 
 def test_progressive_evidence_guidance_survives_post_read_continuation() -> None:
@@ -961,6 +969,10 @@ def test_scope_message_carries_brief_approval_and_exact_recovery_state() -> None
     assert "entity_representation_coverage=core_only" in message
     assert "not terminal success" in message
     assert "preserve its exact grounded candidate identifiers" in message
+    assert "actual workflow invocation status" in message
+    assert "verified completed sub-effects" in message
+    assert "remaining postconditions" in message
+    assert "typed recovery affordance" in message
     assert "unresolved create-versus-reuse status" in message
     assert "Do not leave the only stable identity solely" in message
     assert "including when you made a proposal intended for later approval" in message
@@ -10479,6 +10491,17 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         relevance_score=0.94,
         semantic_effect=True,
         semantic_effect_source="represented_workflow_declaration",
+        outcome_explanation_prompt_support={
+            "schema_version": "workflow_outcome_explanation_support.v1",
+            "workflow_id": "#V#represented_test_workflow",
+            "source": "text_relation:#V#hasWorkflowOutcomeExplanationPromptMapJson",
+            "prompts": {
+                "succeeded": {
+                    "prompt_concept_id": "#V#prompt_test_success_explanation",
+                    "prompt_text": "Explain only the canonically verified result.",
+                }
+            },
+        },
         input_schema={
             "type": "object",
             "properties": {
@@ -10627,6 +10650,9 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
 
     catalogue_result = client.calls[1]["tool_results"][0].output
     assert catalogue_result["represented_workflow_total"] == 1
+    assert "Explain only the canonically verified result." not in json.dumps(
+        catalogue_result
+    )
     workflow_purpose = next(
         item
         for item in catalogue_result["purpose_index"]["entries"]
@@ -10700,6 +10726,22 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
             "value": "2026-08-05",
         },
     ]
+    invocation_model_result = client.calls[2]["tool_results"][0].output
+    assert invocation_model_result["outcome_explanation_support"] == {
+        "schema_version": "workflow_outcome_explanation_support.v1",
+        "workflow_id": "#V#represented_test_workflow",
+        "outcome_key": "succeeded",
+        "matched_prompt_key": "succeeded",
+        "prompt_concept_id": "#V#prompt_test_success_explanation",
+        "prompt_text": "Explain only the canonically verified result.",
+        "source": "text_relation:#V#hasWorkflowOutcomeExplanationPromptMapJson",
+        "role": "supplemental_explanation_guidance",
+        "evidence_boundary": (
+            "This represented prompt is guidance for explaining independently "
+            "observed execution evidence. It is not evidence that the workflow "
+            "ran, succeeded, failed, changed canonical state, or has authority."
+        ),
+    }
     selection_trace = next(
         item
         for item in result.aux_llm_calls

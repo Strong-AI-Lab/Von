@@ -59,11 +59,15 @@ _REPO_SEED_ASSET_PATH = (
 )
 _MANAGED_BY = "paper_representation_workflow_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-2189"
+_OUTCOME_EXPLANATION_SOURCE_TAG = "JVNAUTOSCI-2697"
 _METADATA_EXTRACTION_PROMPT_CONCEPT_ID = (
     "#V#prompt_scholarly_article_metadata_extraction"
 )
 _REPRESENTATION_EVIDENCE_PROMPT_CONCEPT_ID = (
     "#V#prompt_scholarly_article_representation_evidence_summary"
+)
+_OUTCOME_EXPLANATION_PROMPT_CONCEPT_ID = (
+    "#V#prompt_scholarly_article_outcome_explanation"
 )
 _METADATA_EXTRACTION_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -76,6 +80,12 @@ _REPRESENTATION_EVIDENCE_PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "prompt_scholarly_article_representation_evidence_summary_seed.md"
+)
+_OUTCOME_EXPLANATION_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "prompt_scholarly_article_outcome_explanation_seed.md"
 )
 
 
@@ -113,6 +123,17 @@ def _ensure_paper_workflow_prompt_support(
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
+            WorkflowPromptConceptSpec(
+                concept_id=_OUTCOME_EXPLANATION_PROMPT_CONCEPT_ID,
+                name="Scholarly article outcome explanation prompt",
+                description=(
+                    "Canonical supplemental prompt used by the containing turn "
+                    "model to explain partial or unsuccessful scholarly article "
+                    "representation outcomes without confusing declared workflow "
+                    "stages with observed execution."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
         ),
         provenance_source=_MANAGED_BY,
     )
@@ -127,6 +148,10 @@ def _ensure_paper_workflow_prompt_support(
             _REPRESENTATION_EVIDENCE_PROMPT_SEED_ASSET_PATH,
             "scholarly_representation_evidence_prompt_seed_missing",
         ),
+        _OUTCOME_EXPLANATION_PROMPT_CONCEPT_ID: (
+            _OUTCOME_EXPLANATION_PROMPT_SEED_ASSET_PATH,
+            "scholarly_outcome_explanation_prompt_seed_missing",
+        ),
     }
     for prompt_id, (asset_path, error_code) in seed_assets.items():
         if force_prompt_seed or not prompt_concept_has_content(prompt_id):
@@ -135,7 +160,14 @@ def _ensure_paper_workflow_prompt_support(
                 predicate="hasContent",
                 text=_load_prompt_seed_text(asset_path, error_code=error_code),
                 lang="en-NZ",
-                context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+                context={
+                    "jira": (
+                        _OUTCOME_EXPLANATION_SOURCE_TAG
+                        if prompt_id == _OUTCOME_EXPLANATION_PROMPT_CONCEPT_ID
+                        else _SOURCE_TAG
+                    ),
+                    "source": _MANAGED_BY,
+                },
                 garbage_collect=True,
             )
             seeded_prompt_ids.append(prompt_id)

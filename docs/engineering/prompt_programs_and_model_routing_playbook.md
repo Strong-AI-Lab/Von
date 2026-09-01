@@ -70,6 +70,29 @@ Telemetry should expose:
 - enough lineage to distinguish a prompt fragment from the full
   model-visible context
 
+### 3B. Outcome explanation guidance
+
+The containing turn model should explain the user's requested outcome from
+observed execution and canonical effect evidence, independently of whether the
+outer turn, each attempted tool call, or a workflow envelope completed. A
+workflow declaration describes expected capability; it does not establish
+invocation, stage progress, failure, or domain postconditions.
+
+Keep the generic distinction in the ordinary-turn prompt: verified completed
+work, unmet postconditions, the narrowest evidenced cause (`not invoked`,
+`pending`, `failed`, `blocked`, or `unknown`), and the smallest safe
+continuation. Do not add a universal response critic solely to restate these
+facts.
+
+When a workflow needs domain-specific explanation guidance, it may publish a
+`workflow_outcome_explanation_prompt_map.v1` through
+`#V#hasWorkflowOutcomeExplanationPromptMapJson`. The map selects Vontology
+prompt concepts by outcome key with an optional `default`. Project the selected
+prompt beside the workflow execution result only after the workflow capability
+has actually been called. The prompt supplements the generic synthesis rule;
+it is not execution evidence, effect evidence, or authority, and it cannot
+override diagnostic facts or the user's request.
+
 ## 4. Prompt optimisation loop
 
 For features worth systematic optimisation, define:
