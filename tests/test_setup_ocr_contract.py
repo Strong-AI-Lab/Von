@@ -131,7 +131,12 @@ def test_bash_has_an_explicit_ordinary_user_apt_fallback_and_launcher_path() -> 
         "prepare_tesseract",
     )
 
-    assert "sudo -n true" in system_install
+    assert 'sudo -n -l "$apt_get_path" update' in system_install
+    assert (
+        'sudo -n -l "$apt_get_path" install -y tesseract-ocr tesseract-ocr-eng'
+        in system_install
+    )
+    assert "sudo -n true" not in system_install
     assert "install_tesseract_debian_user_local" in system_install
     assert "apt-get download" in local_install
     assert "dpkg-deb -x" in local_install
@@ -140,6 +145,16 @@ def test_bash_has_an_explicit_ordinary_user_apt_fallback_and_launcher_path() -> 
     assert "TESSDATA_PREFIX" in local_install
     assert 'if [ -x "${HOME}/.local/bin/tesseract" ]' in launcher
     assert 'export PATH="${HOME}/.local/bin:${PATH}"' in launcher
+
+
+def test_readme_documents_narrow_von_deps_sudo_contract() -> None:
+    readme = _read("README.md")
+
+    assert "Cmnd_Alias VON_DEPS" in readme
+    assert "/usr/bin/apt-get update" in readme
+    assert "/usr/bin/apt-get install -y tesseract-ocr tesseract-ocr-eng" in readme
+    assert "NOPASSWD: VON_DEPS" in readme
+    assert "do not replace it with unrestricted `apt-get` or `NOPASSWD: ALL`" in readme
 
 
 def test_unix_final_receipt_qualifies_core_only_and_required_failure() -> None:

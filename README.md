@@ -158,6 +158,22 @@ Homebrew. `--with-ocr` is also available when you want OCR to be mandatory but
 do not authorise package installation; `--install-system-deps` implies that
 strict check.
 
+On a managed Ubuntu/Debian host, an administrator may enable non-interactive
+installation without granting blanket passwordless sudo. Create a root-owned
+rule with `sudo visudo -f /etc/sudoers.d/von-deps`, replacing `<von-user>` with
+the account that runs Von:
+
+```sudoers
+Cmnd_Alias VON_DEPS = /usr/bin/apt-get update, \
+    /usr/bin/apt-get install -y tesseract-ocr tesseract-ocr-eng
+<von-user> ALL=(root) NOPASSWD: VON_DEPS
+```
+
+Keep `VON_DEPS` as an exact, reviewed allowlist when new native dependencies
+are added; do not replace it with unrestricted `apt-get` or `NOPASSWD: ALL`.
+The installer detects this command-specific grant automatically. Without it,
+the ordinary-user local-package route remains available.
+
 ### Windows PowerShell
 
 ```powershell

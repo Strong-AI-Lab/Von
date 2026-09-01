@@ -308,16 +308,22 @@ install_tesseract_system_dependency() {
                 echo -e "${RED}Automatic Tesseract installation currently supports apt-based Linux distributions.${NC}"
                 return 1
             fi
+            local apt_get_path
+            apt_get_path=$(command -v apt-get)
             if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
                 echo "Installing Tesseract with apt-get (already running as root)."
-                apt-get update
-                apt-get install -y tesseract-ocr tesseract-ocr-eng
-            elif command_exists sudo && sudo -n true >/dev/null 2>&1; then
+                "$apt_get_path" update
+                "$apt_get_path" install -y tesseract-ocr tesseract-ocr-eng
+            elif command_exists sudo \
+                && sudo -n -l "$apt_get_path" update >/dev/null 2>&1 \
+                && sudo -n -l "$apt_get_path" install -y tesseract-ocr tesseract-ocr-eng >/dev/null 2>&1; then
+                echo "A non-interactive VON_DEPS sudo grant for the exact apt commands is available."
                 echo "Installing Tesseract with: sudo apt-get update"
-                sudo -n apt-get update
+                sudo -n "$apt_get_path" update
                 echo "Installing Tesseract with: sudo apt-get install -y tesseract-ocr tesseract-ocr-eng"
-                sudo -n apt-get install -y tesseract-ocr tesseract-ocr-eng
+                sudo -n "$apt_get_path" install -y tesseract-ocr tesseract-ocr-eng
             else
+                echo "No non-interactive VON_DEPS sudo grant for those exact apt commands was detected."
                 install_tesseract_debian_user_local
             fi
             ;;
