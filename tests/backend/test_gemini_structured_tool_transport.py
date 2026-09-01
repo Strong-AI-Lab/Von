@@ -401,7 +401,17 @@ def test_gemini_37_fails_clearly_without_interactions_sdk_surface() -> None:
         )
 
 
-@pytest.mark.parametrize("status", ["failed", "cancelled", "in_progress", "completed"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        "failed",
+        "cancelled",
+        "in_progress",
+        "incomplete",
+        "budget_exceeded",
+        "completed",
+    ],
+)
 def test_interactions_unsuccessful_status_or_errors_are_typed_and_sanitised(
     status: str,
 ) -> None:
