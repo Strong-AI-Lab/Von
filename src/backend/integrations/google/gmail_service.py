@@ -79,6 +79,7 @@ AI_AGENT_MACHINE_HEADER = "X-Von-AI-Agent"
 AI_AGENT_SENDER_DISPLAY_NAME = "Von AI Agent"
 DELIVERY_FINGERPRINT_HEADER = "X-Von-Delivery-Fingerprint"
 OUTBOUND_DELIVERY_FINGERPRINT_SCHEMA_VERSION = "gmail_outbound_delivery_key.v2"
+OUTBOUND_TURN_INTENT_SCHEMA_VERSION = "gmail_outbound_turn_intent.v1"
 _DEFAULT_OUTBOUND_COLLECTION = object()
 
 
@@ -1705,6 +1706,53 @@ def _outbound_delivery_identity(
     )
 
 
+def _outbound_turn_intent_request_id(
+    *,
+    idempotency_scope: str,
+    to: list[str],
+    cc: list[str],
+    bcc: list[str],
+    reply_to: list[str],
+    subject: str,
+    body_text: str,
+    body_html: str | None,
+    body_language: str | None,
+    body_authorship: str | None,
+) -> str:
+    """Derive one private, stable identity for a logical send in a turn.
+
+    Ordinary turns bind ``idempotency_scope`` to their trusted turn identity.
+    The remaining material is the normalised send intent, so exact retries
+    converge even when provider call IDs change while distinct messages in one
+    turn do not collide. Only the digest leaves this boundary.
+    """
+
+    scope = str(idempotency_scope or "").strip()
+    if not scope:
+        raise ValueError("idempotency_scope is required")
+    if len(scope) > 512:
+        raise ValueError("idempotency_scope is too long")
+    digest = _sha256_json(
+        {
+            "schema_version": OUTBOUND_TURN_INTENT_SCHEMA_VERSION,
+            "idempotency_scope": scope,
+            "to": _normalise_header_addresses(to),
+            "cc": _normalise_header_addresses(cc),
+            "bcc": _normalise_header_addresses(bcc),
+            "reply_to": _normalise_header_addresses(reply_to),
+            "subject": subject.strip(),
+            "body_text": body_text,
+            "body_html": body_html,
+            "body_language": str(body_language or "").strip().lower() or None,
+            "body_authorship": (
+                str(body_authorship or "unspecified").strip().lower()
+                or "unspecified"
+            ),
+        }
+    )
+    return f"gmail_turn_intent:{digest}"
+
+
 def _safe_canonical_readback(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Mapping):
         return {
@@ -1833,6 +1881,7 @@ def send_message(
     audit_context: Mapping[str, object] | None = None,
     profile_resource_concept_id: str | None = None,
     request_id: str | None = None,
+    idempotency_scope: str | None = None,
     acting_user_concept_id: str | None = None,
     organisation_concept_id: str | None = None,
     body_language: str | None = None,
@@ -1847,8 +1896,11 @@ def send_message(
     authorised workflow gate. The helper also checks that the profile declares a
     Gmail scope accepted by ``users.messages.send`` before invoking the API.
     The trusted caller must also provide the represented profile resource and a
-    stable request id. Before provider dispatch this boundary durably claims the
-    idempotency key and atomically reserves mailbox-wide quota. A visible
+    stable request id. Ordinary actor turns also supply a trusted turn
+    idempotency scope, from which this boundary derives a stable identity for
+    each normalised logical message. Before provider dispatch this boundary
+    durably claims the idempotency key and atomically reserves mailbox-wide
+    quota. A visible
     AI-agent disclosure is absent by default and is added only when a trusted
     actor, organisation, or mailbox policy requires one. After Gmail accepts
     the message, the helper reads it back and returns a body-free verification
@@ -1894,6 +1946,21 @@ def send_message(
         raise ValueError("request_id is required")
     if len(trusted_request_id) > 512:
         raise ValueError("request_id is too long")
+
+    trusted_idempotency_scope = str(idempotency_scope or "").strip() or None
+    if trusted_idempotency_scope is not None:
+        trusted_request_id = _outbound_turn_intent_request_id(
+            idempotency_scope=trusted_idempotency_scope,
+            to=to_addresses,
+            cc=cc_addresses,
+            bcc=bcc_addresses,
+            reply_to=reply_to_addresses,
+            subject=subject,
+            body_text=body_text,
+            body_html=body_html,
+            body_language=body_language,
+            body_authorship=body_authorship,
+        )
 
     from ...services.gmail_visible_disclosure_policy_service import (
         GmailVisibleDisclosurePolicyError,

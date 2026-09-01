@@ -1058,6 +1058,7 @@ def _gmail_send_gateway(handler: Any) -> InternalMCPGateway:
                     "acting_user_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
                     "request_id": (str, type(None)),
+                    "idempotency_scope": (str, type(None)),
                 },
                 aliases={
                     "profile_id": "profile",
@@ -1073,6 +1074,7 @@ def _gmail_send_gateway(handler: Any) -> InternalMCPGateway:
                 "acting_user_concept_id": "actor_user_concept_id",
                 "organisation_concept_id": "actor_organisation_concept_id",
                 "request_id": "turn_id",
+                "idempotency_scope": "turn_id",
                 "namespace": "turn_namespace",
             },
             ordinary_turn_trusted_argument_choice_bindings={
@@ -10510,6 +10512,7 @@ def test_explicit_request_guard_allows_actor_bound_gmail_send(
                             "acting_user_concept_id": "#V#spoof",
                             "organisation_concept_id": "#V#other",
                             "request_id": "spoofed-request",
+                            "idempotency_scope": "spoofed-idempotency-scope",
                         },
                     },
                 )
@@ -10550,6 +10553,7 @@ def test_explicit_request_guard_allows_actor_bound_gmail_send(
         "acting_user_concept_id": "#V#person",
         "organisation_concept_id": "#V#org",
         "request_id": "turn-send-gmail",
+        "idempotency_scope": "turn-send-gmail",
     }
     assert inferred["prompt"] == "Send this email now."
     assert inferred["recent_user_prompts"] == ["Draft a short note first."]
@@ -11826,6 +11830,7 @@ def test_domain_effect_report_preserves_readback_and_receipt_semantics() -> None
     assert fact["workflow_instance_readback_verified"] is False
     assert "workflow_instance_terminal_status" not in fact
     assert fact["canonical_readback_verified"] is True
+    assert fact["outcome_resolved"] is True
     assert fact["target_ids"] == [domain_target_id]
     assert fact["evidence_id"] == "evidence-domain-invocation"
     assert "### Verified, observed, recovered, or handler-reported" in screen_text

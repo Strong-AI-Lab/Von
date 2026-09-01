@@ -7,6 +7,7 @@ from email.message import EmailMessage
 from email.parser import BytesParser
 from email.policy import default as default_email_policy
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import mongomock
@@ -683,6 +684,39 @@ def test_send_message_rejects_html_that_could_hide_agent_disclosure():
     assert delivery_collection.count_documents({}) == 0
 
 
+def test_turn_intent_identity_is_private_stable_and_normalises_recipient_headers():
+    common = {
+        "idempotency_scope": "turn-multiple-sends",
+        "cc": [],
+        "bcc": [],
+        "reply_to": [],
+        "subject": "Requested note",
+        "body_text": "Private message body.",
+        "body_html": None,
+        "body_language": "en-NZ",
+        "body_authorship": "von_drafted",
+    }
+
+    first = gs._outbound_turn_intent_request_id(
+        to=["Researcher <PERSON@EXAMPLE.TEST>"],
+        **common,
+    )
+    equivalent = gs._outbound_turn_intent_request_id(
+        to=["person@example.test"],
+        **{**common, "body_language": "en-nz"},
+    )
+    distinct = gs._outbound_turn_intent_request_id(
+        to=["other@example.test"],
+        **common,
+    )
+
+    assert first == equivalent
+    assert first != distinct
+    assert first.startswith("gmail_turn_intent:")
+    assert "person@example.test" not in first
+    assert "Private message body." not in first
+
+
 def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
@@ -855,6 +889,150 @@ def test_send_message_returns_verified_body_free_canonical_readback(monkeypatch)
     assert replay["idempotent_replay"] is True
     assert replay["changed"] is False
     assert replay["outcome_finality"] == "durable_idempotent_replay"
+
+
+def test_send_message_turn_scope_allows_distinct_messages_and_deduplicates_replays(
+    monkeypatch,
+):
+    monkeypatch.setattr(gs, "_resolve_vontology_profile_scopes", lambda _profile: None)
+    quota_collection, delivery_collection = _outbound_test_collections()
+    captured: dict[str, object] = {"send_count": 0, "raw_by_id": {}}
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class _Messages:
+        def send(self, **kwargs):
+            captured["send_count"] = int(captured["send_count"]) + 1
+            message_id = f"sent-{captured['send_count']}"
+            raw_by_id = cast(dict[str, str], captured["raw_by_id"])
+            raw_by_id[message_id] = kwargs["body"]["raw"]
+            return _Request({"id": message_id, "threadId": f"thread-{message_id}"})
+
+        def get(self, **kwargs):
+            message_id = kwargs["id"]
+            raw_by_id = cast(dict[str, str], captured["raw_by_id"])
+            return _Request(
+                {
+                    "id": message_id,
+                    "threadId": f"thread-{message_id}",
+                    "labelIds": ["SENT"],
+                    "raw": raw_by_id[message_id],
+                }
+            )
+
+    class _Users:
+        def __init__(self):
+            self._messages = _Messages()
+
+        def messages(self):
+            return self._messages
+
+        def getProfile(self, **_kwargs):
+            return _Request({"emailAddress": "zhan@example.test"})
+
+    class _Service:
+        def __init__(self):
+            self._users = _Users()
+
+        def users(self):
+            return self._users
+
+    profiles = {
+        "zhan-gmail": gs.GmailProfile(
+            profile_id="zhan-gmail",
+            token_path="/tmp/fake-token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    monkeypatch.setattr(gs, "get_service", lambda *_args, **_kwargs: _Service())
+    shared = {
+        "profile_id": "zhan-gmail",
+        "subject": "Google Scholar profile and ORCID iD",
+        "allow_send": True,
+        "profiles": profiles,
+        "idempotency_scope": "turn-multiple-gmail-sends",
+    }
+
+    def send(*, recipient: str, body: str):
+        return gs.send_message(
+            to=recipient,
+            body_text=body,
+            **shared,
+            **_outbound_send_kwargs(
+                quota_collection=quota_collection,
+                delivery_collection=delivery_collection,
+                request_id="turn-multiple-gmail-sends",
+            ),
+        )
+
+    first = send(
+        recipient="first@example.test",
+        body="Could you send your profile link?",
+    )
+    second = send(
+        recipient="second@example.test",
+        body="Could you send your profile link?",
+    )
+    first_replay = send(
+        recipient="first@example.test",
+        body="Could you send your profile link?",
+    )
+    second_replay = send(
+        recipient="second@example.test",
+        body="Could you send your profile link?",
+    )
+    legacy_first = gs.send_message(
+        profile_id="zhan-gmail",
+        to="legacy-first@example.test",
+        subject="Legacy direct request",
+        body_text="One exact direct delivery.",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id="legacy-direct-request-id",
+        ),
+    )
+    legacy_conflict = gs.send_message(
+        profile_id="zhan-gmail",
+        to="legacy-second@example.test",
+        subject="Legacy direct request",
+        body_text="One exact direct delivery.",
+        allow_send=True,
+        profiles=profiles,
+        **_outbound_send_kwargs(
+            quota_collection=quota_collection,
+            delivery_collection=delivery_collection,
+            request_id="legacy-direct-request-id",
+        ),
+    )
+
+    assert first["effect_status"] == "succeeded"
+    assert second["effect_status"] == "succeeded"
+    assert first["delivery_fingerprint"] != second["delivery_fingerprint"]
+    assert first_replay["idempotent_replay"] is True
+    assert second_replay["idempotent_replay"] is True
+    assert first_replay["delivery_fingerprint"] == first["delivery_fingerprint"]
+    assert second_replay["delivery_fingerprint"] == second["delivery_fingerprint"]
+    assert legacy_first["effect_status"] == "succeeded"
+    assert legacy_conflict["error_code"] == "gmail_outbound_idempotency_conflict"
+    assert legacy_conflict["effect_status"] == "not_started"
+    assert captured["send_count"] == 3
+    assert delivery_collection.count_documents({}) == 3
+    quota_document = quota_collection.find_one({})
+    assert quota_document["messages_in_day"] == 3
+    persisted = json.dumps(list(delivery_collection.find({})), default=str)
+    assert "first@example.test" not in persisted
+    assert "second@example.test" not in persisted
+    assert "legacy-first@example.test" not in persisted
+    assert "legacy-second@example.test" not in persisted
+    assert "Could you send your profile link?" not in persisted
 
 
 def test_send_message_required_policy_is_localised_exact_once_and_read_back(

@@ -5587,7 +5587,14 @@ def _build_effect_outcome_report(
             "changed": state.get("changed") if isinstance(state.get("changed"), bool) else None,
             "initial_effect_status": state.get("initial_effect_status"),
             "current_outcome_status": state.get("current_outcome_status"),
-            "outcome_resolved": state.get("outcome_resolved") is True,
+            # A handler-level canonical read-back already resolves a successful
+            # effect. The reconciliation flag records whether a later repair
+            # pass ran; it must not make a verified success look uncertain in
+            # the portable outcome report or failure capsule.
+            "outcome_resolved": (
+                state.get("outcome_resolved") is True
+                or (effect_status == "succeeded" and canonical_readback_verified)
+            ),
             "reconciliation_status": state.get("reconciliation_status"),
             "canonical_readback_present": isinstance(
                 canonical_readback, Mapping
