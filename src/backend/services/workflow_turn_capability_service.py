@@ -367,6 +367,9 @@ class WorkflowTurnCapability:
     input_schema: Mapping[str, Any]
     launch_input_contract_source: str | None = None
     discovery_metadata: Mapping[str, Any] = field(default_factory=dict)
+    outcome_explanation_prompt_support: Mapping[str, Any] = field(
+        default_factory=dict
+    )
     component_capability_names: tuple[str, ...] = ()
     declared_component_count: int = 0
     unresolved_component_count: int = 0
@@ -374,6 +377,12 @@ class WorkflowTurnCapability:
     direct_equivalent_capability_names: tuple[str, ...] = ()
     semantic_effect: bool | None = None
     semantic_effect_source: str = "insufficient_declared_component_evidence"
+
+    def _outcome_explanation_prompt_keys(self) -> list[str]:
+        prompts = self.outcome_explanation_prompt_support.get("prompts")
+        if not isinstance(prompts, Mapping):
+            return []
+        return sorted(str(key) for key in prompts)
 
     def to_catalogue_entry(self) -> dict[str, Any]:
         effect_profile = {
@@ -426,6 +435,9 @@ class WorkflowTurnCapability:
             "terminal_readback": True,
             "relevance_score": round(float(self.relevance_score), 4),
             "launch_input_contract_source": self.launch_input_contract_source,
+            "outcome_explanation_prompt_keys": (
+                self._outcome_explanation_prompt_keys()
+            ),
             "discovery_metadata": dict(self.discovery_metadata),
         }
 
@@ -461,6 +473,9 @@ def discover_turn_workflow_capabilities(
 
     from src.backend.services.workflow_discovery_service import (
         discover_workflows_for_turn,
+    )
+    from src.backend.workflows.outcome_explanation_prompt_support import (
+        resolve_workflow_outcome_explanation_prompt_support,
     )
     from src.backend.workflows.vontology_loader import (
         resolve_workflow_launch_input_contract,
@@ -512,6 +527,21 @@ def discover_turn_workflow_capabilities(
                         "error": str(exc)[:500],
                     }
                 )
+            try:
+                outcome_explanation_prompt_support = (
+                    resolve_workflow_outcome_explanation_prompt_support(workflow_id)
+                    or {}
+                )
+            except Exception as exc:  # noqa: BLE001 - optional represented guidance
+                outcome_explanation_prompt_support = {}
+                contract_errors.append(
+                    {
+                        "workflow_id": workflow_id,
+                        "stage": "outcome_explanation_prompt_resolution",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                    }
+                )
             routing_profile = raw_match.get("routing_profile")
             routing_index_metadata = raw_match.get("routing_index_metadata")
             plan_metadata = _workflow_plan_metadata(
@@ -539,6 +569,9 @@ def discover_turn_workflow_capabilities(
                     input_schema=_workflow_model_input_schema(launch_contract),
                     launch_input_contract_source=(
                         _normalise_non_empty_text(launch_contract_source)
+                    ),
+                    outcome_explanation_prompt_support=(
+                        outcome_explanation_prompt_support
                     ),
                     discovery_metadata={
                         "match_source": raw_match.get("match_source"),
@@ -952,6 +985,21 @@ def normalise_workflow_effect_receipt(
             "outcome_finality": "terminal_for_turn",
         }
     )
+    explanation_outcome_key = (
+        semantic_outcome
+        if effect_status == "succeeded" and semantic_outcome != "completed"
+        else effect_status
+    )
+    from src.backend.workflows.outcome_explanation_prompt_support import (
+        select_workflow_outcome_explanation_prompt,
+    )
+
+    outcome_explanation_support = select_workflow_outcome_explanation_prompt(
+        capability.outcome_explanation_prompt_support,
+        outcome_key=explanation_outcome_key,
+    )
+    if outcome_explanation_support is not None:
+        receipt["outcome_explanation_support"] = outcome_explanation_support
     if effect_status != "succeeded":
         recovery_affordances = list(receipt.get("recovery_affordances") or [])
         if instance_id is not None:

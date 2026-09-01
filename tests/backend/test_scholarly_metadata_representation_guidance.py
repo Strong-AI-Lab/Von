@@ -21,6 +21,50 @@ def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> No
     assert "get_text_relations_summary" in prompt_text
 
 
+def test_scholarly_outcome_explanation_guidance_preserves_execution_truth() -> None:
+    prompt_text = (
+        _SEED_DIR / "prompt_scholarly_article_outcome_explanation_seed.md"
+    ).read_text(encoding="utf-8")
+
+    lowered = prompt_text.lower()
+    assert "if the workflow was not invoked, say so" in lowered
+    assert "do not describe an internal stage as having stopped" in lowered
+    assert "smallest continuation" in lowered
+    assert "never propose recreating a confirmed effect" in lowered
+    assert "does not establish that the workflow ran" in lowered
+
+
+def test_scholarly_workflow_links_outcome_explanation_prompt_map() -> None:
+    bundle = json.loads(
+        (_SEED_DIR / "paper_representation_workflow_seed_bundle.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    workflow = next(
+        item
+        for item in bundle["workflows"]
+        if item.get("workflow_id")
+        == "#V#scholarly_article_metadata_representation_workflow"
+    )
+    prompt_map_text = next(
+        item["text"]
+        for item in workflow["text_relations"]
+        if item.get("predicate")
+        == "#V#hasWorkflowOutcomeExplanationPromptMapJson"
+    )
+    prompt_map = json.loads(prompt_map_text)
+
+    assert prompt_map["schema_version"] == (
+        "workflow_outcome_explanation_prompt_map.v1"
+    )
+    assert prompt_map["prompt_concept_ids"]["failed"] == (
+        "#V#prompt_scholarly_article_outcome_explanation"
+    )
+    assert prompt_map["prompt_concept_ids"]["default"] == (
+        "#V#prompt_scholarly_article_outcome_explanation"
+    )
+
+
 def test_tool_calling_workflow_has_generic_write_discovery_exemplars() -> None:
     bundle = json.loads(
         (_SEED_DIR / "canonical_workflow_publication_seed_bundle.json").read_text(

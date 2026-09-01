@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "35",
+  "seed_version": "36",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -95,6 +95,11 @@
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
           "text": "{\"phase\": \"published\", \"published\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowOutcomeExplanationPromptMapJson",
+          "text": "{\"prompt_concept_ids\": {\"blocked\": \"#V#prompt_scholarly_article_outcome_explanation\", \"clarification_required\": \"#V#prompt_scholarly_article_outcome_explanation\", \"default\": \"#V#prompt_scholarly_article_outcome_explanation\", \"failed\": \"#V#prompt_scholarly_article_outcome_explanation\", \"follow_up_required\": \"#V#prompt_scholarly_article_outcome_explanation\", \"indeterminate\": \"#V#prompt_scholarly_article_outcome_explanation\", \"not_completed\": \"#V#prompt_scholarly_article_outcome_explanation\", \"not_started\": \"#V#prompt_scholarly_article_outcome_explanation\", \"partial\": \"#V#prompt_scholarly_article_outcome_explanation\"}, \"schema_version\": \"workflow_outcome_explanation_prompt_map.v1\"}",
           "lang": "en-NZ"
         },
         {

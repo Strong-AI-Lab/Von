@@ -97,6 +97,21 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
             "text_relation:launch_contract",
         ),
     )
+    monkeypatch.setattr(
+        "src.backend.workflows.outcome_explanation_prompt_support."
+        "resolve_workflow_outcome_explanation_prompt_support",
+        lambda workflow_id: {
+            "schema_version": "workflow_outcome_explanation_support.v1",
+            "workflow_id": workflow_id,
+            "source": "text_relation:#V#hasWorkflowOutcomeExplanationPromptMapJson",
+            "prompts": {
+                "failed": {
+                    "prompt_concept_id": "#V#prompt_test_failure_explanation",
+                    "prompt_text": "Explain the verified partial outcome.",
+                }
+            },
+        },
+    )
 
     capabilities, diagnostic = discover_turn_workflow_capabilities(
         "produce the reusable work product",
@@ -137,6 +152,7 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
         "find_relations_with_argument",
     ]
     assert catalogue_entry["plan_profile"]["cost_profile"]["declared_step_count"] == 3
+    assert catalogue_entry["outcome_explanation_prompt_keys"] == ["failed"]
     assert diagnostic["status"] == "completed"
     assert diagnostic["match_count"] == 1
     assert diagnostic["candidate_count"] == 3
@@ -558,3 +574,53 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert durable_timeout["recovery_affordances"][0]["action_type"] == (
         "inspect_pending_workflow_instance"
     )
+
+
+def test_workflow_receipt_projects_represented_outcome_guidance_without_claiming_evidence():
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+        normalise_workflow_effect_receipt,
+    )
+
+    capability = WorkflowTurnCapability(
+        name="represented_workflow_test",
+        workflow_id="#V#test_workflow",
+        display_name="Test workflow",
+        description="Produce a represented work product.",
+        relevance_score=0.91,
+        input_schema={"type": "object", "properties": {}},
+        outcome_explanation_prompt_support={
+            "schema_version": "workflow_outcome_explanation_support.v1",
+            "workflow_id": "#V#test_workflow",
+            "source": "text_relation:#V#hasWorkflowOutcomeExplanationPromptMapJson",
+            "prompts": {
+                "failed": {
+                    "prompt_concept_id": "#V#prompt_test_failure_explanation",
+                    "prompt_text": "Name the verified work and unmet postconditions.",
+                },
+                "default": {
+                    "prompt_concept_id": "#V#prompt_test_default_explanation",
+                    "prompt_text": "Explain only what the evidence establishes.",
+                },
+            },
+        },
+    )
+
+    receipt = normalise_workflow_effect_receipt(
+        {
+            "success": True,
+            "instance_id": "instance-failed",
+            "created_new": True,
+            "final_status": "failed",
+        },
+        capability=capability,
+    )
+
+    support = receipt["outcome_explanation_support"]
+    assert support["outcome_key"] == "failed"
+    assert support["matched_prompt_key"] == "failed"
+    assert support["prompt_concept_id"] == "#V#prompt_test_failure_explanation"
+    assert "Name the verified work" in support["prompt_text"]
+    assert "not evidence that the workflow ran" in support["evidence_boundary"]
+    assert receipt["effect_status"] == "failed"
+    assert receipt["instance_id"] == "instance-failed"

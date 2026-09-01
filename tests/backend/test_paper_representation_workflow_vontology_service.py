@@ -500,6 +500,30 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         limit=2,
     )
     assert evidence_prompt_rows
+    outcome_prompt_rows = get_texts_for_concept(
+        "#V#prompt_scholarly_article_outcome_explanation",
+        predicate="hasContent",
+        limit=2,
+    )
+    assert outcome_prompt_rows
+
+    from src.backend.workflows.outcome_explanation_prompt_support import (
+        resolve_workflow_outcome_explanation_prompt_support,
+    )
+
+    outcome_prompt_support = resolve_workflow_outcome_explanation_prompt_support(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert outcome_prompt_support is not None
+    assert set(outcome_prompt_support["prompts"]) >= {
+        "default",
+        "failed",
+        "not_started",
+        "partial",
+    }
+    assert outcome_prompt_support["prompts"]["failed"]["prompt_concept_id"] == (
+        "#V#prompt_scholarly_article_outcome_explanation"
+    )
 
     metadata_definition = load_workflow_definition_from_vontology(
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
@@ -2375,7 +2399,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "35" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "36" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
