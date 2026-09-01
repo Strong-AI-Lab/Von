@@ -301,6 +301,45 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(JSON.parse(firstText).mcp_access).toBeUndefined();
     });
 
+    test('location-only historical turn copies its bounded capsule without loading raw diagnostics', async () => {
+        const {
+            __testOnly_buildLlmDebugClipboardJsonForTurn,
+            setLlmDebugDataForTurn
+        } = require(chatTabModulePath);
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        fetchWithTimeout.mockResolvedValue({
+            ok: true,
+            json: async () => buildFailureCapsule({ request_id: 'req-location-only' })
+        });
+
+        setLlmDebugDataForTurn('history-location-only', {
+            history_location: {
+                session_id: 'session-location-only',
+                history_index: 1307
+            },
+            timestamp: '2026-08-27T19:01:51.876Z'
+        });
+
+        const jsonText = await __testOnly_buildLlmDebugClipboardJsonForTurn(
+            'history-location-only'
+        );
+
+        expect(JSON.parse(jsonText)).toEqual(expect.objectContaining({
+            schema_version: 'turn_failure_capsule.v1',
+            request_id: 'req-location-only'
+        }));
+        expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+        const [calledUrl] = fetchWithTimeout.mock.calls[0];
+        const parsedUrl = new URL(calledUrl, 'https://example.test');
+        expect(parsedUrl.pathname).toBe('/von/history/turn_failure_capsule');
+        expect(parsedUrl.searchParams.has('request_id')).toBe(false);
+        expect(parsedUrl.searchParams.get('session_id')).toBe('session-location-only');
+        expect(parsedUrl.searchParams.get('history_index')).toBe('1307');
+        expect(String(calledUrl)).not.toContain('/history/debug');
+        expect(String(calledUrl)).not.toContain('/telemetry_locator');
+        expect(String(calledUrl)).not.toContain('/turn_telemetry_access');
+    });
+
     test('capsule projection redacts credential-shaped text and enforces the pretty UTF-8 16 KiB ceiling', async () => {
         const {
             __testOnly_buildLlmDebugClipboardJsonForTurn,

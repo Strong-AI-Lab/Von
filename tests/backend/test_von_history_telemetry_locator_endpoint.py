@@ -600,7 +600,6 @@ def test_history_turn_failure_capsule_denies_cross_actor_conversation(
     response = app.test_client().get(
         "/von/history/turn_failure_capsule",
         query_string={
-            "request_id": "req-private",
             "session_id": "private-session",
             "history_index": 2,
         },
@@ -608,6 +607,60 @@ def test_history_turn_failure_capsule_denies_cross_actor_conversation(
 
     assert response.status_code == 403
     assert response.get_json() == {"error": "Not authorised for conversation"}
+
+
+def test_history_turn_failure_capsule_resolves_exact_location_without_request_id(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    stored_request_id = "req-location-only"
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#owner",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#owner@org"},
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_history_request_scope_hints",
+        lambda **_kwargs: ("#V#owner@org", "#V#org"),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: ("#V#owner", None),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_derive_namespace_for_user_org",
+        lambda *_args, **_kwargs: "#V#owner@org",
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_debug_entry",
+        lambda **_kwargs: {
+            "request_id": stored_request_id,
+            "turn_failure_capsule": _stored_failure_capsule(stored_request_id),
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history/turn_failure_capsule",
+        query_string={
+            "session_id": "owner-session",
+            "history_index": 1307,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == _stored_failure_capsule(stored_request_id)
 
 
 def test_history_turn_failure_capsule_denies_wrong_request_for_history_entry(
@@ -708,7 +761,6 @@ def test_history_turn_failure_capsule_legacy_absence_is_typed_404(monkeypatch):
     response = app.test_client().get(
         "/von/history/turn_failure_capsule",
         query_string={
-            "request_id": "legacy-request",
             "session_id": "legacy-session",
             "history_index": 1,
         },

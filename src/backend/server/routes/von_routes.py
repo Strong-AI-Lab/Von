@@ -15577,8 +15577,9 @@ def history_turn_failure_capsule():
         request.args.get("session_id") or session.get("session_id")
     )
     history_index = request.args.get("history_index", type=int)
-    if not request_id:
-        return jsonify({"error": "request_id required"}), 400
+    # An authenticated browser may have only the exact history location from a
+    # slim history projection. request_id remains an optional integrity
+    # discriminator, not an authority carrier; enforce it whenever supplied.
     if not session_id:
         return jsonify({"error": "session_id required"}), 400
     if history_index is None or history_index < 0:
@@ -15653,9 +15654,10 @@ def history_turn_failure_capsule():
     if not isinstance(compact_debug, Mapping):
         return jsonify({"error": "failure_capsule_not_available"}), 404
     stored_request_id = _progress_str(compact_debug.get("request_id"))
-    if stored_request_id and stored_request_id != request_id:
+    if request_id and stored_request_id and stored_request_id != request_id:
         return jsonify({"error": "request_id does not belong to history_index"}), 403
-    if stored_request_id != request_id:
+    resolved_request_id = request_id or stored_request_id
+    if not resolved_request_id or stored_request_id != resolved_request_id:
         return jsonify({"error": "failure_capsule_not_available"}), 404
 
     capsule = compact_debug.get("turn_failure_capsule")
@@ -15664,7 +15666,8 @@ def history_turn_failure_capsule():
         not isinstance(projected_capsule, Mapping)
         or projected_capsule.get("schema_version")
         != TURN_FAILURE_CAPSULE_SCHEMA_VERSION
-        or _progress_str(projected_capsule.get("request_id")) != request_id
+        or _progress_str(projected_capsule.get("request_id"))
+        != resolved_request_id
         or turn_failure_capsule_size_bytes(projected_capsule)
         > TURN_FAILURE_CAPSULE_MAX_BYTES
     ):
