@@ -178,6 +178,17 @@ class ChatPromptQueueHandoffConflict(InvalidChatPromptQueueInput):
         self.queue_id = queue_id
 
 
+class ChatPromptQueueRetryConflict(InvalidChatPromptQueueInput):
+    """Raised when a failed row cannot accept a linked retry successor."""
+
+    error_code = "queue_retry_conflict"
+    status_code = 409
+
+    def __init__(self, message: str, *, queue_id: str | None = None) -> None:
+        super().__init__(message)
+        self.queue_id = queue_id
+
+
 _QUEUE_ADMISSION_LOCK = threading.RLock()
 _UNSET = object()
 
@@ -456,6 +467,7 @@ def _enqueue_fingerprint(
     task_execution_concept_id: str | None,
     dispatch_ready: bool,
     handoff_source_queue_id: str | None,
+    retry_source_queue_id: str | None,
 ) -> str:
     material = {
         "schema": "chat_prompt_queue_enqueue.v2",
@@ -470,6 +482,7 @@ def _enqueue_fingerprint(
         "task_execution_concept_id": task_execution_concept_id,
         "dispatch_ready_at_enqueue": dispatch_ready,
         "handoff_source_queue_id": handoff_source_queue_id,
+        "retry_source_queue_id": retry_source_queue_id,
     }
     encoded = json.dumps(
         material,
@@ -530,6 +543,25 @@ def _raise_if_handoff_source_already_bound(
         "The handoff source is already bound to another durable replacement",
         queue_id=str(existing.get("queue_id") or "") or None,
     )
+
+
+def _find_retry_successor(
+    *,
+    coll: Collection,
+    scope: Mapping[str, Any],
+    retry_source_queue_id: str | None,
+) -> dict[str, Any] | None:
+    if not retry_source_queue_id:
+        return None
+    existing = coll.find_one(
+        {
+            **_compatible_scope_query(scope),
+            "retry_source_queue_id": retry_source_queue_id,
+        }
+    )
+    if not isinstance(existing, Mapping):
+        return None
+    return _idempotent_enqueue_result(existing, replayed=True)
 
 
 def _normalise_user_concept_id(value: Any) -> str:
@@ -1026,6 +1058,13 @@ def serialise_queue_record(doc: Mapping[str, Any] | None) -> dict[str, Any] | No
         "handoff_reconciliation_last_error": doc.get(
             "handoff_reconciliation_last_error"
         ),
+        "retry_source_queue_id": doc.get("retry_source_queue_id"),
+        "retry_request_id": doc.get("retry_request_id"),
+        "retry_source_task_execution_concept_id": doc.get(
+            "retry_source_task_execution_concept_id"
+        ),
+        "retried_by_queue_id": doc.get("retried_by_queue_id"),
+        "retried_at": _serialise_datetime(doc.get("retried_at")),
         "execution_envelope_version": doc.get("execution_envelope_version"),
         "task_concept_id": doc.get("task_concept_id"),
         "task_execution_concept_id": doc.get("task_execution_concept_id"),
@@ -1096,16 +1135,164 @@ def list_recent_failed_queue_records(
         **_compatible_scope_query(scope),
         "status": STATUS_FAILED,
         "completed_at": {"$gte": cutoff},
+        "$or": [
+            {"retried_by_queue_id": {"$exists": False}},
+            {"retried_by_queue_id": None},
+            {"retried_by_queue_id": ""},
+        ],
     }
-    docs = (
+    docs = list(
         _collection()
         .find(query)
         .sort([("completed_at", -1), ("updated_at", -1)])
-        .limit(max_limit)
+        .limit(100)
     )
-    return [
-        record for record in (serialise_queue_record(doc) for doc in docs) if record
+    failed_ids = [
+        str(doc.get("queue_id") or "")
+        for doc in docs
+        if doc.get("queue_id")
     ]
+    retried_source_ids: set[str] = set()
+    if failed_ids:
+        successors = _collection().find(
+            {
+                **_compatible_scope_query(scope),
+                "retry_source_queue_id": {"$in": failed_ids},
+            },
+            {"retry_source_queue_id": 1},
+        )
+        retried_source_ids = {
+            str(doc.get("retry_source_queue_id") or "")
+            for doc in successors
+            if doc.get("retry_source_queue_id")
+        }
+    return [
+        record
+        for record in (
+            serialise_queue_record(doc)
+            for doc in docs
+            if str(doc.get("queue_id") or "") not in retried_source_ids
+        )
+        if record
+    ][:max_limit]
+
+
+def get_failed_queue_record_for_retry(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+) -> dict[str, Any]:
+    """Return one actor-visible failed row as canonical retry input.
+
+    The execution envelope is intentionally returned only to trusted server
+    code. It is not added to the general queue projection merely to support a
+    retry action.
+    """
+
+    queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
+    coll = _collection()
+    existing_successor = coll.find_one(
+        {
+            **_compatible_scope_query(scope),
+            "retry_source_queue_id": queue_id_clean,
+        }
+    )
+    if isinstance(existing_successor, Mapping):
+        return {
+            "source": None,
+            "successor": dict(existing_successor),
+        }
+    source = coll.find_one(
+        {
+            **_compatible_scope_query(scope),
+            "queue_id": queue_id_clean,
+            "status": STATUS_FAILED,
+        }
+    )
+    if not isinstance(source, Mapping):
+        current = coll.find_one(
+            {
+                **_compatible_scope_query(scope),
+                "queue_id": queue_id_clean,
+            },
+            {"status": 1, "retried_by_queue_id": 1},
+        )
+        details = {
+            "current_status": current.get("status") if current else None,
+            "retried_by_queue_id": (
+                current.get("retried_by_queue_id") if current else None
+            ),
+        }
+        raise ChatPromptQueueRecordNotFound(
+            "The failed queue record is not available for retry",
+            error_code="queue_retry_source_not_found",
+            details=details,
+        )
+    return {"source": dict(source), "successor": None}
+
+
+def mark_failed_queue_record_retried(
+    *,
+    scope: Mapping[str, Any],
+    source_queue_id: str,
+    successor_queue_id: str,
+) -> dict[str, Any]:
+    """Back-link a failed source after its unique successor is durable.
+
+    A concurrent Dismiss may already have changed the source to cancelled.
+    Once the successor exists, Retry has been durably accepted, so preserve
+    that terminal status while recording the lineage instead of returning a
+    false failure for work that can now execute.
+    """
+
+    source_id = _coerce_scope_value(source_queue_id, field="source_queue_id")
+    successor_id = _coerce_scope_value(
+        successor_queue_id,
+        field="successor_queue_id",
+    )
+    coll = _collection()
+    successor = coll.find_one(
+        {
+            **_compatible_scope_query(scope),
+            "queue_id": successor_id,
+            "retry_source_queue_id": source_id,
+        },
+        {"queue_id": 1},
+    )
+    if not isinstance(successor, Mapping):
+        raise ChatPromptQueueRetryConflict(
+            "The retry successor does not match the failed source",
+            queue_id=successor_id,
+        )
+    now = _now()
+    source = coll.find_one_and_update(
+        {
+            **_compatible_scope_query(scope),
+            "queue_id": source_id,
+            "status": {"$in": [STATUS_FAILED, STATUS_CANCELLED]},
+            "$or": [
+                {"retried_by_queue_id": {"$exists": False}},
+                {"retried_by_queue_id": successor_id},
+            ],
+        },
+        {
+            "$set": {
+                "retried_by_queue_id": successor_id,
+                "retried_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not isinstance(source, Mapping):
+        raise ChatPromptQueueRetryConflict(
+            "The failed source changed while its retry was being accepted",
+            queue_id=successor_id,
+        )
+    record = serialise_queue_record(source)
+    if record is None:  # pragma: no cover - defensive
+        raise ChatPromptQueueUnavailable("retry source could not be serialised")
+    return record
 
 
 def list_queue_visibility_records(
@@ -1801,6 +1988,9 @@ def create_queue_record(
     task_execution_concept_id: Any = None,
     server_dispatch_ready: Any = None,
     handoff_source_queue_id: Any = None,
+    retry_source_queue_id: Any = None,
+    retry_request_id: Any = None,
+    retry_source_task_execution_concept_id: Any = None,
 ) -> dict[str, Any]:
     if status not in {STATUS_QUEUED, STATUS_IN_PROGRESS}:
         raise InvalidChatPromptQueueInput("status must be queued or in_progress")
@@ -1861,6 +2051,21 @@ def create_queue_record(
         field="handoff_source_queue_id",
         required=False,
     )
+    retry_source_queue_id_clean = _coerce_scope_value(
+        retry_source_queue_id,
+        field="retry_source_queue_id",
+        required=False,
+    )
+    retry_request_id_clean = _coerce_scope_value(
+        retry_request_id,
+        field="retry_request_id",
+        required=False,
+    )
+    retry_source_task_execution_concept_id_clean = _coerce_scope_value(
+        retry_source_task_execution_concept_id,
+        field="retry_source_task_execution_concept_id",
+        required=False,
+    )
     if bool(task_concept_id_clean) != bool(task_execution_concept_id_clean):
         raise InvalidChatPromptQueueInput(
             "task_concept_id and task_execution_concept_id must be supplied together"
@@ -1876,6 +2081,25 @@ def create_queue_record(
     if handoff_source_queue_id_clean and task_concept_id_clean:
         raise InvalidChatPromptQueueInput(
             "handoff_source_queue_id cannot be combined with task execution links"
+        )
+    if handoff_source_queue_id_clean and retry_source_queue_id_clean:
+        raise InvalidChatPromptQueueInput(
+            "handoff and retry source links cannot be combined"
+        )
+    if retry_source_queue_id_clean and dispatch_mode_clean != DISPATCH_MODE_SERVER:
+        raise InvalidChatPromptQueueInput(
+            "retry_source_queue_id requires server dispatch"
+        )
+    if bool(retry_source_queue_id_clean) != bool(retry_request_id_clean):
+        raise InvalidChatPromptQueueInput(
+            "retry_source_queue_id and retry_request_id must be supplied together"
+        )
+    if (
+        retry_source_task_execution_concept_id_clean
+        and not retry_source_queue_id_clean
+    ):
+        raise InvalidChatPromptQueueInput(
+            "retry task lineage requires retry_source_queue_id"
         )
     active_task_execution_key = (
         _active_task_execution_key(task_concept_id_clean)
@@ -1942,6 +2166,7 @@ def create_queue_record(
             task_execution_concept_id=task_execution_concept_id_clean,
             dispatch_ready=dispatch_ready,
             handoff_source_queue_id=handoff_source_queue_id_clean,
+            retry_source_queue_id=retry_source_queue_id_clean,
         )
     elif any(
         value is not None
@@ -1951,6 +2176,9 @@ def create_queue_record(
             execution_envelope_version,
             server_dispatch_ready,
             handoff_source_queue_id_clean,
+            retry_source_queue_id_clean,
+            retry_request_id_clean,
+            retry_source_task_execution_concept_id_clean,
         )
     ):
         raise InvalidChatPromptQueueInput(
@@ -2009,6 +2237,23 @@ def create_queue_record(
                     if handoff_source_queue_id_clean
                     else {}
                 ),
+                **(
+                    {
+                        "retry_source_queue_id": retry_source_queue_id_clean,
+                        "retry_request_id": retry_request_id_clean,
+                        **(
+                            {
+                                "retry_source_task_execution_concept_id": (
+                                    retry_source_task_execution_concept_id_clean
+                                )
+                            }
+                            if retry_source_task_execution_concept_id_clean
+                            else {}
+                        ),
+                    }
+                    if retry_source_queue_id_clean
+                    else {}
+                ),
             }
         )
     if task_concept_id_clean:
@@ -2029,6 +2274,13 @@ def create_queue_record(
             seconds=LEGACY_SUBMISSION_RENDEZVOUS_SECONDS
         )
     coll = _collection()
+    retry_successor = _find_retry_successor(
+        coll=coll,
+        scope=scope,
+        retry_source_queue_id=retry_source_queue_id_clean,
+    )
+    if retry_successor is not None:
+        return retry_successor
     if enqueue_submission_id_clean and enqueue_fingerprint:
         reusable = _find_idempotent_enqueue(
             coll=coll,
@@ -2112,6 +2364,13 @@ def create_queue_record(
                             coll=coll,
                             handoff_source_queue_id=handoff_source_queue_id_clean,
                         )
+                        retry_successor = _find_retry_successor(
+                            coll=coll,
+                            scope=scope,
+                            retry_source_queue_id=retry_source_queue_id_clean,
+                        )
+                        if retry_successor is not None:
+                            return retry_successor
                         _raise_if_task_execution_already_active(
                             coll=coll,
                             active_task_execution_key=active_task_execution_key,
@@ -2163,6 +2422,13 @@ def create_queue_record(
                 coll=coll,
                 handoff_source_queue_id=handoff_source_queue_id_clean,
             )
+            retry_successor = _find_retry_successor(
+                coll=coll,
+                scope=scope,
+                retry_source_queue_id=retry_source_queue_id_clean,
+            )
+            if retry_successor is not None:
+                return retry_successor
             _raise_if_task_execution_already_active(
                 coll=coll,
                 active_task_execution_key=active_task_execution_key,

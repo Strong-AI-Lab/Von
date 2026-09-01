@@ -59,6 +59,11 @@ from ...services.chat_prompt_queue_dispatch_service import (
     reconcile_linked_task_execution_terminal,
     wake_chat_prompt_queue_dispatcher,
 )
+from ...services.task_execution_service import (
+    reconcile_task_execution_queue_record,
+    task_execution_concept_id_for_launch,
+    task_execution_enqueue_submission_id_for_launch,
+)
 from ...services import conversation_management_service
 from ...services import conversation_search_service
 from ...services.external_conversation_import_service import (
@@ -1126,12 +1131,18 @@ def _chat_prompt_queue_error_response(
     if isinstance(exc, chat_prompt_queue_service.InvalidChatPromptQueueInput):
         error_code = str(getattr(exc, "error_code", "invalid_input"))
         status_code = int(getattr(exc, "status_code", 400) or 400)
+        error_queue_id = getattr(exc, "queue_id", None)
         return (
             jsonify(
                 {
                     "success": False,
                     "error": str(exc),
                     "error_code": error_code,
+                    **(
+                        {"queue_id": error_queue_id}
+                        if error_queue_id
+                        else {}
+                    ),
                 }
             ),
             status_code,
@@ -1352,6 +1363,237 @@ def complete_chat_prompt_queue_handoff_route(queue_id: str):
         return _chat_prompt_queue_error_response(
             exc,
             action="complete_handoff",
+            queue_id=queue_id,
+            scope=scope,
+        )
+
+
+@von_bp.route(
+    "/api/chat_prompt_queue/<queue_id>/retry",
+    methods=["POST"],
+)
+def retry_failed_chat_prompt_queue_route(queue_id: str):
+    """Create one idempotent, linked successor for an actor-visible failure."""
+
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    payload = _chat_prompt_queue_payload()
+    retry_request_id = _normalise_non_empty_text(payload.get("retry_request_id"))
+    if not retry_request_id:
+        return _chat_prompt_queue_error_response(
+            chat_prompt_queue_service.InvalidChatPromptQueueInput(
+                "retry_request_id is required"
+            ),
+            action="retry",
+            queue_id=queue_id,
+            scope=scope,
+        )
+    if len(retry_request_id) > 200:
+        return _chat_prompt_queue_error_response(
+            chat_prompt_queue_service.InvalidChatPromptQueueInput(
+                "retry_request_id is too long"
+            ),
+            action="retry",
+            queue_id=queue_id,
+            scope=scope,
+        )
+
+    queue_record: dict[str, Any] | None = None
+    source: Mapping[str, Any] | None = None
+    task_execution: dict[str, Any] | None = None
+    try:
+        retry_state = chat_prompt_queue_service.get_failed_queue_record_for_retry(
+            scope=scope,
+            queue_id=queue_id,
+        )
+        existing_successor = retry_state.get("successor")
+        if isinstance(existing_successor, Mapping):
+            queue_record = chat_prompt_queue_service.serialise_queue_record(
+                existing_successor
+            )
+            if queue_record is None:  # pragma: no cover - defensive
+                raise chat_prompt_queue_service.ChatPromptQueueUnavailable(
+                    "retry successor could not be serialised"
+                )
+            try:
+                chat_prompt_queue_service.mark_failed_queue_record_retried(
+                    scope=scope,
+                    source_queue_id=queue_id,
+                    successor_queue_id=str(queue_record.get("queue_id") or ""),
+                )
+            except chat_prompt_queue_service.ChatPromptQueueRetryConflict as exc:
+                current_app.logger.warning(
+                    "Retry successor exists but source back-link could not be "
+                    "reconciled queue_id=%s successor_queue_id=%s: %s",
+                    queue_id,
+                    queue_record.get("queue_id"),
+                    exc,
+                )
+            queue_record["idempotent_replay"] = True
+            wake_chat_prompt_queue_dispatcher()
+            return jsonify(
+                {
+                    "success": True,
+                    "item": queue_record,
+                    "task_execution": None,
+                    "idempotent_replay": True,
+                    "reconciliation_pending": bool(
+                        queue_record.get("task_concept_id")
+                        and not queue_record.get("dispatch_ready")
+                    ),
+                }
+            ), 200
+
+        source_value = retry_state.get("source")
+        if not isinstance(source_value, Mapping):  # pragma: no cover - defensive
+            raise chat_prompt_queue_service.ChatPromptQueueUnavailable(
+                "retry source could not be read"
+            )
+        source = source_value
+        conversation_key = _normalise_non_empty_text(
+            source.get("conversation_key")
+        )
+        if not conversation_key:
+            raise chat_prompt_queue_service.InvalidChatPromptQueueInput(
+                "The failed work is not linked to a retryable conversation"
+            )
+
+        source_task_id = _normalise_non_empty_text(source.get("task_concept_id"))
+        source_execution_id = _normalise_non_empty_text(
+            source.get("task_execution_concept_id")
+        )
+        if bool(source_task_id) != bool(source_execution_id):
+            raise chat_prompt_queue_service.ChatPromptQueueRetryConflict(
+                "The failed work has incomplete task execution lineage"
+            )
+
+        retry_launch_id = f"queue-retry:{queue_id}"
+        execution_envelope = (
+            dict(source.get("execution_envelope"))
+            if isinstance(source.get("execution_envelope"), Mapping)
+            else {}
+        )
+        execution_envelope["initiation_id"] = retry_launch_id
+        execution_envelope.setdefault("turn_kind", "user_message")
+
+        task_execution_id = None
+        retry_enqueue_id = retry_launch_id
+        if source_task_id and source_execution_id:
+            actor_id = str(scope.get("user_concept_id") or "")
+            organisation_id = str(scope.get("organisation_concept_id") or "")
+            task_execution_id = task_execution_concept_id_for_launch(
+                task_concept_id=source_task_id,
+                creator_concept_id=actor_id,
+                organisation_concept_id=organisation_id,
+                launch_request_id=retry_launch_id,
+            )
+            retry_enqueue_id = task_execution_enqueue_submission_id_for_launch(
+                task_concept_id=source_task_id,
+                creator_concept_id=actor_id,
+                organisation_concept_id=organisation_id,
+                launch_request_id=retry_launch_id,
+            )
+            workflow_inputs = execution_envelope.get("workflow_inputs")
+            if not isinstance(workflow_inputs, Mapping):
+                raise chat_prompt_queue_service.ChatPromptQueueRetryConflict(
+                    "The failed task execution has no trusted workflow inputs"
+                )
+            execution_envelope["workflow_inputs"] = {
+                **dict(workflow_inputs),
+                "task_execution_concept_id": task_execution_id,
+                "retry_of_queue_id": queue_id,
+                "retry_of_task_execution_concept_id": source_execution_id,
+            }
+
+        queue_record = chat_prompt_queue_service.create_queue_record(
+            scope=scope,
+            prompt_raw=source.get("prompt_raw"),
+            session_id=source.get("session_id"),
+            session_name=source.get("session_name"),
+            status=chat_prompt_queue_service.STATUS_QUEUED,
+            source=("von_task" if source_task_id else "failed_retry"),
+            conversation_key=conversation_key,
+            enqueue_submission_id=retry_enqueue_id,
+            dispatch_mode=chat_prompt_queue_service.DISPATCH_MODE_SERVER,
+            execution_envelope_version=1,
+            execution_envelope=execution_envelope,
+            task_concept_id=source_task_id,
+            task_execution_concept_id=task_execution_id,
+            server_dispatch_ready=not bool(source_task_id),
+            retry_source_queue_id=queue_id,
+            retry_request_id=retry_request_id,
+            retry_source_task_execution_concept_id=source_execution_id,
+        )
+        idempotent_replay = bool(queue_record.get("idempotent_replay"))
+        chat_prompt_queue_service.mark_failed_queue_record_retried(
+            scope=scope,
+            source_queue_id=queue_id,
+            successor_queue_id=str(queue_record.get("queue_id") or ""),
+        )
+
+        if source_task_id and task_execution_id:
+            task_execution = reconcile_task_execution_queue_record(
+                {
+                    **queue_record,
+                    **scope,
+                    "execution_envelope": execution_envelope,
+                }
+            )
+            if (
+                queue_record.get("status")
+                == chat_prompt_queue_service.STATUS_QUEUED
+                and not queue_record.get("dispatch_ready")
+            ):
+                queue_record = (
+                    chat_prompt_queue_service.activate_server_dispatch_record(
+                        scope=scope,
+                        queue_id=str(queue_record.get("queue_id") or ""),
+                        enqueue_submission_id=retry_enqueue_id,
+                        task_execution_concept_id=task_execution_id,
+                    )
+                )
+                queue_record["idempotent_replay"] = idempotent_replay
+        wake_chat_prompt_queue_dispatcher()
+        return jsonify(
+            {
+                "success": True,
+                "item": queue_record,
+                "task_execution": task_execution,
+                "idempotent_replay": idempotent_replay,
+                "reconciliation_pending": False,
+            }
+        ), (200 if idempotent_replay else 201)
+    except Exception as exc:  # noqa: BLE001 - preserve route error boundary
+        if (
+            queue_record
+            and source
+            and source.get("task_concept_id")
+            and queue_record.get("status")
+            == chat_prompt_queue_service.STATUS_QUEUED
+            and not queue_record.get("dispatch_ready")
+        ):
+            current_app.logger.warning(
+                "Task retry accepted for durable reconciliation queue_id=%s: %s",
+                queue_record.get("queue_id"),
+                exc,
+            )
+            wake_chat_prompt_queue_dispatcher()
+            return jsonify(
+                {
+                    "success": True,
+                    "item": queue_record,
+                    "task_execution": task_execution,
+                    "idempotent_replay": bool(
+                        queue_record.get("idempotent_replay")
+                    ),
+                    "reconciliation_pending": True,
+                    "warning": "Task retry projection is being reconciled",
+                }
+            ), 202
+        return _chat_prompt_queue_error_response(
+            exc,
+            action="retry",
             queue_id=queue_id,
             scope=scope,
         )

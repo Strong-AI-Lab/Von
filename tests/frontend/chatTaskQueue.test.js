@@ -1476,6 +1476,7 @@ describe('chat task queue', () => {
             'The final response did not return from Von.'
         );
         expect(document.querySelector('.chat-task-queue-delete')).toBeNull();
+        expect(document.querySelector('.chat-task-queue-failed-retry')?.textContent).toBe('Retry');
         expect(document.querySelector('.chat-task-queue-dismiss')?.textContent).toBe('Dismiss');
         expect(document.querySelector('.chat-task-queue-restart')).toBeNull();
         expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
@@ -1610,57 +1611,16 @@ describe('chat task queue', () => {
         expect(document.querySelector('.chat-task-queue-dismiss')?.disabled).toBe(false);
     }, 15000);
 
-    test('resubmits the focused failed persisted prompt through the normal send path', async () => {
-        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+    test('retries a failed row once through the linked server endpoint', async () => {
         const {
             __testOnly_refreshChatPromptQueueFromServer,
-            sendMessage,
         } = require(chatTabModulePath);
 
-        getUserContext.mockReturnValue({
-            user_id: 'user',
-            org_id: 'org',
-            language: 'en-NZ',
-            gmail_profile: null
-        });
-
         const fetchCalls = [];
-        const generateBodies = [];
+        let resolveRetry = null;
         global.fetch = jest.fn((url, options = {}) => {
             fetchCalls.push({ url, options });
-
-            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
-                const body = JSON.parse(options.body || '{}');
-                return Promise.resolve({
-                    ok: true,
-                    json: async () => ({ html: String(body.text || '') })
-                });
-            }
-
-            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
-                return Promise.resolve({
-                    ok: true,
-                    json: async () => ({ history_length: 0, authenticated: true })
-                });
-            }
-
             if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
-                if ((options.method || 'GET') === 'POST') {
-                    const parsed = JSON.parse(options.body || '{}');
-                    return Promise.resolve({
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            item: {
-                                queue_id: 'queue-active',
-                                prompt_raw: parsed.prompt_raw,
-                                status: parsed.status || 'in_progress',
-                                session_id: parsed.session_id,
-                                session_name: parsed.session_name
-                            }
-                        })
-                    });
-                }
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({
@@ -1678,50 +1638,119 @@ describe('chat task queue', () => {
                     })
                 });
             }
-
-            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-active/finish') {
-                return Promise.resolve({
-                    ok: true,
-                    json: async () => ({
-                        success: true,
-                        item: { queue_id: 'queue-active', status: 'completed' }
-                    })
+            if (
+                typeof url === 'string'
+                && url === '/von/api/chat_prompt_queue/queue-failed/retry'
+                && options.method === 'POST'
+            ) {
+                return new Promise((resolve) => {
+                    resolveRetry = () => resolve({
+                        ok: true,
+                        status: 201,
+                        json: async () => ({
+                            success: true,
+                            item: {
+                                queue_id: 'queue-retry',
+                                retry_source_queue_id: 'queue-failed',
+                                prompt_raw: 'List the most recent 10 gmail messages together with any labels',
+                                status: 'queued',
+                                dispatch_mode: 'server',
+                                dispatch_ready: true,
+                                session_id: 'session-1',
+                                session_name: 'Current'
+                            }
+                        })
+                    });
                 });
             }
-
-            if (typeof url === 'string' && url.startsWith('/von/generate')) {
-                const parsed = JSON.parse(options.body || '{}');
-                generateBodies.push(parsed);
-                return Promise.resolve({
-                    ok: true,
-                    json: async () => ({
-                        response: 'Selected failed prompt response',
-                        llm_debug: { model: 'gpt-5.2' }
-                    })
-                });
-            }
-
             return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
         });
 
         await __testOnly_refreshChatPromptQueueFromServer();
+        const retryButton = document.querySelector('.chat-task-queue-failed-retry');
+        expect(retryButton).toBeTruthy();
 
-        const failedEditor = document.querySelector('.chat-task-queue-edit');
-        expect(failedEditor).toBeTruthy();
-        failedEditor.focus();
-        failedEditor.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-        expect(document.querySelector('.chat-task-queue-item-selected')).toBeTruthy();
+        retryButton.click();
+        retryButton.click();
+        await flushMicrotasks();
 
-        await sendMessage();
+        expect(resolveRetry).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-item-failed')).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-failed-retry')?.disabled).toBe(true);
+        expect(fetchCalls.filter((call) => (
+            call.url === '/von/api/chat_prompt_queue/queue-failed/retry'
+        ))).toHaveLength(1);
+
+        resolveRetry();
         await flushMicrotasks();
         await flushMicrotasks();
 
-        expect(generateBodies).toHaveLength(1);
-        expect(generateBodies[0].prompt).toBe('List the most recent 10 gmail messages together with any labels');
-        expect(generateBodies[0].conversation_session_id).toBe('session-1');
-        expect(fetchCalls.some((call) => String(call.url).includes('/queue-failed/claim'))).toBe(false);
-        expect(fetchCalls.some((call) => String(call.url).includes('/queue-failed/finish'))).toBe(false);
+        const retryCall = fetchCalls.find((call) => (
+            call.url === '/von/api/chat_prompt_queue/queue-failed/retry'
+        ));
+        expect(JSON.parse(retryCall.options.body)).toEqual({
+            retry_request_id: expect.any(String)
+        });
         expect(document.querySelector('.chat-task-queue-item-failed')).toBeNull();
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent)
+            .toBe('Next up • Current');
+        expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/claim'))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/finish'))).toBe(false);
+    }, 15000);
+
+    test('retains failure evidence when linked retry is not accepted', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [],
+                        recent_failed_items: [{
+                            queue_id: 'queue-failed',
+                            prompt_raw: 'Retry me safely',
+                            status: 'failed',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            last_error: 'model_error'
+                        }]
+                    })
+                });
+            }
+            if (
+                url === '/von/api/chat_prompt_queue/queue-failed/retry'
+                && options.method === 'POST'
+            ) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 503,
+                    json: async () => ({
+                        success: false,
+                        error: 'chat prompt queue storage is unavailable',
+                        error_code: 'backend_unavailable'
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        document.querySelector('.chat-task-queue-failed-retry').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('.chat-task-queue-item-failed')).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-failure-message')?.textContent)
+            .toBe('model_error');
+        expect(document.querySelector('.chat-task-queue-sync-warning')?.textContent)
+            .toBe('Queue storage is temporarily unavailable.');
+        expect(document.querySelector('.chat-task-queue-failed-retry')?.disabled)
+            .toBe(false);
     }, 15000);
 
     test('shows a precise persisted update failure for an editable legacy row', async () => {
