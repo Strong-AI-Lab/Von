@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -82,6 +84,28 @@ _PAPER_REPO_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "paper_representation_workflow_seed_bundle.json"
 )
+_PAPER_SEED_INPUT_PATHS: tuple[Path, ...] = (
+    _PAPER_REPO_SEED_ASSET_PATH,
+    _PAPER_REPO_SEED_ASSET_PATH.with_name(
+        "prompt_scholarly_article_metadata_extraction_seed.md"
+    ),
+    _PAPER_REPO_SEED_ASSET_PATH.with_name(
+        "prompt_scholarly_article_representation_evidence_summary_seed.md"
+    ),
+    _PAPER_REPO_SEED_ASSET_PATH.with_name(
+        "prompt_scholarly_article_outcome_explanation_seed.md"
+    ),
+)
+_PAPER_MOCK_COLLECTION_NAMES: tuple[str, ...] = (
+    "concepts",
+    "text_relations",
+    "text_values",
+    "scoped_knowledge_assertions",
+    "ontology_mutation_receipts",
+)
+_canonical_seed_snapshot: dict[str, dict[str, Any]] | None = None
+_canonical_seed_snapshot_fingerprint: str | None = None
+_canonical_seed_fixture_bootstrap_count = 0
 _LIVE_ARXIV_ACCEPTANCE_PRIMARY_PAPER_ENV = "VON_LIVE_ARXIV_ACCEPTANCE_PAPER"
 _LIVE_ARXIV_ACCEPTANCE_SAMPLE_ENV = "VON_LIVE_ARXIV_ACCEPTANCE_SAMPLE"
 _LIVE_ARXIV_ACCEPTANCE_RUN_ENV = "VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE"
@@ -399,6 +423,104 @@ def _execute_live_arxiv_acceptance_case(
     }
 
 
+def _paper_seed_input_fingerprint(
+    paths: tuple[Path, ...] = _PAPER_SEED_INPUT_PATHS,
+) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _invalidate_paper_workflow_test_caches() -> None:
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        invalidate_workflow_runnable_verification_cache,
+    )
+    from src.backend.workflows.workflow_action_contracts import (
+        invalidate_workflow_action_contract_resolution_cache,
+    )
+
+    authority_service.clear_workflow_type_resolution_cache()
+    invalidate_workflow_discovery_executability_caches()
+    invalidate_workflow_action_contract_resolution_cache()
+    invalidate_workflow_runnable_verification_cache(
+        reason="paper_workflow_test_fixture_boundary"
+    )
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+    registry_factory.invalidate_shared_workflow_registry_read_only()
+
+
+def _drop_paper_mock_collections(db: Any) -> None:
+    for collection_name in _PAPER_MOCK_COLLECTION_NAMES:
+        db.drop_collection(collection_name)
+
+
+def _snapshot_paper_mock_collections(db: Any) -> dict[str, dict[str, Any]]:
+    return {
+        collection_name: {
+            "documents": copy.deepcopy(list(db[collection_name].find({}))),
+            "indexes": copy.deepcopy(db[collection_name].index_information()),
+        }
+        for collection_name in _PAPER_MOCK_COLLECTION_NAMES
+    }
+
+
+def _restore_paper_mock_collections(
+    db: Any,
+    snapshot: dict[str, dict[str, Any]],
+) -> None:
+    _drop_paper_mock_collections(db)
+    for collection_name in _PAPER_MOCK_COLLECTION_NAMES:
+        collection = db[collection_name]
+        collection_snapshot = snapshot[collection_name]
+        for index_name, raw_spec in collection_snapshot["indexes"].items():
+            if index_name == "_id_":
+                continue
+            spec = copy.deepcopy(raw_spec)
+            keys = spec.pop("key")
+            spec.pop("v", None)
+            spec.pop("ns", None)
+            collection.create_index(keys, name=index_name, **spec)
+        documents = copy.deepcopy(collection_snapshot["documents"])
+        if documents:
+            collection.insert_many(documents)
+
+
+def _get_canonical_seed_snapshot(db: Any) -> dict[str, dict[str, Any]]:
+    global _canonical_seed_fixture_bootstrap_count
+    global _canonical_seed_snapshot
+    global _canonical_seed_snapshot_fingerprint
+
+    fingerprint = _paper_seed_input_fingerprint()
+    if (
+        _canonical_seed_snapshot is not None
+        and _canonical_seed_snapshot_fingerprint != fingerprint
+    ):
+        raise AssertionError(
+            "Paper workflow seed inputs changed after the worker-local canonical "
+            "fixture was built; start a new pytest process to rebuild authority."
+        )
+    if _canonical_seed_snapshot is None:
+        _drop_paper_mock_collections(db)
+        _invalidate_paper_workflow_test_caches()
+        report = bootstrap_canonical_paper_representation_workflows()
+        publication_counts = (report.get("publication") or {}).get("counts") or {}
+        assert publication_counts.get("errors") == 0, json.dumps(
+            report, sort_keys=True, default=str
+        )
+        assert publication_counts.get("workflows_published") == 8, json.dumps(
+            report, sort_keys=True, default=str
+        )
+        _canonical_seed_snapshot = _snapshot_paper_mock_collections(db)
+        _canonical_seed_snapshot_fingerprint = fingerprint
+        _canonical_seed_fixture_bootstrap_count += 1
+    assert _canonical_seed_fixture_bootstrap_count == 1
+    return _canonical_seed_snapshot
+
+
 @pytest.fixture
 def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
@@ -430,21 +552,26 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
 
     db = get_db()
     if db is not None:
-        for collection_name in (
-            "concepts",
-            "text_relations",
-            "text_values",
-            "scoped_knowledge_assertions",
-            "ontology_mutation_receipts",
-        ):
-            try:
-                db.drop_collection(collection_name)
-            except Exception:
-                pass
-    invalidate_workflow_discovery_executability_caches()
+        _drop_paper_mock_collections(db)
+    _invalidate_paper_workflow_test_caches()
     yield
-    invalidate_workflow_discovery_executability_caches()
-    authority_service.clear_workflow_type_resolution_cache()
+    _invalidate_paper_workflow_test_caches()
+
+
+@pytest.fixture
+def _canonical_seeded_mock_db(_reset_mock_db: Any):
+    from src.backend.db.mongo_client import get_db
+
+    db = get_db()
+    assert db is not None
+    snapshot = _get_canonical_seed_snapshot(db)
+    _restore_paper_mock_collections(db, snapshot)
+    _invalidate_paper_workflow_test_caches()
+    assert _snapshot_paper_mock_collections(db) == snapshot
+    yield snapshot
+    _restore_paper_mock_collections(db, snapshot)
+    _invalidate_paper_workflow_test_caches()
+    assert _snapshot_paper_mock_collections(db) == snapshot
 
 
 def test_bootstrap_materialises_paper_representation_workflow_family(
@@ -1902,10 +2029,9 @@ def _load_source_neutral_test_definitions() -> tuple[
 
 
 def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_partial_success(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
@@ -1993,10 +2119,9 @@ def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_
 
 
 def test_source_neutral_paper_reference_workflow_fails_when_no_item_succeeds(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
@@ -2039,10 +2164,9 @@ def test_source_neutral_paper_reference_workflow_fails_when_no_item_succeeds(
 
 
 def test_source_neutral_workflow_routes_explicit_submission_to_org_workflow_but_public_id_wins(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
@@ -2087,10 +2211,9 @@ def test_source_neutral_workflow_routes_explicit_submission_to_org_workflow_but_
 
 
 def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
@@ -2130,10 +2253,9 @@ def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
 
 
 def test_source_neutral_paper_reference_workflow_fails_closed_without_references(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, _calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
@@ -2160,10 +2282,8 @@ def test_source_neutral_paper_reference_workflow_fails_closed_without_references
 
 
 def test_source_neutral_paper_reference_launch_contract_and_exemplars_are_source_neutral(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
-
     launch_contract, launch_contract_source = resolve_workflow_launch_input_contract(
         SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
     )
@@ -2492,10 +2612,8 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
 
 
 def test_arxiv_launch_contract_explicit_singular_target_is_not_widened_by_ambient_context(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
-
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
@@ -2540,10 +2658,8 @@ def test_arxiv_launch_contract_explicit_singular_target_is_not_widened_by_ambien
 
 
 def test_arxiv_launch_contract_explicit_batch_target_remains_authoritative(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
-
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
@@ -2590,10 +2706,8 @@ def test_arxiv_launch_contract_explicit_batch_target_remains_authoritative(
 
 
 def test_arxiv_launch_contract_resolves_deictic_paper_ids_from_prior_context(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
-
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
@@ -2701,13 +2815,12 @@ def test_arxiv_launch_contract_resolves_deictic_paper_ids_from_prior_context(
     ],
 )
 def test_arxiv_workflow_routes_recoverable_acquisition_failure_to_url_import(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     import_succeeds: bool,
     download_error_code: str,
     download_error_details: dict[str, Any],
     expected_import_reason: str,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -2915,9 +3028,8 @@ def test_arxiv_workflow_routes_recoverable_acquisition_failure_to_url_import(
 
 
 def test_metadata_workflow_executes_direct_scholarly_article_representation(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3057,12 +3169,11 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
 
 
 def test_metadata_workflow_reuses_global_papers_across_authorised_actors_but_not_name_only_people(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.backend.services import ontology_publication_authority_service
 
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
     definition = load_workflow_definition_from_vontology(
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
@@ -3179,9 +3290,8 @@ def test_metadata_workflow_reuses_global_papers_across_authorised_actors_but_not
 
 
 def test_metadata_workflow_rejects_global_representation_without_live_role(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
     definition = load_workflow_definition_from_vontology(
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
@@ -3219,9 +3329,8 @@ def test_metadata_workflow_rejects_global_representation_without_live_role(
 
 
 def test_metadata_workflow_keeps_local_file_copy_link_user_scoped(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
     file_copy_concept_id = "#V#private_local_copy_of_public_paper"
     concept_service.create_concept(
@@ -3300,9 +3409,8 @@ def test_metadata_workflow_keeps_local_file_copy_link_user_scoped(
 
 
 def test_metadata_workflow_reuses_existing_article_on_identical_retry(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3357,9 +3465,8 @@ def test_metadata_workflow_reuses_existing_article_on_identical_retry(
 
 
 def test_metadata_workflow_reuses_same_doi_when_title_varies(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3411,9 +3518,8 @@ def test_metadata_workflow_reuses_same_doi_when_title_varies(
 
 
 def test_metadata_workflow_creates_distinct_same_title_articles_for_different_dois(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3474,9 +3580,8 @@ def test_metadata_workflow_creates_distinct_same_title_articles_for_different_do
 
 
 def test_metadata_workflow_creates_distinct_same_title_articles_for_different_source_uris(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3541,9 +3646,8 @@ def test_metadata_workflow_creates_distinct_same_title_articles_for_different_so
 
 
 def test_metadata_workflow_rejects_title_only_reuse_before_mutation(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3598,10 +3702,9 @@ def test_metadata_workflow_rejects_title_only_reuse_before_mutation(
     ["organisation_general", "global_general"],
 )
 def test_metadata_workflow_does_not_mutate_shared_article_by_title_alone(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     scope_mode: str,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     title = "Shared Scope Scholarly Article"
@@ -3664,10 +3767,9 @@ def test_metadata_workflow_does_not_mutate_shared_article_by_title_alone(
     ["organisation_general", "global_general"],
 )
 def test_metadata_workflow_validates_supplied_article_scope_before_text_mutation(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
     scope_mode: str,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     paper_concept_id = "#V#supplied_shared_scholarly_article"
@@ -3731,9 +3833,8 @@ def test_metadata_workflow_validates_supplied_article_scope_before_text_mutation
 
 
 def test_metadata_workflow_rejects_supplied_private_article_without_trusted_actor(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     paper_concept_id = "#V#other_users_private_scholarly_article"
@@ -3782,9 +3883,8 @@ def test_metadata_workflow_rejects_supplied_private_article_without_trusted_acto
 
 
 def test_metadata_workflow_rejects_supplied_actor_private_article(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     paper_concept_id = "#V#supplied_actor_private_scholarly_article"
@@ -3840,9 +3940,8 @@ def test_metadata_workflow_rejects_supplied_actor_private_article(
 
 
 def test_metadata_workflow_represents_sparse_source_uri_without_title(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
@@ -3899,9 +3998,8 @@ def test_metadata_workflow_represents_sparse_source_uri_without_title(
 
 
 def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
-    _reset_mock_db: Any,
+    _canonical_seeded_mock_db: Any,
 ) -> None:
-    bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
 
     definition = load_workflow_definition_from_vontology(
