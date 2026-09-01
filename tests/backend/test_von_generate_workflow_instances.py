@@ -216,6 +216,33 @@ def test_ordinary_generate_uses_adaptive_turn_without_master_workflow_or_gate(
     assert "workflow_instance_id" not in payload
 
 
+def test_partial_answer_terminal_status_is_delivered_as_honest_success(
+    app: Flask,
+) -> None:
+    partial = (
+        "Partial answer — the model provider stopped before the response completed, "
+        "so some requested rows or details may be missing.\n\n"
+        "| Student | Expected end |\n|---|---|\n| Student A | 2027 |"
+    )
+    adaptive_state = app.config["_ADAPTIVE_TURN_STATE"]
+    adaptive_state["response_text"] = partial
+    adaptive_state["terminal_status"] = "answer_partially_completed"
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Make the table."},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["terminal_status"] == "answer_partially_completed"
+    assert payload["response"] == partial
+    assert payload["llm_debug"]["llm_interaction"][
+        "ordinary_turn_terminal_status"
+    ] == "answer_partially_completed"
+
+
 def test_ordinary_generate_does_not_run_disabled_buttonify_model(
     app: Flask,
     monkeypatch: pytest.MonkeyPatch,

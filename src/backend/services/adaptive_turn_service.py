@@ -88,6 +88,7 @@ _DEFAULT_OUTER_TOOL_WORKERS = 8
 _SUCCESSFUL_MODEL_DURATION_ADVISORY_MULTIPLIER = 1.25
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
+_MODEL_TRANSPORT_RECOVERY_CONTEXT_MAX_BYTES = 64_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
 _CAPABILITY_PURPOSE_MAX_CHARS = 160
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
@@ -1269,6 +1270,10 @@ def _structured_transport_failure_telemetry(
             "provider_error_code",
             "provider_errors",
             "failure_kind",
+            "partial_response_available",
+            "partial_response_char_count",
+            "partial_response_sha256",
+            "provider_output_step_types",
         )
         if key in decision
     }
@@ -1279,6 +1284,9 @@ def _structured_transport_failure_telemetry(
         "provider_status",
         "provider_status_code",
         "provider_error_code",
+        "partial_response_available",
+        "partial_response_char_count",
+        "partial_response_sha256",
     ):
         if key in retained_decision:
             telemetry[key] = retained_decision[key]
@@ -2095,8 +2103,9 @@ def _scope_message(
         message += (
             "\n- The answer-only checkpoint has been reached. Answer now from the "
             "bounded evidence already present in the request. Do not request "
-            "tools or new external capabilities. State material limitations "
-            "instead of filling evidence gaps."
+            "tools or new external capabilities. Produce a compact, complete "
+            "answer within the available response space. State material "
+            "limitations instead of filling evidence gaps."
         )
     elif final_synthesis:
         message += (
@@ -8649,6 +8658,24 @@ def execute_adaptive_turn(
                 if isinstance(exc, StructuredToolTransportError)
                 else {}
             )
+            partial_response = getattr(exc, "partial_response", None)
+            partial_response_text = (
+                partial_response.text_response.strip()
+                if isinstance(partial_response, LLMResponse)
+                and partial_response.text_response.strip()
+                else ""
+            )
+            if isinstance(partial_response, LLMResponse):
+                _usage_add(usage_totals, partial_response.usage)
+            partial_response_model = (
+                partial_response.model.strip()
+                if isinstance(partial_response, LLMResponse)
+                and isinstance(partial_response.model, str)
+                and partial_response.model.strip()
+                else None
+            )
+            if isinstance(partial_response, LLMResponse):
+                provider_request_sent = True
             llm_calls.append(
                 {
                     "call_id": model_call_id,
@@ -8659,8 +8686,12 @@ def execute_adaptive_turn(
                     "provider": configured_provider or None,
                     "requested_model": model,
                     "selected_model": model,
-                    "effective_model": None,
-                    "model_identity_source": None,
+                    "effective_model": partial_response_model,
+                    "model_identity_source": (
+                        "provider_partial_response"
+                        if partial_response_model
+                        else None
+                    ),
                     "provider_request_sent": provider_request_sent,
                     "request_timeout_seconds": None,
                     "request_advisory_seconds": effective_model_call_advisory,
@@ -8670,15 +8701,51 @@ def execute_adaptive_turn(
                     ),
                     "status": "failed",
                     "success": False,
+                    "usage": (
+                        dict(partial_response.usage)
+                        if isinstance(partial_response, LLMResponse)
+                        and partial_response.usage
+                        else None
+                    ),
+                    "partial_response_retained": bool(partial_response_text),
                     "error": str(exc),
                     "error_class": type(exc).__name__,
                     **transport_failure_telemetry,
                 }
             )
             emit_model_call_end(llm_calls[-1])
+            if partial_response_text:
+                last_partial_text = partial_response_text
+                last_partial_effect_generation = request_effect_generation
             if isinstance(exc, ModelExecutionEligibilityError):
                 terminal_status = exc.failure_kind
                 return finish(str(exc), status=terminal_status)
+            if (
+                isinstance(exc, StructuredToolTransportError)
+                and answer_only
+                and partial_response_text
+            ):
+                aux_calls.append(
+                    {
+                        "type": "adaptive_turn_partial_answer_delivery",
+                        "schema_version": "adaptive_turn_partial_answer_delivery.v1",
+                        "call_id": model_call_id,
+                        "reason": "answer_only_provider_response_incomplete",
+                        "action": "deliver_visible_partial_response_with_caveat",
+                        "partial_response_char_count": len(partial_response_text),
+                        "partial_response_sha256": hashlib.sha256(
+                            partial_response_text.encode("utf-8")
+                        ).hexdigest(),
+                        **transport_failure_telemetry,
+                    }
+                )
+                terminal_status = "answer_partially_completed"
+                return finish(
+                    "Partial answer — the model provider stopped before the "
+                    "response completed, so some requested rows or details may "
+                    "be missing.\n\n" + partial_response_text,
+                    status=terminal_status,
+                )
             if final_synthesis and not answer_only:
                 enter_answer_only("evidence_call_failed")
                 continue
@@ -8700,6 +8767,28 @@ def execute_adaptive_turn(
                     if provider_status == "budget_exceeded"
                     else "structured_transport_failed_after_evidence"
                 )
+                recovery_context_before_bytes = len(_json_bytes(current_context))
+                enter_answer_only(recovery_reason)
+                compact_answer_context = _compact_context_after_limit(
+                    prompt=prompt,
+                    context=final_context_base or (),
+                    evidence_index=evidence_store.index(),
+                    before_size=(
+                        2
+                        * (
+                            _MODEL_TRANSPORT_RECOVERY_CONTEXT_MAX_BYTES
+                            + len(prompt.encode("utf-8"))
+                        )
+                    ),
+                    evidence_views=evidence_views,
+                )
+                if compact_answer_context is not None:
+                    compact_answer_context_bytes = len(
+                        _json_bytes(compact_answer_context)
+                    )
+                    if compact_answer_context_bytes < len(_json_bytes(current_context)):
+                        current_context = compact_answer_context
+                recovery_context_after_bytes = len(_json_bytes(current_context))
                 aux_calls.append(
                     {
                         "type": "adaptive_turn_model_transport_recovery",
@@ -8710,12 +8799,20 @@ def execute_adaptive_turn(
                         "prior_model_call_count": model_call_sequence,
                         "tool_invocation_count": len(tool_invocations),
                         "evidence_count": available_evidence_count,
+                        "context_compacted": (
+                            recovery_context_after_bytes
+                            < recovery_context_before_bytes
+                        ),
+                        "context_before_bytes": recovery_context_before_bytes,
+                        "context_after_bytes": recovery_context_after_bytes,
+                        "context_max_bytes": (
+                            _MODEL_TRANSPORT_RECOVERY_CONTEXT_MAX_BYTES
+                        ),
                         "error": str(exc),
                         "error_class": type(exc).__name__,
                         **transport_failure_telemetry,
                     }
                 )
-                enter_answer_only(recovery_reason)
                 continue
             if not final_synthesis and _is_transient_model_request_liveness_failure(
                 exc

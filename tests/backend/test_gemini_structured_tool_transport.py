@@ -438,3 +438,72 @@ def test_interactions_unsuccessful_status_or_errors_are_typed_and_sanitised(
     assert exc_info.value.decision["failure_kind"] == "provider_response_failed"
     assert "secret-provider-value" not in str(exc_info.value.decision)
     assert "[redacted]" in str(exc_info.value.decision)
+
+
+def test_interactions_incomplete_retains_only_visible_partial_response() -> None:
+    interaction = _Resource(
+        id="interaction-incomplete",
+        model="gemini-3.7-flash-20260815",
+        status="incomplete",
+        output_text="",
+        steps=[
+            _Resource(
+                type="thought",
+                summary=[{"type": "text", "text": "private reasoning"}],
+                signature="private-signature",
+            ),
+            _Resource(
+                type="model_output",
+                content=[
+                    {
+                        "type": "text",
+                        "text": "| Student | End date |\n|---|---|\n| A | 2027 |",
+                    }
+                ],
+                signature="answer-signature",
+            ),
+        ],
+        usage=_Resource(
+            total_input_tokens=320,
+            total_output_tokens=41,
+            total_thought_tokens=9,
+            total_tokens=370,
+        ),
+        errors=None,
+    )
+    client = _client(_Interactions([interaction]))
+
+    with pytest.raises(StructuredToolTransportError) as exc_info:
+        asyncio.run(client.generate_with_tools("Make the table.", [_tool()]))
+
+    error = exc_info.value
+    assert error.decision["provider_status"] == "incomplete"
+    assert error.decision["partial_response_available"] is True
+    assert error.decision["partial_response_char_count"] == 45
+    assert error.decision["provider_output_step_types"] == [
+        "thought",
+        "model_output",
+    ]
+    assert "Student" not in str(error.decision)
+    assert "private reasoning" not in str(error.decision)
+
+    partial = error.partial_response
+    assert partial is not None
+    assert partial.text_response == (
+        "| Student | End date |\n|---|---|\n| A | 2027 |"
+    )
+    assert partial.tool_calls == []
+    assert partial.model == "gemini-3.7-flash-20260815"
+    assert partial.usage == {
+        "input_tokens": 320,
+        "output_tokens": 50,
+        "visible_output_tokens": 41,
+        "total_tokens": 370,
+        "thought_tokens": 9,
+    }
+    assert partial.transport_metadata["response_complete"] is False
+    assert partial.transport_metadata["provider_status"] == "incomplete"
+    assert partial.raw_response is not None
+    assert partial.raw_response["step_types"] == ["thought", "model_output"]
+    assert "private reasoning" not in str(partial.raw_response)
+    assert "private-signature" not in str(partial.raw_response)

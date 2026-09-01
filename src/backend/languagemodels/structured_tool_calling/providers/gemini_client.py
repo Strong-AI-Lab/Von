@@ -9,6 +9,7 @@ a compatibility surface, including exact model-content replay.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from time import monotonic
@@ -487,10 +488,65 @@ class GeminiClient(LLMClient):
             else None
         )
         provider_errors = _provider_error_evidence(_value(interaction, "errors"))
+        output_steps = [
+            _provider_mapping(step) for step in (_value(interaction, "steps") or [])
+        ]
+        output_steps = [step for step in output_steps if step]
+        step_text = self._text_from_interaction_steps(output_steps)
+        output_text = _value(interaction, "output_text")
+        text = (
+            output_text
+            if isinstance(output_text, str) and output_text.strip()
+            else step_text
+        )
+        usage = _value(interaction, "usage")
+        mapped_usage = self._usage_mapping(usage)
+        actual_model = _value(interaction, "model")
         actionable_statuses = {"completed", "requires_action"}
         if (
             status is not None and status not in actionable_statuses
         ) or provider_errors:
+            partial_response = None
+            partial_text = text.strip() if isinstance(text, str) else ""
+            if status == "incomplete" and not provider_errors and partial_text:
+                effective_model = (
+                    str(actual_model)
+                    if isinstance(actual_model, str) and actual_model.strip()
+                    else model
+                )
+                partial_response = LLMResponse(
+                    text_response=partial_text,
+                    tool_calls=[],
+                    raw_response={
+                        "id": _value(interaction, "id"),
+                        "model": actual_model,
+                        "status": status,
+                        "step_types": [
+                            str(step.get("type") or "unknown")
+                            for step in output_steps[:20]
+                        ],
+                        "step_count": len(output_steps),
+                        "usage": _provider_mapping(usage),
+                    },
+                    model=effective_model,
+                    usage=mapped_usage,
+                    transport_metadata={
+                        "provider": "gemini",
+                        "requested_model": model,
+                        "effective_model": effective_model,
+                        "effective_api_surface": GEMINI_INTERACTIONS_SURFACE,
+                        "connection_id": (
+                            self.config.connection_id or "gemini_developer_api"
+                        ),
+                        "deployment_id": self.config.deployment_id or model,
+                        "continuation_mode": "stateless",
+                        "store": False,
+                        "effective_model_parameters": dict(effective_parameters),
+                        "provider_status": status,
+                        "response_complete": False,
+                        "partial_response": True,
+                    },
+                )
             raise StructuredToolTransportError(
                 "Gemini Interactions returned an unsuccessful provider status.",
                 decision={
@@ -500,15 +556,24 @@ class GeminiClient(LLMClient):
                     "provider_status": status,
                     "provider_errors": provider_errors,
                     "failure_kind": "provider_response_failed",
+                    "partial_response_available": partial_response is not None,
+                    **(
+                        {
+                            "partial_response_char_count": len(partial_text),
+                            "partial_response_sha256": hashlib.sha256(
+                                partial_text.encode("utf-8")
+                            ).hexdigest(),
+                            "provider_output_step_types": [
+                                str(step.get("type") or "unknown")
+                                for step in output_steps[:20]
+                            ],
+                        }
+                        if partial_response is not None
+                        else {}
+                    ),
                 },
+                partial_response=partial_response,
             )
-        output_steps = [
-            _provider_mapping(step) for step in (_value(interaction, "steps") or [])
-        ]
-        output_steps = [step for step in output_steps if step]
-        text = _value(interaction, "output_text")
-        if not isinstance(text, str):
-            text = self._text_from_interaction_steps(output_steps)
         tool_calls, diagnostics, call_names = self._normalise_function_steps(
             output_steps,
             available_tools,
@@ -524,7 +589,6 @@ class GeminiClient(LLMClient):
                     "failure_kind": "missing_provider_call_correlation",
                 },
             )
-        actual_model = _value(interaction, "model")
         return self._response(
             text=text or "",
             tool_calls=tool_calls,
@@ -535,13 +599,13 @@ class GeminiClient(LLMClient):
             requested_model=model,
             actual_model=actual_model,
             surface=GEMINI_INTERACTIONS_SURFACE,
-            usage=_value(interaction, "usage"),
+            usage=usage,
             raw_response={
                 "id": _value(interaction, "id"),
                 "model": actual_model,
                 "status": _value(interaction, "status"),
                 "steps": output_steps,
-                "usage": _provider_mapping(_value(interaction, "usage")),
+                "usage": _provider_mapping(usage),
                 "errors": provider_errors,
             },
             effective_parameters=effective_parameters,

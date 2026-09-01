@@ -9123,7 +9123,12 @@ def test_structured_transport_failure_after_evidence_gets_one_tool_free_answer()
             }
         ),
         prompt="Make a table of my current students.",
-        context=[],
+        context=[
+            {
+                "role": "assistant",
+                "content": "old conversational context " * 20_000,
+            }
+        ],
         llm_client=client,
         model="gemini-3.7-flash",
         turn_id="turn-provider-budget-recovery",
@@ -9143,9 +9148,10 @@ def test_structured_transport_failure_after_evidence_gets_one_tool_free_answer()
         item
         for item in final_context
         if item.get("role") == "user"
-        and "adaptive_turn_final_synthesis_evidence.v1" in str(item.get("content"))
+        and "adaptive_turn_context_recovery.v1" in str(item.get("content"))
     )
     assert "read-before-provider-budget" in evidence_message["content"]
+    assert len(_json_bytes(final_context)) <= 64_512
     failed_call = result.llm_calls[1]
     assert failed_call["failure_kind"] == "provider_response_failed"
     assert failed_call["provider_status"] == "budget_exceeded"
@@ -9159,6 +9165,195 @@ def test_structured_transport_failure_after_evidence_gets_one_tool_free_answer()
     assert recovery["action"] == "fresh_answer_without_tools"
     assert recovery["evidence_count"] == 1
     assert recovery["tool_invocation_count"] == 1
+    assert recovery["context_compacted"] is True
+    assert recovery["context_after_bytes"] < recovery["context_before_bytes"]
+    assert recovery["context_max_bytes"] == 64_000
+
+
+def test_consecutive_incomplete_responses_deliver_visible_partial_answer() -> None:
+    first_incomplete = StructuredToolTransportError(
+        "Gemini Interactions returned an unsuccessful provider status.",
+        decision={
+            "provider": "gemini",
+            "effective_api_surface": "interactions",
+            "model": "gemini-3.7-flash",
+            "provider_status": "incomplete",
+            "provider_errors": [],
+            "failure_kind": "provider_response_failed",
+            "partial_response_available": False,
+        },
+    )
+    partial_table = (
+        "| Student | Expected end | Co-adviser | Topic |\n"
+        "|---|---|---|---|\n"
+        "| Student A | 2027 | Adviser B | Reliable agents |"
+    )
+    second_incomplete = StructuredToolTransportError(
+        "Gemini Interactions returned an unsuccessful provider status.",
+        decision={
+            "provider": "gemini",
+            "effective_api_surface": "interactions",
+            "model": "gemini-3.7-flash",
+            "provider_status": "incomplete",
+            "provider_errors": [],
+            "failure_kind": "provider_response_failed",
+            "partial_response_available": True,
+            "partial_response_char_count": len(partial_table),
+        },
+        partial_response=LLMResponse(
+            text_response=partial_table,
+            model="gemini-3.7-flash-20260815",
+            usage={"input_tokens": 410, "output_tokens": 61, "total_tokens": 471},
+            transport_metadata={
+                "provider": "gemini",
+                "provider_status": "incomplete",
+                "response_complete": False,
+            },
+        ),
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-consecutive-incomplete",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="gemini",
+                api_surface="interactions",
+                model="gemini-3.7-flash",
+                state_mode="stateless",
+                input_items=[{"type": "user_input", "content": []}],
+                output_items=[
+                    {
+                        "type": "function_call",
+                        "id": "read-before-consecutive-incomplete",
+                        "name": "turn_invoke_capability",
+                        "arguments": {},
+                    }
+                ],
+            ),
+        ),
+        first_incomplete,
+        second_incomplete,
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "students": [{"name": "Student A", "expected_end": "2027"}],
+            }
+        ),
+        prompt="Make a table of my current students.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-consecutive-incomplete-partial-delivery",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "answer_partially_completed"
+    assert result.response_text.startswith(
+        "Partial answer — the model provider stopped before the response completed"
+    )
+    assert partial_table in result.response_text
+    assert len(client.calls) == 3
+    assert client.calls[2]["available_tools"] == []
+    assert "continuation" not in client.calls[2]
+    assert "tool_results" not in client.calls[2]
+    assert "Produce a compact, complete answer" in client.calls[2][
+        "system_message"
+    ]
+    assert len(_json_bytes(client.calls[2]["context"])) <= 64_512
+    assert result.llm_usage == {
+        "input_tokens": 410,
+        "output_tokens": 61,
+        "total_tokens": 471,
+    }
+    final_call = result.llm_calls[2]
+    assert final_call["status"] == "failed"
+    assert final_call["provider_request_sent"] is True
+    assert final_call["partial_response_retained"] is True
+    assert final_call["effective_model"] == "gemini-3.7-flash-20260815"
+    assert final_call["usage"] == {
+        "input_tokens": 410,
+        "output_tokens": 61,
+        "total_tokens": 471,
+    }
+    delivery = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_partial_answer_delivery"
+    )
+    assert delivery["action"] == "deliver_visible_partial_response_with_caveat"
+    assert delivery["provider_status"] == "incomplete"
+    assert delivery["partial_response_char_count"] == len(partial_table)
+    recovery = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_model_transport_recovery"
+    )
+    assert recovery["context_compacted"] is False
+    assert recovery["context_max_bytes"] == 64_000
+
+
+def test_consecutive_incomplete_without_partial_response_remains_terminal() -> None:
+    def incomplete() -> StructuredToolTransportError:
+        return StructuredToolTransportError(
+            "Gemini Interactions returned an unsuccessful provider status.",
+            decision={
+                "provider": "gemini",
+                "provider_status": "incomplete",
+                "failure_kind": "provider_response_failed",
+                "partial_response_available": False,
+            },
+        )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-empty-incomplete",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+        ),
+        incomplete(),
+        incomplete(),
+        LLMResponse(text_response="A fourth call must not happen."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True, "students": []}),
+        prompt="Make a table of my current students.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-consecutive-incomplete-without-partial",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "model_error"
+    assert len(client.calls) == 3
+    assert "StructuredToolTransportError" in result.response_text
+    assert not any(
+        item.get("type") == "adaptive_turn_partial_answer_delivery"
+        for item in result.aux_llm_calls
+    )
 
 
 def test_structured_transport_failure_without_evidence_remains_terminal() -> None:

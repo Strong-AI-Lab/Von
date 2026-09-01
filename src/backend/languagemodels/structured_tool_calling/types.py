@@ -26,9 +26,15 @@ class StructuredToolTransportError(ToolCallError):
         message: str,
         *,
         decision: Mapping[str, Any] | None = None,
+        partial_response: "LLMResponse | None" = None,
     ) -> None:
         super().__init__(message)
         self.decision = dict(decision or {})
+        # Some providers return an explicitly incomplete interaction together
+        # with usable visible output. Keep that output in memory so a bounded
+        # controller can recover or deliver it honestly; it is never a
+        # successful response by itself.
+        self.partial_response = partial_response
 
 
 class UnsupportedStructuredToolTransportError(StructuredToolTransportError):
