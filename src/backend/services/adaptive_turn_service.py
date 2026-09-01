@@ -1247,6 +1247,46 @@ def _is_transient_model_request_liveness_failure(exc: BaseException) -> bool:
     return False
 
 
+def _structured_transport_failure_telemetry(
+    exc: StructuredToolTransportError,
+) -> dict[str, Any]:
+    """Retain the bounded provider decision that made a response unusable."""
+
+    raw_decision = getattr(exc, "decision", None)
+    decision = dict(raw_decision) if isinstance(raw_decision, Mapping) else {}
+    failure_kind = str(
+        decision.get("failure_kind")
+        or getattr(exc, "failure_kind", "structured_tool_transport_error")
+    ).strip()
+    retained_decision = {
+        key: decision[key]
+        for key in (
+            "provider",
+            "effective_api_surface",
+            "model",
+            "provider_status",
+            "provider_status_code",
+            "provider_error_code",
+            "provider_errors",
+            "failure_kind",
+        )
+        if key in decision
+    }
+    telemetry: dict[str, Any] = {
+        "failure_kind": failure_kind or "structured_tool_transport_error",
+    }
+    for key in (
+        "provider_status",
+        "provider_status_code",
+        "provider_error_code",
+    ):
+        if key in retained_decision:
+            telemetry[key] = retained_decision[key]
+    if retained_decision:
+        telemetry["transport_decision"] = retained_decision
+    return telemetry
+
+
 def _evidence_context_message(
     evidence_index: Sequence[Mapping[str, Any]],
     *,
@@ -6527,6 +6567,13 @@ def execute_adaptive_turn(
                 "usage": call.get("usage"),
                 "success": call.get("success"),
                 "duration_ms": call.get("duration_ms"),
+                "error": call.get("error"),
+                "error_class": call.get("error_class"),
+                "failure_kind": call.get("failure_kind"),
+                "provider_status": call.get("provider_status"),
+                "provider_status_code": call.get("provider_status_code"),
+                "provider_error_code": call.get("provider_error_code"),
+                "transport_decision": call.get("transport_decision"),
                 "llm_usage_cost_summary": current_llm_usage_cost_summary(),
                 "result_summary": (
                     "The model call completed; usage and cost evidence were updated."
@@ -8597,6 +8644,11 @@ def execute_adaptive_turn(
             provider_request_sent = (
                 False if isinstance(exc, ModelExecutionEligibilityError) else None
             )
+            transport_failure_telemetry = (
+                _structured_transport_failure_telemetry(exc)
+                if isinstance(exc, StructuredToolTransportError)
+                else {}
+            )
             llm_calls.append(
                 {
                     "call_id": model_call_id,
@@ -8620,6 +8672,7 @@ def execute_adaptive_turn(
                     "success": False,
                     "error": str(exc),
                     "error_class": type(exc).__name__,
+                    **transport_failure_telemetry,
                 }
             )
             emit_model_call_end(llm_calls[-1])
@@ -8628,6 +8681,41 @@ def execute_adaptive_turn(
                 return finish(str(exc), status=terminal_status)
             if final_synthesis and not answer_only:
                 enter_answer_only("evidence_call_failed")
+                continue
+            available_evidence_count = len(evidence_store.index())
+            # A provider may exhaust its own interaction budget only after a
+            # long, otherwise successful tool continuation. Preserve that work
+            # with one fresh no-tool synthesis instead of returning the adapter
+            # exception and discarding every completed observation.
+            if (
+                isinstance(exc, StructuredToolTransportError)
+                and not final_synthesis
+                and (available_evidence_count > 0 or bool(evidence_views))
+            ):
+                provider_status = transport_failure_telemetry.get(
+                    "provider_status"
+                )
+                recovery_reason = (
+                    "provider_budget_exhausted_after_evidence"
+                    if provider_status == "budget_exceeded"
+                    else "structured_transport_failed_after_evidence"
+                )
+                aux_calls.append(
+                    {
+                        "type": "adaptive_turn_model_transport_recovery",
+                        "schema_version": "adaptive_turn_model_transport_recovery.v1",
+                        "call_id": model_call_id,
+                        "reason": recovery_reason,
+                        "action": "fresh_answer_without_tools",
+                        "prior_model_call_count": model_call_sequence,
+                        "tool_invocation_count": len(tool_invocations),
+                        "evidence_count": available_evidence_count,
+                        "error": str(exc),
+                        "error_class": type(exc).__name__,
+                        **transport_failure_telemetry,
+                    }
+                )
+                enter_answer_only(recovery_reason)
                 continue
             if not final_synthesis and _is_transient_model_request_liveness_failure(
                 exc

@@ -25,6 +25,7 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     LLMResponse,
     StructuredToolContextLimitError,
     StructuredToolProtocolError,
+    StructuredToolTransportError,
     ToolCall,
     ToolCallError,
     ToolResult,
@@ -9065,6 +9066,133 @@ def test_model_timeout_recovery_retains_existing_tool_evidence() -> None:
     assert evidence_payload["schema_version"] == "adaptive_turn_context_recovery.v1"
     assert evidence_payload["evidence"][0]["call_id"] == "read-before-timeout"
     assert "z" * 5_000 not in evidence_messages[0]["content"]
+
+
+def test_structured_transport_failure_after_evidence_gets_one_tool_free_answer() -> (
+    None
+):
+    provider_failure = StructuredToolTransportError(
+        "Gemini Interactions returned an unsuccessful provider status.",
+        decision={
+            "provider": "gemini",
+            "effective_api_surface": "interactions",
+            "model": "gemini-3.7-flash",
+            "provider_status": "budget_exceeded",
+            "provider_errors": [],
+            "failure_kind": "provider_response_failed",
+        },
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-provider-budget",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current students"},
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="gemini",
+                api_surface="interactions",
+                model="gemini-3.7-flash",
+                state_mode="stateless",
+                input_items=[{"type": "user_input", "content": []}],
+                output_items=[
+                    {
+                        "type": "function_call",
+                        "id": "read-before-provider-budget",
+                        "name": "turn_invoke_capability",
+                        "arguments": {},
+                    }
+                ],
+            ),
+        ),
+        provider_failure,
+        LLMResponse(text_response="Recovered answer from retained evidence."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "students": [{"name": "Student A", "expected_end": "2027"}],
+            }
+        ),
+        prompt="Make a table of my current students.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-provider-budget-recovery",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Recovered answer from retained evidence."
+    assert len(client.calls) == 3
+    assert client.calls[1]["continuation"].state_mode == "stateless"
+    assert "continuation" not in client.calls[2]
+    assert "tool_results" not in client.calls[2]
+    assert client.calls[2]["available_tools"] == []
+    final_context = client.calls[2]["context"]
+    evidence_message = next(
+        item
+        for item in final_context
+        if item.get("role") == "user"
+        and "adaptive_turn_final_synthesis_evidence.v1" in str(item.get("content"))
+    )
+    assert "read-before-provider-budget" in evidence_message["content"]
+    failed_call = result.llm_calls[1]
+    assert failed_call["failure_kind"] == "provider_response_failed"
+    assert failed_call["provider_status"] == "budget_exceeded"
+    assert failed_call["transport_decision"]["provider"] == "gemini"
+    recovery = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_model_transport_recovery"
+    )
+    assert recovery["reason"] == "provider_budget_exhausted_after_evidence"
+    assert recovery["action"] == "fresh_answer_without_tools"
+    assert recovery["evidence_count"] == 1
+    assert recovery["tool_invocation_count"] == 1
+
+
+def test_structured_transport_failure_without_evidence_remains_terminal() -> None:
+    client = _SequenceClient(
+        StructuredToolTransportError(
+            "Gemini Interactions returned an unsuccessful provider status.",
+            decision={
+                "provider": "gemini",
+                "provider_status": "failed",
+                "failure_kind": "provider_response_failed",
+            },
+        ),
+        LLMResponse(text_response="This response must not be requested."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Answer without any prior evidence.",
+        context=[],
+        llm_client=client,
+        model="gemini-3.7-flash",
+        turn_id="turn-provider-failure-without-evidence",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(client.calls) == 1
+    assert result.terminal_status == "model_error"
+    assert result.llm_calls[0]["failure_kind"] == "provider_response_failed"
+    assert result.llm_calls[0]["provider_status"] == "failed"
+    assert not any(
+        item.get("type") == "adaptive_turn_model_transport_recovery"
+        for item in result.aux_llm_calls
+    )
 
 
 def test_model_timeout_does_not_retry_without_changed_context() -> None:
