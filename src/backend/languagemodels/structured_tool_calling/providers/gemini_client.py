@@ -11,10 +11,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import re
 from collections.abc import Mapping, Sequence
 from time import monotonic
 from typing import Any
 from uuid import uuid4
+
+import httpx
 
 from ....integrations.internal_mcp.tool_call_contracts import (
     strip_internal_schema_extensions,
@@ -44,6 +48,11 @@ from ..types import (
 
 GEMINI_INTERACTIONS_SURFACE = "interactions"
 GEMINI_GENERATE_CONTENT_SURFACE = "gemini_generate_content"
+_MAX_RETRY_AFTER_METADATA_SECONDS = 3_600.0
+_RETRY_AFTER_MESSAGE_RE = re.compile(
+    r"\bretry\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*s(?:ec(?:ond)?s?)?\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _value(value: Any, key: str, default: Any = None) -> Any:
@@ -108,6 +117,146 @@ def _is_gemini_37_flash(model: str) -> bool:
     if model_id.startswith("models/"):
         model_id = model_id.split("/", 1)[1]
     return model_id == "gemini-3.7-flash" or model_id.startswith("gemini-3.7-flash-")
+
+
+def _safe_provider_token(value: Any) -> str | None:
+    """Retain a bounded provider enum/code, never an arbitrary error message."""
+
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 96:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_.:-]+", candidate) is None:
+        return None
+    return candidate
+
+
+def _provider_status_code(exc: BaseException) -> int | None:
+    for value in (
+        getattr(exc, "code", None),
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _provider_error_code(exc: BaseException) -> str | None:
+    details = getattr(exc, "details", None)
+    if not isinstance(details, Mapping):
+        return None
+    error = details.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    direct_code = _safe_provider_token(error.get("code"))
+    if direct_code is not None:
+        return direct_code
+    nested_details = error.get("details")
+    if isinstance(nested_details, Sequence) and not isinstance(
+        nested_details,
+        (str, bytes, bytearray),
+    ):
+        for item in nested_details[:10]:
+            if not isinstance(item, Mapping):
+                continue
+            nested_code = _safe_provider_token(item.get("code"))
+            if nested_code is not None:
+                return nested_code
+    return None
+
+
+def _bounded_retry_after_seconds(value: Any) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(seconds)
+        or seconds < 0.0
+        or seconds > _MAX_RETRY_AFTER_METADATA_SECONDS
+    ):
+        return None
+    return seconds
+
+
+def _provider_retry_after(exc: BaseException) -> tuple[float | None, str | None]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            raw_header = headers.get("Retry-After")
+        except (AttributeError, TypeError):
+            raw_header = None
+        retry_after = _bounded_retry_after_seconds(raw_header)
+        if retry_after is not None:
+            return retry_after, "response_header"
+
+    # google-genai 2.x has no dedicated retry-delay attribute. Its bounded
+    # provider message carries the observed decimal-second retry instruction.
+    provider_message = getattr(exc, "message", None)
+    if isinstance(provider_message, str):
+        match = _RETRY_AFTER_MESSAGE_RE.search(provider_message[:1_024])
+        if match is not None:
+            retry_after = _bounded_retry_after_seconds(match.group(1))
+            if retry_after is not None:
+                return retry_after, "provider_message"
+    return None, None
+
+
+def _transient_sdk_transport_error(
+    exc: BaseException,
+    *,
+    model: str,
+    surface: str,
+) -> StructuredToolTransportError | None:
+    """Classify only provider failures with safe, discriminating evidence."""
+
+    status_code = _provider_status_code(exc)
+    if status_code == 429:
+        decision: dict[str, Any] = {
+            "provider": "gemini",
+            "effective_api_surface": surface,
+            "model": model,
+            "provider_status_code": 429,
+            "failure_kind": "provider_rate_limited",
+            "provider_request_sent": True,
+        }
+        provider_status = _safe_provider_token(getattr(exc, "status", None))
+        if provider_status is not None:
+            decision["provider_status"] = provider_status
+        provider_error_code = _provider_error_code(exc)
+        if provider_error_code is not None:
+            decision["provider_error_code"] = provider_error_code
+        retry_after_seconds, retry_after_source = _provider_retry_after(exc)
+        if retry_after_seconds is not None:
+            decision["retry_after_seconds"] = retry_after_seconds
+            decision["retry_after_source"] = retry_after_source
+        return StructuredToolTransportError(
+            "Gemini temporarily rate-limited the structured-tool request.",
+            decision=decision,
+        )
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (httpx.NetworkError, ConnectionError)):
+            decision = {
+                "provider": "gemini",
+                "effective_api_surface": surface,
+                "model": model,
+                "failure_kind": "provider_connection_failed",
+            }
+            if isinstance(current, httpx.ConnectError):
+                decision["provider_request_sent"] = False
+            return StructuredToolTransportError(
+                "Gemini could not be reached for the structured-tool request.",
+                decision=decision,
+            )
+        current = current.__cause__ or current.__context__
+    return None
 
 
 class GeminiClient(LLMClient):
@@ -221,6 +370,21 @@ class GeminiClient(LLMClient):
         except StructuredToolTransportError:
             raise
         except Exception as exc:
+            transient_error = _transient_sdk_transport_error(
+                exc,
+                model=request_model,
+                surface=surface,
+            )
+            if transient_error is not None:
+                decision = transient_error.decision
+                self.logger.error(
+                    "Gemini structured-tool transport failure: kind=%s "
+                    "status_code=%s retry_after_seconds=%s",
+                    decision.get("failure_kind"),
+                    decision.get("provider_status_code"),
+                    decision.get("retry_after_seconds"),
+                )
+                raise transient_error from exc
             safe_error = sanitise_transport_telemetry_text(str(exc))
             self.logger.error("Gemini structured-tool API error: %s", safe_error)
             raise ToolCallError(f"Gemini call failed: {safe_error}") from exc
