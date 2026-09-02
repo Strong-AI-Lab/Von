@@ -455,6 +455,95 @@ def _iter_query_matches(
         }
 
 
+def _json_scalar_equals(actual: Any, expected: Any) -> bool:
+    if expected is None:
+        return actual is None
+    if isinstance(expected, bool):
+        return isinstance(actual, bool) and actual is expected
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return (
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and actual == expected
+        )
+    return isinstance(actual, type(expected)) and actual == expected
+
+
+def _normalise_field_equals(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("field_equals must be a non-empty object.")
+    if len(value) > 20:
+        raise ValueError("field_equals accepts at most 20 fields.")
+    normalised: dict[str, Any] = {}
+    for raw_field, expected in value.items():
+        if not isinstance(raw_field, str) or not raw_field.strip():
+            raise ValueError("field_equals field names must be non-empty strings.")
+        field = raw_field.strip()
+        if len(field) > 256:
+            raise ValueError("field_equals field names may not exceed 256 characters.")
+        if expected is not None and not isinstance(expected, (str, int, float, bool)):
+            raise ValueError(
+                "field_equals values must be JSON scalars: string, number, boolean, or null."
+            )
+        normalised[field] = expected
+    return normalised
+
+
+def _iter_field_equals_matches(
+    value: Any,
+    field_equals: Mapping[str, Any],
+    *,
+    pointer: str = "",
+    depth: int = 0,
+) -> Iterator[dict[str, Any]]:
+    if depth > 64:
+        return
+    if isinstance(value, Mapping):
+        if all(
+            field in value and _json_scalar_equals(value.get(field), expected)
+            for field, expected in field_equals.items()
+        ):
+            yield {
+                "json_pointer": pointer[:_MAX_QUERY_POINTER_CHARS],
+                "match_kind": "mapping_fields",
+                "matched_fields": sorted(field_equals),
+                "field_values": dict(field_equals),
+            }
+        for key, item in value.items():
+            token = _escape_json_pointer_token(key)
+            yield from _iter_field_equals_matches(
+                item,
+                field_equals,
+                pointer=f"{pointer}/{token}",
+                depth=depth + 1,
+            )
+        return
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        for index, item in enumerate(value):
+            yield from _iter_field_equals_matches(
+                item,
+                field_equals,
+                pointer=f"{pointer}/{index}",
+                depth=depth + 1,
+            )
+
+
+def _parse_structural_query_fragment(query: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(f"{{{query}}}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    try:
+        return _normalise_field_equals(parsed)
+    except ValueError:
+        return None
+
+
 def _bounded_positive_int(
     value: Any,
     *,
@@ -518,7 +607,7 @@ class TurnEvidenceStore:
         value_kind = _value_kind(stored_value)
         selectors = ["offset", "query"]
         if isinstance(stored_value, (Mapping, list, tuple)):
-            selectors.insert(0, "json_pointer")
+            selectors[:0] = ["json_pointer", "field_equals"]
 
         with self._lock:
             while True:
@@ -663,6 +752,81 @@ class TurnEvidenceStore:
                 ),
                 "has_more": has_more,
                 "next_offset": offset + len(matches) if has_more else None,
+                "conclusion": self._selector_conclusion(record),
+            }
+        )
+        return result
+
+    @staticmethod
+    def _selector_conclusion(record: _StoredEvidence) -> dict[str, Any]:
+        diagnostics = record.envelope.source_diagnostics
+        source_coverage_complete = diagnostics.get("coverage_complete")
+        source_has_more = diagnostics.get("has_more")
+        return {
+            "scope": "selected_evidence",
+            "source_coverage_complete": (
+                source_coverage_complete
+                if isinstance(source_coverage_complete, bool)
+                else None
+            ),
+            "source_has_more": (
+                source_has_more if isinstance(source_has_more, bool) else None
+            ),
+            "global_conclusion_supported": (
+                source_coverage_complete is True and source_has_more is not True
+            ),
+        }
+
+    def _read_field_equals(
+        self,
+        record: _StoredEvidence,
+        *,
+        value: Any,
+        field_equals: Mapping[str, Any],
+        json_pointer: str | None,
+        offset: int,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        matches: list[dict[str, Any]] = []
+        has_more = False
+        skipped = 0
+        for match in _iter_field_equals_matches(
+            value,
+            field_equals,
+            pointer=json_pointer or "",
+        ):
+            if skipped < offset:
+                skipped += 1
+                continue
+            candidate_matches = [*matches, match]
+            rendered = json.dumps(
+                candidate_matches,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            if len(rendered) > max_chars:
+                has_more = True
+                break
+            matches.append(match)
+
+        result = self._slice_metadata(record)
+        result.update(
+            {
+                "selector": {
+                    "json_pointer": json_pointer,
+                    "field_equals": dict(field_equals),
+                    "offset": offset,
+                    "max_chars": max_chars,
+                },
+                "content_format": "field_matches",
+                "matches": matches,
+                "returned_match_count": len(matches),
+                "returned_chars": len(
+                    json.dumps(matches, ensure_ascii=True, separators=(",", ":"))
+                ),
+                "has_more": has_more,
+                "next_offset": offset + len(matches) if has_more else None,
+                "conclusion": self._selector_conclusion(record),
             }
         )
         return result
@@ -673,6 +837,7 @@ class TurnEvidenceStore:
         *,
         json_pointer: str | None = None,
         query: str | None = None,
+        field_equals: Mapping[str, Any] | None = None,
         offset: int = 0,
         max_chars: int = DEFAULT_READ_MAX_CHARS,
         trusted_scope: TrustedTurnScope,
@@ -692,6 +857,26 @@ class TurnEvidenceStore:
             json_pointer if isinstance(json_pointer, str) else None
         )
         clean_query = _clean_optional_text(query)
+        try:
+            clean_field_equals = (
+                _normalise_field_equals(field_equals)
+                if field_equals is not None
+                else None
+            )
+        except ValueError as exc:
+            return {
+                **self._slice_metadata(record),
+                "success": False,
+                "error_code": "invalid_field_equals",
+                "message": str(exc),
+            }
+        if clean_query is not None and clean_field_equals is not None:
+            return {
+                **self._slice_metadata(record),
+                "success": False,
+                "error_code": "conflicting_evidence_selectors",
+                "message": "Use query or field_equals, not both.",
+            }
 
         bounded_offset = _bounded_positive_int(
             offset,
@@ -728,7 +913,32 @@ class TurnEvidenceStore:
                     "json_pointer": clean_pointer,
                 }
 
+        if clean_field_equals is not None:
+            return self._read_field_equals(
+                record,
+                value=selected_value,
+                field_equals=clean_field_equals,
+                json_pointer=clean_pointer,
+                offset=bounded_offset,
+                max_chars=bounded_max_chars,
+            )
+
         if clean_query is not None:
+            structural_recovery = _parse_structural_query_fragment(clean_query)
+            if structural_recovery is not None:
+                return {
+                    **self._slice_metadata(record),
+                    "success": False,
+                    "error_code": "structural_query_requires_field_equals",
+                    "message": (
+                        "query performs case-insensitive text matching over keys and "
+                        "non-null scalar values; use field_equals for exact JSON fields."
+                    ),
+                    "recovery": {
+                        "selector": "field_equals",
+                        "field_equals": structural_recovery,
+                    },
+                }
             return self._read_query(
                 record,
                 value=selected_value,

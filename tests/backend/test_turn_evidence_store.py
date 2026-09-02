@@ -57,6 +57,7 @@ def test_record_returns_opaque_bounded_provenance_envelope() -> None:
     assert projected["preview_truncated"] is True
     assert projected["available_selectors"] == [
         "json_pointer",
+        "field_equals",
         "offset",
         "query",
     ]
@@ -382,6 +383,99 @@ def test_read_query_returns_bounded_model_selectable_matches() -> None:
     } == {
         "/records/1/name",
         "/records/1/text",
+    }
+
+
+def test_read_field_equals_finds_json_null_without_serialised_text_matching() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-structural-null")
+    envelope = store.record(
+        "conversation_list",
+        "call-conversation-list",
+        {
+            "coverage_complete": True,
+            "has_more": False,
+            "conversations": [
+                {"session_id": "unnamed", "session_name": None},
+                {"session_id": "named", "session_name": "Named conversation"},
+            ],
+        },
+    )
+
+    result = store.read(
+        envelope.evidence_id,
+        field_equals={"session_name": None},
+        max_chars=2_000,
+        trusted_scope=scope,
+        turn_id="turn-structural-null",
+    )
+
+    assert result["success"] is True
+    assert result["content_format"] == "field_matches"
+    assert result["returned_match_count"] == 1
+    assert result["matches"] == [
+        {
+            "json_pointer": "/conversations/0",
+            "match_kind": "mapping_fields",
+            "matched_fields": ["session_name"],
+            "field_values": {"session_name": None},
+        }
+    ]
+    assert result["conclusion"]["global_conclusion_supported"] is True
+
+
+def test_structural_text_query_returns_executable_field_equals_recovery() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-structural-query")
+    envelope = store.record(
+        "conversation_list",
+        "call-conversation-list",
+        {"conversations": [{"session_name": None}]},
+    )
+
+    for query in ('"session_name":null', '"session_name": null'):
+        result = store.read(
+            envelope.evidence_id,
+            query=query,
+            trusted_scope=scope,
+            turn_id="turn-structural-query",
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "structural_query_requires_field_equals"
+        assert result["recovery"] == {
+            "selector": "field_equals",
+            "field_equals": {"session_name": None},
+        }
+
+
+def test_empty_query_on_incomplete_source_cannot_support_global_conclusion() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-incomplete-query")
+    envelope = store.record(
+        "conversation_list",
+        "call-incomplete-list",
+        {
+            "coverage_complete": False,
+            "has_more": True,
+            "conversations": [{"session_name": "Named conversation"}],
+        },
+    )
+
+    result = store.read(
+        envelope.evidence_id,
+        query="missing term",
+        trusted_scope=scope,
+        turn_id="turn-incomplete-query",
+    )
+
+    assert result["success"] is True
+    assert result["matches"] == []
+    assert result["conclusion"] == {
+        "scope": "selected_evidence",
+        "source_coverage_complete": False,
+        "source_has_more": True,
+        "global_conclusion_supported": False,
     }
 
 
