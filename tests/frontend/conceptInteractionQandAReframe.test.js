@@ -3,9 +3,13 @@ const path = require('path');
 
 const {
     describeConceptQaRepresentation,
+    handleStartInteraction,
     isUnmistakableMissingConceptQaRoute,
     refreshConceptQaSessionCard,
 } = require('../../src/frontend/web/von_interface/static/js/conceptTab.js');
+const {
+    setCurrentlySelectedConceptId,
+} = require('../../src/frontend/web/von_interface/static/js/state.js');
 
 const conceptTemplate = fs.readFileSync(
     path.resolve(__dirname, '../../src/frontend/web/von_interface/templates/concept_tab.html'),
@@ -145,5 +149,94 @@ describe('concept-improvement Q&A entry point', () => {
         expect(document.getElementById('conceptQaGapStatus').textContent).toContain(
             'not an assertion or a creation block'
         );
+    });
+
+    test('renders a retryable initial-question failure as an existing recoverable Q&A', async () => {
+        document.body.innerHTML = conceptTemplate;
+        const originalFetch = global.fetch;
+        global.fetch = jest.fn(async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                sessions: [{
+                    session_id: 'qa-primary-labs-retry',
+                    focal_concept_ids: ['#V#primary_labs'],
+                    lifecycle: { status: 'active', revision: 0 },
+                    mode: 'concept_q_and_a',
+                    origin_kind: 'concept_q_and_a',
+                    initial_question: {
+                        status: 'retryable_failure',
+                        retryable: true,
+                        attempt_count: 1,
+                        failure: {
+                            error_code: 'initial_question_generation_failed',
+                            message: 'The initial Q&A question could not be generated.',
+                        },
+                    },
+                    conversation_reference: {
+                        schema_version: 'conversation_reference.v1',
+                        binding_kind: 'explicit_session_id',
+                        session_id: 'qa-primary-labs-retry',
+                    },
+                    turns: [],
+                }],
+            }),
+        }));
+        try {
+            await refreshConceptQaSessionCard('#V#primary_labs');
+        } finally {
+            global.fetch = originalFetch;
+        }
+
+        expect(document.getElementById('conceptQaSessionBadge').textContent).toBe('Needs retry');
+        expect(document.getElementById('conceptQaSessionSummary').textContent)
+            .toContain('Retry to continue this same recoverable conversation');
+        expect(document.getElementById('startInteractionButton').textContent)
+            .toBe('Retry initial question');
+        expect(document.getElementById('startInteractionButton').classList)
+            .not.toContain('hidden');
+        expect(document.getElementById('resumeConceptQaButton').classList).toContain('hidden');
+        expect(document.getElementById('openConceptQaTranscriptButton').classList)
+            .not.toContain('hidden');
+    });
+
+    test('keeps a partial start on the concept card instead of opening an empty transcript', async () => {
+        document.body.innerHTML = conceptTemplate;
+        setCurrentlySelectedConceptId('#V#primary_labs');
+        const originalFetch = global.fetch;
+        global.fetch = jest.fn(async (url) => {
+            expect(String(url)).toContain('/q_and_a/start');
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    session_id: 'qa-primary-labs-partial-start',
+                    focal_concept_ids: ['#V#primary_labs'],
+                    lifecycle: { status: 'active', revision: 0 },
+                    mode: 'concept_q_and_a',
+                    origin_kind: 'concept_q_and_a',
+                    initial_question: {
+                        status: 'retryable_failure',
+                        retryable: true,
+                        attempt_count: 1,
+                    },
+                    turns: [],
+                }),
+            };
+        });
+        let started;
+        try {
+            started = await handleStartInteraction();
+        } finally {
+            global.fetch = originalFetch;
+        }
+
+        expect(started).toBe(false);
+        expect(global.fetch).toBe(originalFetch);
+        expect(document.getElementById('conceptQaSessionCard').dataset.state).toBe('retryable');
+        expect(document.getElementById('startInteractionButton').textContent)
+            .toBe('Retry initial question');
+        expect(document.getElementById('conceptQaSessionSummary').textContent)
+            .toContain('same recoverable conversation');
     });
 });

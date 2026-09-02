@@ -1926,14 +1926,18 @@ function updateConceptQaComposerUi() {
     const busy = conceptQaSubmitInFlight.has(session.session_id)
         || conceptQaTransitionInFlight.has(session.session_id);
     const terminal = session.lifecycle !== 'active';
+    const awaitingInitialQuestion = session.lifecycle === 'active'
+        && !conceptQaActionAllowed(session, 'submit_turn');
     const readOnly = isExternalConversationReadOnly();
-    promptInput.disabled = readOnly || terminal || busy;
+    promptInput.disabled = readOnly || terminal || awaitingInitialQuestion || busy;
     promptInput.setAttribute(
         'placeholder',
         readOnly
             ? 'Imported snapshot — choose Continue to add new turns.'
             : terminal
             ? `Concept Q&A ${session.lifecycle}; the transcript remains available.`
+            : awaitingInitialQuestion
+            ? 'Retry the initial question from the concept card before answering.'
             : (busy ? 'Saving this Q&A turn…' : 'Answer the current concept question…'),
     );
 }
@@ -1958,7 +1962,11 @@ function renderConceptQaConversationControls() {
     title.textContent = 'Concept Q&A';
     const status = document.createElement('span');
     status.className = 'concept-qa-conversation-status';
-    status.textContent = session.lifecycle === 'active'
+    const awaitingInitialQuestion = session.lifecycle === 'active'
+        && !conceptQaActionAllowed(session, 'submit_turn');
+    status.textContent = session.lifecycle === 'active' && awaitingInitialQuestion
+        ? 'Needs retry · return to the concept card to generate the initial question.'
+        : session.lifecycle === 'active'
         ? 'Active · answers and representation outcomes are saved in this conversation.'
         : `${session.lifecycle === 'finished' ? 'Finished' : 'Cancelled'} · transcript and prior knowledge are retained.`;
     header.append(title, status);
@@ -2108,6 +2116,11 @@ async function submitActiveConceptQaPrompt({ session, promptInput, promptRaw }) 
     if (!session?.concept_id || !session?.session_id) return false;
     if (session.lifecycle !== 'active') {
         showToast(`This concept Q&A is ${session.lifecycle}; its transcript remains available.`, 'info');
+        renderConceptQaConversationControls();
+        return false;
+    }
+    if (!conceptQaActionAllowed(session, 'submit_turn')) {
+        showToast('Retry the initial concept question before submitting an answer.', 'info');
         renderConceptQaConversationControls();
         return false;
     }
@@ -6559,11 +6572,17 @@ function updateSendButtonForCurrentChatState() {
         )
     );
     const conceptQaTerminal = Boolean(conceptQaSession && conceptQaSession.lifecycle !== 'active');
+    const conceptQaAwaitingInitialQuestion = Boolean(
+        conceptQaSession
+        && conceptQaSession.lifecycle === 'active'
+        && !conceptQaActionAllowed(conceptQaSession, 'submit_turn')
+    );
     sendButton.disabled = uploadInFlight
         || queueSubmissionInFlight
         || readOnly
         || conceptQaBusy
-        || conceptQaTerminal;
+        || conceptQaTerminal
+        || conceptQaAwaitingInitialQuestion;
     sendButton.setAttribute('aria-busy', queueSubmissionInFlight || conceptQaBusy ? 'true' : 'false');
     if (readOnly) {
         sendButton.textContent = 'Read-only import';
@@ -6571,9 +6590,17 @@ function updateSendButtonForCurrentChatState() {
         return;
     }
     if (conceptQaSession) {
-        sendButton.textContent = conceptQaTerminal
-            ? `Q&A ${conceptQaSession.lifecycle}`
-            : (conceptQaBusy ? 'Saving Q&A…' : 'Submit answer');
+        if (conceptQaTerminal) {
+            sendButton.textContent = `Q&A ${conceptQaSession.lifecycle}`;
+        } else if (conceptQaAwaitingInitialQuestion) {
+            sendButton.textContent = 'Retry question first';
+        } else {
+            sendButton.textContent = conceptQaBusy ? 'Saving Q&A…' : 'Submit answer';
+        }
+        if (conceptQaAwaitingInitialQuestion) {
+            sendButton.title = 'Return to the concept card and retry the initial question before answering.';
+            return;
+        }
         sendButton.title = conceptQaTerminal
             ? 'The transcript remains available, but this concept Q&A no longer accepts turns.'
             : (conceptQaBusy ? 'Saving this turn and its representation receipts.' : 'Submit this answer to concept Q&A.');

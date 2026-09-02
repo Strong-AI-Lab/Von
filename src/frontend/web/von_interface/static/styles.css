@@ -2111,6 +2111,17 @@ body.von-signed-out {
     color: #b91c1c;
 }
 
+.concept-qa-session-card[data-state="retryable"] {
+    border-color: #fcd34d;
+    border-left-color: #d97706;
+    background: #fffbeb;
+}
+
+.concept-qa-session-card[data-state="retryable"] .concept-qa-session-badge {
+    background: #fef3c7;
+    color: #92400e;
+}
+
 .concept-qa-session-summary {
     margin: 0;
     color: #334155;

@@ -1614,20 +1614,27 @@ function renderConceptQaSessionCard({ suffix = '', session = null, error = null,
   const controls = getConceptQaCardElements(suffix);
   if (!controls.card) return false;
 
-  const state = error ? 'error' : (session?.lifecycle || 'ready');
+  const initialQuestionRetryable = session?.initial_question?.retryable === true;
+  const state = error
+    ? 'error'
+    : (initialQuestionRetryable ? 'retryable' : (session?.lifecycle || 'ready'));
   controls.card.dataset.state = state;
   if (controls.badge) {
     controls.badge.textContent = error
       ? 'Unavailable'
+      : (initialQuestionRetryable
+        ? 'Needs retry'
       : (session?.lifecycle === 'active'
         ? 'Active'
         : (session?.lifecycle === 'finished'
           ? 'Finished'
-          : (session?.lifecycle === 'cancelled' ? 'Cancelled' : 'Ready')));
+          : (session?.lifecycle === 'cancelled' ? 'Cancelled' : 'Ready'))));
   }
   if (controls.summary) {
     if (error) {
       controls.summary.textContent = 'Q&A status could not be checked. You can retry without losing an existing transcript.';
+    } else if (initialQuestionRetryable) {
+      controls.summary.textContent = 'The first Q&A question could not be generated. Retry to continue this same recoverable conversation.';
     } else if (session?.lifecycle === 'active') {
       controls.summary.textContent = 'A recoverable Q&A conversation is active for this concept.';
     } else if (session?.lifecycle === 'finished') {
@@ -1649,13 +1656,19 @@ function renderConceptQaSessionCard({ suffix = '', session = null, error = null,
   const hasSession = Boolean(session?.session_id);
   const isActive = session?.lifecycle === 'active';
   if (controls.start) {
-    controls.start.classList.toggle('hidden', isActive);
-    controls.start.textContent = hasSession ? 'Start new Q&A' : 'Improve concept by Q&A';
-    controls.start.title = 'Answer guided questions in a recoverable conversation; admitted exact claims retain provenance.';
+    controls.start.classList.toggle('hidden', isActive && !initialQuestionRetryable);
+    controls.start.textContent = initialQuestionRetryable
+      ? 'Retry initial question'
+      : (hasSession ? 'Start new Q&A' : 'Improve concept by Q&A');
+    controls.start.title = initialQuestionRetryable
+      ? 'Retry the first question in this existing recoverable Q&A conversation.'
+      : 'Answer guided questions in a recoverable conversation; admitted exact claims retain provenance.';
   }
   if (controls.resume) {
-    controls.resume.classList.toggle('hidden', !isActive);
-    controls.resume.onclick = isActive ? () => void openConceptQaSessionInChat(session) : null;
+    controls.resume.classList.toggle('hidden', !isActive || initialQuestionRetryable);
+    controls.resume.onclick = isActive && !initialQuestionRetryable
+      ? () => void openConceptQaSessionInChat(session)
+      : null;
   }
   if (controls.open) {
     controls.open.classList.toggle('hidden', !hasSession);
@@ -1725,6 +1738,9 @@ export async function handleStartInteraction() {
     const session = await startConceptQaSession(conceptId, buildLocalModelRequestFields());
     conceptQaSessionByConcept.set(conceptId, session);
     renderConceptQaSessionCard({ suffix, session });
+    if (session.initial_question?.retryable === true) {
+      return false;
+    }
     await openConceptQaSessionInChat(session);
     return true;
   } catch (error) {
