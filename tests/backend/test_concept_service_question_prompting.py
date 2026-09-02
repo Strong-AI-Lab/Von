@@ -120,7 +120,7 @@ def test_emitted_question_binds_only_the_matching_plan_item():
 
     first = {
         "requirement_id": "organisation_has_member",
-        "predicate_concept_id": "#V#memberOf",
+        "predicate_concept_id": "#V#memberOfVonOrg",
         "focal_argument": "object",
         "other_argument_type_concept_id": "#V#von_user",
         "declared_on_type_concept_id": "#V#von_user_organisation",
@@ -151,7 +151,7 @@ def test_paraphrased_or_ambiguous_question_is_not_bound_to_formalisation():
     plan = [
         {
             "requirement_id": "organisation_has_member",
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",
             "declared_on_type_concept_id": "#V#von_user_organisation",

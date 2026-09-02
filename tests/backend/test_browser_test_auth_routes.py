@@ -47,7 +47,10 @@ def test_auth_status_includes_browser_test_mode_descriptor(monkeypatch, app_clie
     assert payload["authenticated"] is False
     assert payload["browser_test_mode"]["available"] is True
     assert payload["browser_test_mode"]["status"] == "available"
-    assert payload["browser_test_mode"]["identity_label"] == "Zhan von Witbrock <zhanvonwitbrock@gmail.com>"
+    assert (
+        payload["browser_test_mode"]["identity_label"]
+        == "Zhan von Witbrock <zhanvonwitbrock@gmail.com>"
+    )
     assert payload["browser_test_mode"]["fixture_id"] == "browser_user_view.v1"
 
 
@@ -145,7 +148,10 @@ def test_browser_test_login_sets_browser_test_session(monkeypatch, app_client):
     assert payload["authenticated"] is True
     assert payload["auth_provider"] == "browser_test_fixture"
     assert payload["user_concept_id"] == "#V#zhan_von_witbrock"
-    assert payload["organisation"]["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
+    assert (
+        payload["organisation"]["concept_id"]
+        == "#V#university_of_auckland_strong_ai_lab"
+    )
     assert payload["window_session_id"] == "ws_browser_test"
     assert payload["fixture"]["messages"]["total"] == 3
     assert login_calls == [
@@ -156,7 +162,10 @@ def test_browser_test_login_sets_browser_test_session(monkeypatch, app_client):
     ]
 
 
-def test_exchange_token_clears_scope_when_authenticated_user_changes(app_client):
+def test_exchange_token_clears_scope_when_authenticated_user_changes(
+    monkeypatch,
+    app_client,
+):
     _, client = app_client
     token = "cross-account-token"
     auth_routes._oauth_states[token] = {
@@ -167,6 +176,13 @@ def test_exchange_token_clears_scope_when_authenticated_user_changes(app_client)
             "name": "User B",
         },
     }
+    monkeypatch.setattr(
+        auth_routes,
+        "find_user_concept_by_login_email",
+        lambda email: (
+            {"concept_id": "#V#user_b"} if email == "user-b@example.test" else None
+        ),
+    )
     with client.session_transaction() as sess:
         sess["user_concept_id"] = "#V#user_a"
         sess["user_email"] = "user-a@example.test"
@@ -188,6 +204,56 @@ def test_exchange_token_clears_scope_when_authenticated_user_changes(app_client)
         assert "role_in_org" not in sess
         assert "namespace" not in sess
         assert "session_id" not in sess
+
+
+def test_auth_status_does_not_treat_email_without_user_binding_as_authenticated(
+    app_client,
+):
+    _, client = app_client
+    with client.session_transaction() as sess:
+        sess["user_email"] = "unbound@example.test"
+        sess["auth_provider"] = "google_oauth"
+
+    response = client.get("/von/api/auth/status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["authenticated"] is False
+    assert payload["email"] is None
+    assert payload["user_concept_id"] is None
+    assert payload["auth_provider"] is None
+
+
+def test_exchange_token_rechecks_login_binding_and_fails_closed(
+    monkeypatch,
+    app_client,
+):
+    _, client = app_client
+    token = "revoked-binding-token"
+    auth_routes._oauth_states[token] = {
+        "timestamp": time.time(),
+        "user": {
+            "concept_id": "#V#user_b",
+            "email": "user-b@example.test",
+            "name": "User B",
+        },
+    }
+    monkeypatch.setattr(
+        auth_routes,
+        "find_user_concept_by_login_email",
+        lambda _email: None,
+    )
+
+    response = client.post(
+        "/von/api/auth/exchange-token",
+        json={"token": token},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error_code"] == "von_login_email_binding_invalid"
+    with client.session_transaction() as sess:
+        assert "user_concept_id" not in sess
+        assert "user_email" not in sess
 
 
 def test_logout_invalidates_owned_window_context(monkeypatch, app_client):

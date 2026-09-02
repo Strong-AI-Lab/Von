@@ -115,7 +115,7 @@ describe('concept-improvement Q&A entry point', () => {
                         content: 'Which organisation is it a member of?',
                         concept_q_and_a: {
                             elicitation_predicate: {
-                                predicate_concept_id: '#V#memberOf',
+                                predicate_concept_id: '#V#memberOfVonOrg',
                                 predicate_label: 'member of',
                                 status: 'missing',
                                 gap_status: 'asserted_relation_missing',

@@ -104,7 +104,24 @@ Use different controls for different data and capability classes.
 
 ## Known Security Limitations
 
-### 1. Narrow authentication safeguard implemented in December 2024
+### 1. Authentication identity boundary
+
+Google OAuth email addresses must resolve only through the dedicated
+`#V#hasVonLoginEmail` predicate. The ordinary `#V#has_email` predicate is
+descriptive contact information: adding it to a person must never let that
+address authenticate as the person. Login-email bindings are an explicit
+operator-reviewed allow-list, are unique across user concepts, and fail closed
+when absent, stale, or ambiguous. An unbound OAuth identity must not inherit a
+browser-supplied or prior-session concept and must not auto-create a user.
+
+`#V#hasVonLoginEmail` specialises and entails `#V#has_email`; the reverse
+inference is forbidden. Generic ontology mutation surfaces reserve the narrow
+predicate so only the dedicated identity-binding lifecycle can change it.
+Newly resolved Google sessions carry a versioned login-assurance marker at the
+trusted session boundary. Pre-cutover email sessions lack that evidence and
+must fail closed rather than retaining an actor or organisation scope.
+
+### 1a. Narrow endpoint safeguard implemented in December 2024
 
 **Location**: `src/backend/server/routes/von_routes.py` - `/generate` endpoint
 

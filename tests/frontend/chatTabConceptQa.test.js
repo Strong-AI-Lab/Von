@@ -97,7 +97,7 @@ describe('chat workspace concept Q&A mode', () => {
                 content: 'Which organisation is it a member of?',
                 concept_q_and_a: {
                     elicitation_predicate: {
-                        predicate_concept_id: '#V#memberOf',
+                        predicate_concept_id: '#V#memberOfVonOrg',
                         predicate_label: 'member of',
                         status: 'missing',
                         gap_status: 'asserted_relation_missing',
@@ -152,7 +152,7 @@ describe('chat workspace concept Q&A mode', () => {
                     formalisation: {
                         status: 'tentative',
                         assertion_id: 'tentative-7',
-                        predicate_id: '#V#memberOf',
+                        predicate_id: '#V#memberOfVonOrg',
                         confirmation: {
                             available: true,
                             method: 'POST',

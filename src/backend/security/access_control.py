@@ -17,6 +17,9 @@ from .visibility_predicates import (
     get_specific_to_org_values,
     get_specific_to_user_values,
 )
+from .authentication_assurance import (
+    session_has_required_authentication_assurance,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -402,6 +405,10 @@ def get_effective_user_concept_id_with_source() -> tuple[str | None, str | None]
     if not has_request_context():
         return None, None
 
+    if not session_has_required_authentication_assurance(session):
+        _log.warning("Rejected pre-cutover or unassured email-authenticated session")
+        return None, None
+
     # Primary authority is the server-side session which is populated during the
     # authenticated login flow.
     session_user = _normalise_concept_id(session.get("user_concept_id"))
@@ -453,6 +460,8 @@ def get_effective_organisation_concept_id() -> Optional[str]:
     if _MANUAL_ACTOR_BOUND.get() or manual is not None:
         return manual
     if not has_request_context():
+        return None
+    if not session_has_required_authentication_assurance(session):
         return None
     try:
         window_session_id = request.headers.get("X-Von-Window-Session")

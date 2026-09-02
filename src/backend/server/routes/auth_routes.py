@@ -1,10 +1,17 @@
 from flask import Blueprint, current_app, request, redirect, session, url_for, jsonify
 
 from ...auth_service import GoogleAuthService
-from ...services.settings_service import (
-    set_current_user_by_email,
+from ...security.authentication_assurance import (
+    AUTHENTICATION_ASSURANCE_SESSION_KEY,
+    GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE,
+    session_has_required_authentication_assurance,
 )
 from ...services.exceptions import MultipleUsersForEmailError
+from ...services.von_user_authentication_service import (
+    find_user_concept_by_login_email,
+    login_email_log_fingerprint,
+    normalise_von_login_email,
+)
 import time
 
 auth_bp = Blueprint("auth_bp", __name__)
@@ -54,9 +61,7 @@ def _clear_scope_if_authenticated_identity_changes(
     new_email: object,
 ) -> None:
     """Drop prior actor scope unless the new login proves the same identity."""
-    previous_concept_id = _normalise_session_identity(
-        session.get("user_concept_id")
-    )
+    previous_concept_id = _normalise_session_identity(session.get("user_concept_id"))
     previous_email = _normalise_session_identity(session.get("user_email"))
     next_concept_id = _normalise_session_identity(new_user_concept_id)
     next_email = _normalise_session_identity(new_email)
@@ -100,12 +105,21 @@ def _build_auth_status_payload() -> dict:
             else ("google_oauth" if user_email else None)
         )
 
+    authenticated = bool(
+        user_email
+        and user_concept_id
+        and session_has_required_authentication_assurance(session)
+    )
     return {
-        "authenticated": bool(user_email),
-        "email": user_email,
-        "name": user_info.get("name") if isinstance(user_info, dict) else None,
-        "user_concept_id": user_concept_id,
-        "auth_provider": auth_provider,
+        "authenticated": authenticated,
+        "email": user_email if authenticated else None,
+        "name": (
+            user_info.get("name")
+            if authenticated and isinstance(user_info, dict)
+            else None
+        ),
+        "user_concept_id": user_concept_id if authenticated else None,
+        "auth_provider": auth_provider if authenticated else None,
         "browser_test_mode": browser_test_mode,
     }
 
@@ -160,16 +174,14 @@ def login():
 
     authorization_url, state = service.get_authorization_url()
     # Keep a single concise log for traceability
-    print(
-        f"[auth_login] start state={authorization_url.split('state=')[1].split('&')[0] if 'state=' in authorization_url else 'unknown'} redirect={service.redirect_uri}"
-    )
+    print(f"[auth_login] start redirect={service.redirect_uri}")
 
     # Store state in both session AND in-memory backup (for popup windows)
     session["oauth_state"] = state
     _oauth_states[state] = {"timestamp": time.time(), "used": False}
 
     # Minimal debug line (state + session keys only)
-    print(f"[auth_login] state_saved={state} session_keys={list(session.keys())}")
+    print(f"[auth_login] state_saved session_keys={list(session.keys())}")
 
     return redirect(authorization_url)
 
@@ -183,7 +195,10 @@ def callback():
 
     # Condensed debug
     print(
-        f"[auth_callback] session_state={session_state} received_state={received_state} session_keys={list(session.keys())}"
+        "[auth_callback] state_present="
+        f"{bool(received_state)} state_matches_session="
+        f"{bool(session_state and session_state == received_state)} "
+        f"session_keys={list(session.keys())}"
     )
 
     # Check session first, then fallback to in-memory storage for popup windows
@@ -204,13 +219,16 @@ def callback():
 
     if not valid_state:
         print("[auth_callback] Invalid state - no valid session or memory match")
-        return (
-            f"Invalid state. Session: {session_state}, Received: {received_state}",
-            400,
-        )
+        return "Invalid OAuth state.", 400
+
+    # OAuth state is single-use regardless of whether it was validated through
+    # the cookie session or the popup fallback store.
+    session.pop("oauth_state", None)
+    if received_state:
+        _oauth_states.pop(received_state, None)
 
     try:
-        print(f"[auth_callback] exchanging_code state={received_state}")
+        print("[auth_callback] exchanging_code")
         authorization_response_url = service.canonicalise_authorization_response_url(
             request.url
         )
@@ -221,24 +239,49 @@ def callback():
 
         email = id_info.get("email")
         name = id_info.get("name", "")
-        print(f"[auth_callback] user_email={email}")
-
         if not email:
             print("[auth_callback] No email found in Google profile")
             return "Email not found in Google profile.", 400
-
         try:
-            # Find or create the user in the Von database and set them as current.
-            user = set_current_user_by_email(email, name)
-        except MultipleUsersForEmailError as e:
+            login_email = normalise_von_login_email(email)
+        except ValueError:
             return (
                 jsonify(
                     {
-                        "error": "Multiple users found for this email",
-                        "conflicting_users": e.user_ids,
+                        "error": "Google returned an invalid email address",
+                        "error_code": "google_email_invalid",
+                    }
+                ),
+                400,
+            )
+
+        try:
+            # Resolve only the explicit, operator-controlled login-email
+            # predicate. Ordinary has_email contact facts carry no identity.
+            user = find_user_concept_by_login_email(login_email)
+        except MultipleUsersForEmailError:
+            return (
+                jsonify(
+                    {
+                        "error": "This Google account has an ambiguous Von login binding",
+                        "error_code": "von_login_email_binding_ambiguous",
                     }
                 ),
                 409,
+            )
+        if not user or not user.get("concept_id"):
+            print(
+                "[auth_callback] rejected_unbound_login_email fingerprint="
+                f"{login_email_log_fingerprint(login_email)}"
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "This Google account is not authorised for a Von user",
+                        "error_code": "von_login_email_not_authorised",
+                    }
+                ),
+                403,
             )
 
         # Never carry organisation/namespace/chat authority across accounts in
@@ -246,22 +289,37 @@ def callback():
         user_concept_id = user.get("concept_id") if user else None
         _clear_scope_if_authenticated_identity_changes(
             new_user_concept_id=user_concept_id,
-            new_email=email,
+            new_email=login_email,
         )
 
         # Set session variables for web authentication
-        session["user_email"] = email
-        session["google_user_info"] = {"name": name, "email": email}
+        session["user_email"] = login_email
+        session["google_user_info"] = {"name": name, "email": login_email}
         session["user_concept_id"] = user_concept_id
         session["auth_provider"] = "google_oauth"
+        session[AUTHENTICATION_ASSURANCE_SESSION_KEY] = (
+            GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE
+        )
         session.pop("browser_test_fixture_id", None)
-        print(f"[auth_callback] session_updated user_email={email}")
+        print(
+            "[auth_callback] session_updated user_concept_id="
+            f"{user_concept_id} email_fingerprint="
+            f"{login_email_log_fingerprint(login_email)}"
+        )
 
         # Create a temporary auth token for the popup to send to the parent window
         import secrets
 
         temp_token = secrets.token_urlsafe(32)
-        _oauth_states[temp_token] = {"timestamp": time.time(), "user": user}
+        login_identity = {
+            "concept_id": user_concept_id,
+            "email": login_email,
+            "name": name,
+        }
+        _oauth_states[temp_token] = {
+            "timestamp": time.time(),
+            "user": login_identity,
+        }
         print(f"[auth_callback] temp_token_created len={len(temp_token)}")
 
         # Redirect to success page with the temp token
@@ -283,12 +341,10 @@ def callback():
 def success():
     """Simple success page for OAuth callback."""
     token = request.args.get("token")
-    print(f"[auth_success] Success page loaded with token: {token}")
+    print(f"[auth_success] Success page loaded token_present={bool(token)}")
 
     # Properly escape the token for JavaScript
     js_token = token.replace("'", "\\'").replace('"', '\\"') if token else ""
-    js_token_display = token[:20] + "..." if token else "None"
-
     response = f"""
     <!DOCTYPE html>
     <html>
@@ -304,7 +360,6 @@ def success():
             <h2>✓ Login Successful!</h2>
             <p>You have been successfully logged in with Google.</p>
             <p>This window will close automatically...</p>
-            <p style="font-size: 12px; color: #666;">Token: {js_token_display}</p>
         </div>
 
         <script>
@@ -390,10 +445,38 @@ def exchange_auth_token():
         return jsonify({"success": False, "error": "Token expired"}), 400
 
     user = token_info.get("user")
-    if not user:
+    if not isinstance(user, dict):
         return (
             jsonify({"success": False, "error": "User information not found in token"}),
             400,
+        )
+
+    email = user.get("email")
+    concept_id = user.get("concept_id")
+    if not isinstance(email, str) or not isinstance(concept_id, str):
+        _oauth_states.pop(token, None)
+        return (
+            jsonify({"success": False, "error": "Invalid login identity in token"}),
+            400,
+        )
+    try:
+        current_binding = find_user_concept_by_login_email(email)
+    except (MultipleUsersForEmailError, ValueError):
+        current_binding = None
+    if (
+        not isinstance(current_binding, dict)
+        or current_binding.get("concept_id") != concept_id
+    ):
+        _oauth_states.pop(token, None)
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Von login-email binding is no longer valid",
+                    "error_code": "von_login_email_binding_invalid",
+                }
+            ),
+            403,
         )
 
     # The parent window may already hold another user's org/session context.
@@ -407,6 +490,7 @@ def exchange_auth_token():
     session["google_user_info"] = {"name": user.get("name"), "email": user.get("email")}
     session["user_concept_id"] = user.get("concept_id")
     session["auth_provider"] = "google_oauth"
+    session[AUTHENTICATION_ASSURANCE_SESSION_KEY] = GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE
     session.pop("browser_test_fixture_id", None)
 
     # Provide a consistent slug-style user_id for downstream session-aware routes
@@ -421,8 +505,10 @@ def exchange_auth_token():
     if user_slug:
         session["user_id"] = user_slug.strip().lower().replace(" ", "_")
 
-    print(f"[auth_exchange] Successfully set session for {user.get('email')}")
-    print(f"[auth_exchange] Session contents: {dict(session)}")
+    print(
+        "[auth_exchange] session_updated user_concept_id="
+        f"{concept_id} email_fingerprint={login_email_log_fingerprint(email)}"
+    )
 
     # Clean up the temporary token
     _oauth_states.pop(token, None)
@@ -439,7 +525,8 @@ def get_auth_status():
         host_hdr = "UNKNOWN"
     cookie_keys = list(request.cookies.keys()) if request.cookies else []
     print(
-        f"[auth_status] Host={host_hdr} Cookies={cookie_keys} Session={dict(session)}"
+        f"[auth_status] Host={host_hdr} Cookies={cookie_keys} "
+        f"SessionKeys={list(session.keys())}"
     )
     return jsonify(_build_auth_status_payload())
 
@@ -573,9 +660,7 @@ def logout():
         {
             "success": True,
             "message": "Logged out successfully",
-            "window_context_cleanup": (
-                "deferred" if cleanup_deferred else "completed"
-            ),
+            "window_context_cleanup": ("deferred" if cleanup_deferred else "completed"),
         }
     )
 

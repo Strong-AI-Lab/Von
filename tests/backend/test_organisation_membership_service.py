@@ -1,7 +1,7 @@
 """Tests for organisation_membership_service.py
 
-Tests the Vontology-based membership model that stores user-organisation
-relationships and roles using the memberOf predicate and hasRole text relations.
+Tests the Vontology-based membership model that stores authority-bearing
+user-organisation relationships and roles under narrow Von predicates.
 """
 
 import sys
@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.backend.services.organisation_membership_service import (
     MEMBERSHIP_RELATIONSHIP_KIND,
+    ROLE_PREDICATE,
     create_organisation_membership,
     get_organisation_members,
     get_user_memberships,
@@ -94,6 +95,7 @@ def mock_text_repos():
             "src.backend.db.repositories.text_value_repository.TextValuesRepository"
         ) as text_vals,
     ):
+
         def find_text_value_by_id(value, projection=None):
             query = {"_id": value}
             if projection is None:
@@ -164,7 +166,7 @@ class TestCreateOrganisationMembership:
         call_args = mock_text_value_service.call_args
         assert call_args[1]["subject_concept_id"] == user_id
         # Predicate is stored as namespaced concept identifier
-        assert call_args[1]["predicate"] == "#V#hasRole"
+        assert call_args[1]["predicate"] == ROLE_PREDICATE
         assert call_args[1]["text"] == f"{role}::{org_id}"
         assert mock_window_authority_invalidation == []
 
@@ -184,12 +186,12 @@ class TestCreateOrganisationMembership:
         mock_concepts_repo.find_one.side_effect = [
             {
                 "concept_id": user_id,
-                "relationships": {"memberOf": [org_id]},
+                "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: [org_id]},
             },  # user lookup in create
             {"concept_id": org_id, "relationships": {}},  # org lookup in create
             {
                 "concept_id": user_id,
-                "relationships": {"memberOf": [org_id]},
+                "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: [org_id]},
             },  # user lookup in _check
         ]
         mock_text_value_service.return_value = {
@@ -275,20 +277,20 @@ class TestGetUserMemberships:
         # Setup
         mock_concepts_repo.find_one.return_value = {
             "concept_id": user_id,
-            "relationships": {"memberOf": orgs},
+            "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: orgs},
         }
 
         text_rels, text_vals = mock_text_repos
         text_rels.find.return_value = [
             {
                 "subject_concept_id": user_id,
-                "predicate": "hasRole",
+                "predicate": ROLE_PREDICATE,
                 "object_text_id": "tv_1",
                 "context": {"organisation_id": "#V#sail"},
             },
             {
                 "subject_concept_id": user_id,
-                "predicate": "hasRole",
+                "predicate": ROLE_PREDICATE,
                 "object_text_id": "tv_2",
                 "context": {"organisation_id": "#V#other_org"},
             },
@@ -333,10 +335,10 @@ class TestGetUserMemberships:
         assert result["total_memberships"] == 0
         assert result["memberships"] == []
 
-    def test_get_memberships_merges_canonical_and_legacy_relationships(
+    def test_generic_membership_relations_do_not_grant_von_authority(
         self, mock_concepts_repo, mock_access_control, mock_text_repos
     ):
-        """Both stored membership predicates remain visible and deduplicated."""
+        """Descriptive membership is not an operational access grant."""
         user_id = "#V#michael_witbrock"
         mock_concepts_repo.find_one.return_value = {
             "concept_id": user_id,
@@ -353,18 +355,33 @@ class TestGetUserMemberships:
 
         result = get_user_memberships(user_id)
 
-        assert result["memberships"] == [
+        assert result["memberships"] == []
+        assert result["total_memberships"] == 0
+
+    def test_generic_membership_with_role_still_does_not_grant_von_authority(
+        self, mock_concepts_repo, mock_access_control, mock_text_repos
+    ):
+        user_id = "#V#michael_witbrock"
+        org_id = "#V#semantic_affiliation"
+        mock_concepts_repo.find_one.return_value = {
+            "concept_id": user_id,
+            "relationships": {"memberOf": [org_id]},
+        }
+        text_rels, text_vals = mock_text_repos
+        text_rels.find.return_value = [
             {
-                "organisation_concept_id": (
-                    "#V#university_of_auckland_strong_ai_lab"
-                ),
-                "role": "member",
-            },
-            {
-                "organisation_concept_id": "#V#the_lu_witbrock_household",
-                "role": "member",
-            },
+                "subject_concept_id": user_id,
+                "predicate": ROLE_PREDICATE,
+                "object_text_id": "misleading-role",
+                "context": {"organisation_id": org_id},
+            }
         ]
+        text_vals.find_one.side_effect = [{"text": f"owner::{org_id}"}]
+
+        result = get_user_memberships(user_id)
+
+        assert result["memberships"] == []
+        assert result["total_memberships"] == 0
 
     def test_get_memberships_decodes_scope_distinct_equal_roles(
         self, mock_concepts_repo, mock_access_control, mock_text_repos
@@ -373,7 +390,7 @@ class TestGetUserMemberships:
         orgs = ["#V#org_a", "#V#org_b"]
         mock_concepts_repo.find_one.return_value = {
             "concept_id": user_id,
-            "relationships": {"memberOf": orgs},
+            "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: orgs},
         }
         text_rels, text_vals = mock_text_repos
         text_rels.find.return_value = [
@@ -423,6 +440,7 @@ def test_organisation_role_storage_is_scope_distinct_and_legacy_readable():
         first, {"organisation_id": "#V#org_b"}
     ) == (None, None)
 
+
 # --- Tests for get_organisation_members ---
 
 
@@ -445,13 +463,13 @@ class TestGetOrganisationMembers:
         text_rels.find.return_value = [
             {
                 "subject_concept_id": "#V#michael_witbrock",
-                "predicate": "hasRole",
+                "predicate": ROLE_PREDICATE,
                 "object_text_id": "tv_1",
                 "context": {"organisation_id": org_id},
             },
             {
                 "subject_concept_id": "#V#john_smith",
-                "predicate": "hasRole",
+                "predicate": ROLE_PREDICATE,
                 "object_text_id": "tv_2",
                 "context": {"organisation_id": org_id},
             },
@@ -484,13 +502,13 @@ class TestGetOrganisationMembers:
         text_rels.find.return_value = [
             {
                 "subject_concept_id": "#V#michael_witbrock",
-                "predicate": "hasRole",
+                "predicate": ROLE_PREDICATE,
                 "object_text_id": "tv_1",
                 "context": {"organisation_id": org_id},
             },
             {
                 "subject_concept_id": "#V#john_smith",
-                "predicate": "hasRole",
+                "predicate": ROLE_PREDICATE,
                 "object_text_id": "tv_2",
                 "context": {"organisation_id": org_id},
             },
@@ -534,8 +552,14 @@ class TestUpdateUserRole:
 
         # Setup: user has membership
         mock_concepts_repo.find_one.side_effect = [
-            {"concept_id": user_id, "relationships": {"memberOf": [org_id]}},
-            {"concept_id": user_id, "relationships": {"memberOf": [org_id]}},
+            {
+                "concept_id": user_id,
+                "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: [org_id]},
+            },
+            {
+                "concept_id": user_id,
+                "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: [org_id]},
+            },
         ]
 
         text_rels, text_vals = mock_text_repos
@@ -593,8 +617,14 @@ class TestUpdateUserRole:
         org_id = "#V#sail"
 
         mock_concepts_repo.find_one.side_effect = [
-            {"concept_id": user_id, "relationships": {"memberOf": [org_id]}},
-            {"concept_id": user_id, "relationships": {"memberOf": [org_id]}},
+            {
+                "concept_id": user_id,
+                "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: [org_id]},
+            },
+            {
+                "concept_id": user_id,
+                "relationships": {MEMBERSHIP_RELATIONSHIP_KIND: [org_id]},
+            },
         ]
 
         text_rels, text_vals = mock_text_repos
@@ -637,7 +667,7 @@ class TestRemoveOrganisationMembership:
         text_rels.find_one.return_value = {
             "_id": "rel_id",
             "subject_concept_id": user_id,
-            "predicate": "hasRole",
+            "predicate": ROLE_PREDICATE,
             "context": {"organisation_id": org_id},
         }
         monkeypatch.setattr(

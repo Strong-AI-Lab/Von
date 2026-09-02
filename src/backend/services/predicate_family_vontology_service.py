@@ -16,6 +16,7 @@ FAMILY_MEMBER_PREDICATE_ID = "#V#has_member_predicate"
 FOCAL_ROLE_PREDICATE_ID = "#V#has_focal_role_predicate"
 RELATED_ROLE_PREDICATE_ID = "#V#has_related_role_predicate"
 REIFIED_RELATION_TYPE_PREDICATE_ID = "#V#has_reified_relation_type"
+PREDICATE_SPECIALISATION_PREDICATE_ID = "#V#predicate_specialises_predicate"
 _MAX_EXPANDED_PREDICATES = 100
 
 
@@ -59,6 +60,7 @@ def _empty_expansion(seeds: list[str]) -> dict[str, Any]:
         "focal_role_predicate_ids": [],
         "related_role_predicate_ids": [],
         "reified_relation_type_ids": [],
+        "entailing_specialisation_predicate_ids": [],
         "source": "vontology_predicate_schema",
     }
 
@@ -95,6 +97,8 @@ def expand_relation_predicate_family(
     reified_relation_type_ids: list[str] = []
     index_status = "available"
     family_discovery_source = "relationship_extent_index"
+    specialisation_discovery_source = "relationship_extent_index"
+    entailing_specialisations: list[str] = []
 
     try:
         predicate_projection: dict[str, int] = {
@@ -115,6 +119,58 @@ def expand_relation_predicate_family(
                     relationships.get(inverse_predicate_id),
                     limit=resolved_limit,
                 )
+
+        # Directional entailment expansion: when a query asks for a general
+        # predicate, include facts stated with predicates that specialise it.
+        # Never follow the edge from a specialisation to its generalisation,
+        # because that would make a generic fact satisfy a narrow query (and,
+        # for memberOfVonOrg, would turn description into authority).
+        frontier = list(expanded)
+        while frontier and len(expanded) < resolved_limit:
+            specialisation_rows, specialisation_count = query_relationship_extent_index(
+                predicate_id=PREDICATE_SPECIALISATION_PREDICATE_ID,
+                target_values=frontier,
+                count_total=False,
+                projection={
+                    "_id": 0,
+                    "source_concept_id": 1,
+                    "predicate_id": 1,
+                    "target_value": 1,
+                },
+                limit=resolved_limit * 4,
+            )
+            if specialisation_count < 0:
+                specialisation_discovery_source = "canonical_exact_predicate_query"
+                specialisation_documents = ConceptsRepository.find(
+                    {
+                        f"relationships.{PREDICATE_SPECIALISATION_PREDICATE_ID}": {
+                            "$in": frontier
+                        }
+                    },
+                    projection={"_id": 0, "concept_id": 1},
+                    limit=resolved_limit,
+                )
+                candidates = [
+                    document.get("concept_id")
+                    for document in specialisation_documents
+                    if isinstance(document, Mapping)
+                ]
+            else:
+                candidates = [
+                    row.get("source_concept_id")
+                    for row in specialisation_rows
+                    if isinstance(row, Mapping)
+                ]
+            next_frontier: list[str] = []
+            for candidate in _canonical_ids(candidates):
+                if candidate in expanded:
+                    continue
+                expanded.append(candidate)
+                entailing_specialisations.append(candidate)
+                next_frontier.append(candidate)
+                if len(expanded) >= resolved_limit:
+                    break
+            frontier = next_frontier
 
         family_rows, family_row_count = query_relationship_extent_index(
             predicate_id=FAMILY_MEMBER_PREDICATE_ID,
@@ -227,9 +283,11 @@ def expand_relation_predicate_family(
             "focal_role_predicate_ids": focal_role_predicate_ids,
             "related_role_predicate_ids": related_role_predicate_ids,
             "reified_relation_type_ids": reified_relation_type_ids,
+            "entailing_specialisation_predicate_ids": entailing_specialisations,
             "status": "expanded" if expanded != seeds else "unchanged",
             "relationship_extent_index_status": index_status,
             "family_discovery_source": family_discovery_source,
+            "specialisation_discovery_source": specialisation_discovery_source,
         }
     )
     return result
@@ -239,6 +297,7 @@ __all__ = [
     "FAMILY_MEMBER_PREDICATE_ID",
     "FOCAL_ROLE_PREDICATE_ID",
     "INVERSE_LINK_PREDICATE_IDS",
+    "PREDICATE_SPECIALISATION_PREDICATE_ID",
     "RELATED_ROLE_PREDICATE_ID",
     "REIFIED_RELATION_TYPE_PREDICATE_ID",
     "expand_relation_predicate_family",

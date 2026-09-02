@@ -75,10 +75,9 @@ RESERVED_AUTHORITY_PREDICATES = frozenset(
     {
         AUTHORITY_ROLE_PREDICATE,
         "#V#has_von_operational_administrator",
-        "#V#hasRole",
-        "#V#memberOf",
-        "memberOf",
-        "#V#member_of_organisation",
+        "#V#hasVonLoginEmail",
+        "#V#hasVonOrgRole",
+        "#V#memberOfVonOrg",
     }
 )
 RESERVED_SCOPE_PREDICATES = frozenset(

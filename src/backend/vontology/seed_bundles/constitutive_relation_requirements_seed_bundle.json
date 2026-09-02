@@ -1,6 +1,6 @@
 {
   "schema_version": "constitutive_relation_requirement_seed_bundle.v1",
-  "seed_version": "1",
+  "seed_version": "2",
   "source_tag": "JVNAUTOSCI-1035",
   "managed_by": "constitutive_relation_requirement_service",
   "profiles": [
@@ -11,8 +11,8 @@
         "requirements": [
           {
             "requirement_id": "von_user_organisation_has_von_user_member",
-            "predicate_concept_id": "#V#memberOf",
-            "predicate_label": "member of",
+            "predicate_concept_id": "#V#memberOfVonOrg",
+            "predicate_label": "member of Von organisation",
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",
             "other_argument_type_label": "Von user",

@@ -38980,7 +38980,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "and returns an actor-bound idempotency receipt plus canonical "
                 "read-back. Semantic ontology-administrator authority does not grant "
                 "membership-management authority. Generic relationship tools remain "
-                "ineligible for memberOf or hasRole."
+                "ineligible for memberOfVonOrg or hasVonOrgRole. Generic "
+                "memberOf and hasRole assertions are descriptive only."
             ),
         ),
         MethodDefinition(

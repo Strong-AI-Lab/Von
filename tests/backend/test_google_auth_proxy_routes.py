@@ -55,11 +55,9 @@ def app_client(monkeypatch: pytest.MonkeyPatch):
     auth_routes._oauth_states.clear()
     monkeypatch.setattr(
         auth_routes,
-        "set_current_user_by_email",
-        lambda email, name: {
+        "find_user_concept_by_login_email",
+        lambda email: {
             "concept_id": "#V#example_user",
-            "email": email,
-            "name": name,
         },
     )
 
@@ -113,3 +111,30 @@ def test_callback_exchanges_using_configured_external_https_url(app_client) -> N
         "https://spark.example.test/von/api/auth/google/callback"
         "?code=abc&state=proxy-state"
     )
+
+
+def test_callback_rejects_an_email_without_explicit_login_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    app_client,
+) -> None:
+    client, _ = app_client
+    monkeypatch.setattr(
+        auth_routes,
+        "find_user_concept_by_login_email",
+        lambda _email: None,
+    )
+    auth_routes._oauth_states["proxy-state"] = {
+        "timestamp": time.time(),
+        "used": False,
+    }
+
+    response = client.get(
+        "/von/api/auth/google/callback?code=abc&state=proxy-state",
+        base_url="http://spark.example.test",
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error_code"] == "von_login_email_not_authorised"
+    with client.session_transaction() as flask_session:
+        assert "user_concept_id" not in flask_session
+        assert "user_email" not in flask_session

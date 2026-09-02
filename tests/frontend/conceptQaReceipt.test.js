@@ -47,7 +47,7 @@ describe('concept Q&A representation receipt', () => {
                 formalisation: {
                     status: 'tentative',
                     assertion_id: 'tentative-member-1',
-                    predicate_concept_id: '#V#memberOf',
+                    predicate_concept_id: '#V#memberOfVonOrg',
                     confirmation: {
                         available: true,
                         method: 'POST',

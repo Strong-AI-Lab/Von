@@ -1,7 +1,9 @@
-"""Service functions for managing organisation membership relationships in the Vontology.
+"""Service functions for managing Von organisation memberships.
 
-Handles creation, retrieval, and management of memberOf relationships between
-user concepts and organisation concepts, including role associations.
+Operational membership is represented only by the narrow
+``#V#memberOfVonOrg`` predicate.  It specialises the ordinary semantic
+``#V#memberOf`` predicate, but the converse never holds: a generic membership
+assertion must not grant Von access or an operational role.
 """
 
 from __future__ import annotations
@@ -20,10 +22,27 @@ from .ontology_authority_membership_coordination_service import (
 
 logger = logging.getLogger(__name__)
 
-# Constants for relationship kinds
-MEMBERSHIP_RELATIONSHIP_KIND = "memberOf"
-ALT_MEMBERSHIP_RELATIONSHIP = "#V#member_of_organisation"
-ROLE_PREDICATE = "#V#hasRole"
+# Authority-bearing predicates.  Keep these exact and narrow: generic
+# ``memberOf``/``member_of_organisation`` and ``hasRole`` facts are descriptive
+# ontology assertions and are deliberately not read by this service.
+MEMBERSHIP_RELATIONSHIP_KIND = "#V#memberOfVonOrg"
+ROLE_PREDICATE = "#V#hasVonOrgRole"
+
+# Represented predicate entailment used by the release migration.  The narrow
+# predicate entails the generic one for semantic reasoning; authority readers
+# only accept the narrow predicate explicitly stored on the user concept.
+GENERIC_MEMBERSHIP_PREDICATE = "#V#memberOf"
+PREDICATE_SPECIALISATION_PREDICATE = "#V#predicate_specialises_predicate"
+
+# Read only by the explicit migration service.  They remain here so the
+# authority cutover and its historical inputs have one canonical vocabulary.
+LEGACY_MEMBERSHIP_RELATIONSHIP_KINDS = (
+    "memberOf",
+    "#V#memberOf",
+    "#V#member_of_organisation",
+    "member_of_organisation",
+)
+LEGACY_ROLE_PREDICATES = ("#V#hasRole", "hasRole")
 _ROLE_STORAGE_SEPARATOR = "::"
 
 
@@ -186,10 +205,12 @@ def is_user_member_of_organisation(
 def create_organisation_membership(
     user_concept_id: str, organisation_concept_id: str, role: str = "member"
 ) -> dict[str, Any]:
-    """Create a memberOf relationship between a user and an organisation.
+    """Create an explicit authority-bearing Von organisation membership.
 
-    Stores the relationship in the Vontology as a concept edge, with the role
-    stored as a text relation (hasRole predicate) on a context-decorated link.
+    The narrow membership edge entails ordinary semantic membership through
+    represented predicate-specialisation metadata.  This function does not
+    assert the generic edge separately.  The operational role is likewise
+    stored under a dedicated text predicate scoped to the exact organisation.
 
     Args:
         user_concept_id: The concept ID of the user (e.g., '#V#michael_witbrock')
@@ -230,7 +251,7 @@ def create_organisation_membership(
     if not org_concept:
         raise ValueError(f"Organisation concept '{organisation_concept_id}' not found")
 
-    # Create or update the memberOf relationship edge
+    # Create or update the narrow Von membership relationship edge.
     relationship_exists = _check_relationship_exists(
         user_concept_id, organisation_concept_id
     )
@@ -245,12 +266,18 @@ def create_organisation_membership(
         )
         relationship_created = True
         logger.info(
-            f"Created memberOf relationship: {user_concept_id} --memberOf--> {organisation_concept_id}"
+            "Created Von organisation membership: %s --%s--> %s",
+            user_concept_id,
+            MEMBERSHIP_RELATIONSHIP_KIND,
+            organisation_concept_id,
         )
     else:
         relationship_created = False
         logger.info(
-            f"memberOf relationship already exists: {user_concept_id} --memberOf--> {organisation_concept_id}"
+            "Von organisation membership already exists: %s --%s--> %s",
+            user_concept_id,
+            MEMBERSHIP_RELATIONSHIP_KIND,
+            organisation_concept_id,
         )
 
     if relationship_exists:
@@ -261,7 +288,7 @@ def create_organisation_membership(
             organisation_concept_id,
         )
 
-    # Store the role via text relation (hasRole predicate with context)
+    # Store the role via the narrow Von-role predicate with exact org context.
     role_result = upsert_text_for_concept(
         subject_concept_id=user_concept_id,
         predicate=ROLE_PREDICATE,
@@ -304,23 +331,19 @@ def get_user_memberships(user_concept_id: str) -> dict[str, Any]:
     if not user_concept:
         raise ValueError(f"User concept '{user_concept_id}' not found")
 
-    # Get memberOf relationships
+    # Only explicit narrow edges grant operational membership.  In particular,
+    # never merge or fall back to generic memberOf assertions here.
     memberships_dict = user_concept.get("relationships", {})
     org_ids = memberships_dict.get(MEMBERSHIP_RELATIONSHIP_KIND, [])
-    alt_org_ids = memberships_dict.get(ALT_MEMBERSHIP_RELATIONSHIP, [])
 
     if isinstance(org_ids, str):
         org_ids = [org_ids]
     if not isinstance(org_ids, list):
         org_ids = []
-    if isinstance(alt_org_ids, str):
-        alt_org_ids = [alt_org_ids]
-    if not isinstance(alt_org_ids, list):
-        alt_org_ids = []
 
     merged_org_ids = []
     seen_orgs: set[str] = set()
-    for value in [*org_ids, *alt_org_ids]:
+    for value in org_ids:
         if not isinstance(value, str):
             continue
         if not value.strip():
@@ -430,9 +453,11 @@ def get_organisation_members(
                 if tv:
                     role, stored_org = parse_organisation_role_storage_text(
                         tv.get("text"),
-                        rel.get("context")
-                        if isinstance(rel.get("context"), dict)
-                        else {},
+                        (
+                            rel.get("context")
+                            if isinstance(rel.get("context"), dict)
+                            else {}
+                        ),
                     )
                     if role and stored_org == _normalise_concept_id(
                         organisation_concept_id
@@ -447,18 +472,7 @@ def get_organisation_members(
         org_id_variants.add(organisation_concept_id[3:])
 
     membership_query = {
-        "$or": [
-            {
-                f"relationships.{MEMBERSHIP_RELATIONSHIP_KIND}": {
-                    "$in": list(org_id_variants)
-                }
-            },
-            {
-                f"relationships.{ALT_MEMBERSHIP_RELATIONSHIP}": {
-                    "$in": list(org_id_variants)
-                }
-            },
-        ]
+        f"relationships.{MEMBERSHIP_RELATIONSHIP_KIND}": {"$in": list(org_id_variants)}
     }
     with bypass_access_control():
         member_docs = list(
@@ -546,9 +560,11 @@ def update_user_role(
             if tv:
                 parsed_role, _stored_org = parse_organisation_role_storage_text(
                     tv.get("text"),
-                    current_role_rel.get("context")
-                    if isinstance(current_role_rel.get("context"), dict)
-                    else {},
+                    (
+                        current_role_rel.get("context")
+                        if isinstance(current_role_rel.get("context"), dict)
+                        else {}
+                    ),
                 )
                 if parsed_role:
                     old_role = parsed_role
@@ -645,7 +661,8 @@ def remove_organisation_membership(
     # mutation makes cross-worker revocation fail closed.
     _invalidate_user_window_authority(user_concept_id, organisation_concept_id)
 
-    # Remove the memberOf relationship
+    # Remove only the authority-bearing narrow relationship.  A separately
+    # asserted generic memberOf fact, if any, is semantic and is not authority.
     ConceptsRepository.mutate_relationship_edge(
         source_id=user_concept_id,
         kind=MEMBERSHIP_RELATIONSHIP_KIND,
@@ -682,24 +699,34 @@ def remove_organisation_membership(
 def _check_relationship_exists(
     user_concept_id: str, organisation_concept_id: str
 ) -> bool:
-    """Check if a memberOf relationship already exists between user and organisation."""
+    """Check for an explicit narrow Von organisation membership."""
     user_concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
     if not user_concept:
         return False
 
     memberships_dict = user_concept.get("relationships", {})
     org_ids = memberships_dict.get(MEMBERSHIP_RELATIONSHIP_KIND, [])
+    if isinstance(org_ids, str):
+        org_ids = [org_ids]
+    if not isinstance(org_ids, list):
+        org_ids = []
     return organisation_concept_id in org_ids
 
 
 __all__ = [
     "create_organisation_membership",
+    "GENERIC_MEMBERSHIP_PREDICATE",
     "get_organisation_members",
     "get_user_memberships",
     "is_user_member_of_organisation",
+    "LEGACY_MEMBERSHIP_RELATIONSHIP_KINDS",
+    "LEGACY_ROLE_PREDICATES",
+    "MEMBERSHIP_RELATIONSHIP_KIND",
     "organisation_role_storage_text",
     "parse_organisation_role_storage_text",
+    "PREDICATE_SPECIALISATION_PREDICATE",
     "remove_organisation_membership",
     "resolve_user_organisation_membership",
+    "ROLE_PREDICATE",
     "update_user_role",
 ]

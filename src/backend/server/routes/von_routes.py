@@ -17866,6 +17866,11 @@ def set_user_concept():
             LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
             get_effective_user_concept_id_with_source,
         )
+        from ...security.authentication_assurance import (
+            AUTHENTICATION_ASSURANCE_SESSION_KEY,
+            GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE,
+            session_requires_login_email_assurance,
+        )
 
         data = request.get_json(silent=True) or {}
         user_concept_id = data.get("user_concept_id")
@@ -17878,14 +17883,19 @@ def set_user_concept():
 
         # This endpoint may backfill the canonical concept ID for a legacy
         # authenticated session, but it is not an account switcher. Resolve the
-        # server-side login identity (including its durable email relation) and
-        # require an exact match before changing any actor/session scope.
+        # server-side login identity only through its narrow, durable
+        # hasVonLoginEmail binding and require an exact match before changing
+        # any actor/session scope.
         authenticated_id, authenticated_id_source = (
             get_effective_user_concept_id_with_source()
         )
+        requires_login_email_assurance = session_requires_login_email_assurance(
+            session
+        )
+        resolved_via_login_email = False
         if authenticated_id_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
             authenticated_id = None
-        if not authenticated_id:
+        if not authenticated_id and not requires_login_email_assurance:
             stored_concept_id = session.get("user_concept_id")
             if isinstance(stored_concept_id, str) and stored_concept_id.strip():
                 authenticated_id = stored_concept_id.strip()
@@ -17899,7 +17909,8 @@ def set_user_concept():
                     authenticated_id = email_user.get("concept_id") or email_user.get(
                         "id"
                     )
-        if not authenticated_id:
+                    resolved_via_login_email = bool(authenticated_id)
+        if not authenticated_id and not requires_login_email_assurance:
             legacy_user_id = session.get("user_id")
             if isinstance(legacy_user_id, str) and legacy_user_id.strip():
                 legacy_user_id = legacy_user_id.strip()
@@ -17964,6 +17975,10 @@ def set_user_concept():
 
         # Store the concept id for authoritative identity.
         session["user_concept_id"] = user_concept_id
+        if resolved_via_login_email:
+            session[AUTHENTICATION_ASSURANCE_SESSION_KEY] = (
+                GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE
+            )
         # Keep backward compatibility with code that still reads session['user_id'].
         session["user_id"] = user_concept_id
 

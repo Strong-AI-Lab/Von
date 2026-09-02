@@ -408,9 +408,19 @@ def test_ordinary_actor_keeps_exact_private_creation_and_edit_authority(
     assert edit_decision.reason_code == "semantic_ontology_authority_verified"
 
 
+@pytest.mark.parametrize(
+    "reserved_predicate",
+    [
+        "#V#has_ontology_authority_role",
+        "#V#hasVonOrgRole",
+        "#V#memberOfVonOrg",
+        "#V#hasVonLoginEmail",
+    ],
+)
 def test_reserved_predicates_cannot_be_changed_by_generic_write(
     authority_stores,
     monkeypatch,
+    reserved_predicate,
 ):
     service, _delegations, _receipts = authority_stores
     global_role = _evidence(
@@ -422,7 +432,7 @@ def test_reserved_predicates_cannot_be_changed_by_generic_write(
     )
     with service.override_current_actor("#V#admin", None):
         decision = service.authorise_ontology_mutation(
-            _intent(service, predicate=service.AUTHORITY_ROLE_PREDICATE)
+            _intent(service, predicate=reserved_predicate)
         )
     assert decision.allowed is False
     assert decision.reason_code == ("dedicated_ontology_governance_operation_required")
@@ -941,3 +951,16 @@ def test_actor_bound_private_workflow_does_not_bypass_governance_predicates(
 
     assert decision.allowed is False
     assert decision.reason_code == "dedicated_ontology_governance_operation_required"
+
+
+def test_only_narrow_von_membership_and_login_predicates_are_reserved():
+    from src.backend.services import ontology_publication_authority_service as service
+
+    assert "#V#memberOfVonOrg" in service.RESERVED_AUTHORITY_PREDICATES
+    assert "#V#hasVonOrgRole" in service.RESERVED_AUTHORITY_PREDICATES
+    assert "#V#hasVonLoginEmail" in service.RESERVED_AUTHORITY_PREDICATES
+    assert "#V#memberOf" not in service.RESERVED_AUTHORITY_PREDICATES
+    assert "memberOf" not in service.RESERVED_AUTHORITY_PREDICATES
+    assert "#V#member_of_organisation" not in service.RESERVED_AUTHORITY_PREDICATES
+    assert "#V#hasRole" not in service.RESERVED_AUTHORITY_PREDICATES
+    assert "#V#has_email" not in service.RESERVED_AUTHORITY_PREDICATES

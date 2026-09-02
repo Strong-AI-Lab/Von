@@ -7,13 +7,8 @@ from typing import Any, Callable, Optional, Dict, List, Mapping, Sequence
 from pymongo.results import UpdateResult
 from pymongo.errors import DuplicateKeyError, OperationFailure
 from ..utils.time_utils import utc_now
-from ..db.mongo_client import (
-    APPLICATION_SETTINGS_COLLECTION_NAME,
-    get_text_values_collection,
-    get_text_relations_collection,
-)
+from ..db.mongo_client import APPLICATION_SETTINGS_COLLECTION_NAME
 from ..db.mongo_setup import get_application_settings_collection
-from .exceptions import MultipleUsersForEmailError
 from .mongo_observability_service import (
     build_mongo_operation_comment,
     observe_mongo_operation,
@@ -1700,15 +1695,15 @@ def set_current_organisation_id(org_id: str) -> bool:
 # Removed: get/set_current_organisation_concept_id functions (client localStorage authority)
 
 
-# ---------------- Identity Resolution Helpers (Deterministic, Email-Centric) ----------------
+# ---------------- Identity Resolution Helpers (Deterministic, Login-Binding-Centric) ----------------
 def _log_identity_event(**fields):
     """Emit a structured JSON log line for user identity decisions.
 
     Fields include (not exhaustive):
       event: fixed 'auth_user_resolution'
-      email: authenticated email
+      email_fingerprint: non-reversible identifier for the authenticated email
       expected_concept_id: concept id hinted by session/localStorage (if any)
-      email_relation_concept_id: concept id discovered via existing #V#has_email relation (if any)
+      login_binding_concept_id: concept id discovered via #V#hasVonLoginEmail
       action: chosen resolution path
       conflict: bool when mismatch detected
     """
@@ -1722,216 +1717,70 @@ def _log_identity_event(**fields):
 
 def _find_user_concept_by_email(
     email: str,
-) -> Optional[Dict[str, Any]]:  # Reintroduced deterministic helper
-    """Find an existing user concept via an existing #V#has_email relation.
+) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper for the narrow Von login-email resolver.
 
-    Returns the full concept document or None.
-    Safe: read-only; no mutations.
+    Despite its historical name, this function deliberately ignores ordinary
+    ``#V#has_email`` contact facts.  It is read-only and resolves only
+    ``#V#hasVonLoginEmail``.
     """
-    from ..services.concept_service import get_concept_by_id, get_concept_by_concept_id
+    from .von_user_authentication_service import find_user_concept_by_login_email
 
-    text_values_coll = get_text_values_collection()
-    text_relations_coll = get_text_relations_collection()
-
-    if text_values_coll is None or text_relations_coll is None:
-        logger.error(
-            "_find_user_concept_by_email: Missing text collections (DB unavailable)."
-        )
-        return None
-
-    tv = text_values_coll.find_one({"text": email})
-    if not tv:
-        return None
-    tv_id = str(tv.get("_id"))
-
-    # Find all relations for the given email text value
-    relations = list(
-        text_relations_coll.find({"object_text_id": tv_id, "predicate": "#V#has_email"})
-    )
-
-    if len(relations) > 1:
-        # Log a critical error if multiple users are found for the same email
-        user_ids = [rel.get("subject_concept_id") for rel in relations]
-        logger.critical(
-            f"CRITICAL: Multiple users found for email '{email}': {user_ids}. This is a data integrity issue that must be resolved manually."
-        )
-        raise MultipleUsersForEmailError(email, user_ids)
-
-    if not relations:
-        return None
-
-    rel = relations[0]  # Use the first relation found
-    subj_id = rel.get("subject_concept_id")
-    if not subj_id:
-        return None
-    try:
-        # Use get_concept_by_concept_id for Von concept IDs like #V#michael_witbrock
-        # Use get_concept_by_id for MongoDB ObjectIds
-        if subj_id.startswith("#V#"):
-            concept = get_concept_by_concept_id(subj_id)
-        else:
-            concept = get_concept_by_id(subj_id)
-        return concept
-    except Exception:
-        logger.warning(
-            f"_find_user_concept_by_email: concept retrieval failed for {subj_id}"
-        )
-        return None
+    return find_user_concept_by_login_email(email)
 
 
 def set_current_user_by_email(
     email: str, name: str, expected_user_concept_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """Deterministically resolve (and set) the current user concept for an authenticated email.
+    """Resolve and set a user only from an explicit Von login-email binding.
 
-    Resolution algorithm (authoritative source = email relation):
-      1. If an existing #V#has_email relation maps `email` -> concept (R), adopt R.
-         - If a provided / session expected concept id (E) differs from R, log conflict (action=adopt_email_relation, conflict=true).
-      2. Else (no relation): If an expected concept id (E) is supplied and refers to a valid person concept,
-         link E to the email (create #V#has_email relation) and adopt E (action=link_expected_concept).
-      3. Else: create a new person concept, link email, adopt it (action=create_new_user).
-
-    Conflict handling: We *never* auto-merge. The email relation wins because it is durable & unique; we surface the mismatch in logs.
-    Idempotence: Repeated calls produce same adopted concept & no duplicate relations.
-
-        Identity Invariants (JVNAUTOSCI-634):
-            - Returned dict MUST contain 'concept_id'. If absent but 'id' (vontology style) is present and looks like a concept id, it is normalised.
-            - Session key 'user_concept_id' is always set to the adopted concept_id on success.
-            - A single #V#has_email relation per email is expected; multiple will log conflict (future cleanup tool will reconcile).
-            - No name-based disambiguation is performed (eliminates heuristic drift / race conditions).
+    ``name`` and ``expected_user_concept_id`` are compatibility inputs, not
+    authority.  In particular, an unbound OAuth email is never attached to a
+    concept from the existing browser session and never creates a user.  This
+    compatibility helper does not establish authentication assurance; only the
+    Google OAuth callback may record that proof after verifying the provider
+    response and the current login-email binding.
     """
-    from ..services.concept_service import (
-        get_concept_by_concept_id,
-        create_concept,
-        get_concept_by_id,
-    )
-    from ..services.text_value_service import upsert_text_for_concept
     from flask import session
+    from .von_user_authentication_service import login_email_log_fingerprint
+
+    del name
 
     if not email:
         logger.error("set_current_user_by_email: Blank email provided; aborting.")
         return None
 
-    # Allow caller override; if absent, attempt to read from existing session (pre-login hint from client localStorage)
     if expected_user_concept_id is None:
         expected_user_concept_id = session.get("user_concept_id")
 
-    try:
-        email_user = _find_user_concept_by_email(email)
-    except MultipleUsersForEmailError as e:
-        # Propagate the error to be handled by the caller (e.g., the API route)
-        raise e
-
-    adopted: Optional[Dict[str, Any]] = None
-    action = None
-    conflict = False
-
-    # Step 1: Existing relation path
-    if email_user:
-        adopted = email_user
-        action = "adopt_email_relation"
-        if (
-            expected_user_concept_id
-            and adopted.get("concept_id") != expected_user_concept_id
-        ):
-            conflict = True
-            _log_identity_event(
-                email=email,
-                expected_concept_id=expected_user_concept_id,
-                email_relation_concept_id=adopted.get("concept_id"),
-                action=action,
-                conflict=True,
-            )
-        else:
-            _log_identity_event(
-                email=email,
-                expected_concept_id=expected_user_concept_id,
-                email_relation_concept_id=adopted.get("concept_id"),
-                action=action,
-            )
-    else:
-        # Step 2: Link expected existing concept if provided & valid
-        candidate: Optional[Dict[str, Any]] = None
-        if expected_user_concept_id:
-            try:
-                candidate = get_concept_by_concept_id(expected_user_concept_id)
-            except Exception:
-                candidate = None
-        if candidate:
-            try:
-                candidate_concept_id = candidate.get("concept_id")
-                if (
-                    not isinstance(candidate_concept_id, str)
-                    or not candidate_concept_id
-                ):
-                    raise ValueError("Candidate concept missing concept_id for linking")
-                upsert_text_for_concept(
-                    subject_concept_id=candidate_concept_id,
-                    predicate="#V#has_email",
-                    text=email,
-                    provenance={"source": "login_link_existing"},
-                )
-                adopted_lookup = get_concept_by_concept_id(candidate_concept_id)
-                adopted = adopted_lookup or candidate
-                action = "link_expected_concept"
-                _log_identity_event(
-                    email=email,
-                    expected_concept_id=expected_user_concept_id,
-                    email_relation_concept_id=adopted.get("concept_id"),
-                    action=action,
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed linking expected concept {expected_user_concept_id} to email {email}: {e}"
-                )
-        # Step 3: Create new if still unresolved
-        if adopted is None:
-            try:
-                new_doc = create_concept(name=name, parent_concept_ids=["#V#person"])
-                # Fix JVNAUTOSCI-634: Use concept_id (Von format) instead of id (MongoDB ObjectId)
-                # to prevent duplicate email relations with different identifier formats
-                new_id = new_doc.get("concept_id") if new_doc else None
-                if not new_id:
-                    raise RuntimeError("create_concept returned no concept_id")
-                upsert_text_for_concept(
-                    subject_concept_id=new_id,
-                    predicate="#V#has_email",
-                    text=email,
-                    provenance={"source": "login_create_new"},
-                )
-                adopted = get_concept_by_id(new_id) or new_doc
-                action = "create_new_user"
-                _log_identity_event(
-                    email=email,
-                    expected_concept_id=expected_user_concept_id,
-                    email_relation_concept_id=adopted.get("concept_id"),
-                    action=action,
-                )
-            except Exception as e:
-                logger.error(f"Failed to create/link new user for email {email}: {e}")
-                _log_identity_event(
-                    email=email,
-                    expected_concept_id=expected_user_concept_id,
-                    action="error",
-                    error=str(e),
-                )
-                return None
-
+    adopted = _find_user_concept_by_email(email)
     if not adopted or not adopted.get("concept_id"):
-        # Attempt normalisation: some older concept docs may use 'id' or only have a legacy structure.
-        fallback_id = adopted.get("id") or adopted.get("_id")
-        if isinstance(fallback_id, str) and fallback_id.startswith("#V#"):
-            adopted["concept_id"] = fallback_id
-        else:
-            logger.error(
-                f"set_current_user_by_email: Adopted concept invalid for email {email} (action={action})."
-            )
-            return None
+        _log_identity_event(
+            email_fingerprint=login_email_log_fingerprint(email),
+            expected_concept_id=expected_user_concept_id,
+            action="reject_unbound_login_email",
+        )
+        return None
+
+    conflict = bool(
+        expected_user_concept_id
+        and adopted.get("concept_id") != expected_user_concept_id
+    )
+    _log_identity_event(
+        email_fingerprint=login_email_log_fingerprint(email),
+        expected_concept_id=expected_user_concept_id,
+        login_binding_concept_id=adopted.get("concept_id"),
+        action="adopt_explicit_login_binding",
+        conflict=conflict,
+    )
 
     # Set session binding (authoritative for remainder of request flow)
     session["user_concept_id"] = adopted.get("concept_id")
     logger.info(
-        f"set_current_user_by_email: Adopted concept {adopted.get('concept_id')} (action={action}, conflict={conflict})."
+        "set_current_user_by_email: Adopted explicit login binding concept=%s "
+        "conflict=%s.",
+        adopted.get("concept_id"),
+        conflict,
     )
     return adopted
 
