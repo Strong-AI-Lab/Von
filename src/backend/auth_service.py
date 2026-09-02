@@ -60,8 +60,10 @@ class GoogleAuthService:
             self.canonical_origin = (
                 f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
             )
+            self._canonical_netloc = parsed_redirect.netloc.casefold()
         else:
             self.canonical_origin = None
+            self._canonical_netloc = None
         # Persist base path/query so dynamic hosts can reuse the callback path safely.
         self._redirect_path = parsed_redirect.path or "/von/api/auth/google/callback"
         self._redirect_query = (
@@ -132,6 +134,37 @@ class GoogleAuthService:
             self.canonical_origin = (
                 f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
             )
+            self._canonical_netloc = parsed_redirect.netloc.casefold()
+        else:
+            self.canonical_origin = None
+            self._canonical_netloc = None
+
+    def request_host_matches_canonical_origin(self, host: str) -> bool:
+        """Return whether ``host`` exactly names the configured OAuth origin."""
+        return bool(
+            host
+            and self._canonical_netloc
+            and host.casefold() == self._canonical_netloc
+        )
+
+    def canonicalise_authorization_response_url(self, request_url: str) -> str:
+        """Restore the configured external scheme after trusted TLS termination.
+
+        The rewrite is deliberately limited to the configured callback path on
+        the exact configured host. Requests for any other host or path retain
+        their observed URL and continue through the existing failure path.
+        """
+        configured = urlparse(self.redirect_uri)
+        observed = urlparse(request_url)
+        if (
+            not self.request_host_matches_canonical_origin(observed.netloc)
+            or observed.path != configured.path
+        ):
+            return request_url
+        return observed._replace(
+            scheme=configured.scheme,
+            netloc=configured.netloc,
+        ).geturl()
 
     def allows_dynamic_host(self, host: str) -> bool:
         """Return True when dynamic redirects are enabled and the host is trusted."""

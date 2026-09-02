@@ -97,3 +97,37 @@ def test_google_oauth_clock_skew_env_override_is_bounded(
     _install_dummy_flow(monkeypatch)
 
     assert GoogleAuthService().clock_skew_seconds == expected
+
+
+def test_google_oauth_proxy_canonicalisation_requires_exact_host_and_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_google_oauth_env(monkeypatch)
+    monkeypatch.setenv(
+        "GOOGLE_OAUTH_REDIRECT_URI",
+        "https://spark.example.test/von/api/auth/google/callback",
+    )
+    _install_dummy_flow(monkeypatch)
+    service = GoogleAuthService()
+
+    assert service.request_host_matches_canonical_origin("spark.example.test")
+    assert not service.request_host_matches_canonical_origin("other.example.test")
+    assert not service.request_host_matches_canonical_origin("spark.example.test:5000")
+    assert (
+        service.canonicalise_authorization_response_url(
+            "http://spark.example.test/von/api/auth/google/callback?code=abc&state=xyz"
+        )
+        == "https://spark.example.test/von/api/auth/google/callback?code=abc&state=xyz"
+    )
+    assert (
+        service.canonicalise_authorization_response_url(
+            "http://other.example.test/von/api/auth/google/callback?code=abc"
+        )
+        == "http://other.example.test/von/api/auth/google/callback?code=abc"
+    )
+    assert (
+        service.canonicalise_authorization_response_url(
+            "http://spark.example.test/not-the-callback?code=abc"
+        )
+        == "http://spark.example.test/not-the-callback?code=abc"
+    )

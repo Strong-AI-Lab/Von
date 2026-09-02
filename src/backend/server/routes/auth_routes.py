@@ -123,7 +123,10 @@ def login():
         proto = proto or request.scheme
         current_origin = f"{proto}://{request.host}"
         configured = getattr(service, "canonical_origin", None)
-        if configured and current_origin != configured:
+        canonical_host_matches = service.request_host_matches_canonical_origin(
+            request.host
+        )
+        if configured and current_origin != configured and not canonical_host_matches:
             if service.allows_dynamic_host(request.host):
                 new_redirect = service.build_redirect_for_host(proto, request.host)
                 service.update_redirect(new_redirect)
@@ -208,7 +211,10 @@ def callback():
 
     try:
         print(f"[auth_callback] exchanging_code state={received_state}")
-        id_info = service.exchange_code_for_tokens(request.url)
+        authorization_response_url = service.canonicalise_authorization_response_url(
+            request.url
+        )
+        id_info = service.exchange_code_for_tokens(authorization_response_url)
         print(
             f"[auth_callback] id_info_keys={list(id_info.keys()) if id_info else 'None'}"
         )
