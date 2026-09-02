@@ -7704,6 +7704,178 @@ describe('thinking card toggle accessibility', () => {
         expect(fetchCalls.some(({ url }) => String(url).includes('/finish'))).toBe(false);
     });
 
+    test('preserves the active user turn when a delayed history load finishes after send', async () => {
+        const { getUserContext } = require('../apiService.js');
+        jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+        document.getElementById('promptInput').value = 'Current prompt';
+
+        let resolveHistory;
+        let resolveGenerate;
+        let clientRequestId = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return new Promise((resolve) => {
+                    resolveHistory = () => resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            history: [
+                                {
+                                    role: 'user',
+                                    content: 'Previous prompt',
+                                    turn_id: 'u-previous-request',
+                                    timestamp: '2026-09-01T21:31:32Z'
+                                },
+                                {
+                                    role: 'assistant',
+                                    content: 'Previous answer',
+                                    turn_id: 'a-previous-request',
+                                    timestamp: '2026-09-01T21:33:40Z'
+                                }
+                            ],
+                            segments_returned: 1,
+                            total_segments: 1,
+                            has_more_history: false
+                        })
+                    });
+                });
+            }
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const requestBody = JSON.parse(options.body);
+                clientRequestId = requestBody.client_request_id;
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        item: {
+                            queue_id: 'queue-history-race',
+                            session_id: 'thinking-card-test-session',
+                            prompt_raw: 'Current prompt',
+                            client_request_id: clientRequestId,
+                            status: 'queued'
+                        }
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const requestBody = JSON.parse(options.body);
+                clientRequestId = requestBody.client_request_id;
+                return new Promise((resolve) => {
+                    resolveGenerate = () => resolve({
+                        ok: true,
+                        json: async () => ({
+                            response: 'Current answer',
+                            request_id: clientRequestId,
+                            llm_debug: { request_id: clientRequestId, model: 'test-model' }
+                        })
+                    });
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({ status: 'thinking', phase: 'context_build' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 2, authenticated: true })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const historyPromise = __testOnly_loadChatHistory({ segments: 1 });
+        const sendPromise = sendMessage();
+        for (
+            let flush = 0;
+            flush < 12 && (!clientRequestId || typeof resolveHistory !== 'function');
+            flush += 1
+        ) {
+            await Promise.resolve();
+        }
+
+        expect(clientRequestId).toBeTruthy();
+        expect(typeof resolveHistory).toBe('function');
+        expect(document.querySelectorAll('.user-turn')).toHaveLength(1);
+        expect(document.querySelector('.user-turn').textContent).toContain('Current prompt');
+
+        resolveHistory();
+        await expect(historyPromise).resolves.toBe(true);
+
+        const visibleTurns = Array.from(
+            document.querySelectorAll('#scrollableField .message-container')
+        );
+        expect(visibleTurns).toHaveLength(3);
+        expect(visibleTurns[0].textContent).toContain('Previous prompt');
+        expect(visibleTurns[1].querySelector('.chat-message-text').dataset.originalText).toBe(
+            'Previous answer'
+        );
+        expect(visibleTurns[2].textContent).toContain('Current prompt');
+        expect(visibleTurns[2].dataset.turnId).toBe(`u-${clientRequestId}`);
+        expect(document.querySelectorAll(
+            `.message-container[data-turn-id="u-${clientRequestId}"]`
+        )).toHaveLength(1);
+        expect(document.getElementById('thinkingCardWrapper').getAttribute('aria-hidden')).toBe('false');
+
+        for (let flush = 0; flush < 8 && !resolveGenerate; flush += 1) {
+            await Promise.resolve();
+        }
+        expect(typeof resolveGenerate).toBe('function');
+        resolveGenerate();
+        await expect(sendPromise).resolves.toBeUndefined();
+
+        const currentAnswerTurns = document.querySelectorAll(
+            `.message-container[data-turn-id="a-${clientRequestId}"]`
+        );
+        expect(currentAnswerTurns).toHaveLength(1);
+        expect(currentAnswerTurns[0].querySelector('.chat-message-text').dataset.originalText).toBe(
+            'Current answer'
+        );
+    });
+
+    test('replaces a history projection when live delivery has the same stable turn id', () => {
+        jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+        __testOnly_appendMessage(
+            'Von',
+            'Persisted answer',
+            'a-stable-request',
+            false,
+            true,
+            '2026-09-02T12:28:38Z'
+        );
+        __testOnly_appendMessage(
+            'Von',
+            'Live answer',
+            'a-stable-request',
+            false,
+            false,
+            '2026-09-02T12:28:38Z'
+        );
+
+        const matchingTurns = document.querySelectorAll(
+            '.message-container[data-turn-id="a-stable-request"]'
+        );
+        expect(matchingTurns).toHaveLength(1);
+        expect(matchingTurns[0].querySelector('.chat-message-text').dataset.originalText).toBe(
+            'Live answer'
+        );
+        expect(matchingTurns[0].textContent).not.toContain('(history)');
+    });
+
     test('shows concise critic review from completed thinking card on demand', async () => {
         Object.defineProperty(navigator, 'clipboard', {
             configurable: true,

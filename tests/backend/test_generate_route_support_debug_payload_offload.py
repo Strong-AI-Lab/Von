@@ -103,8 +103,50 @@ def test_persist_generate_turn_messages_offloads_tool_message_content(
         stored_tool_message["content"]["schema_version"] == "debug_payload_blob_ref.v1"
     )
     assert stored_tool_message["content"]["field_path"] == "content"
-    assert captured_messages[1] == {"role": "assistant", "content": "answer"}
+    assert captured_messages[1] == {
+        "role": "assistant",
+        "content": "answer",
+        "turn_id": "a-req-tool-offload",
+    }
     assert updated_context == []
+
+
+def test_persist_generate_turn_messages_uses_request_bound_turn_ids() -> None:
+    captured_messages: list[dict[str, Any]] = []
+
+    _persist_generate_turn_messages(
+        history_user_id="#V#michael_witbrock",
+        user_message_persisted_early=False,
+        prompt_text="prompt",
+        user_concept_id="#V#michael_witbrock",
+        session_id="session-stable-turn-ids",
+        tool_messages=[],
+        response_text="answer",
+        llm_debug_info={"request_id": "req-stable-turn-ids"},
+        user_namespace="#V#michael@org",
+        org_concept_id="#V#org",
+        role_in_org=None,
+        current_context=[],
+        truncate_large_tool_results_fn=lambda messages, **_kwargs: messages,
+        add_chat_history_message_fn=lambda **kwargs: captured_messages.append(
+            dict(kwargs["message"])
+        ),
+        limit_context_size_fn=lambda messages, **_kwargs: list(messages),
+    )
+
+    assert captured_messages == [
+        {
+            "role": "user",
+            "content": "prompt",
+            "author_user_id": "#V#michael_witbrock",
+            "turn_id": "u-req-stable-turn-ids",
+        },
+        {
+            "role": "assistant",
+            "content": "answer",
+            "turn_id": "a-req-stable-turn-ids",
+        },
+    ]
 
 
 def test_persist_generate_assistant_opening_does_not_write_a_synthetic_user_message():

@@ -384,14 +384,17 @@ def _persist_generate_turn_messages(
     if history_user_id:
         if persist_user_message and not user_message_persisted_early:
             with _maybe_span(operation_name="persist_user_message"):
+                user_message = {
+                    "role": "user",
+                    "content": prompt_text,
+                    "author_user_id": user_concept_id,
+                }
+                if request_id:
+                    user_message["turn_id"] = f"u-{request_id}"
                 add_chat_history_message_fn(
                     user_id=history_user_id,
                     session_id=session_id,
-                    message={
-                        "role": "user",
-                        "content": prompt_text,
-                        "author_user_id": user_concept_id,
-                    },
+                    message=user_message,
                     namespace=user_namespace,
                     organisation_concept_id=org_concept_id,
                     role_in_org=role_in_org,
@@ -414,18 +417,21 @@ def _persist_generate_turn_messages(
         if callable(refresh_llm_debug_timing_fn):
             refresh_llm_debug_timing_fn(llm_debug_payload)
         with _maybe_span(operation_name="persist_assistant_message"):
+            assistant_message = {
+                "role": "assistant",
+                "content": response_text,
+                **(
+                    dict(assistant_message_metadata)
+                    if isinstance(assistant_message_metadata, Mapping)
+                    else {}
+                ),
+            }
+            if request_id:
+                assistant_message["turn_id"] = f"a-{request_id}"
             add_chat_history_message_fn(
                 user_id=history_user_id,
                 session_id=session_id,
-                message={
-                    "role": "assistant",
-                    "content": response_text,
-                    **(
-                        dict(assistant_message_metadata)
-                        if isinstance(assistant_message_metadata, Mapping)
-                        else {}
-                    ),
-                },
+                message=assistant_message,
                 llm_debug_data=llm_debug_payload,
                 namespace=user_namespace,
                 organisation_concept_id=org_concept_id,

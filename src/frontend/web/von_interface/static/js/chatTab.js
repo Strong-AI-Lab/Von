@@ -29409,6 +29409,55 @@ function selectRecentChatPair(historyMessages) {
     return eligible.slice(lastUserIndex);
 }
 
+function normaliseChatTurnId(value) {
+    return (typeof value === 'string' && value.trim()) ? value.trim() : null;
+}
+
+function buildChatRequestTurnId(role, requestId) {
+    const normalisedRequestId = normaliseChatTurnId(requestId);
+    if (!normalisedRequestId) {
+        return null;
+    }
+    return `${role === 'assistant' ? 'a' : 'u'}-${normalisedRequestId}`;
+}
+
+function restoreLiveUserTurnAfterHistoryHydration(historyMessages) {
+    const request = getLiveChatRequestForSession(activeChatSessionId);
+    if (
+        !request
+        || !isRequestInActiveChatSession(request)
+        || request.userTurnShouldRender !== true
+    ) {
+        return false;
+    }
+
+    const userTurnId = normaliseChatTurnId(request.userTurnId)
+        || buildChatRequestTurnId('user', request.clientRequestId);
+    const promptText = (typeof request.promptText === 'string' && request.promptText)
+        ? request.promptText
+        : (typeof request.promptRaw === 'string' ? request.promptRaw.trim() : '');
+    if (!userTurnId || !promptText) {
+        return false;
+    }
+
+    const canonicalTurnPresent = historyMessages.some((message) => (
+        normaliseChatTurnId(message?.turn_id) === userTurnId
+    ));
+    if (canonicalTurnPresent) {
+        return false;
+    }
+
+    appendMessage(
+        'User',
+        promptText,
+        userTurnId,
+        false,
+        false,
+        request.userTurnTimestamp || null
+    );
+    return true;
+}
+
 function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     const {
         scrollToBottom = true,
@@ -29509,6 +29558,13 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     // their user-visible late-result cards after transcript rehydration, which
     // clears the scrollable field after accepting the carrier snapshot.
     _renderLateWorkflowOutcomesForActiveSession();
+
+    // A history request may have started before the active prompt was sent and
+    // finish afterwards. Keep the optimistic user turn as an explicit
+    // session-bound overlay until canonical history contains its stable ID.
+    // The active Thinking card is restored in the animation-frame callback
+    // below, so this preserves the visible user -> Thinking ordering.
+    restoreLiveUserTurnAfterHistoryHydration(historyMessages);
 
     // JVNAUTOSCI-2128: rehydrate the per-conversation ArrowUp recall buffer
     // from history so the most recent user prompt is recallable after a
@@ -37016,6 +37072,12 @@ async function handleSendPrompt(options = {}) {
     )
         ? options.enqueueSubmissionId.trim()
         : createClientRequestId();
+    const userTurnId = buildChatRequestTurnId('user', clientRequestId);
+    const assistantTurnId = buildChatRequestTurnId('assistant', clientRequestId);
+    const userTurnShouldRender = Boolean(
+        !assistantOpening && !observeServerDispatch && promptText
+    );
+    const userTurnTimestamp = userTurnShouldRender ? new Date().toISOString() : null;
     const executionContextBinding = synchroniseLlmExecutionContext();
     const explicitFileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
         options?.fileCopyConceptId
@@ -37046,6 +37108,11 @@ async function handleSendPrompt(options = {}) {
         sessionKey: getChatRequestSessionKey(targetSessionId),
         sessionName: targetSessionName,
         promptRaw,
+        promptText,
+        userTurnId,
+        assistantTurnId,
+        userTurnShouldRender,
+        userTurnTimestamp,
         turnKind,
         initiationId,
         promptQueueRecordId,
@@ -37161,13 +37228,9 @@ async function handleSendPrompt(options = {}) {
         syncActiveChatSessionThinkingState();
     }
 
-    // Create turn IDs for user and assistant
-    const userTurnId = `u-${Date.now()}`;
-    const assistantTurnId = `a-${Date.now()}`;
-
     // Add user message to chat with turnId
-    if (isRequestVisible() && !assistantOpening && !observeServerDispatch && promptText) {
-        appendMessage('User', promptText, userTurnId);
+    if (isRequestVisible() && userTurnShouldRender) {
+        appendMessage('User', promptText, userTurnId, false, false, userTurnTimestamp);
         // Fire-and-forget annotate user turn (do not await) - only if toggle is enabled
         const annotationToggle = document.getElementById('annotationToggle');
         if (annotationToggle && annotationToggle.checked) {
@@ -37780,6 +37843,23 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
     const externalActor = (
         options.externalActor && typeof options.externalActor === 'object'
     ) ? options.externalActor : null;
+    const normalisedTurnId = normaliseChatTurnId(turnId);
+    if (normalisedTurnId) {
+        const matchingContainers = Array.from(
+            scrollableField.querySelectorAll('.message-container[data-turn-id]')
+        ).filter((container) => container.dataset.turnId === normalisedTurnId);
+        if (matchingContainers.length > 0) {
+            if (isHistory) {
+                return matchingContainers[0];
+            }
+            matchingContainers.forEach((container) => container.remove());
+            for (let index = transcriptTurns.length - 1; index >= 0; index -= 1) {
+                if (transcriptTurns[index]?.turnId === normalisedTurnId) {
+                    transcriptTurns.splice(index, 1);
+                }
+            }
+        }
+    }
     const renderAsAssistant = sender === 'Von'
         || (isHistory && sender === 'assistant')
         || options.assistantMessage === true;

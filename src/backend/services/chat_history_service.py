@@ -1630,6 +1630,9 @@ def _split_history_into_segments_with_locations(
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
         }
+        turn_id = entry.get("turn_id")
+        if isinstance(turn_id, str) and turn_id.strip():
+            copied["turn_id"] = turn_id.strip()
         author_user_id = entry.get("author_user_id")
         if not isinstance(author_user_id, str) or not author_user_id.strip():
             author_user_id = None
