@@ -5,6 +5,7 @@ import {
     __testOnly_getSettingsSectionRailTargets,
     __testOnly_getVisibleSettingsSectionIds,
     __testOnly_initialiseSettingsConcernNavigation,
+    __testOnly_syncAuthenticatedUserProjection,
 } from '../../src/frontend/web/von_interface/static/js/settingsPage.js';
 
 function renderSettingsNavigationFixture() {
@@ -22,11 +23,9 @@ function renderSettingsNavigationFixture() {
             <nav id="settingsSectionRail"></nav>
 
             <section id="current-user-settings" data-settings-concern="identity">
-                <h2>Current User Configuration</h2>
+                <h2>Signed-in Identity</h2>
                 <div id="authenticationStatus"><button type="button">Login</button></div>
-                <select id="currentUserSelect">
-                    <option value="">Loading people...</option>
-                </select>
+                <div id="currentUserIdentity">Not signed in</div>
             </section>
             <section id="current-organisation-settings" data-settings-concern="identity">
                 <h2>Current Organisation Configuration</h2>
@@ -105,9 +104,9 @@ describe('settings concern navigation', () => {
         ]);
         const summary = document.getElementById('settingsConcernSummary');
         expect(summary.dataset.guidanceSource).toBe('temporary-placeholder');
-        expect(summary.textContent).toContain('Choose the current user for this browser');
+        expect(summary.textContent).toContain('Sign in to establish your identity');
         expect(summary.textContent).toContain('Suggested next step');
-        expect(summary.querySelector('[data-settings-guidance-target]')?.textContent).toBe('Choose current user');
+        expect(summary.querySelector('[data-settings-guidance-target]')?.textContent).toBe('Open sign-in controls');
         expect(__testOnly_getSettingsSectionRailTargets('identity')).toEqual([
             'current-user-settings',
             'current-organisation-settings',
@@ -170,5 +169,26 @@ describe('settings concern navigation', () => {
             'current-organisation-settings',
         ]);
         expect(loginButton.focus).toHaveBeenCalled();
+    });
+
+    test('an unavailable auth-status read preserves inert actor and organisation mirrors', () => {
+        const user = JSON.stringify({ concept_id: '#V#signed_in_user', name: 'Signed In User' });
+        const organisation = JSON.stringify({ concept_id: '#V#selected_org', name: 'Selected Org' });
+        localStorage.setItem('von_current_user', user);
+        sessionStorage.setItem('von_current_user', user);
+        localStorage.setItem('von_current_org', organisation);
+        sessionStorage.setItem('von_current_org', organisation);
+        sessionStorage.setItem('current_user_namespace', '#V#signed_in_user@selected_org');
+
+        expect(__testOnly_syncAuthenticatedUserProjection({
+            status_unavailable: true,
+            error_message: 'Authentication status failed (503)',
+        })).toBeNull();
+
+        expect(localStorage.getItem('von_current_user')).toBe(user);
+        expect(sessionStorage.getItem('von_current_user')).toBe(user);
+        expect(localStorage.getItem('von_current_org')).toBe(organisation);
+        expect(sessionStorage.getItem('von_current_org')).toBe(organisation);
+        expect(sessionStorage.getItem('current_user_namespace')).toBe('#V#signed_in_user@selected_org');
     });
 });

@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 23 August 2026
+- **Last reviewed:** 2 September 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -128,12 +128,21 @@ if not user_concept_id:
     # RAG tools will return "namespace_required" error
 ```
 
-**Unauthenticated User Experience**:
-- ✅ Can still use chat interface (no RAG access)
-- ✅ Agent is **informed** about authentication status
-- ✅ Agent explains RAG tools require login
-- ✅ No access to user-scoped data (RAG, sessions, history)
-- ✅ Clear error messages guide user to log in
+**Unauthenticated browser experience**:
+- The main Von page is replaced by a sign-in gate.
+- Chat, search, Messages, Settings, and actor-scoped background work are not
+  initialised until the server session reports both authentication and a
+  resolved Von user concept.
+- Browser storage is only a compatibility projection of the login-bound actor;
+  it cannot select or replace that actor.
+- Authentication-status transport failures leave the application fail-closed
+  and offer retry without treating an unknown result as logout or erasing the
+  last actor-bound organisation preference.
+- User-scoped Settings profile and recommendation-review routes require a
+  matching authenticated session actor (or the existing explicit privileged
+  role); legacy endpoints that enumerated or fabricated users are absent.
+- Explicitly public, read-only API or knowledge surfaces may remain available
+  separately; the home gate is not a substitute for endpoint authorisation.
 
 **Important limitation**:
 
@@ -632,6 +641,15 @@ be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-09-02**: Documented the login-gated main browser experience
+  - Made the authenticated server session authoritative for the Settings user
+    identity instead of a browser-selected list
+  - Recorded that actor-scoped home modules do not initialise while signed out
+  - Made user-scoped recommendation routes fail closed and removed legacy
+    enumerated or fabricated-user endpoints
+  - Distinguished an unavailable authentication-status read from confirmed
+    logout, retaining inert browser scope mirrors while the gate offers retry
+  - Preserved organisation selection as a separate actor-bound scope choice
 - **2026-08-22**: Documented model-selectable governed creation scope and
   independent publication-scope controls
   - Kept omitted ordinary-turn creation actor-private while allowing explicit

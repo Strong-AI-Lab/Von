@@ -2,7 +2,6 @@ import {
     __testOnly_applyStoredSelection,
     __testOnly_buildPersistedLlmSelections,
     __testOnly_buildServerDefaultLlmPayload,
-    __testOnly_buildStoredUserContextFromOption,
     __testOnly_formatGmailOAuthStoredStatus,
     __testOnly_formatServerDefaultSummary,
     __testOnly_formatRagSummaryForSettings,
@@ -20,6 +19,7 @@ import {
     __testOnly_resolvePersistedActiveLlm,
     __testOnly_renderRuntimeModelSummaries,
     __testOnly_setModelScopeState,
+    __testOnly_syncAuthenticatedUserProjection,
     __testOnly_syncInitialScopedSelections,
     __testOnly_setupInternalMcpCapAutoSave,
 } from '../settingsPage.js';
@@ -79,6 +79,77 @@ describe('settingsPage RAG status summary', () => {
         expect(sessionStorage.getItem('current_user_namespace')).toBe(
             '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
         );
+    });
+
+    test('authenticated status replaces a stale user cache and clears its organisation scope', () => {
+        const staleUser = JSON.stringify({ concept_id: '#V#stale_user', name: 'Stale User' });
+        const staleOrg = JSON.stringify({ concept_id: '#V#stale_org', name: 'Stale Org' });
+        sessionStorage.setItem('von_current_user', staleUser);
+        localStorage.setItem('von_current_user', staleUser);
+        sessionStorage.setItem('von_current_org', staleOrg);
+        localStorage.setItem('von_current_org', staleOrg);
+        sessionStorage.setItem('current_user_namespace', '#V#stale_user@stale_org');
+        localStorage.setItem('current_user_namespace', '#V#stale_user@stale_org');
+
+        expect(__testOnly_syncAuthenticatedUserProjection({
+            authenticated: true,
+            user_concept_id: '#V#authenticated_user',
+            name: 'Authenticated User',
+            email: 'authenticated@example.org',
+        })).toEqual({
+            id: null,
+            concept_id: '#V#authenticated_user',
+            name: 'Authenticated User',
+        });
+
+        expect(JSON.parse(sessionStorage.getItem('von_current_user'))).toMatchObject({
+            concept_id: '#V#authenticated_user',
+            name: 'Authenticated User',
+        });
+        expect(JSON.parse(localStorage.getItem('von_current_user'))).toMatchObject({
+            concept_id: '#V#authenticated_user',
+        });
+        expect(sessionStorage.getItem('von_current_org')).toBeNull();
+        expect(localStorage.getItem('von_current_org')).toBeNull();
+        expect(sessionStorage.getItem('current_user_namespace')).toBeNull();
+        expect(localStorage.getItem('current_user_namespace')).toBeNull();
+    });
+
+    test('signed-out auth status clears user, organisation, and namespace mirrors', () => {
+        for (const storage of [sessionStorage, localStorage]) {
+            storage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#user' }));
+            storage.setItem('von_current_org', JSON.stringify({ concept_id: '#V#org' }));
+            storage.setItem('von_org_context', JSON.stringify({ concept_id: '#V#org' }));
+            storage.setItem('current_user_namespace', '#V#user@org');
+            storage.setItem('von_namespace', '#V#user@org');
+        }
+
+        expect(__testOnly_syncAuthenticatedUserProjection({ authenticated: false })).toBeNull();
+
+        for (const storage of [sessionStorage, localStorage]) {
+            expect(storage.getItem('von_current_user')).toBeNull();
+            expect(storage.getItem('von_current_org')).toBeNull();
+            expect(storage.getItem('von_org_context')).toBeNull();
+            expect(storage.getItem('current_user_namespace')).toBeNull();
+            expect(storage.getItem('von_namespace')).toBeNull();
+        }
+    });
+
+    test('refreshing the same authenticated actor preserves organisation selection', () => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#user' }));
+        sessionStorage.setItem('von_current_org', JSON.stringify({ concept_id: '#V#org' }));
+        sessionStorage.setItem('current_user_namespace', '#V#user@org');
+
+        __testOnly_syncAuthenticatedUserProjection({
+            authenticated: true,
+            user_concept_id: '#V#user',
+            name: 'Current User',
+        });
+
+        expect(JSON.parse(sessionStorage.getItem('von_current_org'))).toMatchObject({
+            concept_id: '#V#org',
+        });
+        expect(sessionStorage.getItem('current_user_namespace')).toBe('#V#user@org');
     });
 
     test('formats KA + Conversation summary when chat counts available', () => {
@@ -371,11 +442,14 @@ describe('settingsPage RAG status summary', () => {
         });
     });
 
-    test('initial scoped selection sync backfills storage and composite namespace from selected user and org', async () => {
+    test('initial scoped selection sync uses the login-derived user and selected organisation', async () => {
+        const authenticatedUser = {
+            concept_id: '#V#michael_witbrock',
+            name: 'Michael Witbrock',
+        };
+        localStorage.setItem('von_current_user', JSON.stringify(authenticatedUser));
+        sessionStorage.setItem('von_current_user', JSON.stringify(authenticatedUser));
         document.body.innerHTML = `
-            <select id="currentUserSelect">
-                <option data-id="user-1" data-concept-id="#V#michael_witbrock" selected>Michael Witbrock</option>
-            </select>
             <select id="currentOrganisationSelect">
                 <option value="">Personal</option>
                 <option data-id="org-1" data-concept-id="#V#university_of_auckland_strong_ai_lab" selected>
@@ -420,10 +494,13 @@ describe('settingsPage RAG status summary', () => {
     });
 
     test('initial scoped selection sync reads the visible Phase 2 org selector when the legacy org select is absent', async () => {
+        const authenticatedUser = {
+            concept_id: '#V#michael_witbrock',
+            name: 'Michael Witbrock',
+        };
+        localStorage.setItem('von_current_user', JSON.stringify(authenticatedUser));
+        sessionStorage.setItem('von_current_user', JSON.stringify(authenticatedUser));
         document.body.innerHTML = `
-            <select id="currentUserSelect">
-                <option data-id="user-1" data-concept-id="#V#michael_witbrock" selected>Michael Witbrock</option>
-            </select>
             <select id="orgSelect">
                 <option value="">Personal (No Org)</option>
                 <option value="#V#university_of_auckland_strong_ai_lab" data-role="admin" selected>
@@ -460,17 +537,6 @@ describe('settingsPage RAG status summary', () => {
             'University Of Auckland Strong Ai Lab',
         );
         expect(refreshRagStatus).toHaveBeenCalled();
-    });
-
-    test('placeholder user option is treated as no selection rather than stored user context', () => {
-        document.body.innerHTML = `
-            <select id="currentUserSelect">
-                <option value="" selected>-- No user selected --</option>
-            </select>
-        `;
-
-        const option = document.querySelector('#currentUserSelect option');
-        expect(__testOnly_buildStoredUserContextFromOption(option)).toBeNull();
     });
 
     test('internal MCP caps default and clamp to the UI/backend contract', () => {
@@ -600,29 +666,29 @@ describe('settingsPage RAG status summary', () => {
         expect(saveFn).toHaveBeenCalledTimes(1);
     });
 
-    test('stored browser-test user is re-injected and selected when the dropdown is rebuilt without it', () => {
+    test('stored organisation is re-injected and selected when the dropdown is rebuilt without it', () => {
         document.body.innerHTML = `
-            <select id="currentUserSelect">
-                <option value="" selected>-- No user selected --</option>
-                <option data-id="user-1" data-concept-id="#V#michael_witbrock">Michael Witbrock</option>
+            <select id="currentOrganisationSelect">
+                <option value="" selected>Personal</option>
+                <option data-id="org-1" data-concept-id="#V#older_org">Older Org</option>
             </select>
         `;
 
-        const storedUser = {
+        const storedOrganisation = {
             id: null,
-            concept_id: '#V#zhan_von_witbrock',
-            name: 'Zhan von Witbrock',
+            concept_id: '#V#university_of_auckland_strong_ai_lab',
+            name: 'University Of Auckland Strong Ai Lab',
         };
 
-        const applied = __testOnly_applyStoredSelection('currentUserSelect', storedUser);
-        const select = document.getElementById('currentUserSelect');
+        const applied = __testOnly_applyStoredSelection('currentOrganisationSelect', storedOrganisation);
+        const select = document.getElementById('currentOrganisationSelect');
 
-        expect(applied).toEqual(storedUser);
-        expect(select.selectedOptions[0].dataset.conceptId).toBe('#V#zhan_von_witbrock');
-        expect([...select.options].map((option) => option.textContent)).toContain('Zhan von Witbrock');
+        expect(applied).toEqual(storedOrganisation);
+        expect(select.selectedOptions[0].dataset.conceptId).toBe('#V#university_of_auckland_strong_ai_lab');
+        expect([...select.options].map((option) => option.textContent)).toContain('University Of Auckland Strong Ai Lab');
     });
 
-    test('initial scoped selection sync preserves stored browser-test user when the visible select is still on the placeholder option', async () => {
+    test('initial scoped selection sync preserves the login-derived browser-test user without a user selector', async () => {
         localStorage.setItem(
             'von_current_user',
             JSON.stringify({ concept_id: '#V#zhan_von_witbrock', name: 'Zhan von Witbrock' }),
@@ -632,9 +698,6 @@ describe('settingsPage RAG status summary', () => {
             JSON.stringify({ concept_id: '#V#zhan_von_witbrock', name: 'Zhan von Witbrock' }),
         );
         document.body.innerHTML = `
-            <select id="currentUserSelect">
-                <option value="" selected>-- No user selected --</option>
-            </select>
             <select id="currentOrganisationSelect">
                 <option value="">Personal</option>
                 <option data-id="org-1" data-concept-id="#V#university_of_auckland_strong_ai_lab" selected>

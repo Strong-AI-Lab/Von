@@ -477,7 +477,11 @@ describe('settings model scope and workflow pool controls', () => {
         });
     });
 
-    test('actor transition commits server user and organisation before scoped GET', async () => {
+    test('organisation transition commits the authenticated server user and organisation before scoped GET', async () => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({
+            concept_id: '#V#new-user',
+            name: 'New User',
+        }));
         const order = [];
         let releaseUserCommit;
         const userCommit = new Promise((resolve) => { releaseUserCommit = resolve; });
@@ -497,8 +501,7 @@ describe('settings model scope and workflow pool controls', () => {
         });
 
         const transition = __testOnly_queueActorContextTransition({
-            snapshot: { user: { concept_id: '#V#old-user' }, organisation: null },
-            requestedUser: { concept_id: '#V#new-user', name: 'New User' },
+            snapshot: { user: { concept_id: '#V#new-user' }, organisation: null },
             requestedOrganisation: { concept_id: '#V#new-org', name: 'New Org' },
             setUserConceptFn,
             switchOrganisationFn,
@@ -533,10 +536,8 @@ describe('settings model scope and workflow pool controls', () => {
             snapshot: {
                 user: { concept_id: '#V#old-user' },
                 organisation: { concept_id: '#V#old-org' },
-                userSelectedIndex: -1,
                 organisationSelectedIndex: -1,
             },
-            requestedUser: { concept_id: '#V#new-user' },
             requestedOrganisation: { concept_id: '#V#new-org' },
             setUserConceptFn: jest.fn(async () => ({ namespace: '#V#new-user' })),
             switchOrganisationFn: jest.fn(async () => { throw new Error('organisation commit failed'); }),
@@ -554,10 +555,15 @@ describe('settings model scope and workflow pool controls', () => {
     });
 
     test('failed initial actor commit restores committed context and leaves Save disabled', async () => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({
+            concept_id: '#V#restored-user',
+            name: 'Restored User',
+        }));
+        localStorage.setItem('von_current_user', JSON.stringify({
+            concept_id: '#V#restored-user',
+            name: 'Restored User',
+        }));
         document.body.insertAdjacentHTML('beforeend', `
-            <select id="currentUserSelect">
-                <option data-concept-id="#V#restored-user" selected>Restored User</option>
-            </select>
             <select id="currentOrganisationSelect">
                 <option data-concept-id="#V#restored-org" selected>Restored Org</option>
             </select>

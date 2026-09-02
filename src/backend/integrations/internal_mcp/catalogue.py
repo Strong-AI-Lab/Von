@@ -1049,7 +1049,7 @@ def _get_context(**kwargs):
         "language": get_preferred_language(),
         "fetch_counts_on_load": get_setting("fetch_counts_on_load"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "note": "User and organisation context managed client-side (localStorage) per JVNAUTOSCI-628",
+        "note": "Browser user identity is derived from the authenticated server session; organisation selection may remain window-scoped.",
     }
 
     # Try to get user info if available (deprecated, but kept for backward compatibility)
@@ -39022,11 +39022,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                     "note": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="get_context output: context info including user, org, llm_model (string), llm_provider, language. User/org managed client-side per JVNAUTOSCI-628.",
+                description="get_context output: server-visible context including user, organisation, llm_model (string), llm_provider, and language. Browser user identity is login-derived; organisation selection may be window-scoped.",
             ),
             category="read",
             ordinary_turn_excluded_reason="server_runtime_context",
-            description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
+            description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. Browser user identity is derived from the authenticated session; organisation selection may be window-scoped and unavailable here. Use when you need to know what model/language is configured.",
         ),
         MethodDefinition(
             name="get_client_capabilities",

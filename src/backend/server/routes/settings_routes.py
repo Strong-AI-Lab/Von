@@ -5,10 +5,7 @@ import time
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app, send_file, session
 import tempfile
-from ...vontology.utils_vontology import (
-    get_concept_notes,
-    EXAMPLE_USER_CONCEPT_ID,
-)  # relative import
+from ...vontology.utils_vontology import get_concept_notes  # relative import
 from typing import Optional, Tuple, Dict, Any, Mapping
 from werkzeug.datastructures import FileStorage
 from ...services.settings_service import (
@@ -384,19 +381,14 @@ def _authorise_active_llm_scope(
 
 
 def _can_access_user_scoped_profile(user_concept_id: str) -> bool:
-    """Allow the current user (or admin/owner) to access a user-scoped profile.
-
-    When no session user is established yet, remain permissive so the existing
-    settings flow can bootstrap the selected user context before the profile is
-    first loaded.
-    """
+    """Allow only the authenticated user (or admin/owner) to access a profile."""
 
     requested_id = str(user_concept_id or "").strip()
     if not requested_id:
         return False
     session_user_id = str(session.get("user_concept_id") or "").strip()
     if not session_user_id:
-        return True
+        return False
     return session_user_id == requested_id or _is_admin_or_owner_session()
 
 
@@ -1033,9 +1025,10 @@ def _get_entity_with_fallback(
 
 
 def get_all_settings_data():
-    """Get all settings (user/org/language now excluded - browser-local).
+    """Get settings that are independent of login-derived actor identity.
 
-    Uses batch DB fetch to reduce ~10 individual queries to 1.
+    Organisation and language remain separate actor preferences. Uses a batch
+    DB fetch to reduce ~10 individual queries to 1.
     """
     try:
         # Batch fetch all DB-stored settings in one query
@@ -2829,80 +2822,6 @@ def verify_ollama_host():
         )
 
 
-@settings_bp.route("/people", methods=["GET"])
-def get_available_people():
-    """API endpoint to retrieve all available person entities for selection."""
-    try:
-        if ConceptsRepository.collection() is None:
-            current_app.logger.warning(
-                "People selector unavailable: concepts collection could not be reached."
-            )
-            response = _jsonify_no_store(
-                {
-                    "error": "People are temporarily unavailable. Please retry shortly.",
-                    "retryable": True,
-                    "reason": "concepts_collection_unavailable",
-                    "retry_after_seconds": 5,
-                },
-                503,
-            )
-            response.headers["Retry-After"] = "5"
-            return response
-
-        # Get all Von user entities by using the specific Von user concept ID
-        concepts, total_count = list_concepts(
-            concept_id="#V#von_user",  # Use the specific Von user concept ID
-            sort_by="name",
-            sort_order=1,  # Ascending
-            per_page=100,  # Get a reasonable number of users
-        )
-
-        # Filter and format for dropdown - use simple name extraction without per-concept DB calls
-        people_options = []
-        for concept in concepts:
-            # Use get_concept_display_name_with_names_fallback directly on existing data
-            # without expensive enrichment (avoids O(n) DB calls)
-            from ...vontology.utils_vontology import (
-                get_concept_display_name_with_names_fallback,
-            )
-
-            display_name = get_concept_display_name_with_names_fallback(concept)
-            people_options.append(
-                {
-                    "id": concept.get("_id"),
-                    "concept_id": concept.get("concept_id"),
-                    "name": display_name or "Unknown",
-                    "notes": (get_concept_notes(concept) or "")[
-                        :100
-                    ],  # Truncate notes for display
-                    "concept_type": concept.get("direct_concept_name", "Person"),
-                    "system_tags": concept.get(
-                        "system_tags", []
-                    ),  # Include system_tags for filtering
-                }
-            )
-
-        return (
-            jsonify(
-                {
-                    "people": people_options,
-                    "total_count": len(people_options),
-                    "available": True,
-                }
-            ),
-            200,
-        )
-
-    except Exception as e:
-        current_app.logger.error(
-            f"Error retrieving people for selection: {e}", exc_info=True
-        )
-        return (
-            jsonify({"error": "An unexpected error occurred while retrieving people."}),
-            500,
-        )
-
-
 @settings_bp.route("/organisations", methods=["GET"])
 def get_available_organisations():
     """API endpoint to retrieve all available organisation entities for selection."""
@@ -3739,46 +3658,6 @@ def _serialize_document(doc):
         return doc.isoformat()
     else:
         return doc
-
-
-@settings_bp.route("/user/current", methods=["GET"])
-def get_current_user():
-    """Return current user / organisation context placeholder values.
-
-    Post JVNAUTOSCI-628: Server-side user/org storage removed - client localStorage
-    is now sole authority. This endpoint returns placeholder values for backward
-    compatibility with any remaining frontend code.
-    """
-    try:
-        user_id = session.get("user_concept_id", EXAMPLE_USER_CONCEPT_ID)
-        user_name = session.get("user_name", "Default User")
-        org_id = session.get("organisation_concept_id", "#V#example_organization")
-        org_name = session.get("organisation_name", "Example Organization")
-
-        return (
-            jsonify(
-                {
-                    "user_id": user_id,
-                    "username": user_name,
-                    "organization_id": org_id,
-                    "organization_name": org_name,
-                }
-            ),
-            200,
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error getting current user: {e}", exc_info=True)
-        return (
-            jsonify(
-                {
-                    "user_id": EXAMPLE_USER_CONCEPT_ID,
-                    "username": "Default User",
-                    "organization_id": "#V#example_organization",
-                    "organization_name": "Example Organization",
-                }
-            ),
-            200,
-        )
 
 
 @settings_bp.route("/metrics/deprecations", methods=["GET"])

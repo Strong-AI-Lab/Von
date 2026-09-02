@@ -2860,7 +2860,7 @@
         },
         {
             "name": "get_context",
-            "description": "Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
+            "description": "Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. Browser user identity is derived from the authenticated session; organisation selection may be window-scoped and unavailable here. Use when you need to know what model/language is configured.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},

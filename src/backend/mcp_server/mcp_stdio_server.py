@@ -1307,7 +1307,7 @@ async def _handle_get_context(arguments: dict[str, Any]) -> list[TextContent]:
         "language_preference": get_preferred_language(),
         "fetch_counts_on_load": get_setting("fetch_counts_on_load"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "note": "User and organisation context managed client-side (localStorage) per JVNAUTOSCI-628",
+        "note": "Standalone stdio has no browser login session; any explicit user or organisation context is caller-scoped.",
     }
     return [_json_text(context)]
 

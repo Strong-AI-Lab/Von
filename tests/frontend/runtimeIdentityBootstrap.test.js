@@ -11,12 +11,12 @@ describe('runtimeIdentityBootstrap', () => {
         });
     });
 
-    test('prefers settings identity and falls back to auth identity when settings is sparse', () => {
+    test('derives user identity only from authenticated status', () => {
         const { resolveBrowserBootstrapUserContext } = require(modulePath);
 
         expect(resolveBrowserBootstrapUserContext({
-            settings: {},
             authStatus: {
+                authenticated: true,
                 user_concept_id: '#V#codex_browser_fixture',
                 name: 'Codex Browser Test'
             },
@@ -25,6 +25,43 @@ describe('runtimeIdentityBootstrap', () => {
             id: null,
             concept_id: '#V#codex_browser_fixture',
             name: 'Codex Browser Test'
+        });
+    });
+
+    test('does not recover a signed-out identity from settings or browser storage', () => {
+        const { resolveBrowserBootstrapUserContext } = require(modulePath);
+
+        expect(resolveBrowserBootstrapUserContext({
+            settings: {
+                current_user_person_concept_id: '#V#settings_actor',
+                current_user_person_name: 'Settings Actor',
+            },
+            authStatus: { authenticated: false },
+            storedUser: {
+                concept_id: '#V#stored_actor',
+                name: 'Stored Actor',
+            },
+        })).toBeNull();
+    });
+
+    test('overwrites stale actor details with the canonical authenticated identity', () => {
+        const { resolveBrowserBootstrapUserContext } = require(modulePath);
+
+        expect(resolveBrowserBootstrapUserContext({
+            authStatus: {
+                authenticated: true,
+                user_concept_id: '#V#authenticated_actor',
+                email: 'actor@example.org',
+            },
+            storedUser: {
+                id: 'stale-db-id',
+                concept_id: '#V#stale_actor',
+                name: 'Stale Actor',
+            },
+        })).toEqual({
+            id: null,
+            concept_id: '#V#authenticated_actor',
+            name: 'actor@example.org',
         });
     });
 

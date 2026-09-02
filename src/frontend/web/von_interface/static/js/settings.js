@@ -154,11 +154,6 @@ export function renderOpenRouterModelOptions(selectElementId, models = [], selec
   renderPremiumModelSelect(select, 'openrouter', models, selectedModel);
 }
 
-export async function loadAvailablePeople() {
-  const { data } = await getJsonDetailed('/api/settings/people');
-  return data;
-}
-
 export async function loadAvailableOrganisations() {
   const { data } = await getJsonDetailed('/api/settings/organisations');
   return data;
@@ -368,59 +363,6 @@ export async function populateOpenRouterModelDropdown(selectElementId, selectedM
       error: err,
       fallbackMessage: 'OpenRouter models are temporarily unavailable.',
       retryAction: () => populateOpenRouterModelDropdown(selectElementId, selectedModel)
-    });
-  }
-}
-
-export async function populatePeopleDropdown(selectElementId, selectedPersonId = null) {
-  const select = document.getElementById(selectElementId);
-  if (!select) return;
-
-  try {
-    const data = await loadAvailablePeople();
-    select.innerHTML = '<option value="">-- No user selected --</option>';
-
-    if (data.people?.length > 0) {
-      const realPeople = data.people.filter(person => 
-        !person.system_tags?.includes('demo_data')
-      );
-
-      if (realPeople.length > 0) {
-        realPeople.forEach(person => {
-          const option = document.createElement('option');
-          // Store both ids in value as JSON, and data attributes for quick access
-          const dbId = person.id || person._id || '';
-          const cid  = person.concept_id || '';
-          option.value = JSON.stringify({ id: dbId, concept_id: cid });
-          option.dataset.id = dbId;
-          option.dataset.conceptId = cid;
-          // Display name: prefer backend-provided display name.
-          option.textContent = person.name || cid || dbId;
-          select.appendChild(option);
-        });
-      } else {
-        select.innerHTML = '<option value="">No non-test people found</option>';
-      }
-    } else {
-      select.innerHTML = '<option value="">No people found</option>';
-    }
-
-    if (selectedPersonId) {
-      // Options store JSON in value; match using data attribute for DB id
-      for (const opt of select.options) {
-        if (opt.dataset && opt.dataset.id === String(selectedPersonId)) {
-          opt.selected = true;
-          break;
-        }
-      }
-    }
-    clearSelectRetryState(select);
-  } catch (err) {
-    console.error('Error populating people dropdown:', err);
-    renderRetryableSelectFailure(select, {
-      error: err,
-      fallbackMessage: 'People are temporarily unavailable.',
-      retryAction: () => populatePeopleDropdown(selectElementId, selectedPersonId)
     });
   }
 }
