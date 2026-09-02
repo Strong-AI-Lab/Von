@@ -496,6 +496,25 @@ def enforce_preserved_fields_write(payload: Dict[str, Any]):
 # REFACTORING_NOTE: Functions for 'concepts' collection will go here.
 
 
+def _normalise_concept_id_for_persistence(value: object) -> Optional[str]:
+    """Preserve exact built-in IDs; canonicalise ordinary concept IDs.
+
+    The code-concept registry is the authority for built-in predicate IDs and
+    includes established camel-case IDs such as ``#V#memberOf``.  Persisting a
+    registered built-in under a lower-cased alias would split its represented
+    identity from the ID used by runtime code.  Inputs outside that exact,
+    finite registry continue through the ordinary lower-case canonicalisation.
+    """
+
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+    from ..vontology.code_concepts_registry import is_code_concept_id
+
+    exact_id = value.strip() if isinstance(value, str) else None
+    if exact_id and is_code_concept_id(exact_id):
+        return exact_id
+    return canonicalise_vontology_concept_id(value)
+
+
 # ---------- Context helpers ----------
 def gather_descriptive_material(
     concept: Dict[str, Any],
@@ -607,9 +626,7 @@ def create_concept(
 
     if concept_id:
         try:
-            from ..utils.concept_id_utils import canonicalise_vontology_concept_id
-
-            canonical_id = canonicalise_vontology_concept_id(concept_id)
+            canonical_id = _normalise_concept_id_for_persistence(concept_id)
         except Exception:
             canonical_id = None
 
