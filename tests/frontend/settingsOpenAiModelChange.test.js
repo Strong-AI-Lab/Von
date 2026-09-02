@@ -59,7 +59,6 @@ describe('settingsPage OpenAI model change handling', () => {
             <button id="addOpenAiToWorkflowPoolButton" type="button"></button>
             <button id="addOllamaToWorkflowPoolButton" type="button"></button>
             <select id="globalModelSelect"></select>
-            <select id="currentUserSelect"></select>
             <select id="currentOrganisationSelect"></select>
             <select id="preferredLanguageSelect"></select>
             <div id="settingsStatusMessage"></div>
@@ -85,9 +84,6 @@ describe('settingsPage OpenAI model change handling', () => {
             }
             if (String(url).includes('/api/settings/ollama/hosts')) {
                 return { data: { hosts: [], active_host: null } };
-            }
-            if (String(url).includes('/api/settings/people')) {
-                return { data: [] };
             }
             if (String(url).includes('/api/settings/organisations')) {
                 return { data: [] };
@@ -162,7 +158,13 @@ describe('settingsPage OpenAI model change handling', () => {
                 return jsonResponse({ role: 'user', namespace: null });
             }
             if (target.startsWith('/von/api/auth/status')) {
-                return jsonResponse({ authenticated: false, browser_test_mode: { enabled: false } });
+                return jsonResponse({
+                    authenticated: true,
+                    email: 'settings-test-user@example.org',
+                    name: 'Settings Test User',
+                    user_concept_id: '#V#settings-test-user',
+                    browser_test_mode: { enabled: false },
+                });
             }
             if (target.startsWith('/api/workflows/capability-index/status')) {
                 return jsonResponse({ status: 'idle' });

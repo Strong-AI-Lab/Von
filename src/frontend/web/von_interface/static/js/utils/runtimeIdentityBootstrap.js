@@ -52,28 +52,29 @@ export function buildNamespaceFromConcepts(userConceptId, organisationConceptId 
 }
 
 export function resolveBrowserBootstrapUserContext({
-    settings = null,
     authStatus = null,
     storedUser = null,
 } = {}) {
-    const conceptId = trimString(
-        settings?.current_user_person_concept_id
-        || authStatus?.user_concept_id
-        || storedUser?.concept_id
-    );
-    const id = trimString(settings?.current_user_person_id || storedUser?.id) || null;
-    const name = normaliseDisplayName(
-        settings?.current_user_person_name,
-        authStatus?.name || storedUser?.name
-    );
-
-    if (!conceptId && !id) {
+    if (authStatus?.authenticated !== true) {
         return null;
     }
 
+    const conceptId = trimString(authStatus?.user_concept_id);
+    if (!conceptId) return null;
+
+    const cachedConceptId = trimString(storedUser?.concept_id);
+    const cacheMatchesAuthenticatedActor = cachedConceptId === conceptId;
+    const id = cacheMatchesAuthenticatedActor
+        ? (trimString(storedUser?.id) || null)
+        : null;
+    const name = normaliseDisplayName(
+        authStatus?.name || authStatus?.email,
+        cacheMatchesAuthenticatedActor ? storedUser?.name : null
+    );
+
     return {
         id,
-        concept_id: conceptId || null,
+        concept_id: conceptId,
         name,
     };
 }

@@ -17,7 +17,7 @@
                 <p class="settings-shell-kicker">Settings</p>
                 <h1>Set up Von for this browser</h1>
                 <p class="settings-shell-summary">Choose a concern, then use the suggested next step below to finish
-                    identity, model, and tool setup without guessing what matters next.</p>
+                    scope, model, and tool setup without guessing what matters next.</p>
             </div>
         </header>
 
@@ -40,7 +40,7 @@
         <nav id="settingsSectionRail" class="settings-section-rail" aria-label="Sections in this settings concern"></nav>
 
         <section id="current-user-settings" data-settings-concern="identity">
-            <h2>Current User Configuration</h2>
+            <h2>Signed-in Identity</h2>
 
             <!-- Authentication Status -->
             <div id="authenticationStatus">
@@ -51,12 +51,16 @@
             </div>
             <div id="browserTestModeStatus" class="settings-note mt-2" aria-live="polite"></div>
 
-            <p class="settings-note"><strong>Note:</strong> User, Organisation and Language selections are stored only
-                in this browser (localStorage) and are not saved on the server.</p>
-            <label for="currentUserSelect">Current User:</label>
-            <select id="currentUserSelect" name="current_user_person">
-                <option value="">Loading people...</option>
-            </select>
+            <p class="settings-note"><strong>Note:</strong> Your identity comes from sign-in and cannot be changed in
+                Settings. Organisation and Language selections remain browser preferences.</p>
+            <div id="currentUserIdentity" class="settings-note settings-identity-card" aria-live="polite">
+                <strong id="currentUserIdentityName">Checking signed-in identity…</strong>
+                <div id="currentUserIdentityEmailRow" hidden>Email: <span id="currentUserIdentityEmail"></span></div>
+                <div id="currentUserIdentityConceptRow" hidden>User concept:
+                    <code id="currentUserIdentityConcept"></code>
+                </div>
+                <div id="currentUserIdentityHint">Identity is verified by the server session.</div>
+            </div>
 
             <label for="preferredLanguageSelect">Preferred Language:</label>
             <select id="preferredLanguageSelect" name="preferred_language">
@@ -84,7 +88,7 @@
 
             <div class="inline-form inline-form-tight mt-8-align-center">
                 <button type="button" id="resetLocalPrefsButton" class="btn-danger"
-                    title="Clear stored user/org/language preferences for this browser">Reset Local Preferences</button>
+                    title="Clear stored organisation, language, and display preferences for this browser">Reset Local Preferences</button>
             </div>
 
             <div id="currentUserStatusMessage" class="status-message" role="alert">
@@ -958,16 +962,30 @@
     <script>
         // Check authentication status on page load
         async function checkAuthenticationStatus() {
+            let timeoutId = null;
             try {
                 console.log('Checking authentication status...');
-                const response = await fetch('/von/api/auth/status');
+                const controller = new AbortController();
+                timeoutId = window.setTimeout(() => controller.abort(), 10000);
+                const response = await fetch('/von/api/auth/status', {
+                    cache: 'no-store',
+                    signal: controller.signal,
+                });
+                if (!response.ok) {
+                    throw new Error(`Authentication status failed (${response.status})`);
+                }
                 const authStatus = await response.json();
 
                 console.log('Authentication status received:', authStatus);
                 await updateAuthenticationDisplay(authStatus);
             } catch (error) {
                 console.error('Failed to fetch authentication status:', error);
-                await updateAuthenticationDisplay({ authenticated: false });
+                await updateAuthenticationDisplay({
+                    status_unavailable: true,
+                    error_message: error?.message || 'Authentication status is unavailable.',
+                });
+            } finally {
+                if (timeoutId !== null) window.clearTimeout(timeoutId);
             }
         }
 
@@ -1139,34 +1157,10 @@
         }
 
         function syncBrowserTestSelections(payload) {
-            const user = payload && payload.user_concept_id
-                ? {
-                    concept_id: payload.user_concept_id,
-                    name: payload.name || payload.email || payload.user_concept_id,
-                    email: payload.email || null,
-                }
-                : null;
             const organisation = payload?.organisation || null;
             const namespace = payload?.namespace || null;
 
             try {
-                if (user?.concept_id) {
-                    const storedUser = {
-                        id: null,
-                        concept_id: user.concept_id,
-                        name: user.name,
-                    };
-                    const hostWindow = getSettingsHostWindow();
-                    const hostSessionStorage = hostWindow?.sessionStorage || sessionStorage;
-                    const hostLocalStorage = hostWindow?.localStorage || localStorage;
-
-                    sessionStorage.setItem('von_current_user', JSON.stringify(storedUser));
-                    localStorage.setItem('von_current_user', JSON.stringify(storedUser));
-                    hostSessionStorage.setItem('von_current_user', JSON.stringify(storedUser));
-                    hostLocalStorage.setItem('von_current_user', JSON.stringify(storedUser));
-                    upsertSelectOption('currentUserSelect', user);
-                }
-
                 if (organisation?.concept_id) {
                     const storedOrg = {
                         id: null,
@@ -1251,10 +1245,56 @@
             container.innerHTML = lines.join('');
         }
 
+        function renderCurrentUserIdentity(authStatus) {
+            const name = document.getElementById('currentUserIdentityName');
+            const email = document.getElementById('currentUserIdentityEmail');
+            const emailRow = document.getElementById('currentUserIdentityEmailRow');
+            const concept = document.getElementById('currentUserIdentityConcept');
+            const conceptRow = document.getElementById('currentUserIdentityConceptRow');
+            const hint = document.getElementById('currentUserIdentityHint');
+            if (!name || !email || !emailRow || !concept || !conceptRow || !hint) return;
+
+            const conceptId = typeof authStatus?.user_concept_id === 'string'
+                ? authStatus.user_concept_id.trim()
+                : '';
+            const isAuthenticatedActor = authStatus?.authenticated === true && !!conceptId;
+            if (!isAuthenticatedActor) {
+                const statusKnown = typeof authStatus?.authenticated === 'boolean';
+                name.textContent = !statusKnown
+                    ? 'Sign-in status unavailable'
+                    : (authStatus?.authenticated === true ? 'Signed-in identity unavailable' : 'Not signed in');
+                email.textContent = '';
+                concept.textContent = '';
+                emailRow.hidden = true;
+                conceptRow.hidden = true;
+                hint.textContent = !statusKnown
+                    ? 'Von could not verify the current session. Retry the status check; your saved scope has not been changed.'
+                    : (authStatus?.authenticated === true
+                        ? 'The authenticated session did not provide a user concept. Sign in again before using user-scoped settings.'
+                        : 'Sign in to establish the current user. Identity cannot be selected in Settings.');
+                return;
+            }
+
+            name.textContent = authStatus.name || authStatus.email || conceptId;
+            email.textContent = authStatus.email || '';
+            concept.textContent = conceptId;
+            emailRow.hidden = !authStatus.email;
+            conceptRow.hidden = false;
+            hint.textContent = 'Verified from the authenticated server session.';
+        }
+
         // Update authentication display based on status
         async function updateAuthenticationDisplay(authStatus) {
             const authContainer = document.getElementById('authenticationStatus');
             console.log('Updating authentication display. Container found:', !!authContainer, 'Status:', authStatus);
+            // Render the canonical identity and publish the status before optional
+            // footer/organisation refreshes, which may be slow or temporarily unavailable.
+            renderCurrentUserIdentity(authStatus);
+            renderBrowserTestModeStatus(authStatus);
+            try {
+                document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
+            } catch { }
+
             const browserTestMode = authStatus?.browser_test_mode || {};
             const browserTestAvailable = !!browserTestMode.available;
             const browserTestButtonLabel = authStatus?.auth_provider === 'browser_test_fixture'
@@ -1264,12 +1304,12 @@
                 ? `<button onclick="loginWithBrowserTestUser()" class="btn-secondary ml-2">${browserTestButtonLabel}</button>`
                 : '';
 
-            if (authStatus.authenticated) {
+            if (authStatus.authenticated === true) {
                 // User is logged in - show status and logout button
                 console.log('Showing authenticated state for:', authStatus.email);
                 authContainer.innerHTML = `
                     <div class="auth-status">
-                        <span class="auth-info">Logged in as: <strong>${authStatus.email}</strong></span>
+                        <span class="auth-info">Logged in as: <strong data-authenticated-email></strong></span>
                         ${authStatus.auth_provider === 'browser_test_fixture'
                             ? '<span class="settings-note ml-2">Browser test fixture active</span>'
                             : ''}
@@ -1277,8 +1317,10 @@
                         ${browserTestButtonHtml}
                     </div>
                 `;
-
-                // Do not overwrite current user selection with auth email; keep user selection independent of Gmail auth
+                const authenticatedEmail = authContainer.querySelector('[data-authenticated-email]');
+                if (authenticatedEmail) {
+                    authenticatedEmail.textContent = authStatus.email || authStatus.name || authStatus.user_concept_id || 'authenticated user';
+                }
 
                 // Immediately add authentication highlighting to footer
                 const userSegments = [...getSettingsHostDocument().querySelectorAll('.footer-segment')]
@@ -1298,20 +1340,22 @@
                 if (window.refreshOrgSelector) {
                     try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
                 }
-            } else {
+            } else if (authStatus.authenticated === false) {
                 // User is not logged in - show login button
                 console.log('Showing unauthenticated state - login button');
                 authContainer.innerHTML = `
                     <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
                     ${browserTestButtonHtml}
                 `;
+            } else {
+                authContainer.innerHTML = `
+                    <div class="auth-status" role="alert">
+                        <span class="auth-info">Sign-in status is temporarily unavailable.</span>
+                        <button onclick="checkAuthenticationStatus()" class="btn-secondary ml-2">Retry status check</button>
+                    </div>
+                `;
             }
 
-            renderBrowserTestModeStatus(authStatus);
-
-            try {
-                document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
-            } catch { }
         }
 
         function authoriseAgentGmail() {
@@ -1407,6 +1451,31 @@
             await refreshAgentGmailOauthStatus();
         }
 
+        const IDENTITY_SCOPE_STORAGE_KEYS = [
+            'von_current_user',
+            'von_current_org',
+            'von_org_context',
+            'current_user_namespace',
+            'von_namespace',
+            'von_org_switching',
+            'von_org_selection',
+        ];
+
+        function clearIdentityScopeMirrors() {
+            const storageWindows = [window];
+            const hostWindow = getSettingsHostWindow();
+            if (hostWindow && hostWindow !== window) storageWindows.push(hostWindow);
+
+            for (const storageWindow of storageWindows) {
+                for (const storageName of ['sessionStorage', 'localStorage']) {
+                    try {
+                        const storage = storageWindow[storageName];
+                        for (const key of IDENTITY_SCOPE_STORAGE_KEYS) storage.removeItem(key);
+                    } catch { }
+                }
+            }
+        }
+
         // Handle logout
         async function logoutUser() {
             try {
@@ -1417,7 +1486,7 @@
                 if (response.ok) {
                     console.log('Logout successful');
 
-                    // Do not touch stored user selection on logout; only update auth display
+                    clearIdentityScopeMirrors();
                     await updateAuthenticationDisplay({ authenticated: false });
 
                     // Immediately remove authentication highlighting from footer
@@ -1429,6 +1498,10 @@
 
                     // Also refresh the full footer to ensure consistency
                     await refreshBrowserTestHostUi();
+
+                    // Re-run the host bootstrap so the signed-out gate replaces the app.
+                    const hostWindow = getSettingsHostWindow();
+                    hostWindow.location.reload();
                 } else {
                     console.error('Logout failed:', response.statusText);
                     alert('Logout failed. Please try again.');
@@ -1456,8 +1529,8 @@
                     throw new Error(message);
                 }
 
+                await checkAuthenticationStatus();
                 syncBrowserTestSelections(payload);
-                await updateAuthenticationDisplay(payload);
 
                 if (window.refreshOrgSelector) {
                     try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
@@ -1565,8 +1638,9 @@
                             const result = await response.json();
                             if (result.success) {
                                 console.log('Auth token exchange successful:', result);
-                                // Update authentication display immediately with the result
-                                await updateAuthenticationDisplay(result);
+                                // The exchange response nests user data. Read back the canonical
+                                // session projection before rendering or caching the actor.
+                                await checkAuthenticationStatus();
                             } else {
                                 console.error('Auth token exchange failed:', result);
                                 // Fall back to checking status

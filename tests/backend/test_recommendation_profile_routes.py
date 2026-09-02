@@ -33,6 +33,8 @@ def test_get_recommendation_profile_returns_payload(monkeypatch):
     )
 
     with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#lu_yunli"
         resp = client.get("/api/settings/recommendation_profile/%23V%23lu_yunli")
 
     assert resp.status_code == 200
@@ -41,6 +43,49 @@ def test_get_recommendation_profile_returns_payload(monkeypatch):
     assert payload["derived_context"]["research_interest_concepts"][0]["name"] == (
         "Knowledge Graph"
     )
+
+
+def test_get_recommendation_profile_requires_authenticated_actor(monkeypatch):
+    app = _make_settings_app()
+    called = {"hit": False}
+
+    def _fake_load(**_kwargs):
+        called["hit"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.load_paper_recommendation_profile",
+        _fake_load,
+    )
+
+    with app.test_client() as client:
+        resp = client.get("/api/settings/recommendation_profile/%23V%23lu_yunli")
+
+    assert resp.status_code == 403
+    assert called["hit"] is False
+
+
+def test_post_recommendation_profile_requires_authenticated_actor(monkeypatch):
+    app = _make_settings_app()
+    called = {"hit": False}
+
+    def _fake_upsert(**_kwargs):
+        called["hit"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.upsert_paper_recommendation_profile",
+        _fake_upsert,
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/recommendation_profile/%23V%23lu_yunli",
+            json={"project_description": "Graph reasoning"},
+        )
+
+    assert resp.status_code == 403
+    assert called["hit"] is False
 
 
 def test_post_recommendation_profile_forbidden_for_different_non_admin_session(
@@ -177,6 +222,29 @@ def test_post_recommendation_review_returns_payload(monkeypatch):
         "include_all_candidates": True,
         "trigger_source": "manual_review",
     }
+
+
+def test_post_recommendation_review_requires_authenticated_actor(monkeypatch):
+    app = _make_settings_app()
+    called = {"hit": False}
+
+    def _fake_build_review(**_kwargs):
+        called["hit"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.build_paper_recommendation_review",
+        _fake_build_review,
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/recommendation_review/%23V%23lu_yunli",
+            json={},
+        )
+
+    assert resp.status_code == 403
+    assert called["hit"] is False
 
 
 def test_post_recommendation_review_forbidden_for_different_non_admin_session(

@@ -7,13 +7,8 @@ import {
     loadAndRenderOllamaHosts,
     populateModelDropdown,
     populateOpenAIModelDropdown,
-    populatePeopleDropdown,
 } from '../settings.js';
 import { getJsonDetailed } from '../apiService.js';
-
-function flushMicrotasks() {
-    return new Promise((resolve) => setTimeout(resolve, 0));
-}
 
 describe('settings retryable load states', () => {
     let consoleErrorSpy;
@@ -26,46 +21,6 @@ describe('settings retryable load states', () => {
 
     afterEach(() => {
         consoleErrorSpy.mockRestore();
-    });
-
-    test('people dropdown shows retryable error state and reloads on focus', async () => {
-        document.body.innerHTML = '<select id="currentUserSelect"></select>';
-
-        getJsonDetailed
-            .mockRejectedValueOnce({
-                message: 'HTTP 503',
-                status: 503,
-                payload: {
-                    error: 'People are temporarily unavailable. Please retry shortly.',
-                    retryable: true,
-                    retry_after_seconds: 0,
-                },
-            })
-            .mockResolvedValueOnce({
-                data: {
-                    people: [
-                        {
-                            id: '682de9200a04490dc7afee09',
-                            concept_id: '#V#michael_witbrock',
-                            name: 'Michael Witbrock',
-                            system_tags: [],
-                        },
-                    ],
-                    total_count: 1,
-                },
-            });
-
-        await populatePeopleDropdown('currentUserSelect');
-
-        const select = document.getElementById('currentUserSelect');
-        expect(select.options[0].textContent).toContain('Click to retry');
-
-        select.dispatchEvent(new Event('focus'));
-        await flushMicrotasks();
-        await flushMicrotasks();
-
-        expect(getJsonDetailed).toHaveBeenCalledTimes(2);
-        expect(select.options[1].textContent).toBe('Michael Witbrock');
     });
 
     test('openai model dropdown distinguishes load failure from a true empty list', async () => {

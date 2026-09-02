@@ -23,7 +23,6 @@ import {
   renderOpenRouterModelOptions,
   renderOpenAIModelOptions,
   populateOrganisationsDropdown,
-  populatePeopleDropdown,
   saveOllamaHosts,
   setOllamaHostManagementWritable,
   showStatusMessage,
@@ -43,6 +42,7 @@ import {
   loadConversationHistorySettings
 } from './utils/conversationHistoryPreferences.js';
 import {
+  clearAllOrgContext,
   getSessionScopedOrgContext,
   getSessionScopedNamespace,
   hasSessionPersonalOrgContext,
@@ -50,7 +50,6 @@ import {
   setSessionScopedNamespace,
 } from './utils/sessionScopedStorage.js';
 import {
-  fetchUserPreferences,
   hydrateStoredSelectionsFromUserPreferences,
 } from './utils/userPreferenceBootstrap.js';
 import {
@@ -98,7 +97,8 @@ async function buildSettingsFetchHeaders(extraHeaders = {}) {
   };
 }
 
-// LocalStorage keys for client-side persistence (no DB storage)
+// The user key is a compatibility projection of the authenticated server actor.
+// Organisation and preference keys remain browser-managed state.
 const LS_USER_KEY = 'von_current_user';
 const LS_ORG_KEY = 'von_current_org';
 const LS_LANG_KEY = 'von_preferred_language';
@@ -335,13 +335,76 @@ function getActiveSettingsConcernId() {
 
 function getSettingsConcernIdentitySnapshot() {
   return {
-    user: getSelectedUserContextFromUi() || getStoredJson(LS_USER_KEY),
+    user: getStoredJson(LS_USER_KEY),
     organisation:
       getSelectedOrganisationContextFromUi()
       || getStoredJson(LS_ORG_KEY)
       || getSessionScopedOrgContext(),
     authStatus: latestSettingsAuthStatus,
   };
+}
+
+const ACTOR_SCOPE_MIRROR_KEYS = Object.freeze([
+  LS_USER_KEY,
+  LS_ORG_KEY,
+  'von_org_context',
+  'current_user_namespace',
+  'von_namespace',
+  'von_org_switching',
+  'von_org_selection',
+]);
+
+function getSettingsStorageWindows() {
+  const storageWindows = [window];
+  try {
+    if (window.parent && window.parent !== window && window.parent.location.origin === window.location.origin) {
+      storageWindows.push(window.parent);
+    }
+  } catch {
+    // Cross-origin parents are not part of this settings session.
+  }
+  return storageWindows;
+}
+
+function clearActorScopeBrowserMirrors() {
+  clearAllOrgContext();
+  for (const storageWindow of getSettingsStorageWindows()) {
+    for (const storageName of ['sessionStorage', 'localStorage']) {
+      try {
+        const storage = storageWindow[storageName];
+        for (const key of ACTOR_SCOPE_MIRROR_KEYS) storage.removeItem(key);
+      } catch { }
+    }
+  }
+}
+
+function syncAuthenticatedUserProjection(authStatus) {
+  latestSettingsAuthStatus = authStatus || null;
+  if (typeof authStatus?.authenticated !== 'boolean') {
+    return null;
+  }
+
+  const projection = resolveBrowserBootstrapUserContext({
+    authStatus,
+    storedUser: getStoredJson(LS_USER_KEY),
+  });
+  if (!projection?.concept_id) {
+    clearActorScopeBrowserMirrors();
+    actorSessionReady = false;
+    scopedModelStateReady = false;
+    updateScopedModelSaveAvailability();
+    return null;
+  }
+
+  const previousActor = getStoredJson(LS_USER_KEY)?.concept_id || null;
+  const hasScopeWithoutActor = !previousActor && Boolean(
+    getStoredJson(LS_ORG_KEY) || getSessionScopedNamespace(),
+  );
+  if ((previousActor && previousActor !== projection.concept_id) || hasScopeWithoutActor) {
+    clearActorScopeBrowserMirrors();
+  }
+  setStoredJson(LS_USER_KEY, projection);
+  return projection;
 }
 
 const PREMIUM_PROVIDER_CONFIG = Object.freeze({
@@ -478,11 +541,11 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
       if (!user?.concept_id) {
         return {
           kicker: 'Suggested next step',
-          title: 'Choose the current user for this browser',
-          description: 'This keeps preferences, scoped history, and later setup steps anchored to one person instead of an anonymous browser state.',
-          actionLabel: 'Choose current user',
+          title: 'Sign in to establish your identity',
+          description: 'Von takes the current user from the authenticated server session. Identity cannot be selected or changed in Settings.',
+          actionLabel: 'Open sign-in controls',
           actionTarget: 'current-user-settings',
-          focusSelector: '#currentUserSelect',
+          focusSelector: '#authenticationStatus button',
           source: 'temporary-placeholder',
         };
       }
@@ -502,8 +565,8 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
       if (authKnown && !authStatus.authenticated) {
         return {
           kicker: 'Suggested next step',
-          title: 'Log in to unlock user-scoped tools',
-          description: 'Your browser knows the user and organisation to act as. Authenticate next if you want server-backed sessions, RAG, and Messages.',
+          title: 'Sign in to establish your identity',
+          description: 'The signed-in session is the authority for user-scoped settings, conversations, RAG, and Messages.',
           actionLabel: 'Open sign-in controls',
           actionTarget: 'current-user-settings',
           focusSelector: '#authenticationStatus button',
@@ -769,7 +832,7 @@ function setActiveSettingsConcern(concernId, options = {}) {
 }
 
 document.addEventListener('authStatusChanged', (event) => {
-  latestSettingsAuthStatus = event?.detail || null;
+  syncAuthenticatedUserProjection(event?.detail || null);
   refreshActiveSettingsConcernGuidance();
 });
 
@@ -940,16 +1003,6 @@ function readOptionIdentity(option) {
   return { id, conceptId };
 }
 
-function buildStoredUserContextFromOption(option) {
-  const { id, conceptId } = readOptionIdentity(option);
-  if (!id && !conceptId) return null;
-  return {
-    id,
-    concept_id: conceptId,
-    name: readOptionText(option),
-  };
-}
-
 function buildStoredOrganisationContextFromOption(option) {
   const { id, conceptId } = readOptionIdentity(option);
   if (!id && !conceptId) return null;
@@ -958,11 +1011,6 @@ function buildStoredOrganisationContextFromOption(option) {
     concept_id: conceptId,
     name: normaliseOrganisationDisplayName(option.textContent) || readOptionText(option),
   };
-}
-
-function getSelectedUserContextFromUi() {
-  const userSelect = document.getElementById('currentUserSelect');
-  return buildStoredUserContextFromOption(userSelect?.selectedOptions?.[0]);
 }
 
 function getOrganisationSelectFromUi() {
@@ -1028,7 +1076,7 @@ async function syncInitialScopedSelections({
   actorSessionReady = false;
   scopedModelStateReady = false;
   updateScopedModelSaveAvailability();
-  const userData = getSelectedUserContextFromUi() || getStoredJson(LS_USER_KEY);
+  const userData = getStoredJson(LS_USER_KEY);
   const orgSelect = getOrganisationSelectFromUi();
   const orgData = getSelectedOrganisationContextFromUi()
     || (!orgSelect ? (getStoredJson(LS_ORG_KEY) || getSessionScopedOrgContext()) : null);
@@ -2266,7 +2314,7 @@ function renderModelPoolTargetScopeNote() {
   const note = document.getElementById('modelPoolTargetScopeNote');
   if (!note) return;
   if (!actorSessionReady) {
-    note.textContent = 'Waiting for the selected user and organisation to be committed to the server session.';
+    note.textContent = 'Waiting for the authenticated user and selected organisation to be committed to the server session.';
     return;
   }
   if (!scopedModelStateReady) {
@@ -4395,11 +4443,6 @@ export function __testOnly_readRuntimeModelSettingFromForm(prefix, options = {})
 }
 
 // Export for testing
-export function __testOnly_buildStoredUserContextFromOption(option) {
-  return buildStoredUserContextFromOption(option);
-}
-
-// Export for testing
 export function __testOnly_applyStoredSelection(selectId, stored, fallbackSelected = true) {
   return applyStoredSelection(selectId, stored, fallbackSelected);
 }
@@ -4407,6 +4450,10 @@ export function __testOnly_applyStoredSelection(selectId, stored, fallbackSelect
 // Export for testing
 export async function __testOnly_syncInitialScopedSelections(overrides = {}) {
   return syncInitialScopedSelections(overrides);
+}
+
+export function __testOnly_syncAuthenticatedUserProjection(authStatus) {
+  return syncAuthenticatedUserProjection(authStatus);
 }
 
 export function __testOnly_applySettingsActorRole(role) {
@@ -4616,27 +4663,27 @@ function setStoredJson(key, value) {
     setSessionScopedOrgContext(value);
     return;
   }
-  // JVNAUTOSCI-1011: Write to both sessionStorage (window-scoped) and localStorage (persistent)
-  try {
-    if (value == null) {
-      sessionStorage.removeItem(key);
-      localStorage.removeItem(key);
-    } else {
-      const json = JSON.stringify(value);
-      sessionStorage.setItem(key, json);
-      localStorage.setItem(key, json);
-    }
-  } catch { }
+  const storageWindows = key === LS_USER_KEY ? getSettingsStorageWindows() : [window];
+  for (const storageWindow of storageWindows) {
+    try {
+      if (value == null) {
+        storageWindow.sessionStorage.removeItem(key);
+        storageWindow.localStorage.removeItem(key);
+      } else {
+        const json = JSON.stringify(value);
+        storageWindow.sessionStorage.setItem(key, json);
+        storageWindow.localStorage.setItem(key, json);
+      }
+    } catch { }
+  }
 }
 
 function snapshotActorBrowserContext() {
-  const userSelect = document.getElementById('currentUserSelect');
   const organisationSelect = document.getElementById('currentOrganisationSelect');
   return {
     user: getStoredJson(LS_USER_KEY),
     organisation: getStoredJson(LS_ORG_KEY),
     organisationRole: currentActorOrganisationRole,
-    userSelectedIndex: userSelect?.selectedIndex ?? -1,
     organisationSelectedIndex: organisationSelect?.selectedIndex ?? -1,
   };
 }
@@ -4644,14 +4691,7 @@ function snapshotActorBrowserContext() {
 function restoreActorBrowserContext(snapshot) {
   setStoredJson(LS_USER_KEY, snapshot?.user || null);
   setStoredJson(LS_ORG_KEY, snapshot?.organisation || null);
-  const userSelect = document.getElementById('currentUserSelect');
   const organisationSelect = document.getElementById('currentOrganisationSelect');
-  if (userSelect) {
-    const applied = applyStoredSelection('currentUserSelect', snapshot?.user, false);
-    if (!applied && Number.isInteger(snapshot?.userSelectedIndex)) {
-      userSelect.selectedIndex = snapshot.userSelectedIndex;
-    }
-  }
   if (organisationSelect) {
     const applied = applyStoredSelection('currentOrganisationSelect', snapshot?.organisation, false);
     if (!applied && Number.isInteger(snapshot?.organisationSelectedIndex)) {
@@ -4710,14 +4750,11 @@ function failClosedActorTransition(error, snapshot) {
 
 function queueActorContextTransition({
   snapshot,
-  requestedUser,
   requestedOrganisation,
-  hydrateUserPreferences = false,
   setUserConceptFn = (userConceptId) => postJson('/von/api/session/set_user_concept', {
     user_concept_id: userConceptId,
   }),
   switchOrganisationFn = switchOrganisation,
-  loadUserPreferencesFn = loadUserConceptPreferences,
   reloadScopedModelsFn = reloadScopedModelSettings,
   rollbackActorFn = rollbackServerActorContext,
   refreshRagStatusFn = () => loadRagStatus(null),
@@ -4739,23 +4776,17 @@ function queueActorContextTransition({
       }
 
       try {
-        const userConceptId = requestedUser?.concept_id || null;
+        const authenticatedUser = getStoredJson(LS_USER_KEY) || snapshot?.user || null;
+        const userConceptId = authenticatedUser?.concept_id || null;
         if (!userConceptId) {
-          throw new Error('The selected user does not have a valid concept ID.');
+          throw new Error('The authenticated user does not have a valid concept ID.');
         }
         const userSession = await setUserConceptFn(userConceptId);
         if (actorGeneration !== actorContextGeneration) {
           return { applied: false, stale: true };
         }
 
-        let organisation = requestedOrganisation || null;
-        if (hydrateUserPreferences) {
-          await loadUserPreferencesFn(userConceptId, { actorGeneration });
-          if (actorGeneration !== actorContextGeneration) {
-            return { applied: false, stale: true };
-          }
-          organisation = getSelectedOrganisationContextFromUi();
-        }
+        const organisation = requestedOrganisation || null;
 
         suppressActorOrgSwitchReload = true;
         let organisationSession = null;
@@ -4774,7 +4805,7 @@ function queueActorContextTransition({
           return { applied: false, stale: true };
         }
 
-        setStoredJson(LS_USER_KEY, requestedUser);
+        setStoredJson(LS_USER_KEY, authenticatedUser);
         setStoredJson(LS_ORG_KEY, organisation);
         renderActiveNamespace();
         void refreshRagStatusFn();
@@ -4882,10 +4913,10 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
       if (optionMatchesStoredContext(opt, stored)) {
         opt.selected = true;
         const { conceptId } = readOptionIdentity(opt);
-        // Backfill concept_id if missing (required for per-user model saves)
+        // Backfill concept_id for legacy organisation options that expose only a DB id.
         if (!stored.concept_id && conceptId) {
           stored.concept_id = conceptId;
-          setStoredJson(selectId === 'currentUserSelect' ? LS_USER_KEY : LS_ORG_KEY, stored);
+          setStoredJson(LS_ORG_KEY, stored);
         }
         return stored;
       }
@@ -4895,10 +4926,8 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
   if (fallbackSelected) {
     const current = sel.selectedOptions?.[0];
     if (current && (current.dataset?.id || current.dataset?.conceptId)) {
-      const storedVal = selectId === 'currentUserSelect'
-        ? buildStoredUserContextFromOption(current)
-        : buildStoredOrganisationContextFromOption(current);
-      setStoredJson(selectId === 'currentUserSelect' ? LS_USER_KEY : LS_ORG_KEY, storedVal);
+      const storedVal = buildStoredOrganisationContextFromOption(current);
+      setStoredJson(LS_ORG_KEY, storedVal);
       return storedVal;
     }
   }
@@ -5027,24 +5056,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     notifyLocalModelPreferenceChanged();
     renderModelScopeOverview();
   });
-  document.getElementById('currentUserSelect')?.addEventListener('change', () => {
-    const snapshot = snapshotActorBrowserContext();
-    const sel = document.getElementById('currentUserSelect');
-    const opt = sel?.selectedOptions?.[0];
-    void queueActorContextTransition({
-      snapshot,
-      requestedUser: buildStoredUserContextFromOption(opt),
-      requestedOrganisation: getSelectedOrganisationContextFromUi() || snapshot.organisation,
-      hydrateUserPreferences: true,
-    });
-  });
   document.getElementById('currentOrganisationSelect')?.addEventListener('change', () => {
     const snapshot = snapshotActorBrowserContext();
     const sel = document.getElementById('currentOrganisationSelect');
     const opt = sel?.selectedOptions?.[0];
     void queueActorContextTransition({
       snapshot,
-      requestedUser: getSelectedUserContextFromUi() || snapshot.user,
       requestedOrganisation: buildStoredOrganisationContextFromOption(opt),
     }).then((result) => {
       if (result?.applied) persistCurrentUserPreferences();
@@ -5313,8 +5330,8 @@ document.getElementById('refreshDeprecationMetricsButton')?.addEventListener('cl
 // Reset local preferences button
 document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () => {
   try {
-    localStorage.removeItem(LS_USER_KEY);
-    localStorage.removeItem(LS_ORG_KEY);
+    setStoredJson(LS_ORG_KEY, null);
+    setSessionScopedNamespace(null);
     localStorage.removeItem(LS_LANG_KEY);
     localStorage.removeItem(LS_GMAIL_PROFILE);
     localStorage.removeItem(LS_SHOW_CODE_NAMES);
@@ -5325,7 +5342,6 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     localStorage.removeItem(LS_CARTOUCHE_SHOW_KIND);
     localStorage.removeItem(LS_CARTOUCHE_KIND_AS_BG);
     // Reset selects visually
-    const userSel = document.getElementById('currentUserSelect'); if (userSel) userSel.selectedIndex = 0;
     const orgSel = document.getElementById('currentOrganisationSelect'); if (orgSel) orgSel.selectedIndex = 0;
     const langSel = document.getElementById('preferredLanguageSelect'); if (langSel) langSel.value = 'en-NZ';
     const gmailProfileSelect = document.getElementById('gmailProfileSelect');
@@ -5388,11 +5404,16 @@ async function loadModelLlmTimeout(provider, model) {
 async function loadAndDisplaySettings() {
   const scopedModelGeneration = invalidateScopedModelState();
   try {
-    // Pass user context to get properly resolved LLM setting (user > org > global precedence)
-    const storedUser = getStoredJson(LS_USER_KEY);
-    const storedOrg = getStoredJson(LS_ORG_KEY);
+    // Read the authenticated actor before asking for actor-scoped settings. A stale
+    // browser cache must never choose which user's settings are requested.
+    const [sessionContext, authStatus] = await Promise.all([
+      _fetchSessionContextForRole(),
+      fetchSettingsAuthStatus(),
+    ]);
+    const bootstrapUser = syncAuthenticatedUserProjection(authStatus);
+    const storedOrg = bootstrapUser ? getStoredJson(LS_ORG_KEY) : null;
     const params = new URLSearchParams();
-    if (storedUser?.concept_id) params.set('user_concept_id', storedUser.concept_id);
+    if (bootstrapUser?.concept_id) params.set('user_concept_id', bootstrapUser.concept_id);
     if (storedOrg?.concept_id) params.set('organisation_concept_id', storedOrg.concept_id);
     const settingsUrl = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
 
@@ -5402,37 +5423,28 @@ async function loadAndDisplaySettings() {
     });
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
-    const [sessionContext, authStatus] = await Promise.all([
-      _fetchSessionContextForRole(),
-      fetchSettingsAuthStatus()
-    ]);
 
-    const bootstrapUser = resolveBrowserBootstrapUserContext({
-      settings,
-      authStatus,
-      storedUser
-    });
-    if (bootstrapUser) {
-      setStoredJson(LS_USER_KEY, bootstrapUser);
-    }
-
-    const bootstrapOrg = resolveBrowserBootstrapOrganisationContext({
-      settings,
-      sessionContext,
-      storedOrganisation: storedOrg,
-      explicitPersonal: hasSessionPersonalOrgContext(),
-    });
+    const bootstrapOrg = bootstrapUser
+      ? resolveBrowserBootstrapOrganisationContext({
+        settings,
+        sessionContext,
+        storedOrganisation: storedOrg,
+        explicitPersonal: hasSessionPersonalOrgContext(),
+      })
+      : null;
     if (bootstrapOrg) {
       setStoredJson(LS_ORG_KEY, bootstrapOrg);
     }
 
-    const bootstrapNamespace = resolveBrowserBootstrapNamespace({
-      settings,
-      sessionContext,
-      userContext: bootstrapUser,
-      organisationContext: bootstrapOrg,
-      explicitPersonal: hasSessionPersonalOrgContext(),
-    });
+    const bootstrapNamespace = bootstrapUser
+      ? resolveBrowserBootstrapNamespace({
+        settings,
+        sessionContext,
+        userContext: bootstrapUser,
+        organisationContext: bootstrapOrg,
+        explicitPersonal: hasSessionPersonalOrgContext(),
+      })
+      : '';
     try {
       if (bootstrapNamespace) {
         sessionStorage.setItem('current_user_namespace', bootstrapNamespace);
@@ -5534,27 +5546,11 @@ async function loadAndDisplaySettings() {
       }
     }
 
-    // Populate People and select the saved one
-    await populatePeopleDropdown('currentUserSelect', settings.current_user_person_id);
-    // If we have concept_id too, attempt to match based on data attribute
-    try {
-      const userSelect = document.getElementById('currentUserSelect');
-      const targetCid = settings.current_user_person_concept_id;
-      if (userSelect && targetCid) {
-        for (const opt of userSelect.options) {
-          if (opt.dataset?.conceptId === targetCid) { opt.selected = true; break; }
-        }
-      }
-    } catch { }
-    // Override with stored local selection if present
-    applyStoredSelection('currentUserSelect', getStoredJson(LS_USER_KEY));
-
     // Restore missing org/language context from persisted per-user preferences
     // before populating organisation-dependent UI or namespace state.
     try {
-      const selectedUser = getSelectedUserContextFromUi();
-      if (selectedUser?.concept_id) {
-        await hydrateStoredSelectionsFromUserPreferences(selectedUser.concept_id);
+      if (bootstrapUser?.concept_id) {
+        await hydrateStoredSelectionsFromUserPreferences(bootstrapUser.concept_id);
       }
     } catch (e) {
       console.warn('Failed to hydrate stored selections from user preferences', e);
@@ -6211,42 +6207,6 @@ async function saveAllSettings({
 }
 
 // --- User concept preference helpers (server-side stored) ---
-
-async function loadUserConceptPreferences(userConceptId, { actorGeneration = null } = {}) {
-  try {
-    const data = await fetchUserPreferences(userConceptId);
-    if (!data) return;
-    if (actorGeneration !== null && actorGeneration !== actorContextGeneration) return;
-    if (data.preferred_language) {
-      const langSel = document.getElementById('preferredLanguageSelect');
-      if (langSel) {
-        langSel.value = data.preferred_language;
-        localStorage.setItem(LS_LANG_KEY, data.preferred_language);
-      }
-    }
-    if (data.organisation_concept_id) {
-      const orgSel = document.getElementById('currentOrganisationSelect');
-      if (orgSel) {
-        for (const opt of orgSel.options) {
-          if (opt.dataset?.conceptId === data.organisation_concept_id) { opt.selected = true; break; }
-        }
-        const selOpt = orgSel.selectedOptions?.[0];
-        if (selOpt) {
-          setStoredJson(LS_ORG_KEY, buildStoredOrganisationContextFromOption(selOpt));
-        }
-      }
-    } else {
-      const orgSel = document.getElementById('currentOrganisationSelect');
-      if (orgSel) {
-        orgSel.selectedIndex = 0;
-      }
-      setStoredJson(LS_ORG_KEY, null);
-      if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
-    }
-  } catch (e) {
-    console.warn('Failed to load user concept preferences', e);
-  }
-}
 
 async function persistCurrentUserPreferences() {
   try {

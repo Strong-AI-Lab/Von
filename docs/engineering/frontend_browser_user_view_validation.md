@@ -6,7 +6,7 @@
   apply it at the validation tier justified by the claim
 - **Created:** 2026-04-06
 - **Last substantive content update before this metadata review:** 2026-06-08
-- **Last reviewed:** 2026-07-25
+- **Last reviewed:** 2026-09-02
 - **Evidence boundary:** Each acceptance claim still requires its own dated
   user-view evidence
 
@@ -122,12 +122,17 @@ Important:
   - `VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID`
   - `VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID`
 - restart Von so the launcher picks the values up from `.env`;
-- open the Settings tab in a browser served directly from `localhost` or
+- open the main Von page in a browser served directly from `localhost` or
   `127.0.0.1`;
-- confirm the Settings authentication area reports the browser-test mode
-  status, target pseudouser identity, and any unavailable reason before trying
-  to log in;
-- use the `Browser Test Login` control in the authentication area.
+- while signed out, confirm that the sign-in gate replaces the working home UI
+  and reports whether browser-test login is available;
+- use the `Browser test login` control on that gate, then confirm the normal
+  home UI appears and Settings shows the resulting identity read-only.
+
+If the canonical authentication-status request fails or times out, the gate
+must remain closed and expose `Retry status check`. Treat this as an unknown
+transport result, not as confirmed logout: a saved actor-bound organisation
+preference may remain inert until status is recovered.
 
 This route is intentionally:
 
@@ -160,8 +165,8 @@ Repeated use is designed to be stable rather than destructive:
 - unread fixture messages are reset to unread so the Messages pane remains
   useful for acceptance checks.
 
-If the `Browser Test Login` button is missing, do not assume the feature is
-absent. Check the status line in the Settings authentication area first. The
+If the `Browser test login` button is missing, do not assume the feature is
+absent. Check the status text on the signed-out home gate first. The
 running app should now report whether browser-test auth is:
 
 - available;

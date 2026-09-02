@@ -11,6 +11,11 @@ import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
+import {
+  hasAuthenticatedVonActor,
+  initialiseHomeAuthentication,
+  shouldClearHomeIdentityMirrors,
+} from './homeAuthGate.js';
 import { formatBackgroundTaskSummary, formatBackgroundTaskTooltip, subscribeBackgroundTaskUpdates } from './backgroundTaskTracker.js';
 import {
   copyJsonTextWithButtonFeedback,
@@ -19,6 +24,7 @@ import {
   resetCopyJsonButtonPreCopyState
 } from './utils/copyJsonButtonState.js';
 import {
+  clearAllOrgContext,
   getSessionScopedNamespace,
   getSessionScopedOrgContext,
   hasSessionOrgContext,
@@ -44,6 +50,21 @@ const getCurrentNamespace = getSessionScopedNamespace;
 document.addEventListener('DOMContentLoaded', async () => {
   console.log("DOM fully loaded and parsed.");
 
+  const authStatus = await initialiseHomeAuthentication();
+  if (!hasAuthenticatedVonActor(authStatus)) {
+    if (shouldClearHomeIdentityMirrors(authStatus)) {
+      clearAllOrgContext();
+      try {
+        localStorage.removeItem('von_current_user');
+        sessionStorage.removeItem('von_current_user');
+      } catch {
+        // Browser mirrors carry no authority; remain signed out if storage is unavailable.
+      }
+    }
+    console.log('[main] Home application initialization stopped until login establishes an actor.');
+    return;
+  }
+
   initializeDomElements();
   initializeInfoPopup();
   applyExpertTabGuards();
@@ -57,13 +78,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Dynamic positioning: calculate header height and position tabs accordingly
   setupDynamicLayout();
 
-  // Resolve duplicate-tab identity and bind this tab's explicit organisation
-  // (including Personal) before any child frame or actor-scoped bootstrap read.
-  await initialiseWindowActorContext();
-
   // Ensure user context is loaded BEFORE initializing chat to prevent race condition
   // where conversation history loads with null user_id
-  await ensureUserContext();
+  await ensureUserContext(authStatus);
   loadDeferredSettingsFrame();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
@@ -200,19 +217,6 @@ function loadDeferredSettingsFrame() {
   if (!deferredSrc || settingsFrame.dataset.actorContextReady === 'true') return;
   settingsFrame.dataset.actorContextReady = 'true';
   settingsFrame.src = deferredSrc;
-}
-
-async function initialiseWindowActorContext() {
-  try {
-    initSessionStorageFromLocalStorage();
-    const { ensureUniqueWindowSessionId } = await import('./apiService.js');
-    await ensureUniqueWindowSessionId();
-    await syncFlaskSessionOrg();
-  } catch (error) {
-    // Keep the outer page usable, but do not eagerly load the Settings frame
-    // until the bounded identity attempt has completed.
-    console.warn('[main] Failed to initialise the window actor context:', error);
-  }
 }
 
 window.addEventListener('von:windowSessionIdentityChanged', () => {
@@ -414,27 +418,15 @@ async function syncFlaskSessionOrg() {
   }
 }
 
-async function fetchBootstrapAuthStatus(getJsonImpl) {
-  try {
-    return await getJsonImpl('/von/api/auth/status');
-  } catch (_) {
-    try {
-      return await getJsonImpl('/api/auth/status');
-    } catch {
-      return null;
-    }
-  }
-}
-
 /**
- * Ensure user context is available in storage before app initialization.
- * Fetches settings if localStorage is empty.
- * ALWAYS syncs session org to avoid race conditions with session fetch.
+ * Mirror the authenticated actor into compatibility storage before app initialization.
+ * The login-bound server session remains authoritative; browser state may retain only
+ * the matching user projection and organisation/language preferences.
  *
  * JVNAUTOSCI-1011: Now uses sessionStorage for org context (window-scoped),
- * while user info remains in localStorage (shared across windows).
+ * while the derived user projection remains in localStorage (shared across windows).
  */
-async function ensureUserContext() {
+async function ensureUserContext(authStatus) {
   try {
     // JVNAUTOSCI-1011: On new window/restart, copy org preference from localStorage
     // This ensures the user's last-used org is restored even in a new window
@@ -445,20 +437,34 @@ async function ensureUserContext() {
     // Resolve a copied duplicate-tab ID before any actor-scoped bootstrap call.
     await ensureUniqueWindowSessionId();
 
-    const storedUser = parseStoredContextValue(localStorage.getItem('von_current_user'));
-    if (storedUser?.concept_id) {
-      try {
-        await hydrateStoredSelectionsFromUserPreferences(storedUser.concept_id);
-      } catch (e) {
-        console.warn('[main] Failed to hydrate stored selections from user preferences:', e);
-      }
-    } else if (localStorage.getItem('von_current_user')) {
+    let storedUser = parseStoredContextValue(localStorage.getItem('von_current_user'));
+    const authenticatedUser = resolveBrowserBootstrapUserContext({
+      authStatus,
+      storedUser,
+    });
+    if (!authenticatedUser?.concept_id) {
+      throw new Error('Authenticated login did not resolve a Von user identity.');
+    }
+
+    if (storedUser?.concept_id !== authenticatedUser.concept_id) {
+      clearAllOrgContext();
       try {
         localStorage.removeItem('von_current_user');
         sessionStorage.removeItem('von_current_user');
       } catch {
-        // Ignore storage cleanup failures and continue with settings fetch.
+        // Ignore compatibility-cache cleanup failures; the session remains authoritative.
       }
+    }
+
+    const encodedAuthenticatedUser = JSON.stringify(authenticatedUser);
+    localStorage.setItem('von_current_user', encodedAuthenticatedUser);
+    sessionStorage.setItem('von_current_user', encodedAuthenticatedUser);
+    storedUser = authenticatedUser;
+
+    try {
+      await hydrateStoredSelectionsFromUserPreferences(authenticatedUser.concept_id);
+    } catch (e) {
+      console.warn('[main] Failed to hydrate stored selections from authenticated user preferences:', e);
     }
 
     // Preference hydration may have supplied an organisation for an otherwise
@@ -468,16 +474,9 @@ async function ensureUserContext() {
 
     console.log('[main] Fetching settings to populate user context...');
     const settings = await getJson('/api/settings/');
-    const needsIdentityFallback = !settings.current_user_person_concept_id || !settings.current_organisation_concept_id;
-    const [authStatus, sessionContext] = needsIdentityFallback
-      ? await Promise.all([
-        fetchBootstrapAuthStatus(getJson),
-        getJson('/von/api/session/context').catch(() => null)
-      ])
-      : [null, null];
+    const sessionContext = await getJson('/von/api/session/context').catch(() => null);
 
     const resolvedUser = resolveBrowserBootstrapUserContext({
-      settings,
       authStatus,
       storedUser
     });
@@ -519,16 +518,6 @@ async function ensureUserContext() {
     if (resolvedNamespace) {
       setSessionScopedNamespace(resolvedNamespace);
       console.log('[main] Populated current_user_namespace from browser bootstrap context:', resolvedNamespace);
-    }
-
-    // Namespace fallback: if server does not provide user info, but a namespace is already
-    // set locally (e.g., via manual selection), propagate it so downstream calls use it.
-    if (!resolvedUser?.concept_id) {
-      const ns = sessionStorage.getItem('von_namespace') || localStorage.getItem('von_namespace');
-      if (ns && !sessionStorage.getItem('current_user_namespace')) {
-        setSessionScopedNamespace(ns);
-        console.log('[main] Using existing von_namespace as current_user_namespace:', ns);
-      }
     }
 
     // CRITICAL: Sync the session's organisation_concept_id to avoid race conditions

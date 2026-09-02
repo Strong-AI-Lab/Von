@@ -13,27 +13,22 @@ def _make_settings_app() -> Flask:
     return app
 
 
-def test_people_selector_returns_retryable_503_when_concepts_collection_unavailable(
-    monkeypatch,
-):
-    import src.backend.server.routes.settings_routes as settings_routes
-
+def test_people_selector_route_is_absent():
     app = _make_settings_app()
-    monkeypatch.setattr(
-        settings_routes.ConceptsRepository,
-        "collection",
-        staticmethod(lambda: None),
-    )
 
     with app.test_client() as client:
         response = client.get("/api/settings/people")
 
-    payload = response.get_json() or {}
-    assert response.status_code == 503
-    assert payload["retryable"] is True
-    assert payload["reason"] == "concepts_collection_unavailable"
-    assert payload["retry_after_seconds"] == 5
-    assert response.headers["Retry-After"] == "5"
+    assert response.status_code == 404
+
+
+def test_legacy_current_user_route_is_absent():
+    app = _make_settings_app()
+
+    with app.test_client() as client:
+        response = client.get("/api/settings/user/current")
+
+    assert response.status_code == 404
 
 
 def test_organisation_selector_returns_retryable_503_when_concepts_collection_unavailable(

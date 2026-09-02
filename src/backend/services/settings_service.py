@@ -190,7 +190,9 @@ RAG_LLM_SETTING_NAME = "rag_llm"
 # CURRENT_ORGANISATION_SETTING_NAME = "current_organisation_id"
 OLLAMA_HOSTS_LIST_SETTING_NAME = "ollama_hosts_list"
 ACTIVE_OLLAMA_HOST_SETTING_NAME = "active_ollama_host"
-# Removed: CURRENT_USER_PERSON_CONCEPT_SETTING_NAME, CURRENT_ORGANISATION_* constants (client localStorage authority)
+# Removed: CURRENT_USER_PERSON_CONCEPT_SETTING_NAME; authenticated session identity
+# replaces a mutable global user setting. CURRENT_ORGANISATION_* remains
+# browser-managed compatibility state.
 PREFERRED_LANGUAGE_SETTING_NAME = "preferred_language"
 FETCH_COUNTS_ON_LOAD_SETTING_NAME = "fetch_counts_on_load"
 PRELOAD_VONTOLOGY_TREE_SETTING_NAME = "preload_vontology_tree"
@@ -1662,7 +1664,8 @@ def get_current_user_person_concept_id() -> Optional[str]:  # legacy accessor
     return None
 
 
-# Removed: get/set_current_user_person_concept_id functions (client localStorage authority)
+# Legacy accessors now project only the authenticated session identity; browser
+# state is not an authority for the current user.
 
 
 # The following functions are deprecated as organisation is managed on the client.

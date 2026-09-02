@@ -19,7 +19,27 @@
 
 </head>
 
-<body>
+<body class="von-auth-pending">
+  <main id="vonAuthenticationGate" class="von-authentication-gate" aria-busy="true">
+    <section class="von-authentication-card" aria-labelledby="vonAuthenticationGateTitle">
+      <p class="von-authentication-kicker">Von</p>
+      <h1 id="vonAuthenticationGateTitle">Sign in to continue</h1>
+      <p class="von-authentication-summary">
+        Your sign-in establishes your Von identity and determines which personal and organisation-scoped work you can
+        access.
+      </p>
+      <div class="von-authentication-actions">
+        <button id="vonGoogleLoginButton" class="btn-primary" type="button" disabled>Sign in with Google</button>
+        <button id="vonBrowserTestLoginButton" class="btn-secondary" type="button" hidden>Browser test login</button>
+        <button id="vonAuthRetryButton" class="btn-secondary" type="button" hidden>Retry status check</button>
+      </div>
+      <p id="vonAuthenticationGateStatus" class="von-authentication-status" role="status" aria-live="polite">
+        Checking your sign-in…
+      </p>
+    </section>
+  </main>
+
+  <div id="vonAuthenticatedApp" hidden>
   <!-- Fixed Global Header (title + search above tabs) JVNAUTOSCI-550 -->
   <div class="global-header" id="globalHeader">
     <div class="global-header-shell">
@@ -235,6 +255,8 @@
     </div>
   </div>
   {% endif %}
+
+  </div>
 
   <!-- Link to external JavaScript (fixed endpoint spacing) -->
   <script type='module' src="{{ url_for('static', filename='js/main.js') }}"></script>
