@@ -15,7 +15,7 @@ historical semantic data but are no longer read for authority after cutover.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
@@ -58,6 +58,30 @@ def _normalise_values(value: object) -> list[str]:
         if normalised and normalised not in output:
             output.append(normalised)
     return output
+
+
+def _normalise_role_overrides(
+    overrides: Iterable[Mapping[str, Any]] | None,
+) -> dict[tuple[str, str], str]:
+    """Validate exact operator choices for otherwise ambiguous legacy pairs."""
+
+    normalised: dict[tuple[str, str], str] = {}
+    for override in overrides or ():
+        if not isinstance(override, Mapping):
+            raise ValueError("membership_role_override_not_mapping")
+        user_id = _normalise_concept_id(override.get("user_concept_id"))
+        organisation_id = _normalise_concept_id(override.get("organisation_concept_id"))
+        role = str(override.get("role") or "").strip()
+        if user_id is None or organisation_id is None:
+            raise ValueError("membership_role_override_pair_required")
+        if role not in AVAILABLE_ROLES:
+            raise ValueError("membership_role_override_invalid_role")
+        pair = (user_id, organisation_id)
+        previous = normalised.get(pair)
+        if previous is not None and previous != role:
+            raise ValueError("membership_role_override_conflicts_with_itself")
+        normalised[pair] = role
+    return normalised
 
 
 def _legacy_edge_pairs() -> dict[tuple[str, str], set[str]]:
@@ -206,6 +230,7 @@ def audit_von_organisation_membership_predicates(
                     **common,
                     "legacy_membership_predicates": predicates,
                     "legacy_roles": roles,
+                    "already_narrow": pair in narrow_pairs,
                     "reason_code": "conflicting_legacy_roles",
                 }
             )
@@ -344,23 +369,97 @@ def migrate_von_organisation_membership_predicates(
     dry_run: bool = True,
     approved: bool = False,
     sample_limit: int = 20,
+    role_overrides: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Copy only evidenced operational memberships to the narrow vocabulary."""
+
+    try:
+        normalised_overrides = _normalise_role_overrides(role_overrides)
+    except ValueError as exc:
+        return {
+            "schema_version": MIGRATION_SCHEMA_VERSION,
+            "success": False,
+            "effect_status": "not_started",
+            "error_code": str(exc),
+        }
 
     audit = audit_von_organisation_membership_predicates(
         sample_limit=max(sample_limit, 100_000)
     )
+    sample_count = max(0, int(sample_limit))
     public_audit = {
         **audit,
         "eligible_operational_memberships": audit["eligible_operational_memberships"][
-            : max(0, int(sample_limit))
+            :sample_count
+        ],
+        "generic_only_non_authority_samples": audit[
+            "generic_only_non_authority_samples"
+        ][:sample_count],
+        "role_only_samples": audit["role_only_samples"][:sample_count],
+        "conflict_samples": audit["conflict_samples"][:sample_count],
+        "invalid_legacy_role_samples": audit["invalid_legacy_role_samples"][
+            :sample_count
         ],
     }
+    eligible_records = list(audit["eligible_operational_memberships"])
+    resolved_conflicts: list[dict[str, Any]] = []
+    unresolved_conflicts: list[dict[str, Any]] = []
+    override_errors: list[dict[str, Any]] = []
+    unused_override_pairs = set(normalised_overrides)
+    for conflict in audit["conflict_samples"]:
+        pair = (
+            conflict["user_concept_id"],
+            conflict["organisation_concept_id"],
+        )
+        selected_role = normalised_overrides.get(pair)
+        if selected_role is None:
+            unresolved_conflicts.append(conflict)
+            continue
+        unused_override_pairs.discard(pair)
+        if selected_role not in conflict.get("legacy_roles", []):
+            override_errors.append(
+                {
+                    "user_concept_id": pair[0],
+                    "organisation_concept_id": pair[1],
+                    "requested_role": selected_role,
+                    "legacy_roles": list(conflict.get("legacy_roles", [])),
+                    "reason_code": "role_override_not_present_in_legacy_evidence",
+                }
+            )
+            continue
+        resolved = {
+            "user_concept_id": pair[0],
+            "organisation_concept_id": pair[1],
+            "role": selected_role,
+            "legacy_membership_predicates": list(
+                conflict.get("legacy_membership_predicates", [])
+            ),
+            "legacy_roles": list(conflict.get("legacy_roles", [])),
+            "already_narrow": bool(conflict.get("already_narrow")),
+            "role_override_applied": True,
+        }
+        resolved_conflicts.append(resolved)
+        eligible_records.append(resolved)
+    for pair in sorted(unused_override_pairs):
+        override_errors.append(
+            {
+                "user_concept_id": pair[0],
+                "organisation_concept_id": pair[1],
+                "requested_role": normalised_overrides[pair],
+                "reason_code": "role_override_does_not_match_a_conflicted_pair",
+            }
+        )
     common = {
         "schema_version": MIGRATION_SCHEMA_VERSION,
         "dry_run": bool(dry_run),
         "approved": bool(approved),
         "audit": public_audit,
+        "resolved_conflict_count": len(resolved_conflicts),
+        "resolved_conflicts": resolved_conflicts[:sample_count],
+        "unresolved_conflict_count": len(unresolved_conflicts),
+        "unresolved_conflicts": unresolved_conflicts[:sample_count],
+        "role_override_error_count": len(override_errors),
+        "role_override_errors": override_errors[:sample_count],
     }
     if not dry_run and not approved:
         return {
@@ -369,7 +468,7 @@ def migrate_von_organisation_membership_predicates(
             "effect_status": "not_started",
             "error_code": "explicit_migration_approval_required",
         }
-    if audit["conflict_count"] or audit["invalid_legacy_role_count"]:
+    if unresolved_conflicts or override_errors or audit["invalid_legacy_role_count"]:
         return {
             **common,
             "success": False,
@@ -381,7 +480,7 @@ def migrate_von_organisation_membership_predicates(
             **common,
             "success": True,
             "effect_status": "not_started",
-            "would_migrate_count": audit["eligible_operational_membership_count"],
+            "would_migrate_count": len(eligible_records),
             "generic_only_relations_will_grant_authority": False,
         }
 
@@ -389,7 +488,6 @@ def migrate_von_organisation_membership_predicates(
     migrated: list[dict[str, Any]] = []
     already_current: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    eligible_records = audit["eligible_operational_memberships"]
     for record in eligible_records:
         user_id = record["user_concept_id"]
         organisation_id = record["organisation_concept_id"]
@@ -431,20 +529,29 @@ def migrate_von_organisation_membership_predicates(
                 }
             )
 
-    final_audit = audit_von_organisation_membership_predicates(
-        sample_limit=max(sample_limit, 100_000)
-    )
-    expected_pairs = {
-        (row["user_concept_id"], row["organisation_concept_id"])
-        for row in eligible_records
-    }
-    current_pairs = {
-        (row["user_concept_id"], row["organisation_concept_id"])
-        for row in final_audit["eligible_operational_memberships"]
-        if row.get("already_narrow") is True
-    }
-    missing_pairs = sorted(expected_pairs - current_pairs)
-    success = not failures and not missing_pairs
+    missing_read_back: list[dict[str, Any]] = []
+    for record in eligible_records:
+        read_back = resolve_user_organisation_membership(
+            record["user_concept_id"],
+            record["organisation_concept_id"],
+        )
+        if (
+            not isinstance(read_back, Mapping)
+            or read_back.get("role") != record["role"]
+        ):
+            missing_read_back.append(
+                {
+                    "user_concept_id": record["user_concept_id"],
+                    "organisation_concept_id": record["organisation_concept_id"],
+                    "expected_role": record["role"],
+                    "actual_role": (
+                        read_back.get("role")
+                        if isinstance(read_back, Mapping)
+                        else None
+                    ),
+                }
+            )
+    success = not failures and not missing_read_back
     return {
         **common,
         "success": success,
@@ -456,13 +563,7 @@ def migrate_von_organisation_membership_predicates(
         "migrated": migrated[: max(0, int(sample_limit))],
         "already_current": already_current[: max(0, int(sample_limit))],
         "failures": failures[: max(0, int(sample_limit))],
-        "missing_read_back_pairs": [
-            {
-                "user_concept_id": user_id,
-                "organisation_concept_id": organisation_id,
-            }
-            for user_id, organisation_id in missing_pairs[: max(0, int(sample_limit))]
-        ],
+        "missing_read_back_pairs": missing_read_back[:sample_count],
         "generic_only_relations_grant_authority": False,
     }
 
