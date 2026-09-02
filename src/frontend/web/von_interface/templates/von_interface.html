@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Von, Strong AI Lab's AI Assistant</title>
+  <title>Von</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 
   <!-- Favicon -->
@@ -70,7 +70,9 @@
         <h1 class="global-organisation-title" title="Current organisation">
           <span class="global-product-name">Von</span>
           <span class="global-organisation-separator" aria-hidden="true">·</span>
-          <span id="headerOrgName">...</span>
+          <!-- Organisation-specific byline, populated from the active
+               Vontology-backed organisation context. -->
+          <span id="headerOrgName" class="global-organisation-byline">...</span>
         </h1>
         <button class="info-icon" id="infoIcon" type="button" title="About this organisation"
           aria-label="About this organisation">i</button>

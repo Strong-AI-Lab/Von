@@ -82,6 +82,8 @@ describe('conversation single-scroll layout', () => {
         const headerShell = fragment.querySelector('.global-header-shell');
         const search = headerShell?.querySelector('#globalConceptSearchRegion');
         const organisation = headerShell?.querySelector('.main-container');
+        const productName = organisation?.querySelector('.global-product-name');
+        const organisationByline = organisation?.querySelector('#headerOrgName');
 
         expect(headerShell).toBeTruthy();
         expect(search).toBeTruthy();
@@ -89,7 +91,14 @@ describe('conversation single-scroll layout', () => {
         expect(
             search.compareDocumentPosition(organisation) & Node.DOCUMENT_POSITION_FOLLOWING
         ).toBeTruthy();
-        expect(organisation.querySelector('#headerOrgName')).toBeTruthy();
+        expect(productName?.textContent.trim()).toBe('Von');
+        expect(organisationByline).toBeTruthy();
+        expect(organisationByline.classList.contains('global-organisation-byline')).toBe(true);
+    });
+
+    test('keeps the global document name organisation-neutral', () => {
+        expect(interfaceTemplate).toContain('<title>Von</title>');
+        expect(interfaceTemplate).not.toContain("Strong AI Lab's AI Assistant");
     });
 
     test('keeps the scrollable vertical conversation rail clear of the fixed footer', () => {
