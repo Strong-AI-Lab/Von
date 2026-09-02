@@ -12697,6 +12697,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "role": "user",
                     "content": prompt_text,
                     "author_user_id": user_concept_id,
+                    "turn_id": f"u-{request_id}",
                 },
                 namespace=history_namespace,
                 organisation_concept_id=org_concept_id,

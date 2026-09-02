@@ -326,6 +326,7 @@ def test_get_chat_history_segments_strips_debug_when_requested(monkeypatch):
                 {
                     "role": "assistant",
                     "content": "ok",
+                    "turn_id": "a-req-history-identity",
                     "llm_debug_data": {"model": "demo"},
                 }
             ],
@@ -350,6 +351,7 @@ def test_get_chat_history_segments_strips_debug_when_requested(monkeypatch):
     assert len(segments) == 1
     assert len(segments[0]) == 1
     assert "llm_debug_data" not in segments[0][0]
+    assert segments[0][0]["turn_id"] == "a-req-history-identity"
 
 
 def test_get_chat_history_debug_entry_hydrates_blob_refs(monkeypatch):
