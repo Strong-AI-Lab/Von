@@ -197,6 +197,54 @@ def test_set_chat_session_skips_history_when_requested(monkeypatch, app_client):
         assert sess.get("session_id") == "s1"
 
 
+def test_set_chat_session_projects_terminal_concept_q_and_a_state(
+    monkeypatch, app_client
+):
+    _, client = app_client
+
+    class _FakeColl:
+        def find_one(self, query, projection=None):
+            if query.get("user_id") != "#V#u" or query.get("session_id") != "qa-1":
+                return None
+            return {
+                "session_id": "qa-1",
+                "session_name": "Primary Labs Q&A",
+                "mode": "concept_q_and_a",
+                "origin_kind": "concept_q_and_a",
+                "focal_concept_ids": ["#V#primary_labs"],
+                "concept_q_and_a": {
+                    "schema_version": "concept_q_and_a_session.v1",
+                    "concept": {
+                        "concept_id": "#V#primary_labs",
+                        "name": "Primary Labs",
+                    },
+                    "lifecycle": {"status": "finished", "revision": 1},
+                },
+            }
+
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: _FakeColl(),
+    )
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#u"
+
+    response = client.post(
+        "/von/api/session/set_chat_session",
+        json={"session_id": "qa-1", "include_history": False},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["mode"] == "concept_q_and_a"
+    assert body["origin_kind"] == "concept_q_and_a"
+    assert body["focal_concept_ids"] == ["#V#primary_labs"]
+    assert body["qa_session"]["lifecycle"]["status"] == "finished"
+
+
 def test_set_chat_session_allows_shared_invite(monkeypatch, app_client):
     _, client = app_client
 

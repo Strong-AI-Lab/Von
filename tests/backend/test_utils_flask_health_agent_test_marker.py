@@ -313,6 +313,14 @@ def test_health_projects_startup_seed_family_readiness_without_raw_report() -> N
                 "receipt_reason": "source_digest_mismatch",
                 "duration_ms": 8,
             },
+            "constitutive_relation_requirements": {
+                "ready": False,
+                "state": "not_checked",
+                "reason": None,
+                "reconciliation_required": False,
+                "receipt_reason": None,
+                "duration_ms": None,
+            },
         },
     }
     assert "private_checkpoint" not in json.dumps(payload)

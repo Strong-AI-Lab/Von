@@ -56,6 +56,7 @@ _TEXT_PREDICATE_IDS = [
     f"#V#{RelationPredicate.HAS_INTERACTION}",
     "#V#hasDefinition",
     "#V#has_renderer_profile_json",
+    "#V#has_constitutive_relation_requirements_json",
 ]
 
 _FILE_METADATA_PREDICATE_IDS = [

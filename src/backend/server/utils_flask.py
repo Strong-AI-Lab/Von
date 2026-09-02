@@ -1557,6 +1557,7 @@ def create_flask_app(
     _maybe_start_relationship_extent_index_reconciliation(app)
     _bootstrap_concept_summary_fields_for_startup(app)
     _bootstrap_publication_scope_profiles_for_startup(app)
+    _bootstrap_constitutive_relation_requirements_for_startup(app)
     _configure_durable_workflow_startup(app)
     _maybe_start_external_conversation_import_worker(app)
     _maybe_start_chat_prompt_queue_dispatcher(app)
@@ -2851,6 +2852,51 @@ def _bootstrap_publication_scope_profiles_for_startup(app: Flask) -> None:
         )
 
 
+def _bootstrap_constitutive_relation_requirements_for_startup(app: Flask) -> None:
+    """Check freshness of represented constitutive relation requirements."""
+
+    if _is_running_under_pytest():
+        return
+    if _is_agent_test_instance():
+        app.config["CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_REPORT"] = {
+            "success": True,
+            "skipped": True,
+            "reason": "agent_test_instance",
+        }
+        app.logger.info(
+            "[constitutive_relation_requirements] AgentTest mode: "
+            "skipping Vontology bootstrap."
+        )
+        return
+    if not _env_bool(
+        "VON_CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_ENABLE", True
+    ):
+        return
+    try:
+        from ..services.constitutive_relation_requirement_service import (
+            ensure_constitutive_relation_requirement_profiles_current_for_startup,
+        )
+
+        report = (
+            ensure_constitutive_relation_requirement_profiles_current_for_startup()
+        )
+        app.config["CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_REPORT"] = report
+        if not bool(report.get("success", False)):
+            app.logger.warning(
+                "[constitutive_relation_requirements] bootstrap failed: %s",
+                report,
+            )
+    except Exception as exc:
+        app.config["CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_REPORT"] = {
+            "success": False,
+            "error": str(exc),
+        }
+        app.logger.warning(
+            "[constitutive_relation_requirements] bootstrap error: %s",
+            exc,
+        )
+
+
 def _configure_durable_workflow_startup(app: Flask) -> None:
     """Initialise or defer durable workflow runtime startup."""
     running_under_pytest = _is_running_under_pytest()
@@ -3332,6 +3378,9 @@ def _build_startup_seed_materialisations_projection(
         "concept_summary_fields": "CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT",
         "publication_scope_profiles": (
             "PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"
+        ),
+        "constitutive_relation_requirements": (
+            "CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_REPORT"
         ),
     }
     families: dict[str, dict[str, object]] = {}

@@ -80,10 +80,10 @@ def test_load_effective_assertions_projects_scopes_and_batches_names(
     )
 
     assert captured["page"] == {
-        "subject_concept_ids": ["#V#event"],
+        "argument_concept_id": "#V#event",
+        "epistemic_statuses": ("asserted", "tentative"),
         "limit": 2,
         "offset": 0,
-        "limit_per_subject": 2,
     }
     assert captured["find"]["filter"] == {
         "concept_id": {
@@ -123,6 +123,85 @@ def test_load_effective_assertions_projects_scopes_and_batches_names(
     assert result["items"][0]["human_statement"] == (
         "Research event Date of event June 2026"
     )
+    assert result["items"][0]["concept_relevance"] == {
+        "kind": "grounded_subject",
+        "concept_id": "#V#event",
+        "aboutness_only": False,
+    }
+
+
+def test_link_only_text_assertion_is_visible_without_becoming_a_relation(
+    monkeypatch,
+) -> None:
+    collection = mongomock.MongoClient().db.scoped_knowledge_assertions
+    now = datetime.now(timezone.utc)
+    collection.insert_one(
+        {
+            "_id": "ska_q_and_a",
+            "assertion_id": "ska_q_and_a",
+            "assertion_revision": 1,
+            "assertion_form": scoped_service.STANDALONE_TEXT_ASSERTION_FORM,
+            "subject_concept_id": None,
+            "predicate": None,
+            "object_kind": "text",
+            "object_text": {
+                "text": "Primary Labs has a chief scientist.",
+                "language": "en-NZ",
+            },
+            "object_concept_id": None,
+            "concept_links": [
+                {
+                    "concept_id": "#V#primary_labs",
+                    "role": "about",
+                    "status": "active",
+                }
+            ],
+            "scope": {
+                "mode": "user",
+                "audience_key": "user:#V#owner",
+                "audience_keys": ["user:#V#owner"],
+            },
+            "status": "asserted",
+            "canonical_publication": False,
+            "created_at": now,
+            "updated_at": now,
+            "provenance": {"asserted_by_user_concept_id": "#V#owner"},
+        }
+    )
+    monkeypatch.setattr(
+        scoped_service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        scoped_service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+    monkeypatch.setattr(service.ConceptsRepository, "find", lambda *_a, **_kw: [])
+
+    with override_current_actor("#V#owner", None):
+        result = service.load_concept_effective_assertions(
+            concept_id="#V#primary_labs"
+        )
+
+    assert [item["assertion_id"] for item in result["items"]] == ["ska_q_and_a"]
+    assertion = result["items"][0]
+    assert assertion["assertion_form"] == scoped_service.STANDALONE_TEXT_ASSERTION_FORM
+    assert assertion["subject"]["concept_id"] is None
+    assert assertion["predicate"]["concept_id"] is None
+    assert assertion["human_statement"] == "Primary Labs has a chief scientist."
+    assert assertion["concept_relevance"] == {
+        "kind": "aboutness_only",
+        "concept_id": "#V#primary_labs",
+        "aboutness_only": True,
+    }
+
+    with override_current_actor("#V#outsider", None):
+        hidden = service.load_concept_effective_assertions(
+            concept_id="#V#primary_labs"
+        )
+    assert hidden["items"] == []
 
 
 def test_exact_profile_assertion_projects_user_facing_profile(monkeypatch) -> None:

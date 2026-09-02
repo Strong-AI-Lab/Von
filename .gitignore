@@ -9,6 +9,7 @@
 !sample_knowledge/*.json
 !src/backend/mcp_server/vontology_mcp.json
 !src/backend/workflows/repo_seed_bundles/*.json
+!src/backend/vontology/seed_bundles/constitutive_relation_requirements_seed_bundle.json
 
 # Python cache and virtual environments
 __pycache__/

@@ -67,6 +67,20 @@ def test_renderer_profile_predicate_is_registered_as_binary_text():
     assert MENTIONED_IN_VON_CODE_ID in inst_of
 
 
+def test_constitutive_requirement_profile_predicate_is_registered_as_binary_text():
+    predicate_id = "#V#has_constitutive_relation_requirements_json"
+
+    assert predicate_id in set(list_code_predicate_ids())
+    doc = build_virtual_concept_doc(predicate_id)
+
+    assert doc is not None
+    assert doc["concept_id"] == predicate_id
+    inst_of = doc.get("relationships", {}).get("is_an_instance_of", [])
+    assert PREDICATE_TYPE_ID in inst_of
+    assert BINARY_TEXT_PREDICATE_TYPE_ID in inst_of
+    assert MENTIONED_IN_VON_CODE_ID in inst_of
+
+
 def test_workflow_runtime_policy_predicates_are_registered():
     ids = set(list_code_predicate_ids())
 

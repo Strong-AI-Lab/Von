@@ -26,11 +26,26 @@
   <!-- Ordinary discussion is distinct from the specialised concept-improvement Q&A below. -->
   <button id="discussConceptButton" class="concept-discuss-button"
     title="Discuss this concept with Von">Discuss</button>
-  <button id="startInteractionButton"
-    title="Answer guided questions to improve this concept; supplied knowledge is preserved with provenance and may update its notes">Improve concept by Q&amp;A</button>
-  <p id="conceptInteractionDisclosure" class="concept-interaction-disclosure">
-    Guided Q&amp;A preserves supplied knowledge with provenance and tries to update this concept's notes.
-  </p>
+  <section id="conceptQaSessionCard" class="concept-qa-session-card" aria-labelledby="conceptQaSessionTitle">
+    <div class="concept-qa-session-header">
+      <strong id="conceptQaSessionTitle">Concept Q&amp;A</strong>
+      <span id="conceptQaSessionBadge" class="concept-qa-session-badge" aria-live="polite">Checking…</span>
+    </div>
+    <p id="conceptInteractionDisclosure" class="concept-interaction-disclosure">
+      Guided Q&amp;A keeps a recoverable conversation transcript. Admitted exact claims are stored with provenance; formalisation and notes updates are reported separately.
+    </p>
+    <p id="conceptQaSessionSummary" class="concept-qa-session-summary" role="status" aria-live="polite">
+      Looking for an active Q&amp;A conversation…
+    </p>
+    <p id="conceptQaGapStatus" class="concept-qa-gap-status hidden"></p>
+    <div class="concept-qa-session-actions">
+      <button id="startInteractionButton"
+        title="Answer guided questions in a recoverable conversation; admitted exact claims are stored with provenance">Improve concept by Q&amp;A</button>
+      <button id="resumeConceptQaButton" class="hidden" type="button">Resume Q&amp;A</button>
+      <button id="openConceptQaTranscriptButton" class="hidden" type="button">Open transcript</button>
+      <button id="copyConceptQaReferenceButton" class="hidden" type="button">Copy reference</button>
+    </div>
+  </section>
   <!-- Add Save Notes Button (initially hidden/disabled) -->
   <button id="saveNotesButton" class="concept-save-button" title="Save changes to concept notes">Save</button>
   <button id="suggestInfoButton" class="concept-save-button"
@@ -62,7 +77,7 @@
   <button id="cancelInteractionButton" class="concept-cancel-button"
     title="Cancel the current concept-improvement Q&amp;A">Cancel Q&amp;A</button>
   <button id="endInteractionButton" class="concept-end-button"
-    title="Finish the concept Q&amp;A and apply the gathered information">Finish Q&amp;A</button>
+    title="Finish the concept Q&amp;A while retaining its transcript and recorded outcomes">Finish Q&amp;A</button>
 
   <!-- Display of the last Q&A exchange -->
   <div id="lastQADisplay" class="concept-last-qa-display">

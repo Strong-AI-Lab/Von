@@ -31,7 +31,16 @@ import os
 import uuid  # Added for GUID generation
 from datetime import datetime, timedelta, timezone  # Ensure timezone is imported
 import requests  # Added for requests.exceptions.ConnectionError
-from typing import Dict, Any, Optional, List, Tuple, Iterable, Mapping  # Added Tuple
+from typing import (  # Added Tuple
+    Dict,
+    Any,
+    Optional,
+    List,
+    Tuple,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from pymongo.errors import PyMongoError  # Added for DB operations
 
 try:
@@ -2706,7 +2715,7 @@ def _normalise_interaction_llm_selection(
 
 def _resolve_interaction_llm_runtime(
     interaction_session: Optional[Mapping[str, Any]] = None,
-) -> tuple[Any, Optional[str], Dict[str, Any]]:
+) -> tuple[Any, Optional[str], Dict[str, Any], Dict[str, Optional[str]]]:
     """Resolve one coherent actor-scoped client, model, and parameter bundle."""
 
     from ..languagemodels.llm_interface import (
@@ -2732,7 +2741,15 @@ def _resolve_interaction_llm_runtime(
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
             )
-            return client, model, dict(params) if isinstance(params, Mapping) else {}
+            return (
+                client,
+                model,
+                dict(params) if isinstance(params, Mapping) else {},
+                {
+                    "configured_provider": provider,
+                    "selected_provider": _llm_client_provider(client),
+                },
+            )
 
     active_setting = resolve_llm_setting(
         user_concept_id=user_concept_id,
@@ -2756,7 +2773,37 @@ def _resolve_interaction_llm_runtime(
         user_concept_id=user_concept_id,
         org_concept_id=org_concept_id,
     )
-    return client, model, dict(params or {})
+    return (
+        client,
+        model,
+        dict(params or {}),
+        {
+            "configured_provider": provider,
+            "selected_provider": _llm_client_provider(client),
+        },
+    )
+
+
+def _llm_client_provider(client: Any) -> Optional[str]:
+    """Identify the client actually returned, including cross-provider fallback."""
+
+    for attribute in ("provider_name", "provider", "client_type"):
+        value = getattr(client, attribute, None)
+        if (
+            isinstance(value, str)
+            and value.strip().lower() in _INTERACTION_LLM_PROVIDERS
+        ):
+            return value.strip().lower()
+    class_name = type(client).__name__.casefold()
+    for marker, provider in (
+        ("openrouter", "openrouter"),
+        ("gemini", "gemini"),
+        ("ollama", "ollama"),
+        ("openai", "openai"),
+    ):
+        if marker in class_name:
+            return provider
+    return None
 
 
 def _store_concept_qa_input_assertion(
@@ -2769,6 +2816,7 @@ def _store_concept_qa_input_assertion(
     concept: Mapping[str, Any],
     session: Mapping[str, Any],
     proposed_predicate: Optional[Mapping[str, Any]] = None,
+    source_event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Preserve one exact Q&A input before semantic enrichment.
 
@@ -2798,8 +2846,10 @@ def _store_concept_qa_input_assertion(
     if resolved_input_kind not in {"answer", "question", "notes", "initial_notes"}:
         raise InvalidConceptDataError("Unsupported concept Q&A input kind")
     resolved_ordinal = max(1, input_ordinal)
-    source_event_id = (
-        f"concept_q_and_a:{interaction_id}:{resolved_input_kind}:{resolved_ordinal}"
+    resolved_source_event_id = (
+        str(source_event_id).strip()
+        if isinstance(source_event_id, str) and source_event_id.strip()
+        else f"concept_q_and_a:{interaction_id}:{resolved_input_kind}:{resolved_ordinal}"
     )
     organisation_concept_id = _canonical_organisation_concept_id(
         session.get("organisation_concept_id")
@@ -2827,12 +2877,12 @@ def _store_concept_qa_input_assertion(
         language="en-NZ",
         scope_mode="user",
         context_id=f"concept_q_and_a:{interaction_id}",
-        source_event_id=source_event_id,
+        source_event_id=resolved_source_event_id,
         evidence=evidence,
         acting_user_concept_id=user_id,
         organisation_concept_id=organisation_concept_id,
         namespace=namespace,
-        turn_id=source_event_id,
+        turn_id=resolved_source_event_id,
         canonical_publication=False,
     )
     assertion_id = str(receipt.get("assertion_id") or "").strip()
@@ -2860,7 +2910,7 @@ def _store_concept_qa_input_assertion(
         acting_user_concept_id=user_id,
         organisation_concept_id=organisation_concept_id,
         namespace=namespace,
-        turn_id=source_event_id,
+        turn_id=resolved_source_event_id,
     )
     return {
         "status": "stored",
@@ -2907,11 +2957,9 @@ def _record_initial_interaction_question(
     detail_key = "question" if interaction_type == "llm_question" else "statement"
     details: Dict[str, Any] = {detail_key: question_text}
     if interaction_type == "llm_question" and elicitation_predicate:
-        details["elicitation_predicate"] = {
-            "predicate_concept_id": elicitation_predicate.get("predicate_concept_id"),
-            "predicate_label": elicitation_predicate.get("predicate_label"),
-            "priority": elicitation_predicate.get("priority"),
-        }
+        details["elicitation_predicate"] = _project_elicitation_metadata(
+            elicitation_predicate
+        )
     entry = InteractionEntry(
         interaction_type=interaction_type,
         details=details,
@@ -3226,6 +3274,7 @@ def get_active_interactions_for_concept(
         query: dict[str, Any] = {
             "concept_id": ObjectId(concept_id),
             "user_id": user_id,
+            "status": "active",
         }
 
         org_scope_values = _organisation_scope_values(organisation_concept_id)
@@ -3353,11 +3402,171 @@ MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION = (
     "Only ask the human if their input is genuinely needed, likely known without extra work, "
     "and materially improves the concept. "
     "When asking, ask one concise, low-effort, high-value question. "
-    "Prefer the highest-priority missing salient predicate when it fits the "
-    "conversation; its represented predicate ID is a proposed formalisation "
-    "target, not proof that the user's answer fills it. "
+    "Prioritise an active unmet constitutive relation requirement before ordinary "
+    "salient-predicate opportunities. Respect its declaration_source: only a "
+    "requirement whose source is 'represented' may be described as represented; "
+    "'builtin_compatibility' is compatibility metadata, not represented knowledge. "
+    "Otherwise prefer the highest-priority useful salient predicate that fits the "
+    "conversation. Treat represented predicate, endpoint, and suggested-question "
+    "metadata as an elicitation target, never as proof that the user's answer fills it. "
+    "A safe, explicitly permitted autoformalisation is tentative until confirmed; "
+    "do not describe it as asserted, confirmed, or authority-activating. Let the user "
+    "defer or say they do not know without repeating or nagging about the same gap. "
     "Avoid broad or unrewarding requests. Ask at most one question in the response."
 )
+
+
+_ELICITATION_REQUIREMENT_IDENTITY_FIELDS = (
+    "requirement_id",
+    "predicate_concept_id",
+    "focal_argument",
+    "other_argument_type_concept_id",
+    "declared_on_type_concept_id",
+)
+
+ELICITATION_METADATA_FIELDS = (
+    "requirement_id",
+    "predicate_concept_id",
+    "predicate_label",
+    "priority",
+    "priority_class",
+    "requirement_kind",
+    "status",
+    "gap_status",
+    "reason",
+    "declared_on_type_concept_id",
+    "inherited",
+    "declaration_depth",
+    "declaration_source",
+    "profile_predicate",
+    "activation_relevance",
+    "authority_relevance",
+    "focal_argument",
+    "other_argument_type_concept_id",
+    "auto_formalisation_allowed",
+    "auto_formalisation_target_status",
+    "confirmation_required_for_activation",
+    "confirmation_question_template",
+    "question",
+)
+
+
+def _project_elicitation_metadata(item: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project the bounded Q&A contract without losing declaration provenance."""
+
+    return {key: item.get(key) for key in ELICITATION_METADATA_FIELDS}
+
+
+def _normalise_emitted_question(value: Any) -> str:
+    """Normalise only presentation-level variation in an emitted question."""
+
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.strip().casefold().split())
+
+
+def _match_emitted_elicitation_requirement(
+    response_text: Any,
+    elicitation_plan: Sequence[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Bind metadata only to the exact planned question actually emitted.
+
+    The plan is advisory input to the model. It is not safe to attach the first
+    plan item to an arbitrary question: doing so can invert endpoints or
+    autoformalise an answer under a predicate the user was never asked about.
+    A planned question is therefore bound only when it is the response's exact
+    final question. Duplicate wording with distinct requirement identities is
+    deliberately treated as ambiguous and left unbound.
+    """
+
+    emitted = _normalise_emitted_question(response_text)
+    if not emitted.endswith("?"):
+        return None
+    matches: List[Mapping[str, Any]] = []
+    for item in elicitation_plan:
+        if not isinstance(item, Mapping):
+            continue
+        planned_question = _normalise_emitted_question(item.get("question"))
+        if not planned_question or not planned_question.endswith("?"):
+            continue
+        if emitted == planned_question or emitted.endswith(f" {planned_question}"):
+            matches.append(item)
+    if not matches:
+        return None
+    identities = {
+        _elicitation_requirement_identity(item)
+        or json.dumps(
+            _project_elicitation_metadata(item),
+            ensure_ascii=True,
+            sort_keys=True,
+            default=str,
+        )
+        for item in matches
+    }
+    if len(identities) != 1:
+        return None
+    return _project_elicitation_metadata(matches[0])
+
+
+def _elicitation_requirement_identity(item: Mapping[str, Any]) -> Optional[str]:
+    """Return a stable identity only when requirement metadata is specific enough."""
+
+    values = {
+        key: str(item.get(key) or "").strip()
+        for key in _ELICITATION_REQUIREMENT_IDENTITY_FIELDS
+    }
+    if not (
+        values["predicate_concept_id"]
+        and values["focal_argument"]
+        and values["other_argument_type_concept_id"]
+        and (values["requirement_id"] or values["declared_on_type_concept_id"])
+    ):
+        return None
+    return "concept_q_and_a_requirement.v1:" + json.dumps(
+        values,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _filter_suppressed_elicitation_plan(
+    plan: Sequence[Mapping[str, Any]],
+    session: Optional[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Apply exact Q&A requirement dispositions, with predicate fallback for legacy rows."""
+
+    if not isinstance(session, Mapping):
+        return [dict(item) for item in plan if isinstance(item, Mapping)]
+    exact_keys = {
+        str(value).strip()
+        for value in (
+            list(session.get("suppressed_requirement_keys") or [])
+            + list(session.get("addressed_requirement_keys") or [])
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    legacy_predicate_ids = {
+        str(value).strip()
+        for value in (
+            list(session.get("suppressed_predicate_ids") or [])
+            + list(session.get("addressed_predicate_ids") or [])
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    filtered: List[Dict[str, Any]] = []
+    for raw_item in plan:
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        identity = _elicitation_requirement_identity(item)
+        predicate_id = str(item.get("predicate_concept_id") or "").strip()
+        if identity is not None and identity in exact_keys:
+            continue
+        if predicate_id and predicate_id in legacy_predicate_ids:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def _get_concept_elicitation_plan(
@@ -3600,9 +3809,7 @@ def generate_concept_question(
 
     salient_projection = [
         {
-            "predicate_concept_id": item.get("predicate_concept_id"),
-            "predicate_label": item.get("predicate_label"),
-            "priority": item.get("priority"),
+            **_project_elicitation_metadata(item),
             "suggested_question": item.get("question"),
         }
         for item in (elicitation_plan or [])[:6]
@@ -3612,8 +3819,14 @@ def generate_concept_question(
         f"{filled.rstrip()}\n\n"
         "CURRENT MIXED-INITIATIVE AND REPRESENTATION RULE:\n"
         f"{MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION}\n"
-        "Missing salient-predicate opportunities, ordered by represented "
-        f"priority: {json.dumps(salient_projection, ensure_ascii=False)}\n"
+        "Missing constitutive-and-salient opportunities, ordered by declared "
+        "priority with declaration sources shown explicitly: "
+        f"{json.dumps(salient_projection, ensure_ascii=False)}\n"
+        "Use the suggested question only when it is useful in context; metadata is "
+        "an elicitation plan and not evidence that the relation holds.\n"
+        "If you use a suggested question, reproduce it exactly as the final "
+        "question in your response. A paraphrase or a different question will "
+        "remain unbound text and will not drive typed autoformalisation.\n"
         "If the latest input is a user question, do not ignore it in order to "
         "ask an elicitation question. If a follow-up is useful, answer first and "
         "then ask at most one concise question."
@@ -3639,6 +3852,10 @@ def submit_concept_answer(
     user_answer: str,
     session: dict,
     user_notes_input: Optional[str] = None,
+    *,
+    representation_overrides: Optional[Mapping[str, Any]] = None,
+    persist_interaction_session: bool = True,
+    allow_canonical_notes_update: bool = True,
 ) -> dict:
     """
     Submits a user's answer during an concept interaction, gets the LLM's next question or conclusion,
@@ -3799,46 +4016,58 @@ def submit_concept_answer(
         "canonical_publication": False,
     }
     if answer_text and answer_history_entry is not None:
-        answer_ordinal = sum(
-            1
-            for entry in current_history
-            if entry.get("interaction_type") in {"user_answer", "user_question"}
+        supplied_answer_representation = (
+            representation_overrides.get("exact_answer")
+            if isinstance(representation_overrides, Mapping)
+            else None
         )
-        try:
-            answer_representation = _store_concept_qa_input_assertion(
-                interaction_id=interaction_id,
-                input_kind=("question" if answer_text.endswith("?") else "answer"),
-                input_ordinal=answer_ordinal,
-                question_or_statement=previous_question,
-                input_text=answer_text,
-                concept=concept,
-                session=session,
-                proposed_predicate=(
-                    previous_elicitation_predicate
-                    if not answer_text.endswith("?")
-                    else None
-                ),
-            )
-            logger.info(
-                "Represented concept Q&A input as assertion %s about %s",
-                answer_representation.get("assertion_id"),
-                answer_representation.get("target_concept_id"),
-            )
-        except Exception as e:
-            logger.error(
-                "Could not preserve concept Q&A input %s for session %s: %s",
-                answer_ordinal,
-                interaction_id,
-                e,
-                exc_info=True,
-            )
+        if isinstance(supplied_answer_representation, Mapping):
+            answer_representation = dict(supplied_answer_representation)
+        elif answer_text.endswith("?"):
             answer_representation = {
-                "status": "failed",
-                "effect_status": "failed",
-                "error_code": "answer_assertion_write_failed",
+                "status": "not_admitted",
+                "effect_status": "not_needed",
+                "reason_code": "user_question_is_not_asserted_knowledge",
                 "target_concept_id": concept.get("concept_id"),
                 "canonical_publication": False,
             }
+        else:
+            answer_ordinal = sum(
+                1
+                for entry in current_history
+                if entry.get("interaction_type") in {"user_answer", "user_question"}
+            )
+            try:
+                answer_representation = _store_concept_qa_input_assertion(
+                    interaction_id=interaction_id,
+                    input_kind="answer",
+                    input_ordinal=answer_ordinal,
+                    question_or_statement=previous_question,
+                    input_text=answer_text,
+                    concept=concept,
+                    session=session,
+                    proposed_predicate=previous_elicitation_predicate,
+                )
+                logger.info(
+                    "Represented concept Q&A input as assertion %s about %s",
+                    answer_representation.get("assertion_id"),
+                    answer_representation.get("target_concept_id"),
+                )
+            except Exception as e:
+                logger.error(
+                    "Could not preserve concept Q&A input %s for session %s: %s",
+                    answer_ordinal,
+                    interaction_id,
+                    e,
+                    exc_info=True,
+                )
+                answer_representation = {
+                    "status": "failed",
+                    "effect_status": "failed",
+                    "error_code": "answer_assertion_write_failed",
+                    "target_concept_id": concept.get("concept_id"),
+                    "canonical_publication": False,
+                }
         answer_history_entry["details"]["representation"] = answer_representation
 
     notes_representation: Dict[str, Any] = {
@@ -3847,48 +4076,59 @@ def submit_concept_answer(
         "canonical_publication": False,
     }
     if notes_text and notes_history_entry is not None:
-        notes_ordinal = sum(
-            1
-            for entry in current_history
-            if entry.get("interaction_type")
-            in {"user_provided_notes", "user_provided_initial_notes"}
+        supplied_notes_representation = (
+            representation_overrides.get("notes_input")
+            if isinstance(representation_overrides, Mapping)
+            else None
         )
-        try:
-            notes_representation = _store_concept_qa_input_assertion(
-                interaction_id=interaction_id,
-                input_kind="notes",
-                input_ordinal=notes_ordinal,
-                question_or_statement="User-provided concept notes during Q&A",
-                input_text=notes_text,
-                concept=concept,
-                session=session,
-                proposed_predicate=(
-                    previous_elicitation_predicate if not answer_text else None
-                ),
+        if isinstance(supplied_notes_representation, Mapping):
+            notes_representation = dict(supplied_notes_representation)
+        else:
+            notes_ordinal = sum(
+                1
+                for entry in current_history
+                if entry.get("interaction_type")
+                in {"user_provided_notes", "user_provided_initial_notes"}
             )
-        except Exception as e:
-            logger.error(
-                "Could not preserve concept Q&A notes %s for session %s: %s",
-                notes_ordinal,
-                interaction_id,
-                e,
-                exc_info=True,
-            )
-            notes_representation = {
-                "status": "failed",
-                "effect_status": "failed",
-                "error_code": "notes_assertion_write_failed",
-                "target_concept_id": concept.get("concept_id"),
-                "canonical_publication": False,
-            }
+            try:
+                notes_representation = _store_concept_qa_input_assertion(
+                    interaction_id=interaction_id,
+                    input_kind="notes",
+                    input_ordinal=notes_ordinal,
+                    question_or_statement="User-provided concept notes during Q&A",
+                    input_text=notes_text,
+                    concept=concept,
+                    session=session,
+                    proposed_predicate=(
+                        previous_elicitation_predicate if not answer_text else None
+                    ),
+                )
+            except Exception as e:
+                logger.error(
+                    "Could not preserve concept Q&A notes %s for session %s: %s",
+                    notes_ordinal,
+                    interaction_id,
+                    e,
+                    exc_info=True,
+                )
+                notes_representation = {
+                    "status": "failed",
+                    "effect_status": "failed",
+                    "error_code": "notes_assertion_write_failed",
+                    "target_concept_id": concept.get("concept_id"),
+                    "canonical_publication": False,
+                }
         notes_history_entry["details"]["representation"] = notes_representation
 
     # IMPORTANT: Do synthesis FIRST before generating the next question
     # This ensures the next question is based on updated notes that include the current synthesis
     try:
-        llm_client, selected_model, llm_params = _resolve_interaction_llm_runtime(
-            session
-        )
+        (
+            llm_client,
+            selected_model,
+            llm_params,
+            llm_runtime,
+        ) = _resolve_interaction_llm_runtime(session)
         safe_model = selected_model or "default"
     except Exception as e:
         logger.error(
@@ -3915,7 +4155,11 @@ def submit_concept_answer(
             else None
         ),
     }
-    if answer_text and not answer_text.endswith("?"):
+    if (
+        allow_canonical_notes_update
+        and answer_text
+        and answer_representation.get("status") == "stored"
+    ):
         try:
             synthesis_outcome = synthesize_and_update_concept_notes(
                 concept_id=concept_id_str,
@@ -3975,6 +4219,15 @@ def submit_concept_answer(
                 "error_code": "synthesis_processing_failed",
             }
             # Continue because the exact answer may already be durably represented.
+    elif answer_text and answer_representation.get("status") == "stored":
+        synthesis_outcome = {
+            "status": "not_attempted",
+            "effect_status": "not_needed",
+            "synthesis": None,
+            "notes_updated": False,
+            "reason": "canonical_concept_edit_authority_not_delegated",
+            "source_assertion_id": answer_representation.get("assertion_id"),
+        }
     if answer_history_entry is not None:
         answer_history_entry["details"]["concept_notes_synthesis"] = synthesis_outcome
 
@@ -4007,6 +4260,10 @@ def submit_concept_answer(
     # concept_type_name_for_prompt was already calculated above, no need to recalculate
     elicitation_plan = _get_concept_elicitation_plan(
         str(concept.get("concept_id") or concept_id_str)
+    )
+    elicitation_plan = _filter_suppressed_elicitation_plan(
+        elicitation_plan,
+        session,
     )
 
     try:
@@ -4079,13 +4336,13 @@ def submit_concept_answer(
         llm_interaction_type = "llm_statement"
         llm_details_key = "statement"
 
+    emitted_elicitation_predicate = _match_emitted_elicitation_requirement(
+        llm_response_text,
+        elicitation_plan or [],
+    )
     llm_response_details: Dict[str, Any] = {llm_details_key: llm_response_text}
-    if llm_interaction_type == "llm_question" and elicitation_plan:
-        llm_response_details["elicitation_predicate"] = {
-            "predicate_concept_id": elicitation_plan[0].get("predicate_concept_id"),
-            "predicate_label": elicitation_plan[0].get("predicate_label"),
-            "priority": elicitation_plan[0].get("priority"),
-        }
+    if emitted_elicitation_predicate is not None:
+        llm_response_details["elicitation_predicate"] = emitted_elicitation_predicate
     llm_response_interaction_entry = InteractionEntry(
         interaction_type=llm_interaction_type,
         details=llm_response_details,
@@ -4095,23 +4352,26 @@ def submit_concept_answer(
 
     try:
         # Ensure interaction_id is ObjectId for MongoDB query
-        interaction_oid = (
-            ObjectId(interaction_id)
-            if not isinstance(interaction_id, ObjectId)
-            else interaction_id
-        )
+        if not persist_interaction_session:
+            update_result = None
+        else:
+            interaction_oid = (
+                ObjectId(interaction_id)
+                if not isinstance(interaction_id, ObjectId)
+                else interaction_id
+            )
 
-        update_result = interactions_collection.update_one(
-            {"_id": interaction_oid},
-            {
-                "$set": {
-                    "history": current_history,  # current_history has already been updated
-                    "last_updated_time": datetime.now(timezone.utc),
-                    "indexing_status": "pending",
-                }
-            },
-        )
-        if update_result.matched_count == 0:
+            update_result = interactions_collection.update_one(
+                {"_id": interaction_oid},
+                {
+                    "$set": {
+                        "history": current_history,
+                        "last_updated_time": datetime.now(timezone.utc),
+                        "indexing_status": "pending",
+                    }
+                },
+            )
+        if update_result is not None and update_result.matched_count == 0:
             logger.error(
                 f"Interaction session {interaction_id} (OID: {interaction_oid}) not found for update."
             )
@@ -4119,7 +4379,8 @@ def submit_concept_answer(
                 "error": "Interaction session not found for update",
                 "status": "error_db_update_notfound",
             }
-        logger.info(f"Successfully updated interaction session {interaction_id}")
+        if update_result is not None:
+            logger.info(f"Successfully updated interaction session {interaction_id}")
     except PyMongoError as e:
         logger.error(
             f"MongoDB error updating interaction session {interaction_id}: {e}"
@@ -4141,8 +4402,28 @@ def submit_concept_answer(
     return {
         "next_step_type": llm_interaction_type,
         "next_step_content": llm_response_text,
+        "elicitation_predicate": emitted_elicitation_predicate,
         "status": "success",
         "interaction_id": interaction_id,  # Return the original string ID
+        "llm_debug_data": {
+            "schema_version": "concept_q_and_a_llm_debug.v1",
+            "purpose": "concept_q_and_a_next_turn",
+            "requested": (
+                dict(session.get("llm_selection"))
+                if isinstance(session.get("llm_selection"), Mapping)
+                else None
+            ),
+            "configured": {
+                "provider": llm_runtime.get("configured_provider"),
+            },
+            "provider": llm_runtime.get("selected_provider"),
+            "model": safe_model,
+            "selected": {
+                "provider": llm_runtime.get("selected_provider"),
+                "model": safe_model,
+                "model_parameters": dict(llm_params or {}),
+            },
+        },
         "synthesis": synthesis_outcome.get("synthesis"),
         "synthesis_status": synthesis_outcome.get("status"),
         "representation": {
@@ -5182,6 +5463,8 @@ def generate_initial_question(
     concept_id: str,
     initial_notes: Optional[str] = None,
     interaction_session: Optional[Mapping[str, Any]] = None,
+    *,
+    persist_interaction_question: bool = True,
 ) -> dict:
     """
     Ask the LLM for the *first* question to pose about an concept.
@@ -5235,6 +5518,10 @@ def generate_initial_question(
     elicitation_plan = _get_concept_elicitation_plan(
         str(concept.get("concept_id") or concept_id)
     )
+    elicitation_plan = _filter_suppressed_elicitation_plan(
+        elicitation_plan,
+        interaction_session,
+    )
 
     # ------------------------------------------------------------------ 2. prompt
     try:
@@ -5258,9 +5545,12 @@ def generate_initial_question(
 
     # ------------------------------------------------------------------ 3. call LLM
     try:
-        llm_client, model_name, llm_params = _resolve_interaction_llm_runtime(
-            interaction_session
-        )
+        (
+            llm_client,
+            model_name,
+            llm_params,
+            llm_runtime,
+        ) = _resolve_interaction_llm_runtime(interaction_session)
         raw = llm_client.generate(
             prompt=final_prompt,
             model=model_name or "default",
@@ -5283,20 +5573,48 @@ def generate_initial_question(
     if not initial_question:
         initial_question = _build_minimal_imposition_fallback_question(display_name)
 
-    if interaction_session is not None:
+    emitted_elicitation_predicate = _match_emitted_elicitation_requirement(
+        initial_question,
+        elicitation_plan,
+    )
+
+    requested_selection = (
+        interaction_session.get("llm_selection")
+        if isinstance(interaction_session, Mapping)
+        else None
+    )
+    llm_debug_data = {
+        "schema_version": "concept_q_and_a_llm_debug.v1",
+        "purpose": "concept_q_and_a_initial_turn",
+        "requested": (
+            dict(requested_selection)
+            if isinstance(requested_selection, Mapping)
+            else None
+        ),
+        "configured": {
+            "provider": llm_runtime.get("configured_provider"),
+        },
+        "provider": llm_runtime.get("selected_provider"),
+        "model": model_name or "default",
+        "selected": {
+            "provider": llm_runtime.get("selected_provider"),
+            "model": model_name or "default",
+            "model_parameters": dict(llm_params or {}),
+        },
+    }
+
+    if interaction_session is not None and persist_interaction_question:
         _record_initial_interaction_question(
             interaction_session=interaction_session,
             question_or_statement=initial_question,
-            elicitation_predicate=(
-                elicitation_plan[0]
-                if initial_question.endswith("?") and elicitation_plan
-                else None
-            ),
+            elicitation_predicate=emitted_elicitation_predicate,
         )
 
     return {
         "question": initial_question,
         "status": "success",
+        "elicitation_predicate": emitted_elicitation_predicate,
+        "llm_debug_data": llm_debug_data,
         "concept": {
             "_id": str(concept.get("_id", concept_id)),
             "name": display_name,

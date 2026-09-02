@@ -6,6 +6,7 @@ const actorContextState = globalThis[ACTOR_CONTEXT_STATE_KEY] || {
   registrations: new Map(),
   listenersBound: false,
   reload: null,
+  refreshKnowledge: null,
 };
 globalThis[ACTOR_CONTEXT_STATE_KEY] = actorContextState;
 const panelRegistrations = actorContextState.registrations;
@@ -122,26 +123,112 @@ function createAssertionDetails(item) {
   return details;
 }
 
-function createAssertionRow(item) {
+function assertionRelevanceKind(item) {
+  return cleanText(item?.concept_relevance?.kind).toLowerCase();
+}
+
+function assertionDirection(item) {
+  const relevanceKind = assertionRelevanceKind(item);
+  if (relevanceKind === 'grounded_object') return 'incoming';
+  if (relevanceKind === 'grounded_subject') return 'outgoing';
+  if (relevanceKind === 'grounded_subject_and_object') return 'reflexive';
+  if (relevanceKind === 'aboutness_only') return 'aboutness';
+  return 'unspecified';
+}
+
+function assertionArgumentLabel(argument) {
+  if (!argument || typeof argument !== 'object') return '';
+  if (argument.kind === 'text') return cleanText(argument.text);
+  return cleanText(argument.display_name) || cleanText(argument.concept_id);
+}
+
+function assertionStatementPresentation(item) {
   const predicate = cleanText(item?.predicate?.display_name) || 'Assertion';
-  const object = item?.object || {};
-  const value = object.kind === 'concept'
-    ? cleanText(object.display_name) || cleanText(object.concept_id)
-    : cleanText(object.text);
+  const value = assertionArgumentLabel(item?.object);
   if (!value) return null;
+
+  const humanStatement = cleanText(item?.human_statement);
+  if (humanStatement) {
+    return { complete: true, predicate, text: humanStatement, value };
+  }
+
+  const relevanceKind = assertionRelevanceKind(item);
+  if (relevanceKind === 'aboutness_only') {
+    return { complete: true, predicate, text: value, value };
+  }
+
+  const subject = assertionArgumentLabel(item?.subject);
+  if (subject) {
+    return {
+      complete: true,
+      predicate,
+      text: [subject, predicate, value].join(' '),
+      value,
+    };
+  }
+  return { complete: false, predicate, text: '', value };
+}
+
+function createAssertionRow(item) {
+  const presentation = assertionStatementPresentation(item);
+  if (!presentation) return null;
 
   const row = document.createElement('article');
   row.className = 'concept-effective-assertion-row';
   row.dataset.assertionId = cleanText(item?.assertion_id);
+  row.dataset.relationDirection = assertionDirection(item);
 
   const statement = document.createElement('div');
   statement.className = 'concept-effective-assertion-statement';
-  appendText(statement, 'span', 'concept-effective-assertion-predicate', predicate);
-  appendText(statement, 'span', 'concept-effective-assertion-value', value);
+  if (presentation.complete) {
+    statement.classList.add('is-complete-statement');
+    appendText(
+      statement,
+      'span',
+      'concept-effective-assertion-human-statement',
+      presentation.text,
+    );
+  } else {
+    appendText(
+      statement,
+      'span',
+      'concept-effective-assertion-predicate',
+      presentation.predicate,
+    );
+    appendText(
+      statement,
+      'span',
+      'concept-effective-assertion-value',
+      presentation.value,
+    );
+  }
   row.appendChild(statement);
+
+  if (item?.concept_relevance?.aboutness_only === true
+      || item?.concept_relevance?.kind === 'aboutness_only') {
+    const relevance = appendText(
+      row,
+      'p',
+      'concept-effective-assertion-relevance aboutness-only',
+      'Exact text linked to this concept; no typed relation asserted.',
+    );
+    if (relevance) relevance.setAttribute('role', 'note');
+  }
 
   const context = item?.source_context || {};
   const contextKind = context.kind === 'organisation' ? 'organisation' : 'personal';
+  const epistemicStatus = cleanText(item?.epistemic_status).toLowerCase();
+  const aboutnessOnly = item?.concept_relevance?.aboutness_only === true
+    || item?.concept_relevance?.kind === 'aboutness_only';
+  if (epistemicStatus === 'tentative' && !aboutnessOnly) {
+    const tentative = appendText(
+      row,
+      'span',
+      'concept-effective-assertion-epistemic concept-effective-assertion-epistemic-tentative',
+      'Tentative typed relation; not confirmed/authority-active',
+    );
+    if (tentative) tentative.setAttribute('aria-label', tentative.textContent);
+  }
   const badge = appendText(
     row,
     'span',
@@ -214,7 +301,7 @@ async function loadPage({ conceptId, suffix, offset, append }) {
 
   try {
     const { data } = await getJsonDetailed(
-      `/api/concepts/${encodeURIComponent(conceptId)}/effective_assertions?limit=${DEFAULT_PAGE_LIMIT}&offset=${offset}`,
+      `/api/concepts/${encodeURIComponent(conceptId)}/effective_assertions?limit=${DEFAULT_PAGE_LIMIT}&offset=${offset}&argument_concept_id=${encodeURIComponent(conceptId)}`,
       { cache: 'no-store' },
     );
     if (panel.dataset.loadToken !== token || panel.dataset.conceptId !== conceptId) {
@@ -223,7 +310,10 @@ async function loadPage({ conceptId, suffix, offset, append }) {
 
     const contextView = cleanText(data?.context_view);
     const items = Array.isArray(data?.items)
-      ? data.items.filter((item) => item?.status === 'asserted')
+      ? data.items.filter((item) => (
+        item?.status === 'asserted'
+        || cleanText(item?.epistemic_status).toLowerCase() === 'tentative'
+      ))
       : [];
     if (contextView !== 'actor_effective' || (items.length === 0 && !append)) {
       panel.classList.add('hidden');
@@ -297,14 +387,45 @@ function clearAndReloadRegisteredPanels() {
   }
 }
 
+export function refreshConceptEffectiveAssertionsPanel({ conceptId, suffix = null } = {}) {
+  const targetConceptId = cleanText(conceptId);
+  const matching = [];
+  for (const [registeredSuffix, registration] of panelRegistrations.entries()) {
+    const registeredMount = document.getElementById(
+      registeredSuffix
+        ? `conceptEffectiveAssertionsMount_${registeredSuffix}`
+        : 'conceptEffectiveAssertionsMount',
+    );
+    if (!registeredMount?.isConnected) {
+      panelRegistrations.delete(registeredSuffix);
+      continue;
+    }
+    if (suffix !== null && registeredSuffix !== suffix) continue;
+    if (targetConceptId && registration.conceptId !== targetConceptId) continue;
+    matching.push(loadPage({
+      conceptId: registration.conceptId,
+      suffix: registeredSuffix,
+      offset: 0,
+      append: false,
+    }));
+  }
+  return Promise.allSettled(matching);
+}
+
 function registerActorContextInvalidation(conceptId, suffix) {
   panelRegistrations.set(suffix, { conceptId });
   actorContextState.reload = clearAndReloadRegisteredPanels;
+  actorContextState.refreshKnowledge = refreshConceptEffectiveAssertionsPanel;
   if (actorContextState.listenersBound) return;
   actorContextState.listenersBound = true;
   const reloadLatestProjection = () => actorContextState.reload?.();
   document.addEventListener('orgSwitched', reloadLatestProjection);
   document.addEventListener('authStatusChanged', reloadLatestProjection);
+  document.addEventListener('von:conceptKnowledgeChanged', (event) => {
+    const conceptId = cleanText(event?.detail?.conceptId);
+    if (!conceptId) return;
+    void actorContextState.refreshKnowledge?.({ conceptId });
+  });
 }
 
 export async function ensureConceptEffectiveAssertionsPanel({ conceptId, suffix }) {
@@ -315,5 +436,7 @@ export async function ensureConceptEffectiveAssertionsPanel({ conceptId, suffix 
 export const _test = {
   createAssertionRow,
   appendAssertionToPredicateGroup,
+  assertionDirection,
+  assertionStatementPresentation,
   formatDate,
 };

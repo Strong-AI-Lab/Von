@@ -70,6 +70,63 @@ def test_history_exposes_conversation_situation_without_message_segments(
     }
 
 
+def test_history_projects_terminal_concept_q_and_a_carrier_state(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#test_user"},
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: ("#V#test_user", None),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "mode": "concept_q_and_a",
+            "origin_kind": "concept_q_and_a",
+            "focal_concept_ids": ["#V#primary_labs"],
+            "concept_q_and_a": {
+                "schema_version": "concept_q_and_a_session.v1",
+                "concept": {
+                    "concept_id": "#V#primary_labs",
+                    "name": "Primary Labs",
+                },
+                "lifecycle": {"status": "cancelled", "revision": 1},
+            },
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history",
+        query_string={"session_id": "qa-terminal"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["session"]["mode"] == "concept_q_and_a"
+    assert body["session"]["focal_concept_ids"] == ["#V#primary_labs"]
+    assert body["qa_session"]["lifecycle"]["status"] == "cancelled"
+
+
 def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypatch):
     from src.backend.server.routes.von_routes import von_bp
 
@@ -314,7 +371,10 @@ def test_history_debug_returns_stored_turn_execution_diagnostics(monkeypatch):
     body = response.get_json()
     assert isinstance(body, dict)
     assert body.get("success") is True
-    assert body.get("history_location") == {"session_id": "session-1", "history_index": 3}
+    assert body.get("history_location") == {
+        "session_id": "session-1",
+        "history_index": 3,
+    }
 
     returned = body.get("llm_debug_data")
     assert isinstance(returned, dict)

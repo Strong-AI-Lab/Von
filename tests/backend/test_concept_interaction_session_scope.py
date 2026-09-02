@@ -77,7 +77,10 @@ def test_interaction_model_runtime_reuses_exact_persisted_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
-    sentinel = object()
+    class _SelectedClient:
+        provider_name = "gemini"
+
+    sentinel = _SelectedClient()
 
     def fake_get_llm_client(**kwargs: Any) -> object:
         captured.update(kwargs)
@@ -100,7 +103,7 @@ def test_interaction_model_runtime_reuses_exact_persisted_selection(
         lambda **_kwargs: pytest.fail("persisted provider must not be re-resolved"),
     )
 
-    client, model, params = concept_service._resolve_interaction_llm_runtime(
+    client, model, params, runtime = concept_service._resolve_interaction_llm_runtime(
         {
             "user_id": "#V#michael_witbrock",
             "organisation_concept_id": "#V#university_of_auckland_strong_ai_lab",
@@ -115,6 +118,10 @@ def test_interaction_model_runtime_reuses_exact_persisted_selection(
     assert client is sentinel
     assert model == "gemini-3.7-flash"
     assert params == {"temperature": 0.2}
+    assert runtime == {
+        "configured_provider": "gemini",
+        "selected_provider": "gemini",
+    }
     assert captured == {
         "client_type": "gemini",
         "user_concept_id": "#V#michael_witbrock",

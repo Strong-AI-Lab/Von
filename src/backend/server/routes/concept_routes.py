@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import datetime as dt
 from typing import Any
-from ...services import concept_service  # Import concept_service
+from ...services import concept_qa_conversation_service, concept_service
 from ...services.window_session_context_service import get_effective_context
 from ...services.concept_service import (
     ConceptServiceError,
@@ -52,6 +52,20 @@ from ...vontology.utils_vontology import (
 from ...db.mongo_client import get_db
 
 concept_bp = Blueprint("concepts", __name__)  # Define blueprint
+
+
+def _concept_qa_error_response(error: Exception) -> ResponseReturnValue:
+    error_code = str(getattr(error, "error_code", "concept_q_and_a_failed"))
+    payload = {"success": False, "error": str(error), "error_code": error_code}
+    if isinstance(error, concept_qa_conversation_service.ConceptQAConversationNotFound):
+        return jsonify(payload), 404
+    if isinstance(error, concept_qa_conversation_service.ConceptQAConversationConflict):
+        return jsonify(payload), 409
+    if isinstance(
+        error, concept_qa_conversation_service.InvalidConceptQAConversationInput
+    ):
+        return jsonify(payload), 400
+    return jsonify(payload), 503
 
 
 def _get_trusted_interaction_user() -> str | None:
@@ -1152,6 +1166,164 @@ def get_legacy_import_metrics():
             jsonify({"success": False, "error": "Failed to fetch legacy metrics"}),
             500,
         )
+
+
+@concept_bp.route("/<string:concept_id>/q_and_a", methods=["GET"])
+def list_concept_q_and_a_route(concept_id: str):
+    user_id = _get_trusted_interaction_user()
+    if not user_id:
+        return jsonify(error="Concept Q&A requires authenticated user context"), 401
+    try:
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        result = concept_qa_conversation_service.list_concept_qa_conversations(
+            concept_id=concept_id,
+            user_id=user_id,
+            namespace=_get_request_namespace(),
+            organisation_concept_id=get_effective_organisation_concept_id(),
+            session_id=request.args.get("session_id"),
+        )
+        return jsonify(result), 200
+    except concept_qa_conversation_service.ConceptQAConversationError as exc:
+        return _concept_qa_error_response(exc)
+
+
+@concept_bp.route("/<string:concept_id>/q_and_a/start", methods=["POST"])
+def start_concept_q_and_a_route(concept_id: str):
+    user_id = _get_trusted_interaction_user()
+    if not user_id:
+        return jsonify(error="Concept Q&A requires authenticated user context"), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        result = concept_qa_conversation_service.start_concept_qa_conversation(
+            concept_id=concept_id,
+            user_id=user_id,
+            namespace=_get_request_namespace(),
+            organisation_concept_id=get_effective_organisation_concept_id(),
+            initial_notes=data.get("initial_notes"),
+            initial_turn_id=data.get("turn_id") or data.get("initial_turn_id"),
+            model_provider=data.get("model_provider"),
+            model=data.get("model"),
+            model_parameters=data.get("model_parameters"),
+        )
+        return jsonify(result), 200
+    except concept_qa_conversation_service.ConceptQAConversationError as exc:
+        return _concept_qa_error_response(exc)
+
+
+@concept_bp.route(
+    "/<string:concept_id>/q_and_a/sessions/<string:session_id>/turns",
+    methods=["POST"],
+)
+def submit_concept_q_and_a_turn_route(concept_id: str, session_id: str):
+    user_id = _get_trusted_interaction_user()
+    if not user_id:
+        return jsonify(error="Concept Q&A requires authenticated user context"), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        result = concept_qa_conversation_service.submit_concept_qa_turn(
+            concept_id=concept_id,
+            session_id=session_id,
+            turn_id=data.get("turn_id"),
+            user_id=user_id,
+            answer=data.get("answer", ""),
+            notes_input=data.get("notes_input"),
+            namespace=_get_request_namespace(),
+            organisation_concept_id=get_effective_organisation_concept_id(),
+        )
+        return jsonify(result), 200
+    except concept_qa_conversation_service.ConceptQAConversationError as exc:
+        return _concept_qa_error_response(exc)
+
+
+def _transition_concept_q_and_a_route(
+    concept_id: str, session_id: str, target_status: str
+) -> ResponseReturnValue:
+    user_id = _get_trusted_interaction_user()
+    if not user_id:
+        return jsonify(error="Concept Q&A requires authenticated user context"), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        result = concept_qa_conversation_service.transition_concept_qa_conversation(
+            concept_id=concept_id,
+            session_id=session_id,
+            user_id=user_id,
+            target_status=target_status,
+            namespace=_get_request_namespace(),
+            organisation_concept_id=get_effective_organisation_concept_id(),
+            expected_revision=data.get("expected_revision"),
+        )
+        return jsonify(result), 200
+    except concept_qa_conversation_service.ConceptQAConversationError as exc:
+        return _concept_qa_error_response(exc)
+
+
+@concept_bp.route(
+    "/<string:concept_id>/q_and_a/sessions/<string:session_id>/finish",
+    methods=["POST"],
+)
+def finish_concept_q_and_a_route(concept_id: str, session_id: str):
+    return _transition_concept_q_and_a_route(concept_id, session_id, "finished")
+
+
+@concept_bp.route(
+    "/<string:concept_id>/q_and_a/sessions/<string:session_id>/cancel",
+    methods=["POST"],
+)
+def cancel_concept_q_and_a_route(concept_id: str, session_id: str):
+    return _transition_concept_q_and_a_route(concept_id, session_id, "cancelled")
+
+
+@concept_bp.route(
+    "/<string:concept_id>/q_and_a/sessions/<string:session_id>/formalisations/"
+    "<string:assertion_id>/confirm",
+    methods=["POST"],
+)
+def confirm_concept_q_and_a_formalisation_route(
+    concept_id: str, session_id: str, assertion_id: str
+):
+    user_id = _get_trusted_interaction_user()
+    if not user_id:
+        return jsonify(error="Concept Q&A requires authenticated user context"), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        from ...security.access_control import get_effective_organisation_concept_id
+
+        result = concept_qa_conversation_service.confirm_concept_qa_formalisation(
+            concept_id=concept_id,
+            session_id=session_id,
+            assertion_id=assertion_id,
+            user_id=user_id,
+            namespace=_get_request_namespace(),
+            organisation_concept_id=get_effective_organisation_concept_id(),
+            request_id=data.get("request_id"),
+        )
+        if result.get("success") is True:
+            return jsonify(result), 200
+        confirmation = result.get("confirmation")
+        authority_decision = (
+            confirmation.get("authority_decision")
+            if isinstance(confirmation, dict)
+            else None
+        )
+        if (
+            isinstance(authority_decision, dict)
+            and authority_decision.get("allowed") is False
+        ):
+            return jsonify(result), 403
+        if isinstance(confirmation, dict) and confirmation.get(
+            "reconciliation_required"
+        ):
+            return jsonify(result), 409
+        return jsonify(result), 422
+    except concept_qa_conversation_service.ConceptQAConversationError as exc:
+        return _concept_qa_error_response(exc)
 
 
 @concept_bp.route("/<string:concept_id>/start_interaction", methods=["POST"])

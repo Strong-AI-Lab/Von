@@ -163,6 +163,9 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
     monkeypatch.setenv("VON_PREWARM_DISABLE", "1")
     monkeypatch.setenv("VON_CONCEPT_SUMMARY_FIELD_BOOTSTRAP_ENABLE", "0")
     monkeypatch.setenv("VON_PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_ENABLE", "0")
+    monkeypatch.setenv(
+        "VON_CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_ENABLE", "0"
+    )
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0")
 
@@ -390,6 +393,7 @@ def test_agent_test_startup_helpers_skip_remote_infrastructure(monkeypatch):
     utils_flask._maybe_start_startup_rag_requeue(app)
     utils_flask._bootstrap_concept_summary_fields_for_startup(app)
     utils_flask._bootstrap_publication_scope_profiles_for_startup(app)
+    utils_flask._bootstrap_constitutive_relation_requirements_for_startup(app)
     utils_flask._log_prompt_concept_health(app)
     utils_flask._register_optional_prewarm(app)
 
@@ -399,6 +403,11 @@ def test_agent_test_startup_helpers_skip_remote_infrastructure(monkeypatch):
         "reason": "agent_test_instance",
     }
     assert app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] == {
+        "success": True,
+        "skipped": True,
+        "reason": "agent_test_instance",
+    }
+    assert app.config["CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_REPORT"] == {
         "success": True,
         "skipped": True,
         "reason": "agent_test_instance",
@@ -428,3 +437,33 @@ def test_publication_scope_profile_startup_records_bootstrap_report(
     utils_flask._bootstrap_publication_scope_profiles_for_startup(app)
 
     assert app.config["PUBLICATION_SCOPE_PROFILE_BOOTSTRAP_REPORT"] == expected
+
+
+def test_constitutive_requirement_startup_records_freshness_report(
+    monkeypatch,
+) -> None:
+    import src.backend.server.utils_flask as utils_flask
+    from src.backend.services import constitutive_relation_requirement_service
+
+    monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+    monkeypatch.setattr(utils_flask, "_is_agent_test_instance", lambda: False)
+    monkeypatch.setenv(
+        "VON_CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_ENABLE", "1"
+    )
+    expected = {"success": True, "ready": True, "seed_version": "test"}
+    monkeypatch.setattr(
+        constitutive_relation_requirement_service,
+        "ensure_constitutive_relation_requirement_profiles_current_for_startup",
+        lambda: expected,
+    )
+    app = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        config={},
+    )
+
+    utils_flask._bootstrap_constitutive_relation_requirements_for_startup(app)
+
+    assert (
+        app.config["CONSTITUTIVE_RELATION_REQUIREMENT_BOOTSTRAP_REPORT"]
+        == expected
+    )
