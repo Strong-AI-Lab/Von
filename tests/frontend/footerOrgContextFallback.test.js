@@ -4,7 +4,7 @@ const domUtilsPath = '../../src/frontend/web/von_interface/static/js/domUtils.js
 
 describe('footer org context fallback', () => {
     beforeEach(() => {
-        document.body.innerHTML = '<div id="modelInfoFooter"></div>';
+        document.body.innerHTML = '<span id="headerOrgName">...</span><div id="modelInfoFooter"></div>';
         localStorage.clear();
         localStorage.setItem('von_org_context', JSON.stringify({
             concept_id: '#V#the_lu_witbrock_household',
@@ -32,10 +32,13 @@ describe('footer org context fallback', () => {
     });
 
     test('uses von_org_context to render org footer segment', async () => {
-        const { setModelInfoFooterText } = require(domUtilsPath);
+        const { setModelInfoFooterText, updateHeaderOrgName } = require(domUtilsPath);
 
+        updateHeaderOrgName();
         await setModelInfoFooterText();
 
+        expect(document.querySelector('#headerOrgName')?.textContent)
+            .toBe('The Lu Witbrock Household');
         const orgSegment = Array.from(document.querySelectorAll('.footer-segment'))
             .find((seg) => seg.querySelector('.footer-label-inline')?.textContent?.trim() === 'Org:');
         expect(orgSegment).toBeTruthy();
