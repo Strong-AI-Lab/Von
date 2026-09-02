@@ -79,6 +79,23 @@ Run the first command before applying. If it reports a missing user or an
 address already bound to another user, correct that exact conflict and rerun
 the dry run; do not work around it by adding a generic email relation.
 
+The organisation-membership migration likewise performs a dry run by default.
+It copies only legacy membership pairs backed by exactly one scoped operational
+role. If it reports conflicting legacy roles, resolve each pair explicitly
+with the exact `--role-override` form shown by `--help`, for example:
+
+```sh
+python -m src.backend.utilities.migrate_von_organisation_membership_predicates \
+  --role-override '#V#person_id=#V#organisation_id=owner'
+
+python -m src.backend.utilities.migrate_von_organisation_membership_predicates \
+  --role-override '#V#person_id=#V#organisation_id=owner' \
+  --apply --approved
+```
+
+The selected role must already occur in the legacy evidence for that exact
+user/organisation pair. Unrelated overrides and invented roles fail closed.
+
 ## 2) Vontology access control (concepts + relationships)
 
 ### Visibility model

@@ -120,6 +120,77 @@ def test_apply_requires_explicit_approval(monkeypatch):
     assert report["error_code"] == "explicit_migration_approval_required"
 
 
+def test_conflicting_roles_require_an_exact_evidenced_override(monkeypatch):
+    pair = ("#V#alice", "#V#von_org")
+    monkeypatch.setattr(migration, "_legacy_edge_pairs", lambda: {pair: {"memberOf"}})
+    monkeypatch.setattr(
+        migration,
+        "_legacy_role_pairs",
+        lambda: ({pair: {"member", "owner"}}, []),
+    )
+    monkeypatch.setattr(migration, "_narrow_membership_pairs", set)
+
+    blocked = migration.migrate_von_organisation_membership_predicates()
+    assert blocked["success"] is False
+    assert blocked["unresolved_conflict_count"] == 1
+    assert blocked["error_code"] == "legacy_membership_inventory_requires_resolution"
+
+    resolved = migration.migrate_von_organisation_membership_predicates(
+        role_overrides=[
+            {
+                "user_concept_id": pair[0],
+                "organisation_concept_id": pair[1],
+                "role": "owner",
+            }
+        ]
+    )
+    assert resolved["success"] is True
+    assert resolved["resolved_conflict_count"] == 1
+    assert resolved["would_migrate_count"] == 1
+    assert resolved["resolved_conflicts"][0]["role"] == "owner"
+
+
+def test_role_override_cannot_invent_a_role_or_target_an_unconflicted_pair(
+    monkeypatch,
+):
+    pair = ("#V#alice", "#V#von_org")
+    monkeypatch.setattr(migration, "_legacy_edge_pairs", lambda: {pair: {"memberOf"}})
+    monkeypatch.setattr(
+        migration,
+        "_legacy_role_pairs",
+        lambda: ({pair: {"member", "owner"}}, []),
+    )
+    monkeypatch.setattr(migration, "_narrow_membership_pairs", set)
+
+    invented = migration.migrate_von_organisation_membership_predicates(
+        role_overrides=[
+            {
+                "user_concept_id": pair[0],
+                "organisation_concept_id": pair[1],
+                "role": "admin",
+            }
+        ]
+    )
+    assert invented["success"] is False
+    assert invented["role_override_errors"][0]["reason_code"] == (
+        "role_override_not_present_in_legacy_evidence"
+    )
+
+    unrelated = migration.migrate_von_organisation_membership_predicates(
+        role_overrides=[
+            {
+                "user_concept_id": "#V#bob",
+                "organisation_concept_id": pair[1],
+                "role": "member",
+            }
+        ]
+    )
+    assert unrelated["success"] is False
+    assert unrelated["role_override_errors"][0]["reason_code"] == (
+        "role_override_does_not_match_a_conflicted_pair"
+    )
+
+
 def test_vocabulary_represents_one_way_memberof_entailment(monkeypatch):
     documents: dict[str, dict] = {
         migration.GENERIC_MEMBERSHIP_PREDICATE: {
