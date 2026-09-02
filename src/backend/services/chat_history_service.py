@@ -1464,6 +1464,11 @@ def _coerce_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
+def _isoformat_datetime(value: Any) -> Optional[str]:
+    parsed = _coerce_datetime(value)
+    return parsed.isoformat() if parsed is not None else None
+
+
 def _is_reset_marker(entry: Dict[str, Any]) -> bool:
     return entry.get("role") == "system" and entry.get("content") == "__RESET__"
 
@@ -3125,6 +3130,253 @@ def get_chat_history_segments(
         raise ChatHistoryServiceError(
             f"Could not retrieve segmented chat history: {e}"
         ) from e
+
+
+def get_chat_history_transcript_page(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    offset: int = 0,
+    page_size: int = 50,
+) -> Dict[str, Any]:
+    """Return one exact source-level transcript page without debug payloads."""
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ChatHistoryServiceError("session_id is required.")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ChatHistoryServiceError("offset must be a non-negative integer.")
+    if not isinstance(page_size, int) or isinstance(page_size, bool):
+        raise ChatHistoryServiceError("page_size must be an integer.")
+    safe_page_size = max(1, min(page_size, 100))
+    collection = get_chat_history_collection_service(read_only=True)
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    _guard_chat_history_read("get_chat_history_transcript_page")
+
+    document = None
+    try:
+        for query in _build_chat_history_session_read_queries(
+            user_id=user_id.strip(),
+            session_id=session_id.strip(),
+            namespace=namespace,
+            include_legacy=include_legacy,
+        ):
+            pipeline = [
+                {"$match": query},
+                {
+                    "$project": {
+                        "_id": 0,
+                        "session_id": 1,
+                        "session_name": 1,
+                        "created_at": 1,
+                        "updated_at": 1,
+                        "history_length": {"$size": _history_array_expr()},
+                        "history_page": {
+                            "$slice": [
+                                _history_array_expr(),
+                                offset,
+                                safe_page_size,
+                            ]
+                        },
+                    }
+                },
+            ]
+            document = next(
+                _read_aggregate(
+                    collection,
+                    pipeline,
+                    operation="get_chat_history_transcript_page.aggregate",
+                ),
+                None,
+            )
+            if isinstance(document, Mapping):
+                break
+        _record_chat_history_read_success()
+    except PyMongoError as exc:
+        _record_chat_history_read_failure("get_chat_history_transcript_page", exc)
+        raise ChatHistoryServiceError(
+            f"Could not page conversation transcript: {exc}"
+        ) from exc
+
+    if not isinstance(document, Mapping):
+        return {
+            "found": False,
+            "messages": [],
+            "message_count": 0,
+            "offset": offset,
+            "next_offset": None,
+            "has_more": False,
+            "coverage_complete": False,
+        }
+    raw_messages = document.get("history_page")
+    messages: List[Dict[str, Any]] = []
+    if isinstance(raw_messages, list):
+        for relative_index, entry in enumerate(raw_messages):
+            if not isinstance(entry, Mapping):
+                continue
+            cleaned = dict(entry)
+            cleaned.pop("llm_debug_data", None)
+            cleaned["source_locator"] = {
+                "session_id": session_id.strip(),
+                "history_index": offset + relative_index,
+                "turn_id": cleaned.get("turn_id"),
+                "message_id": cleaned.get("message_id"),
+            }
+            messages.append(cleaned)
+    history_length = document.get("history_length")
+    if not isinstance(history_length, int) or history_length < 0:
+        history_length = offset + len(messages)
+    next_offset = offset + len(raw_messages or [])
+    has_more = next_offset < history_length
+    return {
+        "found": True,
+        "session_id": session_id.strip(),
+        "session_name": _normalise_session_name(document.get("session_name")),
+        "created_at": _isoformat_datetime(document.get("created_at")),
+        "updated_at": _isoformat_datetime(document.get("updated_at")),
+        "messages": messages,
+        "message_count": history_length,
+        "page_count": len(messages),
+        "offset": offset,
+        "next_offset": next_offset if has_more else None,
+        "has_more": has_more,
+        "coverage_complete": not has_more,
+    }
+
+
+def get_chat_history_title_evidence(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    excerpt_chars: int = 2_000,
+) -> Optional[Dict[str, Any]]:
+    """Return bounded first/latest user-message evidence for title judgement."""
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ChatHistoryServiceError("session_id is required.")
+    safe_excerpt_chars = max(200, min(int(excerpt_chars), 4_000))
+    collection = get_chat_history_collection_service(read_only=True)
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    _guard_chat_history_read("get_chat_history_title_evidence")
+
+    document = None
+    try:
+        for query in _build_chat_history_session_read_queries(
+            user_id=user_id.strip(),
+            session_id=session_id.strip(),
+            namespace=namespace,
+            include_legacy=include_legacy,
+        ):
+            pipeline = [
+                {"$match": query},
+                {
+                    "$project": {
+                        "_id": 0,
+                        "session_id": 1,
+                        "session_name": 1,
+                        "created_at": 1,
+                        "updated_at": 1,
+                        "history_length": {"$size": _history_array_expr()},
+                        "user_messages": {
+                            "$filter": {
+                                "input": _history_array_expr(),
+                                "as": "message",
+                                "cond": {"$eq": ["$$message.role", "user"]},
+                            }
+                        },
+                    }
+                },
+                {
+                    "$project": {
+                        "session_id": 1,
+                        "session_name": 1,
+                        "created_at": 1,
+                        "updated_at": 1,
+                        "history_length": 1,
+                        "user_message_count": {"$size": "$user_messages"},
+                        "first_user_message": {
+                            "$arrayElemAt": ["$user_messages", 0]
+                        },
+                        "latest_user_message": {
+                            "$arrayElemAt": ["$user_messages", -1]
+                        },
+                    }
+                },
+            ]
+            document = next(
+                _read_aggregate(
+                    collection,
+                    pipeline,
+                    operation="get_chat_history_title_evidence.aggregate",
+                ),
+                None,
+            )
+            if isinstance(document, Mapping):
+                break
+        _record_chat_history_read_success()
+    except PyMongoError as exc:
+        _record_chat_history_read_failure("get_chat_history_title_evidence", exc)
+        raise ChatHistoryServiceError(
+            f"Could not read conversation title evidence: {exc}"
+        ) from exc
+    if not isinstance(document, Mapping):
+        return None
+
+    def _project_message(value: Any, *, position: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, Mapping):
+            return None
+        content = value.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return None
+        cleaned = content.strip()
+        excerpt = cleaned[:safe_excerpt_chars]
+        turn_id = value.get("turn_id")
+        message_id = value.get("message_id")
+        timestamp = _isoformat_datetime(value.get("timestamp"))
+        return {
+            "position": position,
+            "role": "user",
+            "content": excerpt,
+            "content_truncated": len(cleaned) > len(excerpt),
+            "content_char_count": len(cleaned),
+            "content_sha256": hashlib.sha256(cleaned.encode("utf-8")).hexdigest(),
+            "turn_id": turn_id,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "source_locator": {
+                "session_id": session_id.strip(),
+                "turn_id": turn_id,
+                "message_id": message_id,
+                "timestamp": timestamp,
+            },
+        }
+
+    first = _project_message(document.get("first_user_message"), position="first")
+    latest = _project_message(document.get("latest_user_message"), position="latest")
+    user_message_count = document.get("user_message_count")
+    history_length = document.get("history_length")
+    return {
+        "session_id": session_id.strip(),
+        "session_name": _normalise_session_name(document.get("session_name")),
+        "created_at": _isoformat_datetime(document.get("created_at")),
+        "updated_at": _isoformat_datetime(document.get("updated_at")),
+        "message_count": history_length if isinstance(history_length, int) else None,
+        "user_message_count": (
+            user_message_count if isinstance(user_message_count, int) else 0
+        ),
+        "first_user_message": first,
+        "latest_user_message": latest,
+        "evidence_sufficient": first is not None and latest is not None,
+    }
 
 
 def get_chat_history_debug_entry(
@@ -5097,6 +5349,145 @@ def get_chat_history_session_summaries_by_ids(
     }
 
 
+def get_chat_history_session_summaries_page(
+    user_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    page_size: int = 100,
+    position: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return one bounded keyset page of owner-scoped session metadata.
+
+    The source ordering uses the effective session timestamp and ``session_id``
+    as a deterministic tie-breaker.  This primitive deliberately pages the
+    source collection rather than truncating an in-memory candidate window.
+    """
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(page_size, int) or isinstance(page_size, bool):
+        raise ChatHistoryServiceError("page_size must be an integer.")
+    safe_page_size = max(1, min(page_size, 100))
+    collection = get_chat_history_collection_service(read_only=True)
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_session_summaries_page")
+    base_query = build_chat_history_query(
+        user_id=user_id.strip(),
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": base_query},
+        {
+            "$set": {
+                "_conversation_page_timestamp": {
+                    "$ifNull": ["$updated_at", {"$ifNull": ["$created_at", epoch]}]
+                }
+            }
+        },
+    ]
+    if position is not None:
+        if not isinstance(position, Mapping):
+            raise ChatHistoryServiceError("conversation page position is invalid.")
+        marker_timestamp = _coerce_datetime(position.get("timestamp"))
+        marker_session_id = position.get("session_id")
+        if marker_timestamp is None or not isinstance(marker_session_id, str):
+            raise ChatHistoryServiceError("conversation page position is incomplete.")
+        pipeline.append(
+            {
+                "$match": {
+                    "$or": [
+                        {
+                            "_conversation_page_timestamp": {
+                                "$lt": marker_timestamp
+                            }
+                        },
+                        {
+                            "_conversation_page_timestamp": marker_timestamp,
+                            "session_id": {"$lt": marker_session_id},
+                        },
+                    ]
+                }
+            }
+        )
+    projection = _add_chat_session_provenance_projection(
+        {
+            "_id": 0,
+            "session_id": 1,
+            "session_name": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "organisation_concept_id": 1,
+            "trashed_at": 1,
+            "conversation_search_index_version": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
+            "_conversation_page_timestamp": 1,
+        }
+    )
+    pipeline.extend(
+        [
+            {
+                "$sort": {
+                    "_conversation_page_timestamp": DESCENDING,
+                    "session_id": DESCENDING,
+                }
+            },
+            {"$limit": safe_page_size + 1},
+            {"$project": projection},
+        ]
+    )
+    try:
+        docs = [
+            dict(row)
+            for row in _read_aggregate(
+                collection,
+                pipeline,
+                operation="get_chat_history_session_summaries_page.aggregate",
+            )
+            if isinstance(row, Mapping)
+        ]
+        _record_chat_history_read_success()
+    except PyMongoError as exc:
+        _record_chat_history_read_failure(
+            "get_chat_history_session_summaries_page", exc
+        )
+        raise ChatHistoryServiceError(
+            f"Could not page chat history session summaries: {exc}"
+        ) from exc
+
+    has_more = len(docs) > safe_page_size
+    page_docs = docs[:safe_page_size]
+    sessions = [
+        summary
+        for doc in page_docs
+        if (summary := _build_session_summary_from_metadata(doc)) is not None
+    ]
+    next_position = None
+    if page_docs:
+        final_doc = page_docs[-1]
+        final_timestamp = _coerce_datetime(
+            final_doc.get("_conversation_page_timestamp")
+        ) or epoch
+        next_position = {
+            "timestamp": final_timestamp.isoformat(),
+            "session_id": str(final_doc.get("session_id") or ""),
+        }
+    return {
+        "sessions": sessions,
+        "count": len(sessions),
+        "page_size": safe_page_size,
+        "has_more": has_more,
+        "next_position": next_position,
+    }
+
+
 def _bounded_light_session_metadata_query_limit(
     *,
     safe_limit: int,
@@ -5801,6 +6192,8 @@ def rename_chat_session(
     session_name: str,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    require_unnamed: bool = False,
+    expected_updated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Rename an existing chat session without changing its recency ordering."""
     if not isinstance(user_id, str) or not user_id:
@@ -5823,6 +6216,24 @@ def rename_chat_session(
             namespace=namespace,
             include_legacy=include_legacy,
         )
+        conditions: List[Dict[str, Any]] = [query]
+        if require_unnamed:
+            conditions.append(
+                {
+                    "$or": [
+                        {"session_name": None},
+                        {"session_name": {"$exists": False}},
+                        {"session_name": ""},
+                    ]
+                }
+            )
+        if expected_updated_at is not None:
+            expected_timestamp = _coerce_datetime(expected_updated_at)
+            if expected_timestamp is None:
+                raise ChatHistoryServiceError("expected_updated_at is invalid.")
+            conditions.append({"updated_at": expected_timestamp})
+        if len(conditions) > 1:
+            query = {"$and": conditions}
         result = chat_history_coll.update_one(
             query,
             {
@@ -6322,6 +6733,10 @@ def get_chat_history_session_summaries_for_owner_sessions(
             "session_name": 1,
             "created_at": 1,
             "updated_at": 1,
+            "namespace": 1,
+            "organisation_concept_id": 1,
+            "trashed_at": 1,
+            "conversation_search_index_version": 1,
             "focal_concept_ids": 1,
             "focal_concept_ids_source": 1,
             "focal_concept_ids_updated_at": 1,

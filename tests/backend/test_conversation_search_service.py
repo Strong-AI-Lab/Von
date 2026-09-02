@@ -80,6 +80,82 @@ def test_star_search_filters_unnamed_conversations_structurally(monkeypatch):
     assert result["coverage_complete"] is True
 
 
+def test_star_search_pages_the_exhaustive_source_cursor(monkeypatch):
+    from src.backend.services import conversation_search_service as service
+
+    calls = []
+
+    def _list(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("cursor") is None:
+            return {
+                "success": True,
+                "conversations": [
+                    {
+                        "session_id": "unnamed-1",
+                        "session_name": None,
+                        "trashed": False,
+                    }
+                ],
+                "has_more": True,
+                "next_cursor": "source-page-2",
+                "coverage_complete": False,
+                "ordering": {"consistency": "stateless_keyset_under_unchanged_corpus"},
+            }
+        assert kwargs["cursor"] == "source-page-2"
+        return {
+            "success": True,
+            "conversations": [
+                {
+                    "session_id": "unnamed-2",
+                    "session_name": None,
+                    "trashed": False,
+                }
+            ],
+            "has_more": False,
+            "next_cursor": None,
+            "coverage_complete": True,
+            "ordering": {"consistency": "stateless_keyset_under_unchanged_corpus"},
+        }
+
+    monkeypatch.setattr(service, "list_actor_conversations", _list)
+
+    first = service.search_actor_conversations(
+        actor_user_id="#V#alice",
+        namespace="#V#alice@org",
+        query="*",
+        match_mode="lexical",
+        filters={"name_present": False, "access_mode": "owner"},
+        page_size=1,
+    )
+    second = service.search_actor_conversations(
+        actor_user_id="#V#alice",
+        namespace="#V#alice@org",
+        query="*",
+        match_mode="lexical",
+        filters={"name_present": False, "access_mode": "owner"},
+        page_size=1,
+        cursor=first["next_cursor"],
+    )
+
+    assert [row["session_id"] for row in first["results"]] == ["unnamed-1"]
+    assert [row["session_id"] for row in second["results"]] == ["unnamed-2"]
+    assert first["candidate_session_ids"] == ["unnamed-1"]
+    assert second["candidate_session_ids"] == ["unnamed-2"]
+    assert first["continuation_cursor"] == "source-page-2"
+    assert first["next_cursor"] == "source-page-2"
+    assert first["coverage_complete"] is False
+    assert second["coverage_complete"] is True
+    assert calls[0]["name_present"] is False
+    assert calls[1]["cursor"] == "source-page-2"
+    assert isinstance(calls[0]["cursor_context"], str)
+    assert calls[1]["cursor_context"] == calls[0]["cursor_context"]
+
+    # The exhaustive search reuses the source cursor directly. The real source
+    # validates its signed actor/filter binding; this mock asserts only that the
+    # exact continuation reaches that boundary unchanged.
+
+
 def test_search_combines_indexed_title_content_and_override_with_stable_cursor(
     monkeypatch,
 ):

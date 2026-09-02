@@ -73,12 +73,198 @@ _CAPABILITY_TOOL_NAME = "turn_capabilities"
 _INVOKE_TOOL_NAME = "turn_invoke_capability"
 _EVIDENCE_TOOL_NAME = "turn_read_evidence"
 _EVIDENCE_INDEX_TOOL_NAME = "turn_list_evidence"
+_CURSOR_EVIDENCE_ARGUMENT = "cursor_evidence_id"
+_CURSOR_EVIDENCE_CAPABILITIES = frozenset(
+    {
+        "conversation_list",
+        "conversation_search",
+        "conversation_transcript_page",
+    }
+)
+_RENAME_INSPECTION_EVIDENCE_ARGUMENT = "inspection_evidence_id"
 _LOCAL_TOOL_NAMES = {
     _CAPABILITY_TOOL_NAME,
     _INVOKE_TOOL_NAME,
     _EVIDENCE_TOOL_NAME,
     _EVIDENCE_INDEX_TOOL_NAME,
 }
+
+
+def _resolve_turn_cursor_evidence_argument(
+    *,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    evidence_store: TurnEvidenceStore,
+    scope: TrustedTurnScope,
+    turn_id: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Resolve a short turn-evidence handle to one exact opaque cursor."""
+
+    resolved = dict(arguments)
+    evidence_id = resolved.pop(_CURSOR_EVIDENCE_ARGUMENT, None)
+    if evidence_id is None:
+        return resolved, None
+    if capability_name not in _CURSOR_EVIDENCE_CAPABILITIES:
+        return resolved, _error_payload(
+            "cursor_evidence_not_supported",
+            f"{capability_name} does not accept cursor evidence references.",
+        )
+    if resolved.get("cursor") is not None:
+        return resolved, _error_payload(
+            "conflicting_cursor_arguments",
+            "Use cursor or cursor_evidence_id, not both.",
+        )
+    if not isinstance(evidence_id, str) or not evidence_id.strip():
+        return resolved, _error_payload(
+            "cursor_evidence_invalid",
+            "cursor_evidence_id must be a non-empty turn evidence ID.",
+        )
+
+    cursor_slice = evidence_store.read(
+        evidence_id.strip(),
+        json_pointer="/continuation_cursor",
+        max_chars=16_000,
+        trusted_scope=scope,
+        turn_id=turn_id,
+    )
+    if cursor_slice.get("success") is False and cursor_slice.get(
+        "error_code"
+    ) == "evidence_path_not_found":
+        cursor_slice = evidence_store.read(
+            evidence_id.strip(),
+            json_pointer="/next_cursor",
+            max_chars=16_000,
+            trusted_scope=scope,
+            turn_id=turn_id,
+        )
+    if cursor_slice.get("success") is not True:
+        return resolved, _error_payload(
+            "cursor_evidence_unavailable",
+            "The turn-scoped cursor evidence could not be resolved.",
+        )
+    if cursor_slice.get("tool_name") != capability_name:
+        return resolved, _error_payload(
+            "cursor_evidence_tool_mismatch",
+            "The cursor evidence belongs to a different capability.",
+        )
+    cursor_value = cursor_slice.get("content")
+    if (
+        not isinstance(cursor_value, str)
+        or not cursor_value.strip()
+        or cursor_slice.get("has_more") is True
+    ):
+        return resolved, _error_payload(
+            "cursor_evidence_invalid",
+            "The evidence did not contain one complete continuation cursor.",
+        )
+    resolved["cursor"] = cursor_value
+    return resolved, None
+
+
+def _resolve_turn_rename_evidence_arguments(
+    *,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    evidence_store: TurnEvidenceStore,
+    scope: TrustedTurnScope,
+    turn_id: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Hydrate exact rename tokens from one prior inspection result."""
+
+    resolved = dict(arguments)
+    evidence_id = resolved.pop(_RENAME_INSPECTION_EVIDENCE_ARGUMENT, None)
+    if evidence_id is None:
+        return resolved, None
+    if capability_name != "conversation_manage_batch":
+        return resolved, _error_payload(
+            "inspection_evidence_not_supported",
+            f"{capability_name} does not accept inspection evidence references.",
+        )
+    if resolved.get("action") != "rename":
+        return resolved, _error_payload(
+            "inspection_evidence_action_mismatch",
+            "inspection_evidence_id is only valid for batch rename.",
+        )
+    if not isinstance(evidence_id, str) or not evidence_id.strip():
+        return resolved, _error_payload(
+            "inspection_evidence_invalid",
+            "inspection_evidence_id must be a non-empty turn evidence ID.",
+        )
+    raw_items = resolved.get("rename_items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return resolved, _error_payload(
+            "inspection_evidence_invalid",
+            "rename_items are required with inspection_evidence_id.",
+        )
+
+    hydrated_items: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            return resolved, _error_payload(
+                "inspection_evidence_invalid",
+                "Each rename item must be an object.",
+            )
+        hydrated = dict(item)
+        if hydrated.get("evidence_token") is not None:
+            return resolved, _error_payload(
+                "conflicting_inspection_evidence",
+                "Use evidence_token or inspection_evidence_id, not both.",
+            )
+        evidence_index = hydrated.pop("evidence_item_index", None)
+        if (
+            not isinstance(evidence_index, int)
+            or isinstance(evidence_index, bool)
+            or evidence_index < 0
+        ):
+            return resolved, _error_payload(
+                "inspection_evidence_invalid",
+                "Each rename item requires a non-negative evidence_item_index.",
+            )
+        token_slice = evidence_store.read(
+            evidence_id.strip(),
+            json_pointer=f"/results/{evidence_index}/evidence/evidence_token",
+            max_chars=16_000,
+            trusted_scope=scope,
+            turn_id=turn_id,
+        )
+        session_slice = evidence_store.read(
+            evidence_id.strip(),
+            json_pointer=f"/results/{evidence_index}/evidence/session_id",
+            max_chars=1_000,
+            trusted_scope=scope,
+            turn_id=turn_id,
+        )
+        if (
+            token_slice.get("success") is not True
+            or session_slice.get("success") is not True
+            or token_slice.get("tool_name") != "conversation_inspect_batch"
+            or session_slice.get("tool_name") != "conversation_inspect_batch"
+        ):
+            return resolved, _error_payload(
+                "inspection_evidence_unavailable",
+                "The referenced inspection item could not be resolved.",
+            )
+        token_value = token_slice.get("content")
+        evidence_session_id = session_slice.get("content")
+        requested_session_id = hydrated.get("session_id")
+        if (
+            not isinstance(token_value, str)
+            or not token_value.strip()
+            or token_slice.get("has_more") is True
+            or not isinstance(evidence_session_id, str)
+            or not evidence_session_id.strip()
+            or session_slice.get("has_more") is True
+            or requested_session_id != evidence_session_id
+        ):
+            return resolved, _error_payload(
+                "inspection_evidence_mismatch",
+                "The inspection evidence does not match the requested conversation.",
+            )
+        hydrated["evidence_token"] = token_value
+        hydrated_items.append(hydrated)
+
+    resolved["rename_items"] = hydrated_items
+    return resolved, None
 _DEFAULT_TURN_BUDGET_SECONDS = 180.0
 _DEFAULT_FINAL_RESERVE_SECONDS = 30.0
 # The answer checkpoint keeps a small live-path reserve while remaining an
@@ -9743,6 +9929,28 @@ def execute_adaptive_turn(
                     capability_display_name=item.capability_display_name,
                     binding_diagnostics=item.binding_diagnostics,
                 )
+
+            arguments, cursor_evidence_error = _resolve_turn_cursor_evidence_argument(
+                capability_name=canonical_name,
+                arguments=arguments,
+                evidence_store=evidence_store,
+                scope=scope,
+                turn_id=turn_id or "ordinary-turn",
+            )
+            if cursor_evidence_error is not None:
+                return index, contained(cursor_evidence_error)
+            (
+                arguments,
+                inspection_evidence_error,
+            ) = _resolve_turn_rename_evidence_arguments(
+                capability_name=canonical_name,
+                arguments=arguments,
+                evidence_store=evidence_store,
+                scope=scope,
+                turn_id=turn_id or "ordinary-turn",
+            )
+            if inspection_evidence_error is not None:
+                return index, contained(inspection_evidence_error)
 
             assert gateway is not None
             definition = gateway.get_method_definition(execution_method_name)

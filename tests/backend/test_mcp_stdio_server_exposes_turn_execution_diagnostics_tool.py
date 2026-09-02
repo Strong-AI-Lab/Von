@@ -15,6 +15,8 @@ def test_mcp_stdio_server_has_turn_execution_diagnostics_handler() -> None:
     assert "conversation_list" in mcp_stdio_server._TOOL_HANDLERS
     assert "conversation_search" in mcp_stdio_server._TOOL_HANDLERS
     assert "conversation_get" in mcp_stdio_server._TOOL_HANDLERS
+    assert "conversation_transcript_page" in mcp_stdio_server._TOOL_HANDLERS
+    assert "conversation_inspect_batch" in mcp_stdio_server._TOOL_HANDLERS
     assert "conversation_manage" in mcp_stdio_server._TOOL_HANDLERS
     assert "conversation_manage_batch" in mcp_stdio_server._TOOL_HANDLERS
     assert "turn_execution_get_live_progress" in mcp_stdio_server._TOOL_HANDLERS
@@ -62,11 +64,29 @@ def test_vontology_mcp_manifest_includes_turn_execution_diagnostics_tool() -> No
     assert "conversation_list" in names
     assert "conversation_search" in names
     assert "conversation_get" in names
+    assert "conversation_transcript_page" in names
+    assert "conversation_inspect_batch" in names
     assert "conversation_manage" in names
     assert "conversation_manage_batch" in names
     assert "turn_execution_get_live_progress" in names
     assert "workflow_list_use_episodes" in names
     assert "mongo_query_diagnostics_report" in names
+    conversation_search = next(
+        tool for tool in tools if tool.get("name") == "conversation_search"
+    )
+    search_properties = conversation_search["inputSchema"]["properties"]
+    assert {
+        "date_from",
+        "date_to",
+        "focal_concept_id",
+        "access_mode",
+        "hidden",
+        "pinned",
+        "trashed",
+        "name_present",
+    } <= set(search_properties)
+    assert "conversation_inspect_batch" in names
+    assert "conversation_transcript_page" in names
     mongo_tool = next(
         tool for tool in tools if tool.get("name") == "mongo_query_diagnostics_report"
     )
