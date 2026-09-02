@@ -120,7 +120,7 @@ def test_representation_status_question_is_answered_from_receipt_without_model(
             "status": "tentative",
             "effect_status": "succeeded",
             "assertion_id": "ska_member",
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "activation_effect": "organisation_membership",
             "canonical_publication": False,
         },
@@ -194,7 +194,7 @@ def test_autoformalisation_requires_declared_tentative_permission(monkeypatch):
         exact_input=exact,
         answer="Michael Witbrock",
         proposed_predicate={
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",
             "auto_formalisation_allowed": False,
@@ -240,7 +240,7 @@ def test_safe_short_answer_is_stored_as_tentative_direction_aware_relation(
             "canonical_read_back": {
                 "assertion_id": "ska_tentative_member",
                 "subject_concept_id": "#V#michael_witbrock",
-                "predicate": "#V#memberOf",
+                "predicate": "#V#memberOfVonOrg",
                 "object_concept_id": CONCEPT_ID,
                 "epistemic_status": "tentative",
             },
@@ -263,7 +263,7 @@ def test_safe_short_answer_is_stored_as_tentative_direction_aware_relation(
         answer="Michael Witbrock",
         proposed_predicate={
             "requirement_id": "organisation_has_von_user",
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",
             "declared_on_type_concept_id": "#V#von_user_organisation",
@@ -343,7 +343,7 @@ def test_code_string_answer_cannot_bypass_counterpart_type_resolution(monkeypatc
         },
         answer="#V#some_organisation",
         proposed_predicate={
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",
             "auto_formalisation_allowed": True,
@@ -484,7 +484,7 @@ def test_membership_activation_success_is_retained_when_promotion_needs_retry(
     assertion = {
         "assertion_id": "ska_member",
         "subject_concept_id": "#V#michael_witbrock",
-        "predicate": "#V#memberOf",
+        "predicate": "#V#memberOfVonOrg",
         "object_concept_id": CONCEPT_ID,
         "epistemic_status": "tentative",
     }
@@ -520,7 +520,7 @@ def test_membership_activation_success_is_retained_when_promotion_needs_retry(
     formalisation = {
         "assertion_id": "ska_member",
         "subject_concept_id": "#V#michael_witbrock",
-        "predicate_concept_id": "#V#memberOf",
+        "predicate_concept_id": "#V#memberOfVonOrg",
         "object_concept_id": CONCEPT_ID,
         "focal_argument": "object",
         "other_argument_type_concept_id": "#V#von_user",
@@ -771,7 +771,7 @@ def test_member_confirmation_authority_denial_preserves_tentative_candidate(
     assertion = {
         "assertion_id": "ska_member_denied",
         "subject_concept_id": "#V#person",
-        "predicate": "#V#memberOf",
+        "predicate": "#V#memberOfVonOrg",
         "object_concept_id": CONCEPT_ID,
         "epistemic_status": "tentative",
     }
@@ -811,7 +811,7 @@ def test_member_confirmation_authority_denial_preserves_tentative_candidate(
         formalisation={
             "assertion_id": "ska_member_denied",
             "subject_concept_id": "#V#person",
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "object_concept_id": CONCEPT_ID,
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",
@@ -851,7 +851,7 @@ def test_preexisting_membership_lets_original_actor_confirm_without_self_grant(
     assertion = {
         "assertion_id": "ska_member_preexisting",
         "subject_concept_id": "#V#person",
-        "predicate": "#V#memberOf",
+        "predicate": "#V#memberOfVonOrg",
         "object_concept_id": CONCEPT_ID,
         "epistemic_status": "tentative",
     }
@@ -894,7 +894,7 @@ def test_preexisting_membership_lets_original_actor_confirm_without_self_grant(
         formalisation={
             "assertion_id": "ska_member_preexisting",
             "subject_concept_id": "#V#person",
-            "predicate_concept_id": "#V#memberOf",
+            "predicate_concept_id": "#V#memberOfVonOrg",
             "object_concept_id": CONCEPT_ID,
             "focal_argument": "object",
             "other_argument_type_concept_id": "#V#von_user",

@@ -934,7 +934,7 @@ def _tentative_formalisation_receipt(
             resolution=resolution,
         )
     membership_predicate = bool(
-        predicate_id.casefold() == "#v#memberof"
+        predicate_id.casefold() == "#v#memberofvonorg"
         and focal_argument == "object"
         and other_type.casefold() == "#v#von_user"
         and object_id == concept_id
@@ -1476,7 +1476,7 @@ def _confirm_formalisation_effect(
         expected_focal_concept_id or formalisation.get("focal_concept_id") or ""
     ).strip()
     is_membership = bool(
-        predicate_id.casefold() == "#v#memberof"
+        predicate_id.casefold() == "#v#memberofvonorg"
         and str(formalisation.get("focal_argument") or "").strip() == "object"
         and str(formalisation.get("other_argument_type_concept_id") or "").casefold()
         == "#v#von_user"

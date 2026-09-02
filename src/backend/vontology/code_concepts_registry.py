@@ -57,6 +57,8 @@ _TEXT_PREDICATE_IDS = [
     "#V#hasDefinition",
     "#V#has_renderer_profile_json",
     "#V#has_constitutive_relation_requirements_json",
+    "#V#hasVonOrgRole",
+    "#V#hasVonLoginEmail",
 ]
 
 _FILE_METADATA_PREDICATE_IDS = [
@@ -262,6 +264,7 @@ _OTHER_PREDICATE_IDS = [
     "#V#has_email",
     "#V#hasRole",
     "#V#memberOf",
+    "#V#memberOfVonOrg",
     "#V#member_of_organisation",
     "#V#has_birthplace",
     "#V#has_occupation",

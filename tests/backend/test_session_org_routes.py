@@ -373,6 +373,8 @@ def test_set_user_concept_updates_session_context_and_org_listing(
     orgs_data = orgs.get_json()
     assert orgs_data["total_count"] == 1
     assert orgs_data["organisations"][0]["concept_id"] == "#V#the_lu_witbrock_household"
+    with client.session_transaction() as sess:
+        assert sess["von_authentication_assurance"] == "hasVonLoginEmail.v1"
 
 
 def test_set_user_concept_rejects_bare_legacy_header_without_seeding_session(
@@ -546,6 +548,8 @@ def test_get_my_organisations_uses_authenticated_user_not_email(app_client):
         sess["user_id"] = "opaque-oauth-subject"
         sess["user_email"] = "lu.yunli@example.com"
         sess["user_concept_id"] = "#V#michael_witbrock"
+        sess["auth_provider"] = "google_oauth"
+        sess["von_authentication_assurance"] = "hasVonLoginEmail.v1"
 
     resp = client.get("/von/api/organisations/my_organisations")
 

@@ -47,7 +47,7 @@ CONSTITUTIVE_REQUIREMENTS_TEXT_PREDICATES: tuple[str, ...] = (
 
 VON_USER_ORGANISATION_TYPE_ID = "#V#von_user_organisation"
 VON_USER_TYPE_ID = "#V#von_user"
-MEMBER_OF_PREDICATE_ID = "#V#memberOf"
+MEMBER_OF_PREDICATE_ID = "#V#memberOfVonOrg"
 
 _SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -554,22 +554,6 @@ def _predicate_storage_keys(predicate_concept_id: str) -> list[str]:
     keys = [predicate_concept_id]
     if predicate_concept_id.startswith("#V#"):
         keys.append(predicate_concept_id[3:])
-    if predicate_concept_id in {
-        MEMBER_OF_PREDICATE_ID,
-        "memberOf",
-        "#V#member_of_organisation",
-    }:
-        # Reads remain compatible with both the current membership edge key and
-        # the historical ontology predicate.  This does not equate membership
-        # with visibility predicates such as #V#specific_to_user.
-        keys.extend(
-            [
-                "memberOf",
-                "#V#memberOf",
-                "#V#member_of_organisation",
-                "member_of_organisation",
-            ]
-        )
     return list(dict.fromkeys(key for key in keys if key))
 
 

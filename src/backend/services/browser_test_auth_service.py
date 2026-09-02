@@ -41,10 +41,6 @@ from ..services.paper_recommendation_vontology_service import (
     upsert_paper_recommendation_assertion,
 )
 from ..services.relationship_write_service import add_relationship
-from ..services.settings_service import (
-    MultipleUsersForEmailError,
-    _find_user_concept_by_email,
-)
 from ..services.text_value_service import upsert_text_for_concept
 from ..services.window_session_context_service import (
     set_window_chat_session,
@@ -286,28 +282,19 @@ def _ensure_person_concept(
     email: str,
 ) -> dict[str, Any]:
     with bypass_access_control():
+        # Browser-test authentication is an independently gated localhost-only
+        # fixture. Its explicit configured concept ID, not any email relation,
+        # selects the pseudouser. The email written below is contact data only.
         try:
-            existing_email_concept = _find_user_concept_by_email(email)
-        except MultipleUsersForEmailError:
-            raise
-
-        if isinstance(existing_email_concept, dict) and existing_email_concept.get(
-            "concept_id"
-        ):
-            concept_doc = existing_email_concept
-        else:
-            try:
-                concept_doc = get_concept_by_concept_id(concept_id)
-            except ConceptNotFoundError:
-                concept_doc = create_concept(
-                    name=name,
-                    concept_id=concept_id,
-                    parent_concept_ids=["#V#person"],
-                )
-            if not isinstance(concept_doc, dict):
-                raise RuntimeError(
-                    f"Browser-test concept lookup failed for {concept_id}"
-                )
+            concept_doc = get_concept_by_concept_id(concept_id)
+        except ConceptNotFoundError:
+            concept_doc = create_concept(
+                name=name,
+                concept_id=concept_id,
+                parent_concept_ids=["#V#person"],
+            )
+        if not isinstance(concept_doc, dict):
+            raise RuntimeError(f"Browser-test concept lookup failed for {concept_id}")
 
         resolved_concept_id = str(concept_doc.get("concept_id") or concept_id).strip()
         if not resolved_concept_id:

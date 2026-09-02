@@ -25,7 +25,11 @@ Authoritative namespace contract:
 
 - Vontology concept visibility is filtered by canonical Vontology predicates under `relationships.#V#specific_to_user` and `relationships.#V#specific_to_organisation`.
 - Legacy storage keys such as `relationships.specific_to_user` and `relationships.specific_to_org` remain readable only for migration compatibility; new writes should use the canonical predicates.
-- User identity comes from the **server session** (fallback: validated `X-User-Concept-ID` header), not from client JSON.
+- Google OAuth identity is bound to a Vontology user only through the narrow
+  `#V#hasVonLoginEmail` predicate. Ordinary `#V#has_email` contact facts and
+  client/session hints cannot select or create an authenticated actor.
+- Effective user identity comes from the **server session** (fallback:
+  validated `X-User-Concept-ID` header), not from client JSON.
 - RAG tools are **fail-closed** without a namespace.
 - RAG query backends (e.g., LlamaIndex) can additionally filter by metadata keys like `user_id` and `organisation_concept_id`, but only if those keys are provided via `permissions_context`.
 - Effective namespace resolution is now centralised for `/von/generate` and propagated into persistence and RAG paths, with mismatch diagnostics available for migration hardening.
@@ -36,6 +40,17 @@ Authoritative namespace contract:
 
 The authoritative identity is derived by the backend.
 
+- `src/backend/services/von_user_authentication_service.py` resolves Google
+  OAuth email addresses only through `#V#hasVonLoginEmail`.
+  - The predicate specialises and entails descriptive `#V#has_email`.
+  - The reverse inference is forbidden: `#V#has_email` never grants login.
+  - One user may have several explicit login-email values, but an address bound
+    to more than one user is rejected as ambiguous.
+  - An unbound address does not inherit the browser's prior user concept and
+    does not auto-create a new Von user.
+  - Sessions issued through the old email-resolution path do not carry the
+    versioned login-assurance marker and fail closed after the cutover; users
+    must authenticate again.
 - `src/backend/security/access_control.py` provides `get_effective_user_concept_id()`.
   - Primary: `session["user_concept_id"]` (set on login).
   - Fallback: `X-User-Concept-ID` header, **only if validated** as a person/von_user concept.
@@ -46,6 +61,23 @@ The authoritative identity is derived by the backend.
 The `/generate` endpoint explicitly does **not** trust client-provided `user_id` for security reasons. Unauthenticated users can still chat, but RAG access is unavailable.
 
 See: docs/engineering/security_considerations.md.
+
+### Operator migration and recovery
+
+The login-email migration accepts only an explicit reviewed allow-list. It
+never scans or copies `#V#has_email`:
+
+```sh
+python -m src.backend.utilities.migrate_von_login_email_bindings \
+  --binding '#V#person_id=person@example.org'
+
+python -m src.backend.utilities.migrate_von_login_email_bindings \
+  --binding '#V#person_id=person@example.org' --apply --approved
+```
+
+Run the first command before applying. If it reports a missing user or an
+address already bound to another user, correct that exact conflict and rerun
+the dry run; do not work around it by adding a generic email relation.
 
 ## 2) Vontology access control (concepts + relationships)
 
@@ -171,9 +203,14 @@ requirements are recorded in
 RBAC is present but **not a complete system** yet.
 
 - `src/backend/security/role_resolver.py` contains a Phase 1 stub mapping (hardcoded user/org → role → permissions).
-- `src/backend/services/organisation_membership_service.py` persists membership and roles in the Vontology:
-  - membership relationship: `memberOf`
-  - role stored via a text relation predicate like `#V#hasRole` with a context containing the organisation ID
+- `src/backend/services/organisation_membership_service.py` persists operational
+  membership and roles in the Vontology:
+  - authority-bearing membership relationship: `#V#memberOfVonOrg`
+  - operational role: `#V#hasVonOrgRole`, with context containing the exact
+    organisation ID
+  - `#V#memberOfVonOrg` specialises and entails the descriptive
+    `#V#memberOf` predicate; generic `memberOf`, `member_of_organisation`, and
+    `hasRole` assertions never grant Von access or an operational role
 
 Practical consequence:
 - Some code paths can read role/permissions from stubs, while the Vontology contains a richer representation that is not consistently used everywhere.

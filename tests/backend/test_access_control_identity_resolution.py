@@ -124,6 +124,45 @@ def test_header_identity_cache_is_request_local(monkeypatch) -> None:
         assert access_control.get_effective_user_concept_id() == "#V#actor_b"
 
 
+def test_pre_cutover_google_session_without_assurance_has_no_actor_or_org() -> None:
+    from flask import session
+
+    import src.backend.security.access_control as access_control
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    with app.test_request_context("/von/generate"):
+        session["user_concept_id"] = "#V#victim"
+        session["user_email"] = "attacker@example.org"
+        session["auth_provider"] = "google_oauth"
+        session["organisation_concept_id"] = "#V#private_org"
+
+        assert access_control.get_effective_user_concept_id() is None
+        assert access_control.get_effective_organisation_concept_id() is None
+
+
+def test_google_session_with_login_email_assurance_has_its_bound_actor() -> None:
+    from flask import session
+
+    import src.backend.security.access_control as access_control
+    from src.backend.security.authentication_assurance import (
+        AUTHENTICATION_ASSURANCE_SESSION_KEY,
+        GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE,
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    with app.test_request_context("/von/generate"):
+        session["user_concept_id"] = "#V#alice"
+        session["user_email"] = "alice@example.org"
+        session["auth_provider"] = "google_oauth"
+        session[AUTHENTICATION_ASSURANCE_SESSION_KEY] = (
+            GOOGLE_OAUTH_LOGIN_EMAIL_ASSURANCE
+        )
+
+        assert access_control.get_effective_user_concept_id() == "#V#alice"
+
+
 def test_explicit_anonymous_actor_suppresses_ambient_identity_without_a_source(
     monkeypatch,
 ) -> None:

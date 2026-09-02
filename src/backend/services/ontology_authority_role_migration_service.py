@@ -318,7 +318,9 @@ def _text_privileged_role_assignments() -> list[dict[str, Any]]:
 
 
 def _relationship_operational_role_assignments() -> list[dict[str, Any]]:
-    predicate_names = ("#V#hasRole", "hasRole")
+    # Generic hasRole assertions are semantic descriptions, not operational
+    # authority.  Only the narrow Von organisation role predicate is eligible.
+    predicate_names = (ROLE_PREDICATE,)
     role_tokens = tuple(
         sorted({*_OPERATIONAL_ROLE_TOKENS, VON_ADMINISTRATOR_CONCEPT_ID})
     )

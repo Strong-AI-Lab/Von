@@ -4,6 +4,7 @@ from typing import Any
 
 from bson import ObjectId
 from flask import Flask
+import pytest
 
 from src.backend.server.routes import concept_routes
 from src.backend.services import ontology_mutation_command_service as command
@@ -158,14 +159,25 @@ def test_http_text_delete_by_predicate_and_text_fails_closed(monkeypatch) -> Non
     )
 
 
-def test_http_relation_id_cannot_patch_an_ontology_role_relation(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "reserved_predicate",
+    [
+        "#V#has_ontology_authority_role",
+        "#V#hasVonOrgRole",
+        "#V#hasVonLoginEmail",
+    ],
+)
+def test_http_relation_id_cannot_patch_a_reserved_authority_relation(
+    monkeypatch,
+    reserved_predicate: str,
+) -> None:
     mutation_called = False
 
     def relation_find_one(_query: dict[str, Any]) -> dict[str, Any]:
         return {
             "_id": "role-relation",
             "subject_concept_id": "#V#administrator",
-            "predicate": "#V#has_ontology_authority_role",
+            "predicate": reserved_predicate,
             "object_text_id": "role-text",
             "context": {},
         }
@@ -187,6 +199,55 @@ def test_http_relation_id_cannot_patch_an_ontology_role_relation(monkeypatch) ->
     response = _client().patch(
         "/api/concepts/%23V%23administrator/texts/role-relation",
         json={"text": "no longer an administrator", "lang": "en"},
+    )
+
+    assert response.status_code == 403
+    payload = response.get_json()
+    assert payload["error_code"] == ("dedicated_ontology_governance_operation_required")
+    assert payload["effect_status"] == "not_started"
+    assert mutation_called is False
+
+
+@pytest.mark.parametrize(
+    "reserved_predicate",
+    [
+        "#V#has_ontology_authority_role",
+        "#V#hasVonOrgRole",
+        "#V#hasVonLoginEmail",
+    ],
+)
+def test_http_relation_id_cannot_delete_a_reserved_authority_relation(
+    monkeypatch,
+    reserved_predicate: str,
+) -> None:
+    mutation_called = False
+
+    def relation_find_one(_query: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "_id": "role-relation",
+            "subject_concept_id": "#V#administrator",
+            "predicate": reserved_predicate,
+            "object_text_id": "role-text",
+            "context": {},
+        }
+
+    def delete(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal mutation_called
+        mutation_called = True
+        return {"deleted": True}
+
+    monkeypatch.setattr(command, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(command.TextRelationsRepository, "find_one", relation_find_one)
+    monkeypatch.setattr(
+        command.TextValuesRepository,
+        "find_one",
+        lambda _query: {"_id": "role-text", "text": "reserved value", "lang": "en"},
+    )
+    monkeypatch.setattr(concept_routes, "delete_text_relation", delete)
+
+    response = _client().delete(
+        "/api/concepts/%23V%23administrator/texts/role-relation",
+        json={},
     )
 
     assert response.status_code == 403

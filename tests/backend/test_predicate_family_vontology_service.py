@@ -46,6 +46,8 @@ def test_expand_relation_predicate_family_uses_inverse_and_indexed_family_schema
         captured = dict(kwargs)
         captured["target_values"] = list(kwargs.get("target_values") or [])
         index_queries.append(captured)
+        if kwargs["predicate_id"] == service.PREDICATE_SPECIALISATION_PREDICATE_ID:
+            return [], 0
         return (
             [
                 {
@@ -81,6 +83,18 @@ def test_expand_relation_predicate_family_uses_inverse_and_indexed_family_schema
     assert result["family_discovery_source"] == "relationship_extent_index"
     assert index_queries == [
         {
+            "predicate_id": "#V#predicate_specialises_predicate",
+            "target_values": ["#V#direct_relation", "#V#inverse_relation"],
+            "count_total": False,
+            "projection": {
+                "_id": 0,
+                "source_concept_id": 1,
+                "predicate_id": 1,
+                "target_value": 1,
+            },
+            "limit": 128,
+        },
+        {
             "predicate_id": "#V#has_member_predicate",
             "target_values": ["#V#direct_relation", "#V#inverse_relation"],
             "count_total": False,
@@ -91,7 +105,7 @@ def test_expand_relation_predicate_family_uses_inverse_and_indexed_family_schema
                 "target_value": 1,
             },
             "limit": 128,
-        }
+        },
     ]
     assert len(queries) == 2
 
@@ -120,11 +134,11 @@ def test_expand_relation_predicate_family_uses_exact_fallback_when_index_unavail
             return [
                 {
                     "concept_id": "#V#direct_relation",
-                    "relationships": {
-                        "#V#inverse_predicates": ["#V#inverse_relation"]
-                    },
+                    "relationships": {"#V#inverse_predicates": ["#V#inverse_relation"]},
                 }
             ]
+        if f"relationships.{service.PREDICATE_SPECIALISATION_PREDICATE_ID}" in query:
+            return []
         return [
             {
                 "concept_id": "#V#represented_relation_family",
@@ -158,20 +172,58 @@ def test_expand_relation_predicate_family_uses_exact_fallback_when_index_unavail
         "#V#inverse_relation",
         "#V#role_relation",
     ]
-    assert result["family_concept_ids"] == [
-        "#V#represented_relation_family"
-    ]
+    assert result["family_concept_ids"] == ["#V#represented_relation_family"]
     assert result["relationship_extent_index_status"] == "unavailable"
-    assert result["family_discovery_source"] == (
-        "canonical_exact_predicate_query"
-    )
-    assert queries[1]["query"] == {
+    assert result["family_discovery_source"] == ("canonical_exact_predicate_query")
+    assert queries[2]["query"] == {
         "relationships.#V#has_member_predicate": {
             "$in": ["#V#direct_relation", "#V#inverse_relation"]
         }
     }
-    assert queries[1]["limit"] == 32
-    assert queries[1]["max_time_ms"] is None
+    assert queries[2]["limit"] == 32
+    assert queries[2]["max_time_ms"] is None
+
+
+def test_general_predicate_query_expands_to_specialisations_but_not_reverse(
+    monkeypatch,
+) -> None:
+    def fake_find(query, projection=None, *, limit=0):
+        concept_ids = query.get("concept_id", {}).get("$in", [])
+        if concept_ids:
+            return [
+                {"concept_id": concept_id, "relationships": {}}
+                for concept_id in concept_ids
+            ]
+        return []
+
+    def fake_index(**kwargs):
+        predicate = kwargs["predicate_id"]
+        targets = list(kwargs.get("target_values") or [])
+        if predicate == service.PREDICATE_SPECIALISATION_PREDICATE_ID and targets == [
+            "#V#memberOf"
+        ]:
+            return (
+                [
+                    {
+                        "source_concept_id": "#V#memberOfVonOrg",
+                        "predicate_id": predicate,
+                        "target_value": "#V#memberOf",
+                    }
+                ],
+                1,
+            )
+        return [], 0
+
+    monkeypatch.setattr(service.ConceptsRepository, "find", staticmethod(fake_find))
+    monkeypatch.setattr(service, "query_relationship_extent_index", fake_index)
+
+    general = service.expand_relation_predicate_family(["#V#memberOf"])
+    narrow = service.expand_relation_predicate_family(["#V#memberOfVonOrg"])
+
+    assert general["predicate_ids"] == ["#V#memberOf", "#V#memberOfVonOrg"]
+    assert general["entailing_specialisation_predicate_ids"] == ["#V#memberOfVonOrg"]
+    assert narrow["predicate_ids"] == ["#V#memberOfVonOrg"]
+    assert narrow["entailing_specialisation_predicate_ids"] == []
 
 
 def test_expand_relation_predicate_family_fails_soft(monkeypatch) -> None:
