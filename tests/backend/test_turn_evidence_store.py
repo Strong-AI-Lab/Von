@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 
+from src.backend.services.adaptive_turn_service import (
+    _resolve_turn_cursor_evidence_argument,
+    _resolve_turn_rename_evidence_arguments,
+)
 from src.backend.services.turn_evidence_store import (
     DEFAULT_PREVIEW_MAX_CHARS,
     EvidenceEnvelope,
@@ -506,3 +510,142 @@ def test_binary_evidence_is_hydrated_only_as_a_bounded_base64_slice() -> None:
     # The compact index does not grow with the ten-byte source beyond its
     # bounded preview and metadata projection.
     assert len(json.dumps(store.index(), sort_keys=True)) < 5_000
+
+
+def test_turn_runtime_resolves_exact_cursor_from_short_evidence_handle() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-cursor")
+    envelope = store.record(
+        "conversation_search",
+        "call-search",
+        {"continuation_cursor": "signed-opaque-cursor", "has_more": True},
+    )
+
+    resolved, error = _resolve_turn_cursor_evidence_argument(
+        capability_name="conversation_search",
+        arguments={
+            "query": "*",
+            "name_present": False,
+            "cursor_evidence_id": envelope.evidence_id,
+        },
+        evidence_store=store,
+        scope=scope,
+        turn_id="turn-cursor",
+    )
+
+    assert error is None
+    assert resolved == {
+        "query": "*",
+        "name_present": False,
+        "cursor": "signed-opaque-cursor",
+    }
+
+
+def test_turn_runtime_rejects_cursor_evidence_from_another_capability() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-cursor-mismatch")
+    envelope = store.record(
+        "conversation_list",
+        "call-list",
+        {"continuation_cursor": "signed-opaque-cursor"},
+    )
+
+    _resolved, error = _resolve_turn_cursor_evidence_argument(
+        capability_name="conversation_search",
+        arguments={"query": "*", "cursor_evidence_id": envelope.evidence_id},
+        evidence_store=store,
+        scope=scope,
+        turn_id="turn-cursor-mismatch",
+    )
+
+    assert error is not None
+    assert error["error_code"] == "cursor_evidence_tool_mismatch"
+
+
+def test_turn_runtime_hydrates_rename_tokens_from_matching_inspection_items() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-rename")
+    envelope = store.record(
+        "conversation_inspect_batch",
+        "call-inspect",
+        {
+            "results": [
+                {
+                    "evidence": {
+                        "session_id": "session-001",
+                        "evidence_token": "signed-rename-token-001",
+                    },
+                }
+            ]
+        },
+    )
+
+    resolved, error = _resolve_turn_rename_evidence_arguments(
+        capability_name="conversation_manage_batch",
+        arguments={
+            "action": "rename",
+            "inspection_evidence_id": envelope.evidence_id,
+            "rename_items": [
+                {
+                    "session_id": "session-001",
+                    "session_name": "Scientific relation extraction",
+                    "evidence_item_index": 0,
+                }
+            ],
+        },
+        evidence_store=store,
+        scope=scope,
+        turn_id="turn-rename",
+    )
+
+    assert error is None
+    assert resolved == {
+        "action": "rename",
+        "rename_items": [
+            {
+                "session_id": "session-001",
+                "session_name": "Scientific relation extraction",
+                "evidence_token": "signed-rename-token-001",
+            }
+        ],
+    }
+
+
+def test_turn_runtime_rejects_rename_evidence_for_different_session() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-rename-mismatch")
+    envelope = store.record(
+        "conversation_inspect_batch",
+        "call-inspect",
+        {
+            "results": [
+                {
+                    "evidence": {
+                        "session_id": "session-001",
+                        "evidence_token": "signed-rename-token-001",
+                    },
+                }
+            ]
+        },
+    )
+
+    _resolved, error = _resolve_turn_rename_evidence_arguments(
+        capability_name="conversation_manage_batch",
+        arguments={
+            "action": "rename",
+            "inspection_evidence_id": envelope.evidence_id,
+            "rename_items": [
+                {
+                    "session_id": "session-002",
+                    "session_name": "Wrong conversation",
+                    "evidence_item_index": 0,
+                }
+            ],
+        },
+        evidence_store=store,
+        scope=scope,
+        turn_id="turn-rename-mismatch",
+    )
+
+    assert error is not None
+    assert error["error_code"] == "inspection_evidence_mismatch"

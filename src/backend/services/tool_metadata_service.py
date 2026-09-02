@@ -397,6 +397,16 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "conversation",
         "display_template": "Read conversation: {session_id}",
     },
+    "conversation_transcript_page": {
+        "salience": "medium",
+        "category": "conversation",
+        "display_template": "Read transcript page: {session_id}",
+    },
+    "conversation_inspect_batch": {
+        "salience": "medium",
+        "category": "conversation",
+        "display_template": "Inspected {count} conversations",
+    },
     "conversation_manage": {
         "salience": "high",
         "category": "conversation",
@@ -1329,6 +1339,8 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "conversation_list",
     "conversation_search",
     "conversation_get",
+    "conversation_transcript_page",
+    "conversation_inspect_batch",
     "conversation_manage",
     "conversation_manage_batch",
     "testing_prepare_experiment_spec",

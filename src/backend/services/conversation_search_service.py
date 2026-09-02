@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,6 +27,7 @@ SEARCH_SCHEMA_VERSION = "conversation_search_result.v1"
 _VALID_MATCH_MODES = frozenset({"lexical", "semantic", "hybrid"})
 _VALID_SORTS = frozenset({"relevance", "updated"})
 _MAX_CANDIDATES = 500
+_SEARCH_CURSOR_TTL_SECONDS = 24 * 60 * 60
 
 
 class ConversationSearchError(RuntimeError):
@@ -253,20 +255,142 @@ def search_actor_conversations(
     if isinstance(clean_filters.get("hidden"), bool):
         include_hidden = True
 
-    try:
-        accessible_result = list_actor_conversations(
-            actor_user_id=actor,
-            namespace=namespace,
-            organisation_concept_id=organisation_concept_id,
-            limit=_MAX_CANDIDATES,
-            include_hidden=include_hidden,
-            include_trashed=trashed_only,
+    if query_text == "*":
+        enumeration_scope = {
+            "actor_user_id": actor,
+            "namespace": namespace,
+            "organisation_concept_id": organisation_concept_id,
+            "query": query_text,
+            "match_mode": mode,
+            "filters": clean_filters,
+            "sort": sort_mode,
+            "include_hidden": include_hidden,
+            "trashed_only": trashed_only,
+        }
+        cursor_context = hashlib.sha256(
+            json.dumps(
+                enumeration_scope,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        try:
+            enumeration = list_actor_conversations(
+                actor_user_id=actor,
+                namespace=namespace,
+                organisation_concept_id=organisation_concept_id,
+                limit=safe_page_size,
+                include_hidden=include_hidden,
+                include_trashed=trashed_only,
+                # The source cursor is already signed and binds the actor,
+                # namespace, organisation, and list filters.  Returning it
+                # directly avoids a second base64/signature envelope that made
+                # the continuation unnecessarily long and fragile for MCP
+                # clients to carry between calls.
+                cursor=cursor,
+                name_present=clean_filters.get("name_present"),
+                cursor_context=cursor_context,
+            )
+        except ConversationManagementError as exc:
+            raise ConversationSearchError(str(exc)) from exc
+        result_rows = []
+        for raw_row in enumeration.get("conversations", []):
+            if not isinstance(raw_row, Mapping) or not _matches_filters(
+                raw_row, clean_filters
+            ):
+                continue
+            row = dict(raw_row)
+            row["match"] = {
+                "score": 0.0,
+                "fields": ["actor_visible_metadata"],
+                "snippet": None,
+                "source_locator": None,
+            }
+            result_rows.append(row)
+        source_next_cursor = enumeration.get("next_cursor")
+        next_cursor = (
+            source_next_cursor
+            if isinstance(source_next_cursor, str) and source_next_cursor
+            else None
         )
+        coverage_complete = enumeration.get("coverage_complete") is True
+        return {
+            "success": True,
+            "schema_version": SEARCH_SCHEMA_VERSION,
+            "query": query_text,
+            "match_mode": mode,
+            "sort": sort_mode,
+            "filters": clean_filters,
+            "candidate_session_ids": [
+                str(row.get("session_id"))
+                for row in result_rows
+                if isinstance(row.get("session_id"), str)
+                and row.get("session_id")
+            ],
+            "results": result_rows,
+            "count": len(result_rows),
+            "page_size": safe_page_size,
+            "has_more": next_cursor is not None,
+            "continuation_cursor": next_cursor,
+            "next_cursor": next_cursor,
+            "coverage_complete": coverage_complete,
+            "ordering": enumeration.get("ordering"),
+            "index_coverage": {
+                "index_version": chat_history_service.CONVERSATION_SEARCH_INDEX_VERSION,
+                "accessible_window_count": len(
+                    enumeration.get("conversations", [])
+                ),
+                "indexed_conversation_count": None,
+                "shared_conversation_count": sum(
+                    1
+                    for row in enumeration.get("conversations", [])
+                    if isinstance(row, Mapping)
+                    and row.get("shared_with_me") is True
+                ),
+                "complete_for_accessible_window": coverage_complete,
+                "candidate_window_limit": None,
+                "candidate_window_complete": coverage_complete,
+                "limitations": (
+                    [] if coverage_complete else ["source_enumeration_incomplete"]
+                ),
+            },
+            "retrieval": {
+                "lexical": {"status": "not_requested"},
+                "semantic": {"status": "not_requested"},
+            },
+            "trashed_only": trashed_only,
+        }
+
+    accessible_source_rows: list[dict[str, Any]] = []
+    accessible_cursor = None
+    accessible_result: dict[str, Any] = {"coverage_complete": False}
+    try:
+        for _ in range((_MAX_CANDIDATES + 99) // 100):
+            accessible_result = list_actor_conversations(
+                actor_user_id=actor,
+                namespace=namespace,
+                organisation_concept_id=organisation_concept_id,
+                limit=100,
+                include_hidden=include_hidden,
+                include_trashed=trashed_only,
+                cursor=accessible_cursor,
+            )
+            accessible_source_rows.extend(
+                dict(row)
+                for row in accessible_result.get("conversations", [])
+                if isinstance(row, Mapping)
+            )
+            raw_next_cursor = accessible_result.get("next_cursor")
+            if not isinstance(raw_next_cursor, str) or not raw_next_cursor:
+                accessible_cursor = None
+                break
+            accessible_cursor = raw_next_cursor
     except ConversationManagementError as exc:
         raise ConversationSearchError(str(exc)) from exc
     accessible_rows = [
         dict(row)
-        for row in accessible_result.get("conversations", [])
+        for row in accessible_source_rows
         if isinstance(row, Mapping)
         and (
             row.get("trashed") is True
@@ -575,6 +699,7 @@ def search_actor_conversations(
         next_cursor = encode_opaque_cursor(
             purpose="conversation_search",
             payload={"scope": cursor_scope, "position": position},
+            ttl_seconds=_SEARCH_CURSOR_TTL_SECONDS,
         )
 
     indexed_count = sum(
@@ -615,10 +740,16 @@ def search_actor_conversations(
         "match_mode": mode,
         "sort": sort_mode,
         "filters": clean_filters,
+        "candidate_session_ids": [
+            str(row.get("session_id"))
+            for row in page
+            if isinstance(row.get("session_id"), str) and row.get("session_id")
+        ],
         "results": page,
         "count": len(page),
         "page_size": safe_page_size,
         "has_more": has_more,
+        "continuation_cursor": next_cursor,
         "next_cursor": next_cursor,
         "coverage_complete": coverage_complete,
         "ordering": {

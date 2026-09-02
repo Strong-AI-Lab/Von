@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -255,6 +256,159 @@ def list_accepted_invites_for_user(
         direction="incoming",
         limit=limit,
     )
+
+
+def list_accepted_invites_for_user_sessions(
+    *, user_concept_id: str, session_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """Return accepted invites for one actor and a bounded exact session set."""
+
+    actor = user_concept_id.strip() if isinstance(user_concept_id, str) else ""
+    unique_session_ids = list(
+        dict.fromkeys(
+            value.strip()
+            for value in session_ids
+            if isinstance(value, str) and value.strip()
+        )
+    )
+    if not actor or not unique_session_ids:
+        return []
+    if len(unique_session_ids) > 100:
+        raise ValueError("Accepted-invite lookup is limited to 100 session IDs.")
+    coll = _get_collection()
+    if coll is None:
+        raise RuntimeError("Shared conversation invite storage is unavailable.")
+    cursor = coll.find(
+        {
+            "invitee_user_id": actor,
+            "status": "accepted",
+            "session_id": {"$in": unique_session_ids},
+        },
+        {"_id": 0},
+    )
+    return [dict(row) for row in cursor if isinstance(row, Mapping)]
+
+
+def _invite_cursor_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def list_accepted_invites_for_user_page(
+    *,
+    user_concept_id: str,
+    page_size: int = 100,
+    position: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return a stable bounded keyset page of accepted incoming invites."""
+
+    actor = user_concept_id.strip() if isinstance(user_concept_id, str) else ""
+    if not actor:
+        raise ValueError("user_concept_id is required.")
+    if not isinstance(page_size, int) or isinstance(page_size, bool):
+        raise ValueError("page_size must be an integer.")
+    safe_page_size = max(1, min(page_size, 100))
+    coll = _get_collection()
+    if coll is None:
+        return {
+            "available": False,
+            "invites": [],
+            "count": 0,
+            "has_more": False,
+            "next_position": None,
+        }
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    pipeline: List[Dict[str, Any]] = [
+        {
+            "$match": {
+                "invitee_user_id": actor,
+                "status": "accepted",
+            }
+        },
+        {
+            "$set": {
+                "_conversation_page_timestamp": {
+                    "$ifNull": ["$updated_at", {"$ifNull": ["$created_at", epoch]}]
+                },
+                "_conversation_page_invite_id": {
+                    "$convert": {
+                        "input": {"$ifNull": ["$invite_id", "$_id"]},
+                        "to": "string",
+                        "onError": "",
+                        "onNull": "",
+                    }
+                },
+            }
+        },
+    ]
+    if position is not None:
+        if not isinstance(position, Mapping):
+            raise ValueError("invite page position is invalid.")
+        marker_timestamp = _invite_cursor_datetime(position.get("timestamp"))
+        marker_invite_id = position.get("invite_id")
+        if marker_timestamp is None or not isinstance(marker_invite_id, str):
+            raise ValueError("invite page position is incomplete.")
+        pipeline.append(
+            {
+                "$match": {
+                    "$or": [
+                        {
+                            "_conversation_page_timestamp": {
+                                "$lt": marker_timestamp
+                            }
+                        },
+                        {
+                            "_conversation_page_timestamp": marker_timestamp,
+                            "_conversation_page_invite_id": {"$lt": marker_invite_id},
+                        },
+                    ]
+                }
+            }
+        )
+    pipeline.extend(
+        [
+            {
+                "$sort": {
+                    "_conversation_page_timestamp": DESCENDING,
+                    "_conversation_page_invite_id": DESCENDING,
+                }
+            },
+            {"$limit": safe_page_size + 1},
+            {"$project": {"_id": 0}},
+        ]
+    )
+    rows = [dict(row) for row in coll.aggregate(pipeline) if isinstance(row, Mapping)]
+    has_more = len(rows) > safe_page_size
+    page = rows[:safe_page_size]
+    next_position = None
+    if page:
+        final = page[-1]
+        final_timestamp = _invite_cursor_datetime(
+            final.get("_conversation_page_timestamp")
+        )
+        if final_timestamp is None:
+            final_timestamp = epoch
+        next_position = {
+            "timestamp": final_timestamp.isoformat(),
+            "invite_id": str(final.get("_conversation_page_invite_id") or ""),
+        }
+    for invite in page:
+        invite.pop("_conversation_page_timestamp", None)
+        invite.pop("_conversation_page_invite_id", None)
+    return {
+        "available": True,
+        "invites": page,
+        "count": len(page),
+        "has_more": has_more,
+        "next_position": next_position,
+    }
 
 
 def list_outgoing_accepted_invites_for_user(

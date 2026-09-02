@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -40,7 +41,12 @@ def _b64decode(value: str) -> bytes:
         raise OpaqueCursorError("cursor encoding is invalid") from exc
 
 
-def encode_opaque_cursor(*, purpose: str, payload: Mapping[str, Any]) -> str:
+def encode_opaque_cursor(
+    *,
+    purpose: str,
+    payload: Mapping[str, Any],
+    ttl_seconds: int | None = None,
+) -> str:
     """Return a tamper-evident token without exposing cursor fields to callers."""
 
     if not isinstance(purpose, str) or not purpose.strip():
@@ -50,6 +56,16 @@ def encode_opaque_cursor(*, purpose: str, payload: Mapping[str, Any]) -> str:
         "purpose": purpose.strip(),
         "payload": dict(payload),
     }
+    if ttl_seconds is not None:
+        if (
+            not isinstance(ttl_seconds, int)
+            or isinstance(ttl_seconds, bool)
+            or ttl_seconds <= 0
+        ):
+            raise OpaqueCursorError("cursor ttl_seconds must be a positive integer")
+        issued_at = int(time.time())
+        envelope["issued_at_epoch"] = issued_at
+        envelope["expires_at_epoch"] = issued_at + ttl_seconds
     encoded_payload = _b64encode(_canonical_json(envelope))
     signature = hmac.new(
         _binding_secret_bytes(), encoded_payload.encode("ascii"), hashlib.sha256
@@ -85,6 +101,12 @@ def decode_opaque_cursor(*, cursor: str, purpose: str) -> dict[str, Any]:
         raise OpaqueCursorError("cursor schema_version is invalid")
     if envelope.get("purpose") != purpose:
         raise OpaqueCursorError("cursor purpose does not match this request")
+    expires_at = envelope.get("expires_at_epoch")
+    if expires_at is not None:
+        if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+            raise OpaqueCursorError("cursor expiry is invalid")
+        if int(time.time()) >= expires_at:
+            raise OpaqueCursorError("cursor has expired")
     payload = envelope.get("payload")
     if not isinstance(payload, Mapping):
         raise OpaqueCursorError("cursor payload is missing")
