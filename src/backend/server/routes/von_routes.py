@@ -10460,6 +10460,11 @@ def _load_conversation_session_state_fail_soft(
             if isinstance(session_state, Mapping)
             else None
         )
+        session_projection = (
+            chat_history_service.project_chat_session_mode_state(session_state)
+            if isinstance(session_state, Mapping)
+            else {"session_id": session_id}
+        )
         history_meta = {
             "history_offset": (
                 session_state.get("history_offset")
@@ -10498,6 +10503,7 @@ def _load_conversation_session_state_fail_soft(
                 if isinstance(session_state, Mapping)
                 else None
             ),
+            "session": session_projection,
         }
         return history, descriptor, text, revision, observations, history_meta
     except Exception as exc:
@@ -15787,6 +15793,22 @@ def history():
         meta = {"history_truncated": history_truncated}
         total_segments = len(segments)
 
+        session_projection = (
+            dict(owner_history_meta.get("session"))
+            if isinstance(owner_history_meta.get("session"), Mapping)
+            else {"session_id": session_id}
+        )
+        qa_session = (
+            session_projection
+            if isinstance(session_projection.get("concept_q_and_a"), Mapping)
+            else None
+        )
+        specialised_session_fields = (
+            {"session": session_projection, "qa_session": qa_session}
+            if qa_session is not None
+            else {}
+        )
+
         if total_segments == 0:
             return jsonify(
                 {
@@ -15799,6 +15821,7 @@ def history():
                     "conversation_observation_state": owner_history_meta.get(
                         "conversation_observation_state"
                     ),
+                    **specialised_session_fields,
                 }
             )
 
@@ -15831,6 +15854,7 @@ def history():
                 "conversation_observation_state": owner_history_meta.get(
                     "conversation_observation_state"
                 ),
+                **specialised_session_fields,
             }
         )
     except Exception as e:
@@ -18390,6 +18414,14 @@ def set_chat_session():
             "session_name": 1,
             chat_history_service.EXTERNAL_CONVERSATION_IMPORT_FIELD: 1,
             "conversation_lineage": 1,
+            "mode": 1,
+            "origin_kind": 1,
+            "focal_concept_ids": 1,
+            "focal_concept_ids_source": 1,
+            "focal_concept_ids_updated_at": 1,
+            "concept_q_and_a.schema_version": 1,
+            "concept_q_and_a.concept": 1,
+            "concept_q_and_a.lifecycle": 1,
         }
         if include_history:
             projection["history"] = 1
@@ -18429,6 +18461,19 @@ def set_chat_session():
             return jsonify({"error": "Session not found"}), 404
 
         session_name = doc.get("session_name")
+        session_mode_state = chat_history_service.project_chat_session_mode_state(
+            {**doc, "session_id": session_id}
+        )
+        qa_session = (
+            session_mode_state
+            if isinstance(session_mode_state.get("concept_q_and_a"), Mapping)
+            else None
+        )
+        specialised_session_fields = (
+            {**session_mode_state, "qa_session": qa_session}
+            if qa_session is not None
+            else {}
+        )
         external_conversation = (
             chat_history_service.project_external_conversation_metadata(doc)
         )
@@ -18508,6 +18553,7 @@ def set_chat_session():
                     "session_name": session_name,
                     "history": normalised_history,
                     "external_conversation": external_conversation,
+                    **specialised_session_fields,
                 }
             ),
             200,

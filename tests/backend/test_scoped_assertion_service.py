@@ -1386,3 +1386,163 @@ def test_actor_effective_text_read_merges_visible_scoped_assertions(monkeypatch)
     assert rows[0]["row_kind"] == "scoped_assertion"
     assert rows[0]["canonical_publication"] is False
     assert rows[0]["storage_surface"] == "scoped_knowledge_assertions"
+
+
+def test_tentative_relation_is_explicitly_visible_but_does_not_emit_until_promoted(
+    monkeypatch,
+):
+    from src.backend.services import scoped_assertion_service as service
+    from src.backend.services import workflow_event_integration_service as events
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+    monkeypatch.setattr(
+        service,
+        "validate_predicate_concept",
+        lambda _predicate_id: (True, None, None),
+    )
+    launches: list[dict] = []
+    monkeypatch.setattr(
+        events,
+        "maybe_launch_vontology_mutation_workflow",
+        lambda **kwargs: launches.append(kwargs) or {"success": True},
+    )
+
+    receipt = service.upsert_scoped_assertion(
+        subject_concept_id="#V#person",
+        predicate="#V#memberOf",
+        target_concept_id="#V#organisation",
+        acting_user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+        namespace="#V#author@trusted_org",
+        epistemic_status="tentative",
+    )
+
+    assert receipt["canonical_read_back"]["epistemic_status"] == "tentative"
+    assert service.list_visible_scoped_assertions(
+        user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+    ) == []
+    explicit = service.list_visible_scoped_assertions(
+        epistemic_statuses=("asserted", "tentative"),
+        user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+    )
+    assert [item["assertion_id"] for item in explicit] == [receipt["assertion_id"]]
+    assert launches == []
+
+    promoted = service.promote_scoped_assertion_epistemic_status(
+        assertion_id=receipt["assertion_id"],
+        acting_user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+        namespace="#V#author@trusted_org",
+        request_id="confirm-1",
+    )
+
+    assert promoted["epistemic_status"] == "asserted"
+    assert promoted["canonical_read_back"]["epistemic_status"] == "asserted"
+    assert len(launches) == 1
+    assert launches[0]["mutation_event_type"] == events.EVENT_TYPE_SCOPED_ASSERTION_UPSERTED
+    assert launches[0]["event_payload"]["epistemic_status"] == "asserted"
+    assert launches[0]["event_payload"]["promoted_from_epistemic_status"] == "tentative"
+
+
+def test_asserted_upsert_monotonically_promotes_existing_tentative_once(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+    from src.backend.services import workflow_event_integration_service as events
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        service,
+        "validate_predicate_concept",
+        lambda _predicate_id: (True, None, None),
+    )
+    launches: list[dict] = []
+    monkeypatch.setattr(
+        events,
+        "maybe_launch_vontology_mutation_workflow",
+        lambda **kwargs: launches.append(kwargs) or {"success": True},
+    )
+    kwargs = {
+        "subject_concept_id": "#V#person",
+        "predicate": "#V#memberOf",
+        "target_concept_id": "#V#organisation",
+        "acting_user_concept_id": "#V#author",
+        "organisation_concept_id": "#V#trusted_org",
+        "namespace": "#V#author@trusted_org",
+    }
+
+    tentative = service.upsert_scoped_assertion(
+        **kwargs,
+        epistemic_status="tentative",
+    )
+    asserted = service.upsert_scoped_assertion(**kwargs)
+    replay = service.upsert_scoped_assertion(**kwargs)
+
+    assert tentative["epistemic_status"] == "tentative"
+    assert asserted["changed"] is True
+    assert asserted["canonical_read_back"]["epistemic_status"] == "asserted"
+    assert replay["changed"] is False
+    assert len(launches) == 1
+    assert launches[0]["mutation_event_type"] == events.EVENT_TYPE_SCOPED_ASSERTION_UPSERTED
+    assert launches[0]["event_payload"]["promoted_from_epistemic_status"] == "tentative"
+
+
+def test_retracting_tentative_relation_does_not_fan_out_fact_event(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+    from src.backend.services import workflow_event_integration_service as events
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        service,
+        "validate_predicate_concept",
+        lambda _predicate_id: (True, None, None),
+    )
+    launches: list[dict] = []
+    monkeypatch.setattr(
+        events,
+        "maybe_launch_vontology_mutation_workflow",
+        lambda **kwargs: launches.append(kwargs) or {"success": True},
+    )
+    tentative = service.upsert_scoped_assertion(
+        subject_concept_id="#V#person",
+        predicate="#V#memberOf",
+        target_concept_id="#V#organisation",
+        acting_user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+        namespace="#V#author@trusted_org",
+        epistemic_status="tentative",
+    )
+
+    retracted = service.retract_scoped_assertion(
+        assertion_id=tentative["assertion_id"],
+        acting_user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+        namespace="#V#author@trusted_org",
+    )
+
+    assert retracted["changed"] is True
+    assert retracted["canonical_read_back"]["status"] == "retracted"
+    assert launches == []

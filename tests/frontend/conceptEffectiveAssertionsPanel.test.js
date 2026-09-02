@@ -85,6 +85,9 @@ describe('concept actor-effective assertions panel', () => {
         });
 
         expect(result).toEqual({ rendered: true, contextView: 'actor_effective' });
+        expect(api.getJsonDetailed.mock.calls[0][0]).toContain(
+            'argument_concept_id=%23V%23event'
+        );
         const panel = document.getElementById('conceptEffectiveAssertionsPanel_test');
         expect(panel.classList.contains('hidden')).toBe(false);
         expect(panel.querySelectorAll('.concept-effective-assertion-row')).toHaveLength(2);
@@ -217,5 +220,165 @@ describe('concept actor-effective assertions panel', () => {
         expect(panel.classList.contains('hidden')).toBe(false);
         expect(panel.textContent).toContain('Organisation — Example Lab');
         expect(panel.textContent).not.toContain('Personal — visible only to you');
+    });
+
+    test('labels aboutness-only text without implying a typed relation', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        api.getJsonDetailed.mockResolvedValue({
+            data: {
+                context_view: 'actor_effective',
+                items: [assertion({
+                    concept_relevance: {
+                        kind: 'aboutness_only',
+                        concept_id: '#V#event',
+                        aboutness_only: true,
+                    },
+                })],
+                has_more: false,
+            },
+        });
+        const { ensureConceptEffectiveAssertionsPanel } = require(
+            '../../src/frontend/web/von_interface/static/js/components/conceptEffectiveAssertionsPanel.js'
+        );
+
+        await ensureConceptEffectiveAssertionsPanel({ conceptId: '#V#event', suffix: 'test' });
+        expect(document.body.textContent).toContain(
+            'Exact text linked to this concept; no typed relation asserted.'
+        );
+    });
+
+    test('labels a projected tentative typed relation as non-authority-active', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        api.getJsonDetailed.mockResolvedValue({
+            data: {
+                context_view: 'actor_effective',
+                items: [assertion({
+                    epistemic_status: 'tentative',
+                    concept_relevance: {
+                        kind: 'grounded_subject',
+                        concept_id: '#V#event',
+                        aboutness_only: false,
+                    },
+                })],
+                has_more: false,
+            },
+        });
+        const { ensureConceptEffectiveAssertionsPanel } = require(
+            '../../src/frontend/web/von_interface/static/js/components/conceptEffectiveAssertionsPanel.js'
+        );
+
+        await ensureConceptEffectiveAssertionsPanel({ conceptId: '#V#event', suffix: 'test' });
+        expect(document.body.textContent).toContain(
+            'Tentative typed relation; not confirmed/authority-active'
+        );
+        expect(document.querySelector('.concept-effective-assertion-epistemic-tentative'))
+            .not.toBeNull();
+    });
+
+    test('renders incoming and outgoing typed relations as complete direction-aware statements', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        api.getJsonDetailed.mockResolvedValue({
+            data: {
+                context_view: 'actor_effective',
+                items: [
+                    assertion({
+                        assertion_id: 'ska_member',
+                        epistemic_status: 'tentative',
+                        subject: {
+                            concept_id: '#V#michael_witbrock',
+                            display_name: 'Michael Witbrock',
+                        },
+                        predicate: {
+                            concept_id: '#V#memberOf',
+                            storage_id: '#V#memberOf',
+                            display_name: 'member of',
+                        },
+                        object: {
+                            kind: 'concept',
+                            concept_id: '#V#primary_labs',
+                            display_name: 'Primary Labs',
+                        },
+                        human_statement: 'Michael Witbrock member of Primary Labs',
+                        concept_relevance: {
+                            kind: 'grounded_object',
+                            concept_id: '#V#primary_labs',
+                            aboutness_only: false,
+                        },
+                    }),
+                    assertion({
+                        assertion_id: 'ska_location',
+                        subject: {
+                            concept_id: '#V#primary_labs',
+                            display_name: 'Primary Labs',
+                        },
+                        predicate: {
+                            concept_id: '#V#locatedIn',
+                            storage_id: '#V#locatedIn',
+                            display_name: 'located in',
+                        },
+                        object: {
+                            kind: 'concept',
+                            concept_id: '#V#auckland',
+                            display_name: 'Auckland',
+                        },
+                        concept_relevance: {
+                            kind: 'grounded_subject',
+                            concept_id: '#V#primary_labs',
+                            aboutness_only: false,
+                        },
+                    }),
+                ],
+                has_more: false,
+            },
+        });
+        const { ensureConceptEffectiveAssertionsPanel } = require(
+            '../../src/frontend/web/von_interface/static/js/components/conceptEffectiveAssertionsPanel.js'
+        );
+
+        await ensureConceptEffectiveAssertionsPanel({
+            conceptId: '#V#primary_labs',
+            suffix: 'test',
+        });
+
+        const incoming = document.querySelector('[data-assertion-id="ska_member"]');
+        expect(incoming.dataset.relationDirection).toBe('incoming');
+        expect(incoming.querySelector('.concept-effective-assertion-human-statement').textContent)
+            .toBe('Michael Witbrock member of Primary Labs');
+        expect(incoming.textContent).toContain(
+            'Tentative typed relation; not confirmed/authority-active'
+        );
+        expect(incoming.textContent).toContain('Personal — visible only to you');
+
+        const outgoing = document.querySelector('[data-assertion-id="ska_location"]');
+        expect(outgoing.dataset.relationDirection).toBe('outgoing');
+        expect(outgoing.querySelector('.concept-effective-assertion-human-statement').textContent)
+            .toBe('Primary Labs located in Auckland');
+    });
+
+    test('refreshes only the matching concept after a knowledge-change event', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        api.getJsonDetailed.mockResolvedValue({
+            data: {
+                context_view: 'actor_effective',
+                items: [assertion()],
+                has_more: false,
+            },
+        });
+        const { ensureConceptEffectiveAssertionsPanel } = require(
+            '../../src/frontend/web/von_interface/static/js/components/conceptEffectiveAssertionsPanel.js'
+        );
+
+        await ensureConceptEffectiveAssertionsPanel({ conceptId: '#V#event', suffix: 'test' });
+        document.dispatchEvent(new CustomEvent('von:conceptKnowledgeChanged', {
+            detail: { conceptId: '#V#other' },
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(api.getJsonDetailed).toHaveBeenCalledTimes(1);
+
+        document.dispatchEvent(new CustomEvent('von:conceptKnowledgeChanged', {
+            detail: { conceptId: '#V#event' },
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(api.getJsonDetailed).toHaveBeenCalledTimes(2);
     });
 });

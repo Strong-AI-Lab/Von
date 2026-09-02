@@ -68,11 +68,14 @@ _CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME = (
 )
 CONVERSATION_SEARCH_INDEX_VERSION = 1
 _CONVERSATION_SEARCH_TEXT_INDEX_NAME = "conversation_search_text_v1"
+_CONCEPT_QA_ACTIVE_KEY_INDEX_NAME = "concept_q_and_a_active_key_unique_v1"
 _CONVERSATION_SEARCH_MAX_SEGMENT_CHARS = 5_000
 _MAX_FOCAL_CONCEPT_IDS = 4
 CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE = "browser_test_fixture"
 CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS = "benchmark_harness"
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
+CHAT_SESSION_ORIGIN_KIND_CONCEPT_Q_AND_A = "concept_q_and_a"
+CHAT_SESSION_MODE_CONCEPT_Q_AND_A = "concept_q_and_a"
 CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS = frozenset(
     {
         CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE,
@@ -83,6 +86,7 @@ CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS = frozenset(
     }
 )
 CHAT_SESSION_PROVENANCE_FIELDS = (
+    "mode",
     "origin_kind",
     "created_by_actor_concept_id",
     "created_by_actor_type",
@@ -528,6 +532,18 @@ def _ensure_chat_history_indexes(collection) -> None:
                     ],
                     name="namespace_1_user_id_1_focal_concept_ids_1_updated_at_-1",
                 )
+            if _CONCEPT_QA_ACTIVE_KEY_INDEX_NAME not in existing_indexes:
+                collection.create_index(
+                    [("concept_q_and_a.active_key", ASCENDING)],
+                    name=_CONCEPT_QA_ACTIVE_KEY_INDEX_NAME,
+                    unique=True,
+                    partialFilterExpression={
+                        "mode": CHAT_SESSION_MODE_CONCEPT_Q_AND_A,
+                        "origin_kind": CHAT_SESSION_ORIGIN_KIND_CONCEPT_Q_AND_A,
+                        "concept_q_and_a.lifecycle.status": "active",
+                        "concept_q_and_a.active_key": {"$type": "string"},
+                    },
+                )
             if _CONVERSATION_SEARCH_TEXT_INDEX_NAME not in existing_indexes:
                 collection.create_index(
                     [
@@ -707,6 +723,11 @@ def _normalise_chat_session_provenance_fields(
 
 
 def _session_provenance_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    mode = _normalise_session_provenance_text(
+        doc.get("mode"),
+        max_len=80,
+        identifier=True,
+    )
     origin_kind = _normalise_session_provenance_text(
         doc.get("origin_kind"),
         max_len=80,
@@ -732,12 +753,96 @@ def _session_provenance_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         or test_kind
     )
     return {
+        "mode": mode,
         "origin_kind": origin_kind,
         "created_by_actor_concept_id": actor_id,
         "created_by_actor_type": actor_type,
         "is_agent_created": is_agent_created,
         "test_artifact_kind": test_kind,
     }
+
+
+def project_concept_q_and_a_session_metadata(
+    doc: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Return the bounded mode/lifecycle carrier needed by generic chat views."""
+
+    raw_state = doc.get("concept_q_and_a")
+    if not isinstance(raw_state, Mapping):
+        return None
+    raw_concept = raw_state.get("concept")
+    concept = (
+        {
+            key: raw_concept.get(key)
+            for key in ("concept_id", "name", "storage_id", "mongo_id")
+            if raw_concept.get(key) is not None
+        }
+        if isinstance(raw_concept, Mapping)
+        else None
+    )
+    raw_lifecycle = raw_state.get("lifecycle")
+    lifecycle: Dict[str, Any] = {}
+    if isinstance(raw_lifecycle, Mapping):
+        for key in ("status", "revision", "terminal_reason"):
+            if raw_lifecycle.get(key) is not None:
+                lifecycle[key] = raw_lifecycle.get(key)
+        for key in (
+            "started_at",
+            "updated_at",
+            "terminal_at",
+            "finished_at",
+            "cancelled_at",
+        ):
+            value = raw_lifecycle.get(key)
+            timestamp = _coerce_datetime(value)
+            if timestamp is not None:
+                lifecycle[key] = timestamp.isoformat()
+            elif isinstance(value, str) and value.strip():
+                lifecycle[key] = value.strip()
+    return {
+        "schema_version": raw_state.get("schema_version"),
+        "concept": concept,
+        "lifecycle": lifecycle or None,
+    }
+
+
+def _concept_q_and_a_metadata_field(doc: Mapping[str, Any]) -> Dict[str, Any]:
+    projected = project_concept_q_and_a_session_metadata(doc)
+    return {"concept_q_and_a": projected} if projected is not None else {}
+
+
+def _concept_q_and_a_completion(
+    doc: Mapping[str, Any],
+) -> tuple[bool, Optional[datetime]]:
+    projected = project_concept_q_and_a_session_metadata(doc)
+    lifecycle = projected.get("lifecycle") if isinstance(projected, Mapping) else None
+    if not isinstance(lifecycle, Mapping) or lifecycle.get("status") not in {
+        "finished",
+        "cancelled",
+    }:
+        return False, None
+    completed_at = _coerce_datetime(
+        lifecycle.get("terminal_at")
+        or lifecycle.get("finished_at")
+        or lifecycle.get("cancelled_at")
+    )
+    return True, completed_at
+
+
+def project_chat_session_mode_state(doc: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project the generic session fields needed to reopen a specialised carrier."""
+
+    projection: Dict[str, Any] = {
+        "session_id": doc.get("session_id"),
+        **_session_provenance_from_doc(dict(doc)),
+        **_focus_projection_from_doc(dict(doc)),
+    }
+    concept_q_and_a = project_concept_q_and_a_session_metadata(doc)
+    if concept_q_and_a is not None:
+        projection["concept_q_and_a"] = concept_q_and_a
+        projection["concept"] = concept_q_and_a.get("concept")
+        projection["lifecycle"] = concept_q_and_a.get("lifecycle")
+    return projection
 
 
 def _external_conversation_summary_from_doc(
@@ -1004,6 +1109,9 @@ def _add_chat_session_provenance_projection(
         projection[field_name] = 1
     projection[EXTERNAL_CONVERSATION_IMPORT_FIELD] = 1
     projection["conversation_lineage"] = 1
+    projection["concept_q_and_a.schema_version"] = 1
+    projection["concept_q_and_a.concept"] = 1
+    projection["concept_q_and_a.lifecycle"] = 1
     return projection
 
 
@@ -1790,6 +1898,11 @@ def get_chat_history_session_state(
                             "focal_concept_ids": 1,
                             "focal_concept_ids_source": 1,
                             "focal_concept_ids_updated_at": 1,
+                            "mode": 1,
+                            "origin_kind": 1,
+                            "concept_q_and_a.schema_version": 1,
+                            "concept_q_and_a.concept": 1,
+                            "concept_q_and_a.lifecycle": 1,
                         }
                     },
                 ]
@@ -1818,6 +1931,11 @@ def get_chat_history_session_state(
                     "focal_concept_ids": 1,
                     "focal_concept_ids_source": 1,
                     "focal_concept_ids_updated_at": 1,
+                    "mode": 1,
+                    "origin_kind": 1,
+                    "concept_q_and_a.schema_version": 1,
+                    "concept_q_and_a.concept": 1,
+                    "concept_q_and_a.lifecycle": 1,
                 }
                 if include_history:
                     projection["history"] = 1
@@ -1851,6 +1969,7 @@ def get_chat_history_session_state(
         "session_id": session_id,
         "history": history,
         **_conversation_state_from_doc(doc),
+        **project_chat_session_mode_state(doc),
     }
     focus = _focus_projection_from_doc(doc)
     if focus["focal_concept_ids"]:
@@ -3713,6 +3832,111 @@ def add_message_to_history(
         raise ChatHistoryServiceError(f"Could not add message to history: {e}") from e
 
 
+def append_message_to_history_once(
+    *,
+    user_id: str,
+    session_id: str,
+    message: Dict[str, Any],
+    namespace: Optional[str] = None,
+    expected_session_fields: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Atomically append one identified turn to an existing chat carrier.
+
+    This is the exact-transcript primitive for retryable feature-specific
+    conversations.  It never creates a session and it never treats client
+    metadata as actor authority.  Reusing a ``turn_id`` returns the existing
+    stored turn instead of appending another copy.
+    """
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ChatHistoryServiceError("session_id is required.")
+    if not isinstance(message, dict):
+        raise ChatHistoryServiceError("message must be an object.")
+    role = message.get("role")
+    content = message.get("content")
+    turn_id = message.get("turn_id")
+    if role not in {"user", "assistant", "system", "tool"}:
+        raise ChatHistoryServiceError("message.role is not supported.")
+    if not isinstance(content, str):
+        raise ChatHistoryServiceError("message.content must be a string.")
+    if not isinstance(turn_id, str) or not turn_id.strip():
+        raise ChatHistoryServiceError("message.turn_id is required.")
+
+    collection = get_chat_history_collection_service()
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    base_query = build_chat_history_query(
+        user_id=user_id.strip(),
+        session_id=session_id.strip(),
+        namespace=namespace,
+        include_legacy=True,
+    )
+    if isinstance(expected_session_fields, Mapping):
+        for field_name, expected_value in expected_session_fields.items():
+            if not isinstance(field_name, str) or not field_name.strip():
+                raise ChatHistoryServiceError("expected session field names are required.")
+            base_query[field_name.strip()] = expected_value
+
+    stored_message = dict(message)
+    stored_message["turn_id"] = turn_id.strip()
+    if role == "user" and not isinstance(stored_message.get("author_user_id"), str):
+        stored_message["author_user_id"] = user_id.strip()
+    timestamp = stored_message.get("timestamp")
+    if not isinstance(timestamp, (datetime, str)):
+        stored_message["timestamp"] = datetime.now(timezone.utc)
+
+    set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+    push_fields: Dict[str, Any] = {"history": stored_message}
+    search_segment = _conversation_search_segment(stored_message)
+    if search_segment is not None:
+        push_fields["conversation_search_text"] = search_segment["text"]
+        push_fields["conversation_search_segments"] = search_segment
+        set_fields["conversation_search_indexed_at"] = datetime.now(timezone.utc)
+
+    append_query = dict(base_query)
+    append_query["history.turn_id"] = {"$ne": turn_id.strip()}
+    try:
+        result = collection.update_one(
+            append_query,
+            {"$push": push_fields, "$set": set_fields},
+        )
+        doc = collection.find_one(base_query, {"history": 1})
+    except PyMongoError as exc:
+        raise ChatHistoryServiceError(
+            f"Could not append identified chat history turn: {exc}"
+        ) from exc
+
+    if not isinstance(doc, dict):
+        return {
+            "matched": False,
+            "appended": False,
+            "duplicate": False,
+            "turn_id": turn_id.strip(),
+            "message": None,
+            "history_index": None,
+        }
+    history = doc.get("history") if isinstance(doc.get("history"), list) else []
+    existing_message = None
+    history_index = None
+    for index, entry in enumerate(history):
+        if isinstance(entry, dict) and entry.get("turn_id") == turn_id.strip():
+            existing_message = dict(entry)
+            history_index = index
+            break
+    appended = bool(getattr(result, "modified_count", 0) > 0)
+    return {
+        "matched": True,
+        "appended": appended,
+        "duplicate": not appended and existing_message is not None,
+        "turn_id": turn_id.strip(),
+        "message": existing_message,
+        "history_index": history_index,
+    }
+
+
 def set_chat_history_for_session(
     *,
     user_id: str,
@@ -4732,13 +4956,14 @@ def _build_session_summary_from_metadata(
         return None
 
     provenance = _session_provenance_from_doc(doc)
+    is_completed, completed_at_dt = _concept_q_and_a_completion(doc)
     return {
         "session_id": session_id,
         "session_name": session_name,
         "message_count": None,
         "last_message_at": last_ts.isoformat() if last_ts else None,
-        "is_completed": False,
-        "completed_at": None,
+        "is_completed": is_completed,
+        "completed_at": completed_at_dt.isoformat() if completed_at_dt else None,
         "created_at": created_ts.isoformat() if created_ts else None,
         "namespace": doc.get("namespace"),
         "organisation_concept_id": doc.get("organisation_concept_id"),
@@ -4754,6 +4979,7 @@ def _build_session_summary_from_metadata(
         "preview": None,
         **focus,
         **provenance,
+        **_concept_q_and_a_metadata_field(doc),
         **_session_external_projection_from_doc(doc),
     }
 
@@ -5013,6 +5239,10 @@ def _load_chat_history_session_summaries(
             completed_at_dt = None
             if is_completed and isinstance(last_entry, dict):
                 completed_at_dt = _coerce_datetime(last_entry.get("timestamp"))
+            qa_completed, qa_completed_at = _concept_q_and_a_completion(doc)
+            if qa_completed:
+                is_completed = True
+                completed_at_dt = qa_completed_at or completed_at_dt
 
             last_ts = _infer_last_message_timestamp(doc)
             created_ts = _infer_created_timestamp(doc)
@@ -5056,6 +5286,7 @@ def _load_chat_history_session_summaries(
                     "preview": preview,
                     **focus,
                     **provenance,
+                    **_concept_q_and_a_metadata_field(doc),
                     **_session_external_projection_from_doc(doc),
                 }
             )
@@ -5359,6 +5590,10 @@ def get_chat_history_session_summary(
     completed_at_dt = None
     if is_completed and isinstance(last_entry, dict):
         completed_at_dt = _coerce_datetime(last_entry.get("timestamp"))
+    qa_completed, qa_completed_at = _concept_q_and_a_completion(doc)
+    if qa_completed:
+        is_completed = True
+        completed_at_dt = qa_completed_at or completed_at_dt
 
     last_ts = _infer_last_message_timestamp(doc)
     created_ts = _infer_created_timestamp(doc)
@@ -5390,6 +5625,7 @@ def get_chat_history_session_summary(
         "preview": preview,
         **focus,
         **provenance,
+        **_concept_q_and_a_metadata_field(doc),
         **_session_external_projection_from_doc(doc),
     }
     _record_chat_history_read_success()
@@ -5404,12 +5640,14 @@ def create_chat_session(
     namespace: Optional[str] = None,
     organisation_concept_id: Optional[str] = None,
     role_in_org: Optional[str] = None,
+    mode: Optional[str] = None,
     origin_kind: Optional[str] = None,
     created_by_actor_concept_id: Optional[str] = None,
     created_by_actor_type: Optional[str] = None,
     is_agent_created: Optional[bool] = None,
     test_artifact_kind: Optional[str] = None,
     focal_concept_ids: Any = None,
+    concept_q_and_a_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new chat session document if it does not already exist.
 
@@ -5420,11 +5658,15 @@ def create_chat_session(
         namespace: Optional explicit namespace (e.g., from window session context)
         organisation_concept_id: Optional explicit org ID (e.g., from window session context)
         role_in_org: Optional explicit role (e.g., from window session context)
+        mode: Optional durable conversation mode, such as concept_q_and_a
         origin_kind: Optional durable provenance kind for non-human/test sessions
         created_by_actor_concept_id: Optional Vontology actor concept attribution
         created_by_actor_type: Optional actor type concept, such as #V#coding_agent
         is_agent_created: Optional explicit test/agent-created flag
         test_artifact_kind: Optional test/benchmark fixture class
+        concept_q_and_a_state: Initial state for a concept_q_and_a mode carrier.
+            It is inserted atomically with the session so its active key can be
+            protected by the partial unique index.
 
     If namespace/org/role not provided, falls back to Flask session context.
     """
@@ -5455,12 +5697,19 @@ def create_chat_session(
         )
     name = _normalise_session_name(session_name)
     normalised_focus = normalise_focal_concept_ids(focal_concept_ids)
+    normalised_mode = _normalise_session_provenance_text(
+        mode,
+        max_len=80,
+        identifier=True,
+    )
 
     set_on_insert: Dict[str, Any] = {
         "created_at": now,
         "updated_at": now,
         "history": [],
     }
+    if normalised_mode:
+        set_on_insert["mode"] = normalised_mode
     if name:
         set_on_insert["session_name"] = name
         set_on_insert["conversation_search_title"] = name
@@ -5472,6 +5721,14 @@ def create_chat_session(
         set_on_insert["focal_concept_ids"] = normalised_focus
         set_on_insert["focal_concept_ids_source"] = "conversation_launch"
         set_on_insert["focal_concept_ids_updated_at"] = now
+    if concept_q_and_a_state is not None:
+        if normalised_mode != CHAT_SESSION_MODE_CONCEPT_Q_AND_A:
+            raise ChatHistoryServiceError(
+                "concept_q_and_a_state requires concept_q_and_a mode."
+            )
+        if not isinstance(concept_q_and_a_state, Mapping):
+            raise ChatHistoryServiceError("concept_q_and_a_state must be an object.")
+        set_on_insert["concept_q_and_a"] = dict(concept_q_and_a_state)
     if isinstance(ns, str) and ns.strip():
         set_on_insert["namespace"] = ns.strip()
     if isinstance(effective_org, str) and effective_org.strip():
@@ -5516,10 +5773,19 @@ def create_chat_session(
             "session_id": session_id,
             "session_name": _normalise_session_name((doc or {}).get("session_name")),
             "namespace": (doc or {}).get("namespace") or ns,
+            "mode": _normalise_session_provenance_text(
+                (doc or {}).get("mode") or normalised_mode,
+                max_len=80,
+                identifier=True,
+            ),
             **_focus_projection_from_doc(doc),
             **stored_provenance,
             **_session_external_projection_from_doc(doc or {}),
         }
+    except DuplicateKeyError:
+        # Feature-specific partial unique indexes use this as their atomic
+        # concurrency signal; callers must be able to read the winning row.
+        raise
     except PyMongoError as e:
         logger.error(f"Error creating chat session: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not create chat session: {e}") from e

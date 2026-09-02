@@ -25,21 +25,31 @@ _summary_service = importlib.import_module(
 _publication_service = importlib.import_module(
     "src.backend.services.publication_scope_profile_vontology_service"
 )
+_constitutive_service = importlib.import_module(
+    "src.backend.services.constitutive_relation_requirement_service"
+)
 reconcile_canonical_concept_summary_fields = (
     _summary_service.reconcile_canonical_concept_summary_fields
 )
 reconcile_canonical_publication_scope_profiles = (
     _publication_service.reconcile_canonical_publication_scope_profiles
 )
+reconcile_canonical_constitutive_relation_requirement_profiles = (
+    _constitutive_service.reconcile_canonical_constitutive_relation_requirement_profiles
+)
 
 CONCEPT_SUMMARY_FIELDS = "concept-summary-fields"
 PUBLICATION_SCOPE_PROFILES = "publication-scope-profiles"
+CONSTITUTIVE_RELATION_REQUIREMENTS = "constitutive-relation-requirements"
 ALL_FAMILIES = "all"
 MACHINE_RECEIPT_PREFIX = "VON_STARTUP_SEED_RECONCILIATION_RECEIPT="
 
 _RECONCILERS: dict[str, Callable[[], dict[str, Any]]] = {
     CONCEPT_SUMMARY_FIELDS: reconcile_canonical_concept_summary_fields,
     PUBLICATION_SCOPE_PROFILES: reconcile_canonical_publication_scope_profiles,
+    CONSTITUTIVE_RELATION_REQUIREMENTS: (
+        reconcile_canonical_constitutive_relation_requirement_profiles
+    ),
 }
 
 

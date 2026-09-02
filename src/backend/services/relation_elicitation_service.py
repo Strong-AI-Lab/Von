@@ -1,8 +1,11 @@
 # src/backend/services/relation_elicitation_service.py
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
-from ..services import concept_service
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..services import concept_service
+from .constitutive_relation_requirement_service import (
+    ConstitutiveRelationRequirementService,
+)
 from .uncertain_relationship_service import (
     collect_uncertain_predicates,
     upsert_uncertain_relationship_assertion,
@@ -12,8 +15,16 @@ from .uncertain_relationship_service import (
 class RelationElicitationService:
     """Service for proactively enriching the knowledge graph."""
 
-    def __init__(self, llm_client: Optional[Any] = None):
+    def __init__(
+        self,
+        llm_client: Optional[Any] = None,
+        *,
+        constitutive_requirement_service: Optional[Any] = None,
+    ):
         """Initialise the service with an optional preconfigured LLM client."""
+        self.constitutive_requirement_service = (
+            constitutive_requirement_service or ConstitutiveRelationRequirementService()
+        )
         self._llm_initialisation_error: Optional[Exception] = None
         if llm_client is not None:
             self.llm_client = llm_client
@@ -38,8 +49,8 @@ class RelationElicitationService:
     ) -> List[str]:
         """Return unfilled suggested or salient predicates for an individual.
 
-        Traverses direct and ancestor types (forward is_a_type_of + reverse has_subtype) and
-        unions values of both "suggested_relations_for_type" and "#V#salient_binary_predicate_for_type".
+        Traverses direct and ancestor types (forward ``is_a_type_of`` plus
+        reverse ``has_subtype``) and combines suggested and salient predicates.
         Filters out predicates already present as relationship keys.
         By default, predicates already present in hypothesized_relations are also
         excluded; set include_hypothesized=True when downstream workflows need to
@@ -150,12 +161,14 @@ class RelationElicitationService:
             return []
         instance_name = str(instance.get("name") or "this concept").strip()
         relationships = instance.get("relationships") or {}
-        direct_types = relationships.get("is_an_instance_of") or []
-        if isinstance(direct_types, str):
-            direct_types = [direct_types]
-        direct_types = [
-            item for item in direct_types if isinstance(item, str) and item
-        ]
+        direct_types: List[str] = []
+        for instance_predicate in ("is_an_instance_of", "#V#is_an_instance_of"):
+            values = relationships.get(instance_predicate) or []
+            if isinstance(values, str):
+                values = [values]
+            for value in values:
+                if isinstance(value, str) and value and value not in direct_types:
+                    direct_types.append(value)
 
         # Prefer the recomputed inherited field used by the salient-predicate
         # API. If an empty cache is stale, recover through a small number of
@@ -166,6 +179,7 @@ class RelationElicitationService:
             "relationships.suggested_relations_for_type": 1,
             "relationships.#V#salient_binary_predicate_for_type": 1,
             "relationships.is_a_type_of": 1,
+            "relationships.#V#is_a_type_of": 1,
         }
         type_docs = list(
             ConceptsRepository.find(
@@ -176,6 +190,7 @@ class RelationElicitationService:
         opportunities: List[str] = []
         seen_predicates: set[str] = set()
         visited_types: set[str] = set()
+        type_depth_by_id: Dict[str, int] = {type_id: 0 for type_id in direct_types}
 
         def consume_type_docs(docs: List[Dict[str, Any]]) -> List[str]:
             next_parents: List[str] = []
@@ -187,9 +202,7 @@ class RelationElicitationService:
                 candidates = [
                     *(type_relationships.get("suggested_relations_for_type") or []),
                     *(
-                        type_relationships.get(
-                            "#V#salient_binary_predicate_for_type"
-                        )
+                        type_relationships.get("#V#salient_binary_predicate_for_type")
                         or []
                     ),
                     *(doc.get("inherited_salient_binary_predicates") or []),
@@ -202,28 +215,57 @@ class RelationElicitationService:
                     ):
                         seen_predicates.add(candidate)
                         opportunities.append(candidate)
-                for parent in type_relationships.get("is_a_type_of") or []:
-                    if (
-                        isinstance(parent, str)
-                        and parent
-                        and parent not in visited_types
-                        and parent not in next_parents
-                    ):
-                        next_parents.append(parent)
+                for type_predicate in ("is_a_type_of", "#V#is_a_type_of"):
+                    for parent in type_relationships.get(type_predicate) or []:
+                        if (
+                            isinstance(parent, str)
+                            and parent
+                            and parent not in visited_types
+                            and parent not in next_parents
+                        ):
+                            next_parents.append(parent)
+                            parent_depth = int(type_depth_by_id.get(concept_id, 0)) + 1
+                            current_depth = type_depth_by_id.get(parent)
+                            if current_depth is None or parent_depth < current_depth:
+                                type_depth_by_id[parent] = parent_depth
             return next_parents
 
         pending_parents = consume_type_docs(type_docs)
         ancestor_batches = 0
-        while not opportunities and pending_parents and ancestor_batches < 4:
-            current_batch = pending_parents[:32]
+        while pending_parents and ancestor_batches < 16 and len(visited_types) < 250:
+            remaining_capacity = max(1, 250 - len(visited_types))
+            current_batch = pending_parents[: min(32, remaining_capacity)]
+            remaining_parents = pending_parents[len(current_batch) :]
             ancestor_docs = list(
                 ConceptsRepository.find(
                     {"concept_id": {"$in": current_batch}},
                     type_projection,
                 )
             )
-            pending_parents = consume_type_docs(ancestor_docs)
+            discovered_parents = consume_type_docs(ancestor_docs)
+            pending_parents = list(
+                dict.fromkeys(
+                    parent
+                    for parent in [*remaining_parents, *discovered_parents]
+                    if parent not in visited_types
+                )
+            )
             ancestor_batches += 1
+
+        # A constitutive relation is not merely salient.  Evaluate it against
+        # canonical relation incidence (including incoming relations) and put
+        # missing witnesses before optional salience prompts.  Any profile/read
+        # failure remains advisory and must not block concept creation or the
+        # rest of elicitation.
+        try:
+            constitutive_plan, _constitutive_diagnostics = (
+                self.constitutive_requirement_service.get_missing_requirements(
+                    instance=instance,
+                    type_depth_by_id=type_depth_by_id,
+                )
+            )
+        except Exception:
+            constitutive_plan = []
 
         existing_relations = set(relationships.keys())
         existing_hypothesized = set(
@@ -240,22 +282,34 @@ class RelationElicitationService:
             if predicate not in existing_relations
             and predicate not in existing_hypothesized
             and predicate not in existing_uncertain
+            and predicate
+            not in {
+                item.get("predicate_concept_id")
+                for item in constitutive_plan
+                if isinstance(item, dict)
+            }
         ]
 
-        selected_predicates = opportunities[:bounded_limit]
-        predicate_docs = list(
-            ConceptsRepository.find(
-                {"concept_id": {"$in": selected_predicates}},
-                {"concept_id": 1, "name": 1, "names": 1},
+        plan: List[Dict[str, Any]] = [
+            dict(item) for item in constitutive_plan[:bounded_limit]
+        ]
+        selected_predicates = opportunities[: max(0, bounded_limit - len(plan))]
+        predicate_docs = (
+            list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": selected_predicates}},
+                    {"concept_id": 1, "name": 1, "names": 1},
+                )
             )
+            if selected_predicates
+            else []
         )
         predicate_docs_by_id = {
             str(doc.get("concept_id")): doc
             for doc in predicate_docs
             if doc.get("concept_id")
         }
-        plan: List[Dict[str, Any]] = []
-        for priority, predicate in enumerate(selected_predicates, start=1):
+        for predicate in selected_predicates:
             predicate_doc = predicate_docs_by_id.get(predicate) or {}
             predicate_label = str(
                 predicate_doc.get("name")
@@ -266,11 +320,14 @@ class RelationElicitationService:
                 {
                     "predicate_concept_id": predicate,
                     "predicate_label": predicate_label,
-                    "priority": priority,
+                    "requirement_kind": "salient_relation",
+                    "priority_class": "salient",
                     "question": question,
                     "status": "missing",
                 }
             )
+        for priority, item in enumerate(plan, start=1):
+            item["priority"] = priority
         return plan
 
     def generate_question_for_elicit(

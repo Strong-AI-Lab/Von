@@ -3,6 +3,8 @@ const path = require('path');
 
 const {
     describeConceptQaRepresentation,
+    isUnmistakableMissingConceptQaRoute,
+    refreshConceptQaSessionCard,
 } = require('../../src/frontend/web/von_interface/static/js/conceptTab.js');
 
 const conceptTemplate = fs.readFileSync(
@@ -24,13 +26,14 @@ describe('concept-improvement Q&A entry point', () => {
 
         expect(discuss.textContent.trim()).toBe('Discuss');
         expect(improveByQa.textContent.trim()).toBe('Improve concept by Q&A');
-        expect(improveByQa.title).toContain('preserved with provenance');
-        expect(disclosure.textContent).toMatch(/preserves supplied knowledge with provenance/i);
+        expect(improveByQa.title).toContain('recoverable conversation');
+        expect(disclosure.textContent).toMatch(/exact claims are stored with provenance/i);
+        expect(disclosure.textContent).toMatch(/formalisation and notes updates are reported separately/i);
         expect(submitAnswer.title).toContain('continue the concept Q&A');
         expect(cancelQa.textContent.trim()).toBe('Cancel Q&A');
         expect(cancelQa.title).toContain('concept-improvement Q&A');
         expect(finishQa.textContent.trim()).toBe('Finish Q&A');
-        expect(finishQa.title).toContain('apply the gathered information');
+        expect(finishQa.title).toContain('retaining its transcript');
         expect(restart.textContent.trim()).toBe('Improve concept by Q&A again');
 
         const visibleControlCopy = [improveByQa, submitAnswer, cancelQa, finishQa, restart]
@@ -53,7 +56,8 @@ describe('concept-improvement Q&A entry point', () => {
             "Primary Labs' main product is the news site theprimary.com."
         );
         expect(presentation.synthesisText).toContain('notes update failed');
-        expect(presentation.statusText).toContain('preserved as scoped knowledge');
+        expect(presentation.statusText).toContain('stored as scoped knowledge');
+        expect(presentation.statusText).toContain('No typed relation is implied');
         expect(presentation.statusText).not.toContain('No synthesis generated');
     });
 
@@ -67,8 +71,79 @@ describe('concept-improvement Q&A entry point', () => {
             },
         });
 
-        expect(presentation.statusText).toContain('represented with provenance');
+        expect(presentation.statusText).toContain('Exact text claim stored with provenance');
         expect(presentation.statusText).toContain('concept notes updated');
         expect(presentation.statusColor).toBe('green');
+    });
+
+    test('uses the legacy path only for an unmistakably absent canonical route', () => {
+        expect(isUnmistakableMissingConceptQaRoute({ status: 404, payload: {} })).toBe(true);
+        expect(isUnmistakableMissingConceptQaRoute({
+            status: 404,
+            payload: {
+                error: 'Q&A conversation was not found for this concept',
+                error_code: 'conversation_not_found',
+            },
+        })).toBe(false);
+        expect(isUnmistakableMissingConceptQaRoute({
+            status: 403,
+            payload: { error_code: 'actor_context_required' },
+        })).toBe(false);
+        expect(isUnmistakableMissingConceptQaRoute({ status: 405, payload: {} })).toBe(false);
+    });
+
+    test('projects an active Q&A as resume, transcript and canonical-reference actions', async () => {
+        document.body.innerHTML = conceptTemplate;
+        const originalFetch = global.fetch;
+        global.fetch = jest.fn(async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                sessions: [{
+                    session_id: 'qa-primary-labs-1',
+                    focal_concept_ids: ['#V#primary_labs'],
+                    lifecycle: { status: 'active', revision: 1 },
+                    mode: 'concept_q_and_a',
+                    origin_kind: 'concept_q_and_a',
+                    conversation_reference: {
+                        schema_version: 'conversation_reference.v1',
+                        binding_kind: 'explicit_session_id',
+                        session_id: 'qa-primary-labs-1',
+                    },
+                    turns: [{
+                        role: 'assistant',
+                        content: 'Which organisation is it a member of?',
+                        concept_q_and_a: {
+                            elicitation_predicate: {
+                                predicate_concept_id: '#V#memberOf',
+                                predicate_label: 'member of',
+                                status: 'missing',
+                                gap_status: 'asserted_relation_missing',
+                                requirement_kind: 'constitutive_relation',
+                                priority_class: 'constitutive',
+                                priority: 0,
+                            },
+                        },
+                    }],
+                }],
+            }),
+        }));
+        try {
+            await refreshConceptQaSessionCard('#V#primary_labs');
+        } finally {
+            global.fetch = originalFetch;
+        }
+
+        expect(document.getElementById('conceptQaSessionBadge').textContent).toBe('Active');
+        expect(document.getElementById('startInteractionButton').classList).toContain('hidden');
+        expect(document.getElementById('resumeConceptQaButton').classList).not.toContain('hidden');
+        expect(document.getElementById('openConceptQaTranscriptButton').classList).not.toContain('hidden');
+        expect(document.getElementById('copyConceptQaReferenceButton').classList).not.toContain('hidden');
+        expect(document.getElementById('conceptQaGapStatus').textContent).toContain(
+            'Current constitutive gap: member of — asserted relation missing'
+        );
+        expect(document.getElementById('conceptQaGapStatus').textContent).toContain(
+            'not an assertion or a creation block'
+        );
     });
 });

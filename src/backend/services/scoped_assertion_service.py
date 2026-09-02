@@ -39,6 +39,7 @@ STORAGE_SURFACE = "scoped_knowledge_assertions"
 STANDALONE_TEXT_ASSERTION_FORM = "standalone_text"
 SCOPE_MODES = frozenset({"user", "organisation"})
 OBJECT_KINDS = frozenset({"text", "concept"})
+EPISTEMIC_STATUSES = frozenset({"tentative", "asserted"})
 MAX_PAGE_LIMIT = 1000
 MAX_PAGE_SUBJECTS = 100
 MAX_PAGE_CANDIDATES = 10_000
@@ -833,11 +834,15 @@ def upsert_scoped_assertion(
     namespace: Any = None,
     turn_id: Any = None,
     canonical_publication: bool = False,
+    epistemic_status: str = "asserted",
 ) -> dict[str, Any]:
     """Upsert one idempotent scoped assertion and return canonical read-back."""
 
     if canonical_publication is not False:
         raise ValueError("scoped assertions cannot request canonical publication")
+    requested_epistemic_status = str(epistemic_status or "").strip().lower()
+    if requested_epistemic_status not in EPISTEMIC_STATUSES:
+        raise ValueError("epistemic_status must be tentative or asserted")
     scope, actor_context = _scope_for_actor(
         scope_mode=scope_mode,
         acting_user_concept_id=acting_user_concept_id,
@@ -954,6 +959,7 @@ def upsert_scoped_assertion(
         "scope": scope,
         "canonical_publication": False,
         "status": "asserted",
+        "epistemic_status": requested_epistemic_status,
         "created_at": now,
         "updated_at": now,
         "provenance": provenance,
@@ -989,6 +995,40 @@ def upsert_scoped_assertion(
         if previous is None:
             raise
     created = previous is None
+    promoted = None
+    if (
+        isinstance(previous, Mapping)
+        and previous.get("status") == "asserted"
+        and previous.get("epistemic_status") == "tentative"
+        and requested_epistemic_status == "asserted"
+    ):
+        # Epistemic status is monotonic on an active assertion. A normal
+        # asserted upsert must not silently replay an older tentative candidate;
+        # exactly one concurrent caller promotes it and emits the asserted event.
+        promoted = collection.find_one_and_update(
+            {
+                "assertion_id": assertion_id,
+                "status": "asserted",
+                "epistemic_status": "tentative",
+            },
+            {
+                "$set": {
+                    "epistemic_status": "asserted",
+                    "updated_at": now,
+                    "epistemic_promotion": {
+                        "promoted_at": now,
+                        "promoted_by_user_concept_id": actor_context[
+                            "user_concept_id"
+                        ],
+                        "turn_id": str(turn_id or "").strip() or None,
+                        "capability_name": "upsert_scoped_assertion",
+                        "reason": "asserted_upsert",
+                    },
+                },
+                "$inc": {"assertion_revision": 1},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
     reactivated = None
     if isinstance(previous, Mapping) and previous.get("status") == "retracted":
         retraction_history_item = {
@@ -1010,6 +1050,7 @@ def upsert_scoped_assertion(
         # immutable; a bounded history preserves the retraction being undone.
         reactivation_set: dict[str, Any] = {
             "status": "asserted",
+            "epistemic_status": requested_epistemic_status,
             "updated_at": now,
             "reasserted_at": now,
             "reassertion_provenance": reassertion_provenance,
@@ -1035,13 +1076,13 @@ def upsert_scoped_assertion(
             },
             return_document=ReturnDocument.AFTER,
         )
-    persisted = reactivated or collection.find_one(
+    persisted = promoted or reactivated or collection.find_one(
         {"assertion_id": assertion_id}
     )
     read_back = _serialise(persisted)
     if read_back is None:
         raise RuntimeError("scoped assertion write did not produce read-back")
-    changed = bool(created or reactivated is not None)
+    changed = bool(created or promoted is not None or reactivated is not None)
     result = {
         "success": True,
         "effect_status": "succeeded",
@@ -1051,8 +1092,9 @@ def upsert_scoped_assertion(
         "canonical_read_back": read_back,
         "canonical_publication": False,
         "storage_surface": STORAGE_SURFACE,
+        "epistemic_status": read_back.get("epistemic_status") or "asserted",
     }
-    if changed:
+    if changed and (read_back.get("epistemic_status") or "asserted") == "asserted":
         # Scoped knowledge is a first-class mutation surface. Emit the same
         # actor-bound, best-effort event shape used by canonical Vontology
         # writes so represented workflows can react without task-specific
@@ -1070,8 +1112,11 @@ def upsert_scoped_assertion(
                 "predicate": storage_predicate,
                 "object_kind": object_kind,
                 "scope_mode": scope["mode"],
+                "epistemic_status": "asserted",
                 "canonical_publication": False,
             }
+            if promoted is not None:
+                event_payload["promoted_from_epistemic_status"] = "tentative"
             maybe_launch_vontology_mutation_workflow(
                 mutation_event_type=EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
                 mutation_id=assertion_id,
@@ -1087,6 +1132,116 @@ def upsert_scoped_assertion(
             # ambiguous failure.
             pass
     return result
+
+
+def promote_scoped_assertion_epistemic_status(
+    *,
+    assertion_id: Any,
+    acting_user_concept_id: Any,
+    organisation_concept_id: Any = None,
+    namespace: Any = None,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    """Idempotently promote an actor-owned tentative assertion to asserted."""
+
+    assertion_token = str(assertion_id or "").strip()
+    if not assertion_token.startswith("ska_"):
+        raise ValueError("assertion_id must be an exact scoped assertion ID")
+    actor_context = _resolve_actor_context(
+        acting_user_concept_id=acting_user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    user_id = actor_context["user_concept_id"]
+    org_id = actor_context["organisation_concept_id"]
+    scope_clauses: list[dict[str, Any]] = [{"scope.mode": "user"}]
+    if org_id:
+        scope_clauses.append(
+            {
+                "scope.mode": "organisation",
+                "scope.organisation_concept_id": org_id,
+            }
+        )
+    authority_filter: dict[str, Any] = {
+        "assertion_id": assertion_token,
+        "provenance.asserted_by_user_concept_id": user_id,
+        "status": "asserted",
+        "$or": scope_clauses,
+    }
+    collection = get_scoped_knowledge_assertions_collection()
+    if collection is None:
+        raise RuntimeError("scoped assertion storage is unavailable")
+    now = datetime.now(timezone.utc)
+    promoted = collection.find_one_and_update(
+        {
+            **authority_filter,
+            "epistemic_status": "tentative",
+        },
+        {
+            "$set": {
+                "epistemic_status": "asserted",
+                "updated_at": now,
+                "epistemic_confirmation": {
+                    "confirmed_at": now,
+                    "confirmed_by_user_concept_id": user_id,
+                    "request_id": str(request_id or "").strip() or None,
+                    "capability_name": "promote_scoped_assertion_epistemic_status",
+                },
+            },
+            "$inc": {"assertion_revision": 1},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    changed = promoted is not None
+    persisted = promoted or collection.find_one(authority_filter)
+    if not isinstance(persisted, Mapping):
+        raise PermissionError("scoped assertion is unavailable to the current actor")
+    # Assertions created before epistemic status existed are asserted by default.
+    stored_epistemic_status = persisted.get("epistemic_status") or "asserted"
+    if stored_epistemic_status != "asserted":
+        raise RuntimeError("scoped assertion epistemic promotion did not read back")
+    read_back = _serialise(persisted)
+    if read_back is None:
+        raise RuntimeError("scoped assertion promotion did not produce read-back")
+    if changed:
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
+                maybe_launch_vontology_mutation_workflow,
+            )
+
+            event_payload = {
+                "assertion_id": assertion_token,
+                "subject_concept_id": read_back.get("subject_concept_id"),
+                "predicate": read_back.get("predicate"),
+                "object_kind": read_back.get("object_kind"),
+                "scope_mode": (read_back.get("scope") or {}).get("mode"),
+                "epistemic_status": "asserted",
+                "canonical_publication": False,
+                "promoted_from_epistemic_status": "tentative",
+            }
+            maybe_launch_vontology_mutation_workflow(
+                mutation_event_type=EVENT_TYPE_SCOPED_ASSERTION_UPSERTED,
+                mutation_id=assertion_token,
+                user_id=user_id,
+                org_id=org_id,
+                namespace=actor_context["namespace"],
+                event_payload=event_payload,
+                inputs=dict(event_payload),
+            )
+        except Exception:
+            pass
+    return {
+        "success": True,
+        "effect_status": "succeeded",
+        "changed": changed,
+        "assertion_id": assertion_token,
+        "epistemic_status": "asserted",
+        "assertion": read_back,
+        "canonical_read_back": read_back,
+        "canonical_publication": False,
+        "storage_surface": STORAGE_SURFACE,
+    }
 
 
 def retract_scoped_assertion(
@@ -1146,6 +1301,7 @@ def retract_scoped_assertion(
         {
             "_id": 0,
             "assertion_form": 1,
+            "epistemic_status": 1,
         },
     )
     update: dict[str, Any] = {
@@ -1214,7 +1370,16 @@ def retract_scoped_assertion(
             "durable": True,
             "rag_index": read_back.get("rag_index"),
         }
-    if changed and read_back.get("assertion_form") != STANDALONE_TEXT_ASSERTION_FORM:
+    current_epistemic_status = (
+        current.get("epistemic_status") or "asserted"
+        if isinstance(current, Mapping)
+        else None
+    )
+    if (
+        changed
+        and current_epistemic_status == "asserted"
+        and read_back.get("assertion_form") != STANDALONE_TEXT_ASSERTION_FORM
+    ):
         try:
             from .workflow_event_integration_service import (
                 EVENT_TYPE_SCOPED_ASSERTION_RETRACTED,
@@ -1227,6 +1392,7 @@ def retract_scoped_assertion(
                 "predicate": read_back.get("predicate"),
                 "object_kind": read_back.get("object_kind"),
                 "scope_mode": (read_back.get("scope") or {}).get("mode"),
+                "epistemic_status": "asserted",
                 "canonical_publication": False,
             }
             maybe_launch_vontology_mutation_workflow(
@@ -1433,7 +1599,26 @@ def _build_assertion_query(
     languages: Sequence[str] | None,
     assertion_form: str | None,
     context_id: str | None,
+    epistemic_statuses: Sequence[str] | None,
 ) -> dict[str, Any]:
+    requested_epistemic_statuses = {
+        str(item or "").strip().lower() for item in (epistemic_statuses or ())
+    }
+    if not requested_epistemic_statuses:
+        requested_epistemic_statuses = {"asserted"}
+    invalid_epistemic_statuses = requested_epistemic_statuses - EPISTEMIC_STATUSES
+    if invalid_epistemic_statuses:
+        raise ValueError("epistemic_statuses may contain tentative or asserted")
+    epistemic_clauses: list[dict[str, Any]] = []
+    if "asserted" in requested_epistemic_statuses:
+        epistemic_clauses.extend(
+            [
+                {"epistemic_status": "asserted"},
+                {"epistemic_status": {"$exists": False}},
+            ]
+        )
+    if "tentative" in requested_epistemic_statuses:
+        epistemic_clauses.append({"epistemic_status": "tentative"})
     query: dict[str, Any] = {
         (
             "scope.audience_key"
@@ -1441,6 +1626,7 @@ def _build_assertion_query(
             else "scope.audience_keys"
         ): {"$in": list(audience_keys)},
         "status": "asserted",
+        "$and": [{"$or": epistemic_clauses}],
     }
     if subject_concept_ids:
         query["subject_concept_id"] = {"$in": list(subject_concept_ids)}
@@ -1553,6 +1739,7 @@ def list_visible_scoped_assertions_page(
     languages: Sequence[str] | None = None,
     assertion_form: str | None = None,
     context_id: str | None = None,
+    epistemic_statuses: Sequence[str] | None = None,
     limit: int = 200,
     offset: int = 0,
     limit_per_subject: int | None = None,
@@ -1674,6 +1861,7 @@ def list_visible_scoped_assertions_page(
             languages=languages,
             assertion_form=assertion_form,
             context_id=context_id,
+            epistemic_statuses=epistemic_statuses,
         )
         collection = get_scoped_knowledge_assertions_collection()
         if collection is None:
@@ -1923,6 +2111,7 @@ def list_visible_scoped_assertions(
     languages: Sequence[str] | None = None,
     assertion_form: str | None = None,
     context_id: str | None = None,
+    epistemic_statuses: Sequence[str] | None = None,
     limit: int = 200,
     user_concept_id: str | None = None,
     organisation_concept_id: str | None = None,
@@ -1937,6 +2126,7 @@ def list_visible_scoped_assertions(
         languages=languages,
         assertion_form=assertion_form,
         context_id=context_id,
+        epistemic_statuses=epistemic_statuses,
         limit=limit,
         user_concept_id=user_concept_id,
         organisation_concept_id=organisation_concept_id,

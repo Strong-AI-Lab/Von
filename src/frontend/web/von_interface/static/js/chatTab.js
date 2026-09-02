@@ -14,6 +14,10 @@ import {
     decorateInspectableReferences,
     initializeReferenceInspector
 } from './components/referenceInspector.js';
+import {
+    renderConceptQaReceipt,
+    updateConceptQaReceiptConfirmationState,
+} from './components/conceptQaReceipt.js';
 import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
 import { activateTab } from './tabNavigation.js';
 import { isAnnotationEnabled } from './featureFlags.js';
@@ -46,6 +50,17 @@ import {
     parseIsoTimestampMs,
     selectConversationHistorySessions
 } from './utils/conversationHistoryPreferences.js';
+import { buildConversationReferencePayload as buildSharedConversationReferencePayload } from './utils/conversationReference.js';
+import {
+    confirmConceptQaFormalisation,
+    conceptQaActionAllowed,
+    describeConceptQaElicitationGap,
+    isConceptQaSession,
+    normaliseConceptQaReceipts,
+    normaliseConceptQaSession,
+    submitConceptQaTurn,
+    transitionConceptQaSession,
+} from './utils/conceptQaSession.js';
 import {
     normaliseConversationSessionViewModel,
     normaliseConversationSessionViewModels
@@ -155,6 +170,10 @@ let totalHistorySegments = 1;
 let activeChatSessionId = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
+const conceptQaSessionsByChatSession = new Map();
+const conceptQaSubmitInFlight = new Set();
+const conceptQaTransitionInFlight = new Set();
+const conceptQaErrorBySession = new Map();
 let activeExternalConversationMetadata = null;
 let chatSessionSelectionGeneration = 0;
 let newChatCreationInFlight = null;
@@ -1750,52 +1769,16 @@ function toggleConversationPinned(sessionId) {
 }
 
 function buildConversationReferencePayload(session) {
-    const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
-    if (!sid) {
-        return null;
-    }
     const orgContext = getSessionScopedOrgContext();
-    const orgId = (
-        typeof session?.organisation_concept_id === 'string' && session.organisation_concept_id.trim()
-            ? session.organisation_concept_id.trim()
-            : (
-                typeof orgContext?.concept_id === 'string' && orgContext.concept_id.trim()
-                    ? orgContext.concept_id.trim()
-                    : (typeof orgContext?.id === 'string' && orgContext.id.trim() ? orgContext.id.trim() : null)
-            )
-    );
-    const currentUserId = getCurrentUserConceptId() || null;
-    const ownerUserId = (
-        typeof session?.shared_owner_user_id === 'string' && session.shared_owner_user_id.trim()
-            ? session.shared_owner_user_id.trim()
-            : currentUserId
-    );
-    const namespace = (
-        typeof session?.namespace === 'string' && session.namespace.trim()
-            ? session.namespace.trim()
-            : (getSessionScopedNamespace() || null)
-    );
-    return {
-        kind: 'von_conversation_ref',
-        conversation_ref: {
-            session_id: sid,
-            user_concept_id: ownerUserId,
-            namespace,
-            organisation_concept_id: orgId,
-            include_legacy: false,
-        },
-        chat_history_lookup: {
-            user_id: ownerUserId,
-            session_id: sid,
-            namespace,
-            include_legacy: false,
-        },
-        display: {
-            session_name: typeof session?.session_name === 'string' ? session.session_name : null,
-            last_message_at: typeof session?.last_message_at === 'string' ? session.last_message_at : null,
-            current_user_concept_id: currentUserId,
-        },
-    };
+    return buildSharedConversationReferencePayload(session, {
+        currentUserConceptId: getCurrentUserConceptId() || null,
+        namespace: getSessionScopedNamespace() || null,
+        organisationConceptId: (
+            typeof orgContext?.concept_id === 'string' && orgContext.concept_id.trim()
+                ? orgContext.concept_id.trim()
+                : (typeof orgContext?.id === 'string' && orgContext.id.trim() ? orgContext.id.trim() : null)
+        ),
+    });
 }
 
 async function copyConversationReferenceToClipboard(session) {
@@ -1818,6 +1801,535 @@ async function copyConversationReferenceToClipboard(session) {
         copied ? 'success' : 'error'
     );
     return copied;
+}
+
+function rememberConceptQaSession(value, defaults = {}) {
+    const projection = normaliseConceptQaSession(value, defaults);
+    if (!projection) return null;
+    conceptQaSessionsByChatSession.set(projection.chat_session_id, projection);
+    if (projection.session_id !== projection.chat_session_id) {
+        conceptQaSessionsByChatSession.set(projection.session_id, projection);
+    }
+    return projection;
+}
+
+function getConceptQaSessionForChat(sessionId = activeChatSessionId) {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid) return null;
+    const remembered = conceptQaSessionsByChatSession.get(sid);
+    if (remembered) return remembered;
+    const session = sessionTabsCache.find((row) => normaliseHistorySessionId(row?.session_id) === sid);
+    if (!isConceptQaSession(session)) return null;
+    const focalConceptId = Array.isArray(session?.focal_concept_ids)
+        ? session.focal_concept_ids.find((value) => typeof value === 'string' && value.trim())
+        : null;
+    return rememberConceptQaSession(session, { conceptId: focalConceptId, sessionId: sid });
+}
+
+function conceptQaReceiptsChangedKnowledge(value) {
+    const receipts = normaliseConceptQaReceipts(value);
+    const exactStatus = String(receipts.exact_input?.status || '').toLowerCase();
+    const formalisationStatus = String(receipts.formalisation?.status || '').toLowerCase();
+    const notesStatus = String(receipts.notes?.status || '').toLowerCase();
+    return ['stored', 'asserted', 'succeeded', 'success'].includes(exactStatus)
+        || ['candidate', 'proposed', 'tentative', 'uncertain', 'stored', 'asserted', 'succeeded', 'success'].includes(formalisationStatus)
+        || ['updated', 'stored', 'succeeded', 'success'].includes(notesStatus);
+}
+
+function dispatchConceptQaKnowledgeChange(session, receipts, reason = 'concept_q_and_a_turn') {
+    if (!session?.concept_id || !conceptQaReceiptsChangedKnowledge(receipts)) return;
+    document.dispatchEvent(new CustomEvent('von:conceptKnowledgeChanged', {
+        detail: {
+            conceptId: session.concept_id,
+            sessionId: session.session_id,
+            reason,
+            receipts: normaliseConceptQaReceipts(receipts),
+        },
+    }));
+    document.dispatchEvent(new CustomEvent('concept-updated', {
+        detail: {
+            conceptId: session.concept_id,
+            reason,
+            source: 'concept_q_and_a',
+        },
+    }));
+}
+
+function getConceptQaConfirmationUiState(
+    receipt = null,
+    session = getConceptQaSessionForChat(),
+) {
+    if (!session) {
+        return {
+            available: false,
+            label: 'Confirmation unavailable',
+            reason: 'Open the concept Q&A conversation that recorded this tentative relation.',
+        };
+    }
+    if (session.lifecycle === 'cancelled') {
+        return {
+            available: false,
+            label: 'Unavailable — Q&A cancelled',
+            reason: 'This concept Q&A was cancelled, so this receipt can no longer confirm the tentative relation.',
+        };
+    }
+    if (
+        session.lifecycle === 'finished'
+        && receipt?.confirmation?.available_after_finish !== true
+    ) {
+        return {
+            available: false,
+            label: 'Unavailable — Q&A finished',
+            reason: 'This finished Q&A receipt does not permit post-finish confirmation.',
+        };
+    }
+    if (!['active', 'finished'].includes(session.lifecycle)) {
+        return {
+            available: false,
+            label: `Unavailable — Q&A ${session.lifecycle}`,
+            reason: `This concept Q&A is ${session.lifecycle}; confirmation is not available in this lifecycle state.`,
+        };
+    }
+    if (conceptQaTransitionInFlight.has(session.session_id)) {
+        return {
+            available: false,
+            label: 'Confirmation unavailable',
+            reason: 'Wait for the current Q&A confirmation or lifecycle change to finish.',
+        };
+    }
+    return { available: true };
+}
+
+function updateVisibleConceptQaConfirmationUi(session = getConceptQaSessionForChat()) {
+    const scrollableField = document.getElementById('scrollableField');
+    if (!scrollableField) return;
+    updateConceptQaReceiptConfirmationState(
+        scrollableField,
+        (receipt) => getConceptQaConfirmationUiState(receipt, session),
+    );
+}
+
+function updateConceptQaComposerUi() {
+    const session = getConceptQaSessionForChat();
+    const promptInput = getPromptInputElement();
+    if (!promptInput) return;
+    if (!promptInput.dataset.nativePlaceholder) {
+        promptInput.dataset.nativePlaceholder = promptInput.getAttribute('placeholder') || 'Talk with Von here...';
+    }
+    if (!session) {
+        if (!isExternalConversationReadOnly()) {
+            promptInput.disabled = false;
+            promptInput.setAttribute('placeholder', promptInput.dataset.nativePlaceholder);
+        }
+        return;
+    }
+    const busy = conceptQaSubmitInFlight.has(session.session_id)
+        || conceptQaTransitionInFlight.has(session.session_id);
+    const terminal = session.lifecycle !== 'active';
+    const readOnly = isExternalConversationReadOnly();
+    promptInput.disabled = readOnly || terminal || busy;
+    promptInput.setAttribute(
+        'placeholder',
+        readOnly
+            ? 'Imported snapshot — choose Continue to add new turns.'
+            : terminal
+            ? `Concept Q&A ${session.lifecycle}; the transcript remains available.`
+            : (busy ? 'Saving this Q&A turn…' : 'Answer the current concept question…'),
+    );
+}
+
+function renderConceptQaConversationControls() {
+    const mount = document.getElementById('conceptQaConversationControls');
+    if (!mount) return;
+    const session = getConceptQaSessionForChat();
+    if (!session) {
+        mount.replaceChildren();
+        mount.classList.add('hidden');
+        updateVisibleConceptQaConfirmationUi(null);
+        updateConceptQaComposerUi();
+        return;
+    }
+
+    mount.classList.remove('hidden');
+    mount.replaceChildren();
+    const header = document.createElement('div');
+    header.className = 'concept-qa-conversation-header';
+    const title = document.createElement('strong');
+    title.textContent = 'Concept Q&A';
+    const status = document.createElement('span');
+    status.className = 'concept-qa-conversation-status';
+    status.textContent = session.lifecycle === 'active'
+        ? 'Active · answers and representation outcomes are saved in this conversation.'
+        : `${session.lifecycle === 'finished' ? 'Finished' : 'Cancelled'} · transcript and prior knowledge are retained.`;
+    header.append(title, status);
+    mount.appendChild(header);
+
+    const gapText = describeConceptQaElicitationGap(session);
+    if (gapText) {
+        const gap = document.createElement('p');
+        gap.className = 'concept-qa-conversation-gap';
+        gap.textContent = gapText;
+        mount.appendChild(gap);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'concept-qa-conversation-actions';
+    const busy = conceptQaTransitionInFlight.has(session.session_id);
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'btn-mini';
+    copy.textContent = 'Copy reference';
+    copy.disabled = busy;
+    copy.addEventListener('click', () => void copyConversationReferenceToClipboard(session));
+    actions.appendChild(copy);
+
+    if (session.lifecycle === 'active') {
+        const finish = document.createElement('button');
+        finish.type = 'button';
+        finish.className = 'btn-mini concept-qa-finish';
+        finish.textContent = busy ? 'Saving…' : 'Finish Q&A';
+        finish.disabled = busy || !conceptQaActionAllowed(session, 'finish');
+        finish.addEventListener('click', () => void transitionActiveConceptQa('finish'));
+
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn-mini concept-qa-cancel';
+        cancel.textContent = 'Cancel Q&A';
+        cancel.title = 'Stop future Q&A turns. The transcript and already recorded knowledge are retained.';
+        cancel.disabled = busy || !conceptQaActionAllowed(session, 'cancel');
+        cancel.addEventListener('click', () => void transitionActiveConceptQa('cancel'));
+        actions.append(finish, cancel);
+    }
+    mount.appendChild(actions);
+    const errorText = conceptQaErrorBySession.get(session.session_id);
+    if (errorText) {
+        const message = document.createElement('p');
+        message.className = 'concept-qa-conversation-error';
+        message.textContent = errorText;
+        mount.appendChild(message);
+    }
+    updateVisibleConceptQaConfirmationUi(session);
+    updateConceptQaComposerUi();
+    updateSendButtonForCurrentChatState();
+}
+
+async function transitionActiveConceptQa(action) {
+    const current = getConceptQaSessionForChat();
+    if (!current?.concept_id || !current?.session_id) return false;
+    const key = current.session_id;
+    if (conceptQaTransitionInFlight.has(key)) return false;
+    conceptQaTransitionInFlight.add(key);
+    conceptQaErrorBySession.delete(key);
+    renderConceptQaConversationControls();
+    try {
+        const updated = await transitionConceptQaSession({
+            conceptId: current.concept_id,
+            sessionId: current.session_id,
+            action,
+        });
+        rememberConceptQaSession(updated);
+        const cacheIndex = sessionTabsCache.findIndex((row) => row?.session_id === current.chat_session_id);
+        if (cacheIndex >= 0) {
+            sessionTabsCache[cacheIndex] = normaliseConversationSessionViewModel({
+                ...sessionTabsCache[cacheIndex],
+                ...updated,
+                is_completed: updated.lifecycle !== 'active',
+            });
+        }
+        showToast(
+            action === 'finish'
+                ? 'Concept Q&A finished. Its transcript is retained.'
+                : 'Concept Q&A cancelled. Its transcript and prior knowledge are retained.',
+            'success',
+        );
+        document.dispatchEvent(new CustomEvent('von:conceptQaLifecycleChanged', {
+            detail: { conceptId: updated.concept_id, session: updated },
+        }));
+        scheduleChatSessionTabsRefresh(true);
+        return true;
+    } catch (error) {
+        conceptQaErrorBySession.set(
+            key,
+            error?.status === 409
+                ? 'This Q&A changed elsewhere. Reload the conversation status and try again.'
+                : (error?.message || 'The Q&A state could not be changed. Try again.'),
+        );
+        return false;
+    } finally {
+        conceptQaTransitionInFlight.delete(key);
+        renderConceptQaConversationControls();
+    }
+}
+
+function renderConceptQaTurns(session) {
+    const turns = Array.isArray(session?.turns) ? session.turns : [];
+    const scrollableField = document.getElementById('scrollableField');
+    if (!turns.length || !scrollableField) return false;
+    historySegmentsShown = 1;
+    totalHistorySegments = 1;
+    rehydrateHistory(scrollableField, turns, {
+        scrollToBottom: true,
+        preserveScroll: false,
+        showResetNotice: false,
+        forceScrollToBottom: true,
+    });
+    displayedHistorySessionId = session.chat_session_id;
+    return true;
+}
+
+export async function openConceptQaConversation(value) {
+    const session = rememberConceptQaSession(value);
+    if (!session) return { ok: false, error: 'Concept Q&A session is missing.' };
+    const existing = sessionTabsCache.find((row) => row?.session_id === session.chat_session_id);
+    const viewModel = normaliseConversationSessionViewModel({
+        ...existing,
+        ...session,
+        session_id: session.chat_session_id,
+        session_name: session.session_name || existing?.session_name || 'Concept Q&A',
+        focal_concept_ids: session.concept_id ? [session.concept_id] : existing?.focal_concept_ids,
+        is_completed: session.lifecycle !== 'active',
+    });
+    sessionTabsCache = normaliseConversationSessionViewModels([
+        viewModel,
+        ...sessionTabsCache.filter((row) => row?.session_id !== session.chat_session_id),
+    ]);
+    activateTab('chatTab');
+    const switched = await switchToChatSession(session.chat_session_id);
+    if (!switched?.ok && !renderConceptQaTurns(session)) return switched;
+    setActiveChatSession(session.chat_session_id, viewModel?.session_name || 'Concept Q&A');
+    if (session.turns.length) renderConceptQaTurns(session);
+    renderChatSessionTabs(sessionTabsCache, session.chat_session_id);
+    renderConceptQaConversationControls();
+    return { ok: true, session };
+}
+
+async function submitActiveConceptQaPrompt({ session, promptInput, promptRaw }) {
+    if (!session?.concept_id || !session?.session_id) return false;
+    if (session.lifecycle !== 'active') {
+        showToast(`This concept Q&A is ${session.lifecycle}; its transcript remains available.`, 'info');
+        renderConceptQaConversationControls();
+        return false;
+    }
+    const key = session.session_id;
+    if (conceptQaSubmitInFlight.has(key)) return false;
+    conceptQaSubmitInFlight.add(key);
+    conceptQaErrorBySession.delete(key);
+    renderConceptQaConversationControls();
+    try {
+        const result = await submitConceptQaTurn({
+            conceptId: session.concept_id,
+            sessionId: session.session_id,
+            answer: promptRaw,
+        });
+        const updated = rememberConceptQaSession(result.session);
+        if (!updated) throw new Error('The Q&A response did not include session read-back.');
+        rememberLastSubmittedUserPrompt(promptRaw);
+        setPromptComposerValue('', { promptInput });
+        invalidateSessionHistoryCache(updated.chat_session_id);
+        if (!renderConceptQaTurns(updated)) {
+            await loadChatHistory({
+                segments: Math.max(historySegmentsShown, 1),
+                scrollToBottom: true,
+                preserveScroll: false,
+                showResetNotice: false,
+                forceScrollToBottom: true,
+            });
+        }
+        dispatchConceptQaKnowledgeChange(updated, result.receipts);
+        if (updated.lifecycle !== 'active') scheduleChatSessionTabsRefresh(true);
+        return true;
+    } catch (error) {
+        const readBack = normaliseConceptQaSession(error?.payload, {
+            conceptId: session.concept_id,
+            sessionId: session.session_id,
+        });
+        if (error?.status === 409 && readBack) rememberConceptQaSession(readBack);
+        conceptQaErrorBySession.set(
+            key,
+            error?.status === 409
+                ? 'This Q&A is no longer active. Its current state and transcript have been retained.'
+                : (error?.message || 'This Q&A turn could not be saved. Your draft remains in the composer.'),
+        );
+        return false;
+    } finally {
+        conceptQaSubmitInFlight.delete(key);
+        renderConceptQaConversationControls();
+    }
+}
+
+function conceptQaConfirmationDenialText({
+    denial = {},
+    requiredConfirmer = '',
+    reason = '',
+    reconciliationRequired = false,
+} = {}) {
+    const sentence = (value) => {
+        const text = String(value || '').trim();
+        if (!text) return '';
+        return /[.!?]$/.test(text) ? text : `${text}.`;
+    };
+    const whoCanAddMembership = String(denial?.who_can_add_membership || '').trim();
+    const membershipManagementPath = String(denial?.membership_management_path || '').trim();
+    const originalActorNextStep = String(denial?.original_actor_next_step || '').trim();
+    const genericConfirmer = String(
+        denial?.who_can_confirm
+        || denial?.required_confirmer
+        || requiredConfirmer
+        || '',
+    ).trim();
+    const permissions = Array.isArray(denial?.required_permissions)
+        ? denial.required_permissions.filter(Boolean).join(', ')
+        : '';
+    const membershipHandoff = whoCanAddMembership
+        ? sentence([
+            'Membership handoff:',
+            whoCanAddMembership,
+            membershipManagementPath ? `must add the membership through ${membershipManagementPath}` : '',
+        ].filter(Boolean).join(' '))
+        : (membershipManagementPath
+            ? sentence(`Use ${membershipManagementPath} to add the membership`)
+            : '');
+
+    return [
+        'The tentative relation was retained.',
+        reconciliationRequired
+            ? 'A governed activation may have completed and needs reconciliation.'
+            : '',
+        membershipHandoff,
+        denial?.same_q_and_a_action_available_to_other_actor === false
+            ? 'The authorised membership manager cannot use this actor-scoped Q&A Confirm action on behalf of the original actor.'
+            : '',
+        originalActorNextStep
+            ? `Next step for the original Q&A actor: ${sentence(originalActorNextStep)}`
+            : '',
+        !whoCanAddMembership && genericConfirmer
+            ? sentence(`Confirmation requires ${genericConfirmer}`)
+            : '',
+        permissions ? sentence(`Required permission: ${permissions}`) : '',
+        reason
+            ? sentence(`Reason: ${reason}`)
+            : 'Confirmation did not complete; try again.',
+    ].filter(Boolean).join(' ');
+}
+
+async function confirmActiveConceptQaFormalisation(receipt) {
+    const session = getConceptQaSessionForChat();
+    const assertionId = typeof receipt?.assertion_id === 'string' ? receipt.assertion_id.trim() : '';
+    if (!session?.concept_id || !session?.session_id || !assertionId) return false;
+    const key = session.session_id;
+    if (receipt?.confirmation?.available !== true) {
+        conceptQaErrorBySession.set(
+            key,
+            'This receipt no longer offers confirmation; reload the conversation for current status.',
+        );
+        renderConceptQaConversationControls();
+        return false;
+    }
+    const confirmationState = getConceptQaConfirmationUiState(receipt, session);
+    if (!confirmationState.available) {
+        conceptQaErrorBySession.set(
+            key,
+            `${confirmationState.reason} The tentative relation was not changed.`,
+        );
+        renderConceptQaConversationControls();
+        return false;
+    }
+    if (conceptQaTransitionInFlight.has(key)) return false;
+    conceptQaTransitionInFlight.add(key);
+    conceptQaErrorBySession.delete(key);
+    renderConceptQaConversationControls();
+    try {
+        const result = await confirmConceptQaFormalisation({
+            conceptId: session.concept_id,
+            sessionId: session.session_id,
+            assertionId,
+            confirmation: receipt.confirmation,
+        });
+        const updated = rememberConceptQaSession(result.session);
+        if (updated?.turns?.length) {
+            renderConceptQaTurns(updated);
+        } else {
+            invalidateSessionHistoryCache(session.chat_session_id);
+            await loadChatHistory({
+                segments: Math.max(historySegmentsShown, 1),
+                scrollToBottom: false,
+                preserveScroll: true,
+                showResetNotice: false,
+            });
+        }
+        const formalisation = result.receipts?.formalisation;
+        const formalisationStatus = String(formalisation?.status || '').toLowerCase();
+        const confirmationOutcome = result.payload?.confirmation;
+        const canonicalReadBack = confirmationOutcome?.canonical_read_back
+            ?? formalisation?.confirmation?.last_attempt?.canonical_read_back
+            ?? formalisation?.canonical_read_back
+            ?? formalisation?.read_back;
+        const readBackStatus = String(
+            canonicalReadBack?.epistemic_status || canonicalReadBack?.status || '',
+        ).toLowerCase();
+        const confirmed = result.payload?.success !== false
+            && ['asserted', 'succeeded', 'success'].includes(formalisationStatus)
+            && (canonicalReadBack === true
+                || canonicalReadBack?.verified === true
+                || ['asserted', 'verified', 'succeeded'].includes(readBackStatus));
+        if (!confirmed) {
+            const denial = formalisation?.actionable_denial
+                || result.payload?.actionable_denial
+                || result.payload?.confirmation?.actionable_denial
+                || {};
+            const reason = formalisation?.error_code
+                || result.payload?.error_code
+                || result.payload?.reason;
+            conceptQaErrorBySession.set(
+                key,
+                conceptQaConfirmationDenialText({ denial, reason }),
+            );
+            return false;
+        }
+        dispatchConceptQaKnowledgeChange(
+            updated || session,
+            result.receipts,
+            'concept_q_and_a_formalisation_confirmed',
+        );
+        showToast('Tentative relation confirmed and read back.', 'success');
+        return true;
+    } catch (error) {
+        const readBack = normaliseConceptQaSession(error?.payload, {
+            conceptId: session.concept_id,
+            sessionId: session.session_id,
+        });
+        if (readBack) {
+            rememberConceptQaSession(readBack);
+            if (readBack.turns?.length) renderConceptQaTurns(readBack);
+        }
+        const confirmation = error?.payload?.confirmation;
+        const denial = confirmation?.actionable_denial
+            || error?.payload?.actionable_denial
+            || {};
+        const requiredConfirmer = denial.who_can_confirm
+            || denial.required_confirmer
+            || error?.payload?.required_confirmer
+            || confirmation?.required_confirmer;
+        const detail = confirmation?.error_code
+            || error?.payload?.error_code
+            || error?.payload?.reason
+            || error?.payload?.detail
+            || error?.message;
+        conceptQaErrorBySession.set(
+            key,
+            conceptQaConfirmationDenialText({
+                denial,
+                requiredConfirmer,
+                reason: detail,
+                reconciliationRequired: confirmation?.reconciliation_required === true,
+            }),
+        );
+        return false;
+    } finally {
+        conceptQaTransitionInFlight.delete(key);
+        renderConceptQaConversationControls();
+    }
 }
 
 function toggleShowHiddenSessions() {
@@ -6016,6 +6528,10 @@ function updateExternalConversationUi() {
             button.disabled = readOnly;
         }
     });
+    // Session-list refreshes also pass through this function. Reapply the
+    // stronger concept-Q&A lifecycle state so a finished or cancelled Q&A is
+    // not made editable just because it is an ordinary (non-imported) chat.
+    updateConceptQaComposerUi();
     updateSendButtonForCurrentChatState();
 }
 
@@ -6034,11 +6550,33 @@ function updateSendButtonForCurrentChatState() {
         || queueCounts.queued > 0
         || queueCounts.restartable > 0;
     const readOnly = isExternalConversationReadOnly();
-    sendButton.disabled = uploadInFlight || queueSubmissionInFlight || readOnly;
-    sendButton.setAttribute('aria-busy', queueSubmissionInFlight ? 'true' : 'false');
+    const conceptQaSession = getConceptQaSessionForChat();
+    const conceptQaBusy = Boolean(
+        conceptQaSession
+        && (
+            conceptQaSubmitInFlight.has(conceptQaSession.session_id)
+            || conceptQaTransitionInFlight.has(conceptQaSession.session_id)
+        )
+    );
+    const conceptQaTerminal = Boolean(conceptQaSession && conceptQaSession.lifecycle !== 'active');
+    sendButton.disabled = uploadInFlight
+        || queueSubmissionInFlight
+        || readOnly
+        || conceptQaBusy
+        || conceptQaTerminal;
+    sendButton.setAttribute('aria-busy', queueSubmissionInFlight || conceptQaBusy ? 'true' : 'false');
     if (readOnly) {
         sendButton.textContent = 'Read-only import';
         sendButton.title = 'Continue this imported snapshot before sending a new message.';
+        return;
+    }
+    if (conceptQaSession) {
+        sendButton.textContent = conceptQaTerminal
+            ? `Q&A ${conceptQaSession.lifecycle}`
+            : (conceptQaBusy ? 'Saving Q&A…' : 'Submit answer');
+        sendButton.title = conceptQaTerminal
+            ? 'The transcript remains available, but this concept Q&A no longer accepts turns.'
+            : (conceptQaBusy ? 'Saving this turn and its representation receipts.' : 'Submit this answer to concept Q&A.');
         return;
     }
     sendButton.textContent = queueSubmissionInFlight
@@ -24440,6 +24978,7 @@ function setActiveChatSession(sessionId, sessionName, externalConversation = und
     renderActiveUploadUi();
     renderChatTaskQueuePanel();
     updateExternalConversationUi();
+    renderConceptQaConversationControls();
 }
 
 function getChatSessionTabsContainer() {
@@ -28065,6 +28604,10 @@ async function switchToChatSession(sessionId, options = {}) {
             throw new Error('Conversation switch response did not match the selected session.');
         }
 
+        if (isConceptQaSession(data) || isConceptQaSession(data?.qa_session)) {
+            rememberConceptQaSession(data?.qa_session || data, { sessionId: sid });
+        }
+
         setActiveChatSession(
             data?.session_id,
             data?.session_name,
@@ -28623,6 +29166,13 @@ async function loadChatHistory(options = {}) {
         });
         const data = await response.json().catch(() => ({}));
 
+        if (isConceptQaSession(data) || isConceptQaSession(data?.qa_session)) {
+            rememberConceptQaSession(data?.qa_session || data, {
+                sessionId: requestedSessionId,
+            });
+            renderConceptQaConversationControls();
+        }
+
         if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
             return false;
         }
@@ -28876,7 +29426,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
 
     historyMessages.forEach((msg, index) => {
         if (msg.role === 'user' || msg.role === 'assistant') {
-            const turnId = `history-${msg.role}-${index}`;
+            const persistedTurnId = typeof msg.turn_id === 'string' ? msg.turn_id.trim() : '';
+            const turnId = persistedTurnId || `history-${msg.role}-${index}`;
             let label = msg.role === 'user' ? 'User' : 'Von';
             const externalActor = (
                 msg.external_actor && typeof msg.external_actor === 'object'
@@ -28903,6 +29454,11 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
                     history_location: msg.history_location || null,
+                    reference_manifest: msg.reference_manifest
+                        || msg.llm_debug_data?.reference_manifest
+                        || null,
+                    receipts: msg.receipts || msg.representation_receipts || null,
+                    representation: msg.representation || null,
                     timestamp: (
                         msg.llm_debug_data
                         && typeof msg.llm_debug_data === 'object'
@@ -28915,6 +29471,20 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
                 setLlmDebugDataEntry(turnId, merged);
             }
 
+            const historyMessageOptions = {
+                ...(externalActor ? {
+                    assistantMessage: msg.role === 'assistant',
+                    externalActor,
+                    readOnly: true
+                } : {}),
+                conceptQaReceipt: {
+                    receipts: msg.receipts || msg.representation_receipts || null,
+                    representation: msg.representation || null,
+                    reference_manifest: msg.reference_manifest
+                        || msg.llm_debug_data?.reference_manifest
+                        || null,
+                },
+            };
             appendMessage(
                 label,
                 msg.content,
@@ -28924,11 +29494,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
                 msg.timestamp,
                 null,
                 null,
-                externalActor ? {
-                    assistantMessage: msg.role === 'assistant',
-                    externalActor,
-                    readOnly: true
-                } : null
+                historyMessageOptions
             );
             if (msg.role === 'assistant') {
                 const debugData = llmDebugData.get(turnId);
@@ -36334,6 +36900,16 @@ async function handleSendPrompt(options = {}) {
         return;
     }
 
+    const conceptQaSession = getConceptQaSessionForChat(targetSessionId);
+    if (conceptQaSession && directComposerSubmission && !assistantOpening) {
+        await submitActiveConceptQaPrompt({
+            session: conceptQaSession,
+            promptInput,
+            promptRaw,
+        });
+        return;
+    }
+
     if (!observeServerDispatch && getUnavailableLocalModelPreferenceForChat()) {
         if (!fromQueue) {
             notifyUnavailableLocalModelForChat();
@@ -37669,8 +38245,18 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                     buttonifyOptions: debugData?.buttonify?.options
                 });
                 appendQuickReplyButtons(messageContent, debugData?.buttonify);
+                renderConceptQaReceipt(
+                    messageContent,
+                    options.conceptQaReceipt || debugData,
+                    {
+                        onConfirm: confirmActiveConceptQaFormalisation,
+                        getConfirmationState: (receipt) => (
+                            getConceptQaConfirmationUiState(receipt)
+                        ),
+                    },
+                );
             } catch (err) {
-                console.warn('[chatTab] Quick reply rendering failed:', err);
+                console.warn('[chatTab] Assistant turn enrichment rendering failed:', err);
             }
             if (thinkingCardSlot) {
                 messageContent.appendChild(thinkingCardSlot);
@@ -37791,6 +38377,20 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             messageContainer.appendChild(messageHeader);
             messageContainer.appendChild(messageText);
+            try {
+                renderConceptQaReceipt(
+                    messageContainer,
+                    options.conceptQaReceipt,
+                    {
+                        onConfirm: confirmActiveConceptQaFormalisation,
+                        getConfirmationState: (receipt) => (
+                            getConceptQaConfirmationUiState(receipt)
+                        ),
+                    },
+                );
+            } catch (err) {
+                console.warn('[chatTab] User turn representation receipt rendering failed:', err);
+            }
             if (turnId && sender === 'Error') {
                 const thinkingCardSlot = document.createElement('div');
                 thinkingCardSlot.className = 'thinking-card-inline-slot';
@@ -40749,6 +41349,48 @@ export function __testOnly_setActiveChatSession(
 ) {
     setActiveChatSession(sessionId, sessionName, externalConversation);
     syncActiveChatRequestPointers();
+}
+export function __testOnly_setConceptQaSession(session, { active = true } = {}) {
+    const projection = rememberConceptQaSession(session);
+    if (!projection) return null;
+    sessionTabsCache = normaliseConversationSessionViewModels([
+        {
+            ...projection,
+            session_id: projection.chat_session_id,
+            session_name: projection.session_name || 'Concept Q&A',
+            is_completed: projection.lifecycle !== 'active',
+        },
+        ...sessionTabsCache.filter((row) => row?.session_id !== projection.chat_session_id),
+    ]);
+    if (active) {
+        activeChatSessionId = projection.chat_session_id;
+        activeChatSessionName = projection.session_name || 'Concept Q&A';
+    }
+    renderConceptQaConversationControls();
+    return projection;
+}
+export function __testOnly_getConceptQaSession(sessionId = null) {
+    return getConceptQaSessionForChat(sessionId || activeChatSessionId);
+}
+export function __testOnly_renderConceptQaConversationControls() {
+    renderConceptQaConversationControls();
+}
+export async function __testOnly_transitionActiveConceptQa(action) {
+    return transitionActiveConceptQa(action);
+}
+export async function __testOnly_submitActiveConceptQaPrompt(promptRaw) {
+    const session = getConceptQaSessionForChat();
+    const promptInput = getPromptInputElement();
+    return submitActiveConceptQaPrompt({ session, promptInput, promptRaw });
+}
+export async function __testOnly_confirmActiveConceptQaFormalisation(receipt) {
+    return confirmActiveConceptQaFormalisation(receipt);
+}
+export function __testOnly_resetConceptQaState() {
+    conceptQaSessionsByChatSession.clear();
+    conceptQaSubmitInFlight.clear();
+    conceptQaTransitionInFlight.clear();
+    conceptQaErrorBySession.clear();
 }
 export function __testOnly_updateExternalConversationUi() {
     updateExternalConversationUi();

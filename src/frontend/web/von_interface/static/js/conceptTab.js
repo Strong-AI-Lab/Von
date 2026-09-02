@@ -21,9 +21,21 @@ import {
   setCurrentlySelectedConceptId,
   setSelectedConceptOriginalName
 } from './state.js';
-import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
+import {
+  getSessionScopedNamespace,
+  getSessionScopedOrgContext,
+  getSessionScopedOrgId,
+} from './utils/sessionScopedStorage.js';
 import { buildLocalModelRequestFields } from './utils/localModelPreferences.js';
 import { annotateElementText, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
+import {
+  describeConceptQaElicitationGap,
+  fetchConceptQaProjection,
+  startConceptQaSession,
+} from './utils/conceptQaSession.js';
+import { buildConversationReferencePayload } from './utils/conversationReference.js';
+import { copyTextWithClipboardFallback } from './utils/copyJsonButtonState.js';
+import { showToast } from './utils/toast.js';
 import { chooseBestTypeForIndividual, insertNodeIntoVontologyTree, selectVontologyNodeByIdentifier } from './vontology.js';
 
 async function renderConceptMarkdownInto(container, markdownText) {
@@ -53,6 +65,8 @@ export function initializeConceptTabState() {
 
 // Global interaction state
 let currentInteractionId = null;
+const conceptQaSessionByConcept = new Map();
+const conceptQaCardLoadTokenBySuffix = new Map();
 
 async function buildConceptInteractionHeaders() {
   const windowSessionId = await ensureUniqueWindowSessionId();
@@ -1158,6 +1172,7 @@ export function selectConceptWithSuffix(concept, suffix = '', radioId = null) {
   const conceptId = concept.concept_id || concept._id;
   if (conceptId) {
     loadConceptNames(conceptId, suffix);
+    void refreshConceptQaSessionCard(conceptId, suffix);
   }
   updateConceptIdRenamePanel(concept, suffix);
 }
@@ -1547,6 +1562,204 @@ function getElementForSuffix(baseId, suffix) {
   return document.getElementById(baseId);
 }
 
+function getConceptQaCardElements(suffix = '') {
+  return {
+    card: getElementForSuffix('conceptQaSessionCard', suffix),
+    badge: getElementForSuffix('conceptQaSessionBadge', suffix),
+    summary: getElementForSuffix('conceptQaSessionSummary', suffix),
+    gap: getElementForSuffix('conceptQaGapStatus', suffix),
+    start: getElementForSuffix('startInteractionButton', suffix),
+    resume: getElementForSuffix('resumeConceptQaButton', suffix),
+    open: getElementForSuffix('openConceptQaTranscriptButton', suffix),
+    copy: getElementForSuffix('copyConceptQaReferenceButton', suffix),
+  };
+}
+
+function setConceptQaCardBusy(suffix, busy) {
+  const controls = getConceptQaCardElements(suffix);
+  [controls.start, controls.resume, controls.open, controls.copy].forEach((button) => {
+    if (button) button.disabled = Boolean(busy);
+  });
+  controls.card?.setAttribute('aria-busy', busy ? 'true' : 'false');
+}
+
+async function openConceptQaSessionInChat(session) {
+  const chat = await import('./chatTab.js');
+  if (typeof chat.openConceptQaConversation !== 'function') {
+    throw new Error('The conversation workspace is not ready for concept Q&A.');
+  }
+  return chat.openConceptQaConversation(session);
+}
+
+async function copyConceptQaReference(session) {
+  const orgContext = getSessionScopedOrgContext();
+  const payload = buildConversationReferencePayload(session, {
+    currentUserConceptId: getCurrentUserConceptId() || null,
+    namespace: getSessionScopedNamespace() || null,
+    organisationConceptId: orgContext?.concept_id || orgContext?.id || null,
+  });
+  if (!payload) {
+    showToast('This Q&A does not yet have a stable conversation reference.', 'info');
+    return false;
+  }
+  const copied = await copyTextWithClipboardFallback(JSON.stringify(payload, null, 2));
+  showToast(
+    copied ? 'Copied conversation reference.' : 'Could not copy conversation reference.',
+    copied ? 'success' : 'error',
+  );
+  return copied;
+}
+
+function renderConceptQaSessionCard({ suffix = '', session = null, error = null, legacyCount = 0 } = {}) {
+  const controls = getConceptQaCardElements(suffix);
+  if (!controls.card) return false;
+
+  const state = error ? 'error' : (session?.lifecycle || 'ready');
+  controls.card.dataset.state = state;
+  if (controls.badge) {
+    controls.badge.textContent = error
+      ? 'Unavailable'
+      : (session?.lifecycle === 'active'
+        ? 'Active'
+        : (session?.lifecycle === 'finished'
+          ? 'Finished'
+          : (session?.lifecycle === 'cancelled' ? 'Cancelled' : 'Ready')));
+  }
+  if (controls.summary) {
+    if (error) {
+      controls.summary.textContent = 'Q&A status could not be checked. You can retry without losing an existing transcript.';
+    } else if (session?.lifecycle === 'active') {
+      controls.summary.textContent = 'A recoverable Q&A conversation is active for this concept.';
+    } else if (session?.lifecycle === 'finished') {
+      controls.summary.textContent = 'This Q&A is finished. Its transcript and representation receipts remain available.';
+    } else if (session?.lifecycle === 'cancelled') {
+      controls.summary.textContent = 'This Q&A was cancelled. Its transcript and already recorded knowledge remain available.';
+    } else if (legacyCount > 0) {
+      controls.summary.textContent = 'Older Q&A activity exists, but it has not yet been mapped to a copyable conversation.';
+    } else {
+      controls.summary.textContent = 'Start a guided, recoverable conversation about missing information for this concept.';
+    }
+  }
+  if (controls.gap) {
+    const gapText = session ? describeConceptQaElicitationGap(session) : '';
+    controls.gap.textContent = gapText;
+    controls.gap.classList.toggle('hidden', !gapText);
+  }
+
+  const hasSession = Boolean(session?.session_id);
+  const isActive = session?.lifecycle === 'active';
+  if (controls.start) {
+    controls.start.classList.toggle('hidden', isActive);
+    controls.start.textContent = hasSession ? 'Start new Q&A' : 'Improve concept by Q&A';
+    controls.start.title = 'Answer guided questions in a recoverable conversation; admitted exact claims retain provenance.';
+  }
+  if (controls.resume) {
+    controls.resume.classList.toggle('hidden', !isActive);
+    controls.resume.onclick = isActive ? () => void openConceptQaSessionInChat(session) : null;
+  }
+  if (controls.open) {
+    controls.open.classList.toggle('hidden', !hasSession);
+    controls.open.onclick = hasSession ? () => void openConceptQaSessionInChat(session) : null;
+  }
+  if (controls.copy) {
+    const hasReference = Boolean(session?.conversation_reference?.session_id);
+    controls.copy.classList.toggle('hidden', !hasReference);
+    controls.copy.onclick = hasReference ? () => void copyConceptQaReference(session) : null;
+  }
+  setConceptQaCardBusy(suffix, false);
+  return true;
+}
+
+export async function refreshConceptQaSessionCard(conceptId, suffix = '') {
+  const targetConceptId = String(conceptId || getSelectedConceptIdForSuffix(suffix) || '').trim();
+  if (!targetConceptId || !getConceptQaCardElements(suffix).card) return null;
+  const token = `${targetConceptId}:${Date.now()}:${Math.random()}`;
+  conceptQaCardLoadTokenBySuffix.set(suffix, token);
+  setConceptQaCardBusy(suffix, true);
+  const controls = getConceptQaCardElements(suffix);
+  if (controls.badge) controls.badge.textContent = 'Checking…';
+  try {
+    const projection = await fetchConceptQaProjection(targetConceptId);
+    if (conceptQaCardLoadTokenBySuffix.get(suffix) !== token) return null;
+    const session = projection.active_session || projection.sessions[0] || null;
+    if (session) conceptQaSessionByConcept.set(targetConceptId, session);
+    else conceptQaSessionByConcept.delete(targetConceptId);
+    renderConceptQaSessionCard({
+      suffix,
+      session,
+      legacyCount: projection.legacy_interactions.length,
+    });
+    return session;
+  } catch (error) {
+    if (conceptQaCardLoadTokenBySuffix.get(suffix) !== token) return null;
+    renderConceptQaSessionCard({ suffix, error });
+    return null;
+  }
+}
+
+export function isUnmistakableMissingConceptQaRoute(error) {
+  if (Number(error?.status) !== 404) return false;
+  const payload = error?.payload;
+  // The request helper parses an HTML route miss as an empty object. Any
+  // structured JSON response belongs to the canonical API (including
+  // actor-scoped concept/session absence) and must be shown, not re-routed.
+  return Boolean(
+    payload
+    && typeof payload === 'object'
+    && !Array.isArray(payload)
+    && Object.keys(payload).length === 0
+  );
+}
+
+export async function handleStartInteraction() {
+  const suffix = getActiveConceptTabSuffix();
+  const conceptId = getSelectedConceptIdForSuffix(suffix, { fallbackToGlobal: !suffix });
+  if (!conceptId) {
+    alert('Select a concept before starting concept Q&A.');
+    return false;
+  }
+  setConceptQaCardBusy(suffix, true);
+  const controls = getConceptQaCardElements(suffix);
+  if (controls.summary) controls.summary.textContent = 'Starting a recoverable Q&A conversation…';
+  try {
+    const session = await startConceptQaSession(conceptId, buildLocalModelRequestFields());
+    conceptQaSessionByConcept.set(conceptId, session);
+    renderConceptQaSessionCard({ suffix, session });
+    await openConceptQaSessionInChat(session);
+    return true;
+  } catch (error) {
+    // Keep the old interaction path available while installations migrate to
+    // the canonical carrier endpoints. Never fall back on an authority or
+    // server failure: only an absent route denotes an older installation.
+    if (isUnmistakableMissingConceptQaRoute(error)) {
+      renderConceptQaSessionCard({ suffix, error });
+      await handleLegacyStartInteraction();
+      return true;
+    }
+    renderConceptQaSessionCard({ suffix, error });
+    if (controls.summary) controls.summary.textContent = error?.message || 'Concept Q&A could not be started.';
+    return false;
+  } finally {
+    setConceptQaCardBusy(suffix, false);
+  }
+}
+
+try {
+  document.addEventListener('von:conceptQaLifecycleChanged', (event) => {
+    const session = event?.detail?.session;
+    const conceptId = String(event?.detail?.conceptId || session?.concept_id || '').trim();
+    if (!conceptId || !session) return;
+    conceptQaSessionByConcept.set(conceptId, session);
+    for (const suffix of listOpenConceptTabSuffixes()) {
+      if (getSelectedConceptIdForSuffix(suffix, { fallbackToGlobal: !suffix }) === conceptId) {
+        renderConceptQaSessionCard({ suffix, session });
+      }
+    }
+  });
+} catch (_) {
+  // The module can also be imported in non-browser test environments.
+}
+
 function isMissingInteractionSessionMessage(message) {
   const msg = String(message || '').toLowerCase();
   return msg.includes('interaction session not found') ||
@@ -1588,7 +1801,7 @@ export function describeConceptQaRepresentation(data = {}) {
   if (exactAnswerStored && synthesisStatus === 'updated') {
     return {
       synthesisText,
-      statusText: 'Answer represented with provenance and concept notes updated. Please respond to the next question.',
+      statusText: 'Exact text claim stored with provenance; concept notes updated. Please respond to the next question.',
       statusColor: 'green',
     };
   }
@@ -1596,8 +1809,8 @@ export function describeConceptQaRepresentation(data = {}) {
     return {
       synthesisText,
       statusText: exactAnswerStored
-        ? 'Response and supplied notes represented with provenance and used to guide the next exchange.'
-        : 'Supplied notes represented with provenance and used to guide the next question.',
+        ? 'Exact text claim and supplied notes stored separately with provenance and used to guide the next exchange.'
+        : 'Supplied notes stored with provenance and used to guide the next question.',
       statusColor: 'green',
     };
   }
@@ -1605,21 +1818,21 @@ export function describeConceptQaRepresentation(data = {}) {
     return {
       synthesisText,
       statusText: synthesisStatus === 'no_update'
-        ? 'Answer preserved as scoped knowledge; no concept-notes change was proposed. Please respond to the next question.'
-        : 'Answer preserved as scoped knowledge, but the concept-notes update did not complete. Please respond to the next question.',
+        ? 'Exact text claim stored as scoped knowledge; no concept-notes change was proposed. No typed relation is implied.'
+        : 'Exact text claim stored as scoped knowledge, but the concept-notes update did not complete. No typed relation is implied.',
       statusColor: '#a65f00',
     };
   }
   if (synthesisStatus === 'updated') {
     return {
       synthesisText,
-      statusText: 'Concept notes updated, but exact-answer provenance storage failed. Please respond to the next question.',
+      statusText: 'Concept notes updated, but exact-text-claim storage failed. No typed relation is implied.',
       statusColor: '#a65f00',
     };
   }
   return {
     synthesisText,
-    statusText: 'The answer was received, but durable knowledge representation failed. Please retry or finish the Q&A.',
+    statusText: 'The transcript turn was received, but exact-claim storage and notes update failed. No typed relation was asserted.',
     statusColor: 'red',
   };
 }
@@ -1772,7 +1985,7 @@ function ensureInteractionSaveButtonState() {
 }
 
 // Handle specialised concept-improvement Q&A button click.
-export async function handleStartInteraction() {
+async function handleLegacyStartInteraction() {
   const currentlySelectedconceptId = getCurrentlySelectedConceptId();
   console.log("handleStartInteraction called. Currently selected concept ID:", currentlySelectedconceptId);
   const displayNames = getConceptTypeDisplayNames(getCurrentConceptType());

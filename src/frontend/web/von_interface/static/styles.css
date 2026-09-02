@@ -1983,6 +1983,71 @@ body {
     line-height: 1.35;
 }
 
+.concept-qa-session-card {
+    display: grid;
+    gap: 8px;
+    margin: 10px 0 14px;
+    padding: 12px 14px;
+    border: 1px solid #bfdbfe;
+    border-left: 4px solid #2563eb;
+    border-radius: 10px;
+    background: #eff6ff;
+}
+
+.concept-qa-session-header,
+.concept-qa-session-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.concept-qa-session-header {
+    justify-content: space-between;
+}
+
+.concept-qa-session-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #dbeafe;
+    color: #1e40af;
+    font-size: 0.74rem;
+    font-weight: 700;
+}
+
+.concept-qa-session-card[data-state="finished"] .concept-qa-session-badge,
+.concept-qa-session-card[data-state="cancelled"] .concept-qa-session-badge {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+.concept-qa-session-card[data-state="error"] {
+    border-color: #fecaca;
+    background: #fff7f7;
+}
+
+.concept-qa-session-card[data-state="error"] .concept-qa-session-badge {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.concept-qa-session-summary {
+    margin: 0;
+    color: #334155;
+    font-size: 0.86rem;
+}
+
+.concept-qa-gap-status,
+.concept-qa-conversation-gap {
+    margin: 0.35rem 0;
+    color: #704c00;
+    font-size: 0.9rem;
+}
+
+.concept-qa-session-actions button {
+    min-height: 32px;
+}
+
 .task-discuss-btn:hover,
 .message-discuss-btn:hover,
 .concept-discuss-button:hover {
@@ -7713,6 +7778,78 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     border-bottom: 1px solid #e2e8f0;
 }
 
+.concept-qa-conversation-controls {
+    display: grid;
+    gap: 7px;
+    margin-top: 8px;
+    padding: 9px 11px;
+    border: 1px solid #bfdbfe;
+    border-radius: 10px;
+    background: #eff6ff;
+}
+
+.concept-qa-conversation-controls.hidden {
+    display: none;
+}
+
+.concept-qa-conversation-header,
+.concept-qa-conversation-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.concept-qa-conversation-status {
+    color: #475569;
+    font-size: 0.82rem;
+}
+
+.concept-qa-conversation-error {
+    margin: 0;
+    color: #b91c1c;
+    font-size: 0.82rem;
+}
+
+.concept-qa-receipt {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 9px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.concept-qa-receipt-title {
+    margin: 0;
+    color: #334155;
+    font-size: 0.82rem;
+}
+
+.concept-qa-receipt-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding-left: 8px;
+    border-left: 3px solid #94a3b8;
+    font-size: 0.8rem;
+}
+
+.concept-qa-receipt-row.tone-success { border-left-color: #16a34a; }
+.concept-qa-receipt-row.tone-warning { border-left-color: #d97706; }
+.concept-qa-receipt-row.tone-error { border-left-color: #dc2626; }
+
+.concept-qa-receipt-copy {
+    display: grid;
+    gap: 2px;
+}
+
+.concept-qa-receipt-copy span {
+    color: #475569;
+}
+
 .chat-header-controls {
     display: flex;
     align-items: center;
@@ -12093,6 +12230,16 @@ button.prompt-vontology-cartouche {
     align-items: baseline;
 }
 
+.concept-effective-assertion-statement.is-complete-statement {
+    display: block;
+}
+
+.concept-effective-assertion-human-statement {
+    color: #0f172a;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
 .concept-effective-assertion-predicate {
     color: #475569;
     font-size: 0.82rem;
@@ -12102,6 +12249,19 @@ button.prompt-vontology-cartouche {
 .concept-effective-assertion-value {
     color: #0f172a;
     overflow-wrap: anywhere;
+}
+
+.concept-effective-assertion-relevance {
+    grid-column: 1 / -1;
+    margin: 0;
+    color: #92400e;
+    font-size: 0.8rem;
+}
+
+.concept-effective-assertion-relevance.aboutness-only {
+    padding: 6px 8px;
+    border-radius: 7px;
+    background: #fffbeb;
 }
 
 .concept-effective-assertion-scope {
@@ -12114,6 +12274,22 @@ button.prompt-vontology-cartouche {
     font-size: 0.74rem;
     font-weight: 700;
     white-space: nowrap;
+}
+
+.concept-effective-assertion-epistemic {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 700;
+}
+
+.concept-effective-assertion-epistemic-tentative {
+    background: #fef3c7;
+    color: #92400e;
 }
 
 .concept-effective-assertion-scope-personal {

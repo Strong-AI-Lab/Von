@@ -360,6 +360,28 @@ def apply_conversation_preferences(
     return projected
 
 
+def build_canonical_conversation_reference(
+    *,
+    owner_user_id: str,
+    session_id: str,
+    namespace: Any = None,
+    organisation_concept_id: Any = None,
+) -> dict[str, Any]:
+    """Build the one canonical reference shape for an explicit conversation."""
+
+    owner = _required_text(owner_user_id, field="owner_user_id")
+    session = _required_text(session_id, field="session_id")
+    return {
+        "schema_version": "conversation_reference.v1",
+        "binding_kind": "explicit_session_id",
+        "session_id": session,
+        "user_concept_id": owner,
+        "namespace": namespace,
+        "organisation_concept_id": _normalise_concept_id(organisation_concept_id),
+        "include_legacy": True,
+    }
+
+
 def _project_actor_conversation_contract(
     *, actor_user_id: str, row: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -381,17 +403,12 @@ def _project_actor_conversation_contract(
     ]
     if not shared:
         available_actions.append("restore" if trashed else "trash")
-    canonical_reference = {
-        "schema_version": "conversation_reference.v1",
-        "binding_kind": "explicit_session_id",
-        "session_id": session_id,
-        "user_concept_id": owner_user_id,
-        "namespace": projected.get("namespace"),
-        "organisation_concept_id": _normalise_concept_id(
-            projected.get("organisation_concept_id")
-        ),
-        "include_legacy": True,
-    }
+    canonical_reference = build_canonical_conversation_reference(
+        owner_user_id=owner_user_id,
+        session_id=session_id,
+        namespace=projected.get("namespace"),
+        organisation_concept_id=projected.get("organisation_concept_id"),
+    )
     projected.update(
         {
             "display_name": projected.get("session_name"),

@@ -79,6 +79,9 @@ describe("Concept interaction session recovery", () => {
 
         global.fetch = jest.fn(async (url) => {
             const u = String(url);
+            if (u.endsWith("/q_and_a/start")) {
+                return errorJson(404, {});
+            }
             if (u.includes("/start_interaction")) {
                 return okJson({ interaction_id: "interaction-1" });
             }
@@ -128,10 +131,14 @@ describe("Concept interaction session recovery", () => {
         const startCall = global.fetch.mock.calls.find(([url]) =>
             String(url).includes("/start_interaction")
         );
+        const canonicalStartCall = global.fetch.mock.calls.find(([url]) =>
+            String(url).endsWith("/q_and_a/start")
+        );
         const questionCall = global.fetch.mock.calls.find(([url]) =>
             String(url).includes("/generate_initial_question")
         );
 
+        expect(canonicalStartCall).toBeDefined();
         expect(startCall).toBeDefined();
         expect(questionCall).toBeDefined();
         expect(startCall[1].headers["X-Von-Window-Session"]).toMatch(/^ws_/);
@@ -151,6 +158,9 @@ describe("Concept interaction session recovery", () => {
         document.getElementById("conceptNotes_s1").value = "I'm a member of Primary Labs.";
         global.fetch = jest.fn(async (url) => {
             const u = String(url);
+            if (u.endsWith("/q_and_a/start")) {
+                return errorJson(404, {});
+            }
             if (u.includes("/start_interaction")) {
                 return okJson({
                     interaction_id: "interaction-notes-1",
@@ -195,6 +205,9 @@ describe("Concept interaction session recovery", () => {
     it("submits notes-only input for representation and keeps it visible", async () => {
         global.fetch = jest.fn(async (url) => {
             const u = String(url);
+            if (u.endsWith("/q_and_a/start")) {
+                return errorJson(404, {});
+            }
             if (u.includes("/start_interaction")) {
                 return okJson({ interaction_id: "interaction-notes-only" });
             }
@@ -233,7 +246,7 @@ describe("Concept interaction session recovery", () => {
             notes_input: "I'm a member of Primary Labs.",
         });
         expect(document.getElementById("conceptStep2Status_s1").textContent).toContain(
-            "represented with provenance"
+            "stored with provenance"
         );
         expect(document.getElementById("followUpQuestion_s1").textContent).toBe(
             "What role do you have in Primary Labs?"

@@ -72,6 +72,10 @@ def _referenced_concept_ids(items: list[Mapping[str, Any]]) -> list[str]:
                 else None
             ),
         ]
+        for link in item.get("concept_links") or ():
+            if not isinstance(link, Mapping) or link.get("status") != "active":
+                continue
+            candidates.append(link.get("concept_id"))
         for candidate in candidates:
             if not isinstance(candidate, str) or not candidate.startswith("#V#"):
                 continue
@@ -79,6 +83,46 @@ def _referenced_concept_ids(items: list[Mapping[str, Any]]) -> list[str]:
                 seen.add(candidate)
                 ordered.append(candidate)
     return ordered
+
+
+def _concept_relevance(
+    item: Mapping[str, Any],
+    *,
+    focal_concept_id: str | None,
+) -> dict[str, Any] | None:
+    """Describe why an assertion appears on one concept page.
+
+    A standalone text assertion linked through ``concept_links`` is evidence
+    *about* the focal concept, not a subject-predicate-object assertion whose
+    subject can be silently inferred.  Keeping that distinction in the
+    projection lets the UI surface the exact claim without overstating its
+    formalisation.
+    """
+
+    focal_id = str(focal_concept_id or "").strip()
+    if not focal_id:
+        return None
+    subject_match = item.get("subject_concept_id") == focal_id
+    object_match = item.get("object_concept_id") == focal_id
+    if subject_match and object_match:
+        kind = "grounded_subject_and_object"
+    elif subject_match:
+        kind = "grounded_subject"
+    elif object_match:
+        kind = "grounded_object"
+    else:
+        linked = any(
+            isinstance(link, Mapping)
+            and link.get("status") == "active"
+            and link.get("concept_id") == focal_id
+            for link in item.get("concept_links") or ()
+        )
+        kind = "aboutness_only" if linked else "unrelated"
+    return {
+        "kind": kind,
+        "concept_id": focal_id,
+        "aboutness_only": kind == "aboutness_only",
+    }
 
 
 def _display_names_for_ids(concept_ids: list[str]) -> dict[str, str]:
@@ -107,6 +151,7 @@ def _project_item(
     item: Mapping[str, Any],
     *,
     display_names: Mapping[str, str],
+    focal_concept_id: str | None = None,
 ) -> dict[str, Any]:
     assertion_form = str(item.get("assertion_form") or "relation").strip()
     subject_id = str(item.get("subject_concept_id") or "").strip()
@@ -215,9 +260,14 @@ def _project_item(
         },
         "object": object_payload,
         "human_statement": human_statement,
+        "concept_relevance": _concept_relevance(
+            item,
+            focal_concept_id=focal_concept_id,
+        ),
         "presentation": presentation,
         "source_context": source_context,
         "status": item.get("status"),
+        "epistemic_status": item.get("epistemic_status") or "asserted",
         "canonical_publication": False,
         "assertion_context": item.get("assertion_context"),
         "provenance": item.get("provenance"),
@@ -272,14 +322,21 @@ def load_concept_effective_assertions(
     )
 
     page = list_visible_scoped_assertions_page(
-        subject_concept_ids=[subject_id],
+        argument_concept_id=subject_id,
+        epistemic_statuses=("asserted", "tentative"),
         limit=page_limit,
         offset=page_offset,
-        limit_per_subject=page_limit,
     )
     raw_items = [item for item in page.get("items") or [] if isinstance(item, Mapping)]
     display_names = _display_names_for_ids(_referenced_concept_ids(raw_items))
-    items = [_project_item(item, display_names=display_names) for item in raw_items]
+    items = [
+        _project_item(
+            item,
+            display_names=display_names,
+            focal_concept_id=subject_id,
+        )
+        for item in raw_items
+    ]
     return {
         "success": True,
         "concept_id": subject_id,

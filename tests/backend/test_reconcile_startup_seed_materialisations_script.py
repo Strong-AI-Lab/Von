@@ -17,6 +17,9 @@ def test_release_reconciliation_runs_selected_families(monkeypatch) -> None:
             script.PUBLICATION_SCOPE_PROFILES: lambda: (
                 calls.append("publication") or {"ready": True}
             ),
+            script.CONSTITUTIVE_RELATION_REQUIREMENTS: lambda: (
+                calls.append("constitutive") or {"ready": True}
+            ),
         },
     )
 
@@ -24,7 +27,11 @@ def test_release_reconciliation_runs_selected_families(monkeypatch) -> None:
 
     assert report["success"] is True
     assert report["state"] == "ready"
-    assert calls == ["summary", "publication"]
+    assert calls == ["summary", "publication", "constitutive"]
+
+
+def test_constitutive_requirement_family_is_a_release_reconciler() -> None:
+    assert script.CONSTITUTIVE_RELATION_REQUIREMENTS in script._RECONCILERS
 
 
 def test_release_reconciliation_returns_nonzero_when_a_family_is_unavailable(
