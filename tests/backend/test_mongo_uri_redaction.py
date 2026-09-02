@@ -215,6 +215,8 @@ def test_db_info_snapshots_route_after_ping_recovery(monkeypatch) -> None:
     assert payload["fallback_kind"] == "ssh_tunnel"
     assert payload["classification"] == "atlas"
     assert payload["connection_location"]["upstream_sanitized_uri"] == SAFE_URI
+    assert isinstance(payload["mongo_ping_latency_ms"], float)
+    assert payload["mongo_ping_latency_ms"] >= 0.0
     _assert_no_secret_fragments(payload)
 
 

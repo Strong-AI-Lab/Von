@@ -7,10 +7,12 @@ function buildDbInfo({
     classification = 'atlas',
     pingOk = true,
     usingFallback = false,
+    mongoPingLatencyMs = 0.08,
 } = {}) {
     return {
         classification,
         ping_ok: pingOk,
+        mongo_ping_latency_ms: mongoPingLatencyMs,
         using_fallback: usingFallback,
         sanitized_uri: 'mongodb+srv://cluster.example.mongodb.net',
         database_name: 'von_db',
@@ -86,7 +88,7 @@ describe('footer DB badge outage state handling', () => {
         expect(badge.classList.contains('fatal')).toBe(true);
         expect(badge.classList.contains('warning')).toBe(false);
         expect(badge.getAttribute('data-keep-title')).toBe('true');
-        expect(latency?.textContent).toBe('offline');
+        expect(latency?.textContent).toBe('DB offline');
         expect(latency?.getAttribute('data-keep-title')).toBe('true');
         expect(latency?.title).toContain('Atlas unreachable');
     });
@@ -107,9 +109,32 @@ describe('footer DB badge outage state handling', () => {
         expect(badge.classList.contains('warning')).toBe(true);
         expect(badge.classList.contains('fatal')).toBe(false);
         expect(badge.textContent).toContain('Mongo status unknown (Von down)');
-        expect(latency?.textContent).toBe('unknown');
+        expect(latency?.textContent).toBe('DB unknown');
         expect(badge.getAttribute('data-keep-title')).toBe('true');
         expect(latency?.getAttribute('data-keep-title')).toBe('true');
         expect(latency?.title).toContain('Von server is unreachable');
+    });
+
+    test('separates user-facing server RTT from server-side Mongo ping latency', async () => {
+        installFetchMock(buildDbInfo({
+            classification: 'local',
+            pingOk: true,
+            mongoPingLatencyMs: 0.08,
+        }));
+        const { setModelInfoFooterText, setFooterServerReachability } = require(domUtilsPath);
+
+        setFooterServerReachability(true);
+        await setModelInfoFooterText();
+
+        const badge = await waitForDbBadgeReady();
+        const serverRtt = badge?.querySelector('.server-rtt-latency');
+        const dbLatency = badge?.querySelector('.db-latency');
+        expect(badge).toBeTruthy();
+        expect(serverRtt?.textContent).toMatch(/^RTT \d+ms$/);
+        expect(dbLatency?.textContent).toBe('DB 0.1ms');
+        expect(serverRtt?.getAttribute('aria-label')).toBe('Server round-trip latency');
+        expect(dbLatency?.getAttribute('aria-label')).toBe('Mongo ping latency');
+        expect(serverRtt?.title).toContain('Browser ↔ Von server round trip');
+        expect(dbLatency?.title).toContain('measured inside the Von server');
     });
 });

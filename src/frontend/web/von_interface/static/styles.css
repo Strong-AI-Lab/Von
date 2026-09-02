@@ -6857,7 +6857,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     50% { opacity: 1; }
 }
 
-.db-conn-badge.loading .db-latency {
+.db-conn-badge.loading .db-latency,
+.db-conn-badge.loading .server-rtt-latency {
     animation: db-conn-loading-pulse 1.2s ease-in-out infinite;
 }
 
@@ -7000,7 +7001,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     animation: dbBadgeFlash 1.2s ease-in-out infinite;
 }
 
-.db-conn-badge.fatal .db-latency {
+.db-conn-badge.fatal .db-latency,
+.db-conn-badge.fatal .server-rtt-latency {
     padding: 2px 6px;
     margin-left: 6px;
     border-radius: 8px;
@@ -7045,8 +7047,9 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     white-space: nowrap;
 }
 
-/* Latency indicator inside DB badge */
-.db-conn-badge .db-latency {
+/* User-facing server RTT and developer-facing Mongo ping indicators. */
+.db-conn-badge .db-latency,
+.db-conn-badge .server-rtt-latency {
     display: inline-block;
     margin-left: 4px;
     padding: 1px 4px;
@@ -7058,25 +7061,30 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     letter-spacing: 0;
 }
 
-.db-conn-badge.degraded .db-latency {
+.db-conn-badge.degraded .db-latency,
+.db-conn-badge.degraded .server-rtt-latency {
     background: rgba(255, 255, 255, 0.35);
 }
 
-.db-conn-badge.warning .db-latency {
+.db-conn-badge.warning .db-latency,
+.db-conn-badge.warning .server-rtt-latency {
     background: rgba(255, 255, 255, 0.45);
 }
 
-.db-conn-badge .db-latency.warn {
+.db-conn-badge .db-latency.warn,
+.db-conn-badge .server-rtt-latency.warn {
     background: #fde68a;
     color: #92400e;
 }
 
-.db-conn-badge .db-latency.slow {
+.db-conn-badge .db-latency.slow,
+.db-conn-badge .server-rtt-latency.slow {
     background: #fca5a5;
     color: #7f1d1d;
 }
 
-.db-conn-badge.compact .db-latency {
+.db-conn-badge.compact .db-latency,
+.db-conn-badge.compact .server-rtt-latency {
     margin-left: 3px;
     padding: 0 3px;
     font-size: 9px;

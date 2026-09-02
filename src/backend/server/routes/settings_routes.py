@@ -652,6 +652,7 @@ def get_db_location_info():
         sanitized_uri = _sanitize_mongo_uri_for_display(effective_uri)
         # Attempt a quick ping
         ping_ok = False
+        mongo_ping_latency_ms = None
         error_message = None
         try:
             db = get_db()
@@ -678,6 +679,11 @@ def get_db_location_info():
                     ping_error_type = type(ping_exc).__name__
                     raise
                 finally:
+                    if ping_success:
+                        mongo_ping_latency_ms = round(
+                            (time.perf_counter() - ping_started_at) * 1000.0,
+                            3,
+                        )
                     observe_mongo_operation(
                         service="settings_routes",
                         collection="$cmd",
@@ -725,6 +731,10 @@ def get_db_location_info():
             "sanitized_uri": sanitized_uri,
             "database_name": DATABASE_NAME,
             "ping_ok": ping_ok,
+            # This is measured inside the Von server around the Mongo ping.
+            # Browser-to-server round-trip latency is measured separately by
+            # the frontend and must not be presented as database latency.
+            "mongo_ping_latency_ms": mongo_ping_latency_ms,
             "error": error_message,
             "classification": classification,
             "connection_location": connection_location,

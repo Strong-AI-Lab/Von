@@ -358,8 +358,8 @@ let footerDbLoadGeneration = 0;
 let footerServerReachability = null;
 let footerLlmExecutionRefreshScheduled = false;
 let footerWorkflowCapabilityRetryTimerId = null;
-const FOOTER_DB_PROBE_STATS_KEY = 'von_footer_db_probe_stats_v1';
-const FOOTER_DB_PROBE_SAMPLE_LIMIT = 32;
+const FOOTER_SERVER_RTT_STATS_KEY = 'von_footer_server_rtt_stats_v1';
+const FOOTER_SERVER_RTT_SAMPLE_LIMIT = 32;
 const FOOTER_DB_RETRY_MIN_MS = 1500;
 const FOOTER_DB_RETRY_MAX_MS = 20000;
 
@@ -499,10 +499,10 @@ export function setFooterServerReachability(isReachable) {
   }
 }
 
-function readFooterDbProbeStats() {
+function readFooterServerRttStats() {
   const fallback = { successes: 0, failures: 0, samples_ms: [] };
   try {
-    const raw = localStorage.getItem(FOOTER_DB_PROBE_STATS_KEY);
+    const raw = localStorage.getItem(FOOTER_SERVER_RTT_STATS_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw);
     const samples = Array.isArray(parsed?.samples_ms)
@@ -511,16 +511,16 @@ function readFooterDbProbeStats() {
     return {
       successes: Number.isFinite(Number(parsed?.successes)) ? Math.max(0, Number(parsed.successes)) : 0,
       failures: Number.isFinite(Number(parsed?.failures)) ? Math.max(0, Number(parsed.failures)) : 0,
-      samples_ms: samples.slice(-FOOTER_DB_PROBE_SAMPLE_LIMIT),
+      samples_ms: samples.slice(-FOOTER_SERVER_RTT_SAMPLE_LIMIT),
     };
   } catch (_) {
     return fallback;
   }
 }
 
-function persistFooterDbProbeStats(stats) {
+function persistFooterServerRttStats(stats) {
   try {
-    localStorage.setItem(FOOTER_DB_PROBE_STATS_KEY, JSON.stringify(stats));
+    localStorage.setItem(FOOTER_SERVER_RTT_STATS_KEY, JSON.stringify(stats));
   } catch (_) {
     // Non-fatal: stats persistence is best-effort only.
   }
@@ -534,8 +534,8 @@ function computePercentile(values, percentile) {
   return Number.isFinite(value) ? Math.round(value) : null;
 }
 
-function getFooterDbProbeSummary() {
-  const stats = readFooterDbProbeStats();
+function getFooterServerRttSummary() {
+  const stats = readFooterServerRttStats();
   return {
     sampleCount: stats.samples_ms.length,
     p50Ms: computePercentile(stats.samples_ms, 0.5),
@@ -545,19 +545,19 @@ function getFooterDbProbeSummary() {
   };
 }
 
-function recordFooterDbProbeSuccess(elapsedMs) {
-  const stats = readFooterDbProbeStats();
-  const nextSamples = [...stats.samples_ms, Math.round(elapsedMs)].slice(-FOOTER_DB_PROBE_SAMPLE_LIMIT);
-  persistFooterDbProbeStats({
+function recordFooterServerRttSuccess(elapsedMs) {
+  const stats = readFooterServerRttStats();
+  const nextSamples = [...stats.samples_ms, Math.round(elapsedMs)].slice(-FOOTER_SERVER_RTT_SAMPLE_LIMIT);
+  persistFooterServerRttStats({
     successes: stats.successes + 1,
     failures: stats.failures,
     samples_ms: nextSamples,
   });
 }
 
-function recordFooterDbProbeFailure() {
-  const stats = readFooterDbProbeStats();
-  persistFooterDbProbeStats({
+function recordFooterServerRttFailure() {
+  const stats = readFooterServerRttStats();
+  persistFooterServerRttStats({
     successes: stats.successes,
     failures: stats.failures + 1,
     samples_ms: stats.samples_ms,
@@ -566,7 +566,7 @@ function recordFooterDbProbeFailure() {
 
 function computeFooterDbRetryDelayMs(attempt) {
   const safeAttempt = Math.max(0, Number(attempt) || 0);
-  const summary = getFooterDbProbeSummary();
+  const summary = getFooterServerRttSummary();
   const adaptiveBaseMs = Number.isFinite(summary.p90Ms)
     ? Math.min(6000, Math.max(2000, summary.p90Ms * 8))
     : 2500;
@@ -575,10 +575,10 @@ function computeFooterDbRetryDelayMs(attempt) {
 }
 
 function formatFooterDbRetryHint(attempt, delayMs) {
-  const summary = getFooterDbProbeSummary();
+  const summary = getFooterServerRttSummary();
   const waitSec = Math.max(1, Math.round(delayMs / 1000));
   if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
-    return `Waiting for DB status. Retry #${attempt + 1} in ${waitSec}s. Recent db/info latency p50=${summary.p50Ms}ms p90=${summary.p90Ms}ms (n=${summary.sampleCount}).`;
+    return `Waiting for DB status. Retry #${attempt + 1} in ${waitSec}s. Recent browser ↔ Von RTT p50=${summary.p50Ms}ms p90=${summary.p90Ms}ms (n=${summary.sampleCount}).`;
   }
   return `Waiting for DB status. Retry #${attempt + 1} in ${waitSec}s.`;
 }
@@ -873,14 +873,15 @@ function ensureFooterDbLoadingBadge(footer) {
   const badge = document.createElement('span');
   badge.className = 'db-conn-badge loading';
   badge.style.marginLeft = '12px';
-  badge.innerHTML = '<span class="db-label">🕓 Mongo: loading...</span> <span class="db-latency" aria-label="DB latency" title="Waiting for DB status">...</span>';
+  badge.innerHTML = '<span class="db-label">🕓 Mongo: loading...</span> <span class="server-rtt-latency" aria-label="Server round-trip latency" title="Waiting for Von server response">RTT …</span> <span class="db-latency" aria-label="Mongo ping latency" title="Waiting for MongoDB status">DB …</span>';
   setKeptNativeTitle(badge, 'Loading database status...');
-  setKeptNativeTitle(badge.querySelector('.db-latency'), 'Waiting for DB status');
+  setKeptNativeTitle(badge.querySelector('.server-rtt-latency'), 'Waiting for Von server response');
+  setKeptNativeTitle(badge.querySelector('.db-latency'), 'Waiting for MongoDB status');
   footer.appendChild(badge);
   return badge;
 }
 
-function attachFooterDbBadge(footer, dbInfo) {
+function attachFooterDbBadge(footer, dbInfo, initialServerRoundTripMs = null) {
   if (!footer || !dbInfo || typeof dbInfo !== 'object') return;
 
   const sanitized = dbInfo.sanitized_uri || '';
@@ -899,14 +900,21 @@ function attachFooterDbBadge(footer, dbInfo) {
   const buildLabelText = (icon, text) => `${icon} ${text}`;
   const fallbackNote = usingFallback ? ' (fallback)' : '';
   // Build badge content with dedicated label span so we can mutate text later
-  badge.innerHTML = `<span class="db-label">${buildLabelText(labelIcon, `Mongo: ${classification}${fallbackNote}`)}</span> <span class="db-latency" aria-label="DB latency" title="Recent DB ping latency">…</span>`;
-  const latencySpan = () => badge.querySelector('.db-latency');
+  badge.innerHTML = `<span class="db-label">${buildLabelText(labelIcon, `Mongo: ${classification}${fallbackNote}`)}</span> <span class="server-rtt-latency" aria-label="Server round-trip latency" title="Browser to Von server round-trip latency">RTT …</span> <span class="db-latency" aria-label="Mongo ping latency" title="MongoDB ping measured inside the Von server">DB …</span>`;
+  const serverRttSpan = () => badge.querySelector('.server-rtt-latency');
+  const dbLatencySpan = () => badge.querySelector('.db-latency');
   const labelSpan = () => badge.querySelector('.db-label');
   let lastClassification = classification;
   let lastUsingFallback = usingFallback;
   let lastPingOk = !!pingOk;
   let lastServerReachable = normaliseFooterServerReachability(footerServerReachability);
-  let lastMeasuredLatencyMs = null;
+  const normaliseLatencyMs = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+  };
+  let lastServerRoundTripMs = normaliseLatencyMs(initialServerRoundTripMs);
+  let lastMongoPingLatencyMs = normaliseLatencyMs(dbInfo.mongo_ping_latency_ms);
 
   const status = pingOk ? 'Connected' : 'Unavailable';
   const err = dbInfo.error ? `\nError: ${String(dbInfo.error).slice(0, 300)}` : '';
@@ -981,40 +989,66 @@ function attachFooterDbBadge(footer, dbInfo) {
     return 'normal';
   };
 
-  const applyLatencyState = (state, elapsedMs = null) => {
-    const span = latencySpan();
-    if (!span) return;
+  const formatDbLatency = (latencyMs) => {
+    if (!Number.isFinite(latencyMs)) return null;
+    return latencyMs < 10 ? latencyMs.toFixed(1) : String(Math.round(latencyMs));
+  };
 
-    span.classList.remove('fatal', 'warn', 'slow');
+  const applyLatencyState = (state, serverRoundTripMs = null, mongoPingLatencyMs = null) => {
+    const rttSpan = serverRttSpan();
+    const dbSpan = dbLatencySpan();
+    if (!rttSpan || !dbSpan) return;
+
+    rttSpan.classList.remove('fatal', 'warn', 'slow');
+    dbSpan.classList.remove('fatal', 'warn', 'slow');
 
     if (state === 'fatal_atlas') {
-      span.textContent = 'offline';
-      span.classList.add('fatal');
-      setKeptNativeTitle(span, 'MongoDB Atlas unreachable');
+      dbSpan.textContent = 'DB offline';
+      dbSpan.classList.add('fatal');
+      setKeptNativeTitle(dbSpan, 'MongoDB Atlas unreachable');
+      if (Number.isFinite(serverRoundTripMs)) {
+        rttSpan.textContent = `RTT ${Math.round(serverRoundTripMs)}ms`;
+      } else {
+        rttSpan.textContent = 'RTT …';
+      }
+      setKeptNativeTitle(rttSpan, 'Browser to Von server round-trip latency; the server responded but MongoDB did not');
       return;
     }
 
     if (state === 'server_down_unknown') {
-      span.textContent = 'unknown';
-      span.classList.add('warn');
-      setKeptNativeTitle(span, 'Mongo status unknown because Von server is unreachable');
+      rttSpan.textContent = 'RTT unknown';
+      rttSpan.classList.add('warn');
+      dbSpan.textContent = 'DB unknown';
+      dbSpan.classList.add('warn');
+      setKeptNativeTitle(rttSpan, 'Von server is unreachable, so round-trip latency is unknown');
+      setKeptNativeTitle(dbSpan, 'Mongo status is unknown because the Von server is unreachable');
       return;
     }
 
-    if (!Number.isFinite(elapsedMs)) {
-      span.textContent = '...';
-      setKeptNativeTitle(span, 'Waiting for DB status');
-      return;
-    }
-
-    span.textContent = `${elapsedMs}ms`;
-    span.classList.toggle('warn', elapsedMs > 250);
-    span.classList.toggle('slow', elapsedMs > 600);
-    const summary = getFooterDbProbeSummary();
-    if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
-      setKeptNativeTitle(span, `Recent DB latency: ${elapsedMs} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount})`);
+    if (Number.isFinite(serverRoundTripMs)) {
+      rttSpan.textContent = `RTT ${Math.round(serverRoundTripMs)}ms`;
+      rttSpan.classList.toggle('warn', serverRoundTripMs > 250);
+      rttSpan.classList.toggle('slow', serverRoundTripMs > 600);
+      const summary = getFooterServerRttSummary();
+      if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
+        setKeptNativeTitle(rttSpan, `Browser ↔ Von server round trip: ${Math.round(serverRoundTripMs)} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount}). Includes network, relay, TLS and server request handling.`);
+      } else {
+        setKeptNativeTitle(rttSpan, `Browser ↔ Von server round trip: ${Math.round(serverRoundTripMs)} ms. Includes network, relay, TLS and server request handling.`);
+      }
     } else {
-      setKeptNativeTitle(span, `Recent DB latency: ${elapsedMs} ms`);
+      rttSpan.textContent = 'RTT …';
+      setKeptNativeTitle(rttSpan, 'Waiting for Von server round-trip measurement');
+    }
+
+    const formattedDbLatency = formatDbLatency(mongoPingLatencyMs);
+    if (formattedDbLatency !== null) {
+      dbSpan.textContent = `DB ${formattedDbLatency}ms`;
+      dbSpan.classList.toggle('warn', mongoPingLatencyMs > 100);
+      dbSpan.classList.toggle('slow', mongoPingLatencyMs > 500);
+      setKeptNativeTitle(dbSpan, `MongoDB ping measured inside the Von server: ${formattedDbLatency} ms. A cached status response may show the most recent server-side ping for up to 10 seconds.`);
+    } else {
+      dbSpan.textContent = 'DB …';
+      setKeptNativeTitle(dbSpan, 'Waiting for a server-side MongoDB ping measurement');
     }
   };
 
@@ -1022,31 +1056,36 @@ function attachFooterDbBadge(footer, dbInfo) {
     const nextReachable = normaliseFooterServerReachability(event?.detail?.isReachable);
     if (nextReachable === null) return;
     const state = applyBadgeState(lastPingOk, lastClassification, lastUsingFallback, nextReachable);
-    applyLatencyState(state, lastMeasuredLatencyMs);
+    applyLatencyState(state, lastServerRoundTripMs, lastMongoPingLatencyMs);
   };
 
   document.addEventListener('von:serverReachabilityChanged', handleServerReachabilityChanged);
   const initialState = applyBadgeState(lastPingOk, lastClassification, lastUsingFallback, lastServerReachable);
-  applyLatencyState(initialState, null);
+  applyLatencyState(initialState, lastServerRoundTripMs, lastMongoPingLatencyMs);
 
-  // Latency measurement (lightweight HEAD /db/info ping timing)
+  // The browser measures end-to-end Von server RTT. The response separately
+  // carries Mongo ping latency measured inside the server.
   async function measureLatency() {
-    const span = latencySpan(); if (!span) return;
+    if (!serverRttSpan() || !dbLatencySpan()) return;
     try {
       const t0 = performance.now();
       const resp = await fetch('/api/settings/db/info', { cache: 'no-store', method: 'GET' });
       if (!resp.ok) throw new Error('bad status ' + resp.status);
       const payload = await resp.json().catch(() => null);
       const elapsed = Math.round(performance.now() - t0);
-      lastMeasuredLatencyMs = elapsed;
-      recordFooterDbProbeSuccess(elapsed);
+      lastServerRoundTripMs = elapsed;
+      recordFooterServerRttSuccess(elapsed);
+      const reportedMongoPingLatencyMs = normaliseLatencyMs(payload?.mongo_ping_latency_ms);
+      if (reportedMongoPingLatencyMs !== null) {
+        lastMongoPingLatencyMs = reportedMongoPingLatencyMs;
+      }
       const nextClassification = (payload && typeof payload.classification === 'string') ? payload.classification : lastClassification;
       const nextFallback = (payload && typeof payload.using_fallback === 'boolean') ? payload.using_fallback : lastUsingFallback;
       const nextPingOk = (payload && typeof payload.ping_ok === 'boolean') ? payload.ping_ok : lastPingOk;
       const state = applyBadgeState(!!nextPingOk, nextClassification, !!nextFallback, true);
-      applyLatencyState(state, elapsed);
+      applyLatencyState(state, lastServerRoundTripMs, lastMongoPingLatencyMs);
     } catch (_) {
-      recordFooterDbProbeFailure();
+      recordFooterServerRttFailure();
       const inferredServerReachable = normaliseFooterServerReachability(footerServerReachability);
       const state = applyBadgeState(
         false,
@@ -1054,7 +1093,7 @@ function attachFooterDbBadge(footer, dbInfo) {
         lastUsingFallback,
         inferredServerReachable === null ? false : inferredServerReachable
       );
-      applyLatencyState(state, null);
+      applyLatencyState(state, null, null);
     }
   }
 
@@ -1748,12 +1787,12 @@ export async function setModelInfoFooterText() {
     if (dbLoadGeneration !== footerDbLoadGeneration) return;
 
     if (dbInfo) {
-      recordFooterDbProbeSuccess(requestElapsedMs);
+      recordFooterServerRttSuccess(requestElapsedMs);
       const existingBadge = footer.querySelector('.db-conn-badge');
       if (existingBadge) {
         try { existingBadge.remove(); } catch (_) { /* ignore */ }
       }
-      attachFooterDbBadge(footer, dbInfo);
+      attachFooterDbBadge(footer, dbInfo, requestElapsedMs);
       readinessIssues.delete('db');
       updateFooterReadinessState(footerContainer, readinessIssues);
       clearFooterDbRetryTimer();
@@ -1769,7 +1808,7 @@ export async function setModelInfoFooterText() {
         labelNode.textContent = attempt > 0 ? '🕓 Mongo: retrying...' : '🕓 Mongo: loading...';
       }
     }
-    recordFooterDbProbeFailure();
+    recordFooterServerRttFailure();
 
     const inJest = typeof globalThis.process !== 'undefined' && globalThis.process?.env?.JEST_WORKER_ID;
     if (inJest) return;
