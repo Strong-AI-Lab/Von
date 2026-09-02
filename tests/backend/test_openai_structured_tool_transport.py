@@ -735,6 +735,15 @@ def test_responses_serialises_actual_adaptive_tools_with_explicit_strictness() -
         read_tool["parameters"]["properties"]["arguments"]["additionalProperties"]
         is True
     )
+    evidence_tool = next(tool for tool in tools if tool["name"] == "turn_read_evidence")
+    assert evidence_tool["strict"] is False
+    field_equals_schema = evidence_tool["parameters"]["properties"]["field_equals"]
+    assert field_equals_schema["additionalProperties"]["type"] == [
+        "string",
+        "number",
+        "boolean",
+        "null",
+    ]
 
 
 def test_responses_maps_reasoning_effort_and_disables_storage(

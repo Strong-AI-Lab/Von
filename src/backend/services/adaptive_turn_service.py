@@ -1798,8 +1798,10 @@ def _tool_definitions() -> list[ToolDefinition]:
                 "Read a selected bounded slice of a prior tool result by its "
                 "turn-scoped evidence handle. Evidence IDs are opaque: copy the "
                 "complete evidence_id exactly from the result or evidence index; "
-                "never reconstruct or shorten it. Select with a JSON pointer, a text "
-                "query, an offset, or any combination. Repeated calls may inspect "
+                "never reconstruct or shorten it. Select with a JSON pointer, a "
+                "case-insensitive text query over keys and non-null scalar values, "
+                "or field_equals for exact structural matching including JSON null. "
+                "Do not put JSON field predicates in query. Repeated calls may inspect "
                 "different portions; the raw result is not discarded. Omit "
                 "json_pointer, use the RFC root pointer (an empty string), or use "
                 "'/' as this model-facing tool's root alias to read the whole result."
@@ -1815,7 +1817,26 @@ def _tool_definitions() -> list[ToolDefinition]:
                             "or use '/' as this tool's root alias for the whole result."
                         ),
                     },
-                    "query": {"type": "string"},
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Case-insensitive substring match over keys and non-null "
+                            "scalar values. This is not a search over serialised JSON."
+                        ),
+                    },
+                    "field_equals": {
+                        "type": "object",
+                        "description": (
+                            "Exact mapping-field equality predicate. Values must be "
+                            "JSON scalars; use JSON null to find null-valued fields, "
+                            "for example {\"session_name\": null}."
+                        ),
+                        "additionalProperties": {
+                            "type": ["string", "number", "boolean", "null"]
+                        },
+                        "minProperties": 1,
+                        "maxProperties": 20,
+                    },
                     "offset": {"type": "integer", "minimum": 0},
                     "max_chars": {
                         "type": "integer",
@@ -9375,6 +9396,11 @@ def execute_adaptive_turn(
                         query=(
                             str(call.payload.get("query"))
                             if call.payload.get("query") is not None
+                            else None
+                        ),
+                        field_equals=(
+                            dict(call.payload["field_equals"])
+                            if isinstance(call.payload.get("field_equals"), Mapping)
                             else None
                         ),
                         offset=int(call.payload.get("offset") or 0),

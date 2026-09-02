@@ -1677,6 +1677,68 @@ class _RootAliasHydrationClient:
         raise AssertionError("unexpected model call")
 
 
+class _FieldEqualsHydrationClient(_RootAliasHydrationClient):
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: list[Any],
+        **kwargs: Any,
+    ) -> LLMResponse:
+        call_number = len(self.calls)
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "available_tools": list(available_tools),
+                **kwargs,
+            }
+        )
+        if call_number == 0:
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="field-source",
+                        payload={
+                            "name": "general_read",
+                            "arguments": {"query": "list conversations"},
+                        },
+                    )
+                ],
+                continuation=LLMContinuation(
+                    provider="test",
+                    api_surface="responses",
+                    model="test-model",
+                    response_id="field-source-response",
+                ),
+            )
+        if call_number == 1:
+            envelope = self._latest_tool_output(kwargs)
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_read_evidence",
+                        call_id="field-hydration",
+                        payload={
+                            "evidence_id": envelope["evidence_id"],
+                            "field_equals": {"session_name": None},
+                        },
+                    )
+                ],
+                continuation=LLMContinuation(
+                    provider="test",
+                    api_surface="responses",
+                    model="test-model",
+                    response_id="field-hydration-response",
+                ),
+            )
+        if call_number == 2:
+            self.hydrated_slice = self._latest_tool_output(kwargs)
+            return LLMResponse(text_response="The unnamed conversation was found.")
+        raise AssertionError("unexpected model call")
+
+
 def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     client = _SequenceClient(LLMResponse(text_response="A useful answer."))
     gateway = _gateway(lambda **_kwargs: {"success": True})
@@ -2182,9 +2244,46 @@ def test_model_slash_evidence_pointer_hydrates_the_whole_result() -> None:
         if tool.name == "turn_read_evidence"
     )
     assert "root alias" in read_tool.description
+    assert "field_equals" in read_tool.input_schema["properties"]
+    assert "JSON null" in (
+        read_tool.input_schema["properties"]["field_equals"]["description"]
+    )
     assert "root alias" in (
         read_tool.input_schema["properties"]["json_pointer"]["description"]
     )
+
+
+def test_model_field_equals_hydrates_null_mapping_through_adaptive_tool() -> None:
+    client = _FieldEqualsHydrationClient()
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "coverage_complete": True,
+                "has_more": False,
+                "conversations": [
+                    {"session_id": "unnamed", "session_name": None},
+                    {"session_id": "named", "session_name": "Named conversation"},
+                ],
+            }
+        ),
+        prompt="Find unnamed conversations.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="field-equals-hydration",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "The unnamed conversation was found."
+    assert client.hydrated_slice is not None
+    assert client.hydrated_slice["success"] is True
+    assert client.hydrated_slice["matches"][0]["json_pointer"] == "/conversations/0"
+    assert client.hydrated_slice["conclusion"]["global_conclusion_supported"] is True
 
 
 def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None:

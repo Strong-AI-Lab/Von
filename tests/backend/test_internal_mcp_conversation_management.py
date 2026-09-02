@@ -125,6 +125,7 @@ def test_conversation_search_uses_trusted_actor_scope_and_returns_cursor(monkeyp
             organisation_concept_id="#V#org",
             namespace="#V#alice@org",
             query="detector calibration",
+            name_present=False,
             page_size=25,
         )
 
@@ -132,6 +133,10 @@ def test_conversation_search_uses_trusted_actor_scope_and_returns_cursor(monkeyp
     assert captured["organisation_concept_id"] == "#V#org"
     assert captured["namespace"] == "#V#alice@org"
     assert captured["query"] == "detector calibration"
+    assert captured["filters"] == {"name_present": False}
+    definition = build_default_catalogue().get("conversation_search")
+    assert definition.input_schema.expect("name_present") == (bool, type(None))
+    assert "name_present=false" in definition.description
     _assert_success_schema("conversation_search", payload)
 
 

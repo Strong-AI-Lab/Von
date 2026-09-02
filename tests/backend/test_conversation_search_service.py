@@ -32,6 +32,54 @@ def _accessible_result(**_kwargs):
     }
 
 
+def test_star_search_filters_unnamed_conversations_structurally(monkeypatch):
+    from src.backend.services import conversation_search_service as service
+
+    monkeypatch.setattr(
+        service,
+        "list_actor_conversations",
+        lambda **_kwargs: {
+            "success": True,
+            "conversations": [
+                {
+                    "session_id": "unnamed",
+                    "session_name": None,
+                    "last_message_at": "2026-09-02T12:00:00+00:00",
+                    "conversation_search_index_version": 1,
+                    "trashed": False,
+                },
+                {
+                    "session_id": "named",
+                    "session_name": "Named conversation",
+                    "last_message_at": "2026-09-02T11:00:00+00:00",
+                    "conversation_search_index_version": 1,
+                    "trashed": False,
+                },
+            ],
+            "has_more": False,
+            "coverage_complete": True,
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "search_conversation_preference_session_ids",
+        lambda **_kwargs: [],
+    )
+
+    result = service.search_actor_conversations(
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#org",
+        namespace="#V#alice@org",
+        query="*",
+        match_mode="lexical",
+        filters={"name_present": False},
+    )
+
+    assert [row["session_id"] for row in result["results"]] == ["unnamed"]
+    assert result["filters"] == {"name_present": False}
+    assert result["coverage_complete"] is True
+
+
 def test_search_combines_indexed_title_content_and_override_with_stable_cursor(
     monkeypatch,
 ):

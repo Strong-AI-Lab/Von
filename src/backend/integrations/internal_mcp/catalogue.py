@@ -18469,6 +18469,28 @@ def _conversation_search(**kwargs):
             "authenticated_actor_context_required",
             "Conversation search requires a trusted authenticated user.",
         )
+    filters = (
+        dict(kwargs.get("filters"))
+        if isinstance(kwargs.get("filters"), dict)
+        else {}
+    )
+    name_present = kwargs.get("name_present")
+    if name_present is not None:
+        if not isinstance(name_present, bool):
+            return make_error_response(
+                "conversation_search_failed",
+                "name_present must be true, false, or omitted.",
+            )
+        nested_name_present = filters.get("name_present")
+        if (
+            nested_name_present is not None
+            and nested_name_present is not name_present
+        ):
+            return make_error_response(
+                "conversation_search_failed",
+                "Conflicting name_present values were supplied.",
+            )
+        filters["name_present"] = name_present
     try:
         return search_actor_conversations(
             actor_user_id=str(actor_scope.user_concept_id),
@@ -18476,7 +18498,7 @@ def _conversation_search(**kwargs):
             organisation_concept_id=actor_scope.organisation_concept_id,
             query=kwargs.get("query"),
             match_mode=kwargs.get("match_mode") or "hybrid",
-            filters=kwargs.get("filters") if isinstance(kwargs.get("filters"), dict) else {},
+            filters=filters,
             sort=kwargs.get("sort") or "relevance",
             page_size=kwargs.get("page_size") or 20,
             cursor=_clean_optional_string(kwargs.get("cursor")),
@@ -25147,6 +25169,7 @@ def _conversation_search_input_schema() -> Schema:
         optional={
             "match_mode": (str, type(None)),
             "filters": (dict, type(None)),
+            "name_present": (bool, type(None)),
             "sort": (str, type(None)),
             "page_size": (int, type(None)),
             "cursor": (str, type(None)),
@@ -25159,6 +25182,7 @@ def _conversation_search_input_schema() -> Schema:
         allow_unknown=False,
         description=(
             "Search actor-visible conversation titles and user-visible content. "
+            "Use query='*' with name_present=false to find unnamed conversations; "
             "match_mode is lexical, semantic, or hybrid; pass next_cursor back "
             "unchanged to retrieve the next stable batch."
         ),
@@ -42562,7 +42586,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             description=(
                 "Search titles, actor-specific display names, and user-visible "
                 "conversation content for the authenticated actor. Supports lexical, "
-                "semantic, and hybrid retrieval. Results are canonically reauthorised; "
+                "semantic, and hybrid retrieval. Use query='*' with "
+                "name_present=false for typed unnamed-conversation discovery. Results "
+                "are canonically reauthorised; "
                 "each contains a canonical conversation_reference.v1, display name/date, "
                 "available actions, match field, and bounded source locator/snippet. Pass "
                 "next_cursor back unchanged for the next batch. Treat snippets as "

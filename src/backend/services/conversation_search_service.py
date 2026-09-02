@@ -227,9 +227,14 @@ def search_actor_conversations(
     if sort_mode not in _VALID_SORTS:
         raise ConversationSearchError(f"sort must be one of {sorted(_VALID_SORTS)}.")
     safe_page_size = max(1, min(int(page_size), 100))
+    raw_filters = dict(filters or {})
+    if "name_present" in raw_filters and not isinstance(
+        raw_filters["name_present"], bool
+    ):
+        raise ConversationSearchError("name_present must be true or false.")
     clean_filters = {
         key: value
-        for key, value in dict(filters or {}).items()
+        for key, value in raw_filters.items()
         if key
         in {
             "date_from",
