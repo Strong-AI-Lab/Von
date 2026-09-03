@@ -1135,6 +1135,9 @@ def test_run_sh_workflow_purity_check_respects_daily_success_ttl() -> None:
 	tmpdir="$(mktemp -d)"
 	fake_python="$tmpdir/fake-python"
 	purity_calls="$tmpdir/purity-calls.log"
+	runtime_root="$tmpdir/runtime-root"
+	mkdir -p "$runtime_root/scripts"
+	: > "$runtime_root/scripts/check_workflow_purity.py"
 	cat > "$fake_python" <<SH
 #!/usr/bin/env sh
 printf 'called %s\n' "\$*" >> "$purity_calls"
@@ -1163,6 +1166,7 @@ SH
 	log_mongo_ssh_tunnel_status() { :; }
 
 	PORT=5124
+	ROOT="$runtime_root"
 	AGENT_TEST_INSTANCE=0
 	SKIP_HEALTH=1
 	NO_BROWSER=1
@@ -1189,11 +1193,13 @@ SH
 	VON_FORCE_WORKFLOW_PURITY_CHECK=1 start_server
 	force_logs="$(printf '%s\n' "${logs[@]}")"
 	force_call_count=0
+	force_call=""
 	if [ -f "$purity_calls" ]; then
 	    force_call_count="$(wc -l < "$purity_calls" | tr -d ' ')"
+	    force_call="$(tail -n 1 "$purity_calls")"
 	fi
 
-	SKIP_LOGS="$skip_logs" FORCE_LOGS="$force_logs" python3 - <<PY
+	SKIP_LOGS="$skip_logs" FORCE_LOGS="$force_logs" FORCE_CALL="$force_call" python3 - <<PY
 import json
 import os
 print(json.dumps({
@@ -1201,6 +1207,8 @@ print(json.dumps({
     "force_logs": [line for line in os.environ.get("FORCE_LOGS", "").splitlines() if line],
     "skip_call_count": int("$skip_call_count"),
     "force_call_count": int("$force_call_count"),
+    "force_call": os.environ.get("FORCE_CALL", ""),
+    "runtime_root": "$runtime_root",
 }))
 PY
 	rm -rf "$tmpdir"
@@ -1213,6 +1221,10 @@ PY
         "Running Workflow Purity Check" in line for line in payload["skip_logs"]
     )
     assert payload["force_call_count"] == 1
+    assert payload["force_call"] == (
+        f"called {payload['runtime_root']}/scripts/check_workflow_purity.py "
+        f"{payload['runtime_root']} --quiet-on-pass"
+    )
     assert any("Workflow purity check forced" in line for line in payload["force_logs"])
     assert any(
         "Running Workflow Purity Check" in line for line in payload["force_logs"]

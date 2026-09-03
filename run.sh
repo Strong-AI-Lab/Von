@@ -1610,10 +1610,10 @@ start_server() {
             log "Running Workflow Purity Check (warn-only)..."
             set +e
             if [ "$launch_mode" = "pdm-fallback" ]; then
-                "$py" run python "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done
+                "$py" run python "$purity_script" "$ROOT" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done
                 purity_status=${PIPESTATUS[0]}
             else
-                "$py" "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done
+                "$py" "$purity_script" "$ROOT" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done
                 purity_status=${PIPESTATUS[0]}
             fi
             set -e
