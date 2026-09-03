@@ -330,12 +330,14 @@ def _infer_client_type_from_model(model_name: str | None) -> str | None:
         ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
     ):
         return "openai"
+    if lowered.startswith("meta:") or lowered == "muse-spark-1.3":
+        return "meta"
+    if lowered.startswith("gemini"):
+        return "gemini"
     if lowered.startswith("ollama:") or (
         ":" in lowered and not lowered.startswith("ft:")
     ):
         return "ollama"
-    if lowered.startswith("gemini"):
-        return "gemini"
     return None
 
 
@@ -815,12 +817,17 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                     ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
                 ):
                     resolved_provider = "openai"
+                elif lowered_model.startswith("gemini"):
+                    resolved_provider = "gemini"
+                elif (
+                    lowered_model.startswith("meta:")
+                    or lowered_model == "muse-spark-1.3"
+                ):
+                    resolved_provider = "meta"
                 elif lowered_model.startswith("ollama:") or (
                     ":" in lowered_model and not lowered_model.startswith("ft:")
                 ):
                     resolved_provider = "ollama"
-                elif lowered_model.startswith("gemini"):
-                    resolved_provider = "gemini"
             if resolved_provider:
                 trace.metadata["default_provider"] = resolved_provider
         persisted_execution_trace_id: str | None = None

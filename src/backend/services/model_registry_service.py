@@ -49,7 +49,7 @@ MODEL_STAGE_CERTIFICATION_DECISION_SCHEMA_VERSION = (
 DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION = 2
 
 KNOWN_PROVIDER_PREFIXES = frozenset(
-    {"openai", "openrouter", "anthropic", "gemini", "ollama", "deepseek"}
+    {"openai", "openrouter", "anthropic", "gemini", "meta", "ollama", "deepseek"}
 )
 PARAMETER_ACTION_OMIT = "omit"
 PARAMETER_ACTION_FIXED_VALUE = "fixed_value"

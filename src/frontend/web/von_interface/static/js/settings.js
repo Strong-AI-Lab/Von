@@ -96,9 +96,15 @@ export async function loadAvailableOpenRouterModels() {
   return data;
 }
 
+export async function loadAvailableMetaModels() {
+  const { data } = await getJsonDetailed('/api/settings/models/meta');
+  return data;
+}
+
 function premiumProviderLabel(provider) {
   if (provider === 'gemini') return 'Gemini';
   if (provider === 'openrouter') return 'OpenRouter';
+  if (provider === 'meta') return 'Meta Muse';
   return 'OpenAI';
 }
 
@@ -152,6 +158,12 @@ export function renderOpenRouterModelOptions(selectElementId, models = [], selec
   const select = document.getElementById(selectElementId);
   if (!select) return;
   renderPremiumModelSelect(select, 'openrouter', models, selectedModel);
+}
+
+export function renderMetaModelOptions(selectElementId, models = [], selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+  renderPremiumModelSelect(select, 'meta', models, selectedModel);
 }
 
 export async function loadAvailableOrganisations() {
@@ -363,6 +375,24 @@ export async function populateOpenRouterModelDropdown(selectElementId, selectedM
       error: err,
       fallbackMessage: 'OpenRouter models are temporarily unavailable.',
       retryAction: () => populateOpenRouterModelDropdown(selectElementId, selectedModel)
+    });
+  }
+}
+
+export async function populateMetaModelDropdown(selectElementId, selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+
+  try {
+    const models = await loadAvailableMetaModels();
+    renderPremiumModelSelect(select, 'meta', models, selectedModel);
+    clearSelectRetryState(select);
+  } catch (err) {
+    console.error('Error populating Meta Muse model dropdown:', err);
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'Meta Muse models are temporarily unavailable.',
+      retryAction: () => populateMetaModelDropdown(selectElementId, selectedModel)
     });
   }
 }

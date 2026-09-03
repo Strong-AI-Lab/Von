@@ -562,6 +562,29 @@ variable "bootstrap_gemini_api_key_file" {
   }
 }
 
+variable "bootstrap_meta_api_key" {
+  type        = string
+  description = "Optional inline Meta Model API key for managed bootstrap secret-file injection."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_meta_api_key == null || trimspace(var.bootstrap_meta_api_key) != ""
+    error_message = "bootstrap_meta_api_key must be null or non-empty."
+  }
+}
+
+variable "bootstrap_meta_api_key_file" {
+  type        = string
+  description = "Path used by runtime META_API_KEY_FILE."
+  default     = "/etc/von/secrets/meta_api_key"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_meta_api_key_file))
+    error_message = "bootstrap_meta_api_key_file must be an absolute Linux path."
+  }
+}
+
 variable "bootstrap_openrouter_api_key" {
   type        = string
   description = "Optional inline OpenRouter API key for managed bootstrap secret-file injection."
@@ -591,8 +614,8 @@ variable "bootstrap_default_llm_provider" {
   default     = null
 
   validation {
-    condition     = var.bootstrap_default_llm_provider == null || contains(["openai", "openrouter", "gemini", "ollama"], lower(trimspace(var.bootstrap_default_llm_provider)))
-    error_message = "bootstrap_default_llm_provider must be null, openai, openrouter, gemini, or ollama."
+    condition     = var.bootstrap_default_llm_provider == null || contains(["openai", "openrouter", "gemini", "meta", "ollama"], lower(trimspace(var.bootstrap_default_llm_provider)))
+    error_message = "bootstrap_default_llm_provider must be null, openai, openrouter, gemini, meta, or ollama."
   }
 }
 

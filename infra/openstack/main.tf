@@ -178,6 +178,8 @@ locals {
     openai_api_key_file                   = var.bootstrap_openai_api_key_file
     gemini_api_key                        = var.bootstrap_gemini_api_key
     gemini_api_key_file                   = var.bootstrap_gemini_api_key_file
+    meta_api_key                          = var.bootstrap_meta_api_key
+    meta_api_key_file                     = var.bootstrap_meta_api_key_file
     openrouter_api_key                    = var.bootstrap_openrouter_api_key
     openrouter_api_key_file               = var.bootstrap_openrouter_api_key_file
     default_llm_provider                  = var.bootstrap_default_llm_provider

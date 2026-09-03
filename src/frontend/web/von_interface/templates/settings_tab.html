@@ -314,6 +314,7 @@
                     <option value="openai">OpenAI</option>
                     <option value="openrouter">OpenRouter</option>
                     <option value="gemini">Google Gemini</option>
+                    <option value="meta">Meta Muse</option>
                 </select>
             </div>
             <div class="inline-form inline-form-tight mt-2">
@@ -365,6 +366,28 @@
                     <div id="geminiModelStatusMessage" class="status-message" role="alert"></div>
                 </div>
                 <div id="geminiStatusMessage" class="status-message" role="alert"></div>
+            </div>
+
+            <div id="metaProviderSettings" class="hidden">
+                <label for="metaApiKeyEnvVar">Meta API key source:</label>
+                <input type="text" id="metaApiKeyEnvVar" name="meta_api_key_env_var" value="META_API_KEY" readonly aria-readonly="true">
+                <button id="verifyMetaApiKeyButton" class="hidden">Check key and load supported models</button>
+                <div id="metaModelsContainer" class="hidden">
+                    <label for="metaModelSelect">Select Meta Muse model:</label>
+                    <select id="metaModelSelect" name="meta_model">
+                        <!-- Meta Muse models supported by Von will be populated here -->
+                    </select>
+                    <div class="inline-form inline-form-tight mt-2">
+                        <button id="testMetaModelButton" class="btn-secondary" type="button" disabled>Test this model</button>
+                        <button id="addMetaToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
+                    </div>
+                    <div id="metaModelEligibilityStatus" class="status-message" role="status">
+                        Select a Meta Muse model to check whether it is allowed for this scope.
+                    </div>
+                    <div id="metaModelStatusMessage" class="status-message" role="alert"></div>
+                </div>
+                <small class="settings-note">Meta Muse is opt-in. Loading the supported model list does not allow a model or make it the browser default.</small>
+                <div id="metaStatusMessage" class="status-message" role="alert"></div>
             </div>
 
             <div id="openrouterProviderSettings" class="hidden">

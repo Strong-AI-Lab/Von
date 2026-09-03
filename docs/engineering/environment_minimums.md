@@ -29,6 +29,8 @@ $env:OPENAI_API_KEY = '<YOUR-OPENAI-KEY>'
 # or
 $env:GEMINI_API_KEY = '<YOUR-GEMINI-KEY>'
 # or
+$env:META_API_KEY = '<YOUR-META-KEY>'
+# or
 $env:OLLAMA_HOST = 'http://<host>:11434'
 ```
 
@@ -53,6 +55,14 @@ publication and canonical read-back.
 For legacy Gemini naming, `GOOGLE_API_BACKUP_KEY` and
 `GOOGLE_API_BACKUP_KEY_FILE` are accepted as aliases. New setups should use
 the `GEMINI_API_BACKUP_KEY` names.
+
+Meta Muse uses only the canonical `META_API_KEY` credential name. Managed
+deployments can instead set
+`META_API_KEY_FILE=/etc/von/secrets/meta_api_key`; Von reads the secret from
+that file without exposing it through Settings. The supported Meta model is
+`muse-spark-1.3`. Catalogue verification does not allow or select the model:
+the exact `meta:muse-spark-1.3` pair must first be saved in the actor-scoped
+enabled model pool before a paid model probe or generation request.
 
 ## 2. How Von decides whether MongoDB is local or remote
 

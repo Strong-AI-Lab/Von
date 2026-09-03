@@ -7500,7 +7500,13 @@ def _resolve_generate_requested_model(
             if isinstance(provider_value, str) and provider_value.strip():
                 requested_provider_name = provider_value.strip().lower()
                 break
-    if requested_provider_name not in {"openai", "openrouter", "ollama", "gemini"}:
+    if requested_provider_name not in {
+        "openai",
+        "openrouter",
+        "ollama",
+        "gemini",
+        "meta",
+    }:
         requested_provider_name = None
 
     explicit_client_type = None
@@ -7541,7 +7547,13 @@ def _resolve_generate_requested_model(
             active_provider = (
                 str(resolved_setting.get("provider") or "").strip().lower()
             )
-            if active_provider in {"openai", "openrouter", "ollama", "gemini"}:
+            if active_provider in {
+                "openai",
+                "openrouter",
+                "ollama",
+                "gemini",
+                "meta",
+            }:
                 explicit_client_type = active_provider
         model_name = get_active_model_name(
             user_concept_id=user_concept_id,
@@ -13501,6 +13513,8 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 return "openai"
             if lowered.startswith("gemini"):
                 return "gemini"
+            if lowered.startswith("meta:") or lowered == "muse-spark-1.3":
+                return "meta"
             if lowered.startswith("ollama:"):
                 return "ollama"
             if ":" in lowered and not lowered.startswith("ft:"):

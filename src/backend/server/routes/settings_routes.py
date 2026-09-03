@@ -70,8 +70,10 @@ from ...services.paper_recommendation_workflow_vontology_service import (
 )
 from ...services.window_session_context_service import get_effective_context
 from ...security.access_control import (
+    LEGACY_IDENTITY_HEADER_ACTOR_SOURCE,
     get_effective_organisation_concept_id,
     get_effective_user_concept_id,
+    get_effective_user_concept_id_with_source,
 )
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...services.workflow_capability_service import (
@@ -99,6 +101,7 @@ from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
 from ...languagemodels.llm_interface import (
     GeminiClient,
+    MetaMuseClient,
     ModelExecutionEligibilityError,
     OpenAIClient,
     OpenRouterClient,
@@ -255,6 +258,8 @@ def _validate_unified_concept_schema(concept, index):
 settings_bp = Blueprint(
     "settings", __name__
 )  # REMOVED url_prefix, as it's set during registration
+
+META_MUSE_SUPPORTED_MODELS = ("muse-spark-1.3",)
 
 _SHARED_RUNTIME_MODEL_SETTING_KEYS = frozenset(
     {"server_default_llm", "rag_embedder", "rag_llm"}
@@ -807,7 +812,13 @@ def get_llm_info():
         # overrides the DB-stored setting (e.g. premium disabled, Ollama selected locally).
         # Only known providers are accepted; any other value is ignored.
         effective_provider_override = request.args.get("effective_provider")
-        if effective_provider_override in ("openai", "openrouter", "gemini", "ollama"):
+        if effective_provider_override in (
+            "openai",
+            "openrouter",
+            "gemini",
+            "meta",
+            "ollama",
+        ):
             provider = effective_provider_override
             effective_model_override = str(
                 request.args.get("effective_model") or ""
@@ -889,6 +900,31 @@ def get_llm_info():
                     error_message = "Gemini status check failed."
                     current_app.logger.warning(
                         "Gemini LLM status check failed (error_type=%s)",
+                        type(e).__name__,
+                    )
+
+        elif provider == "meta":
+            api_key = _resolve_settings_api_key("META_API_KEY")
+            if not api_key:
+                status = "missing_key"
+                error_message = "Meta API key not set"
+            else:
+                try:
+                    available_models = MetaMuseClient(
+                        api_key=api_key,
+                        **({"default_model": model} if model else {}),
+                    ).list_models()
+                    if model and model not in available_models:
+                        status = "error"
+                        error_message = "The configured Meta model is not available."
+                    else:
+                        status = "ready"
+                        ping_ok = True
+                except Exception as e:
+                    status = "error"
+                    error_message = "Meta status check failed."
+                    current_app.logger.warning(
+                        "Meta LLM status check failed (error_type=%s)",
                         type(e).__name__,
                     )
 
@@ -1061,6 +1097,7 @@ def get_all_settings_data():
         return {
             **db_settings,  # active_llm, openai_api_key_env_var, fetch_counts_on_load, etc.
             "gemini_api_key_env_var": "GEMINI_API_KEY",
+            "meta_api_key_env_var": "META_API_KEY",
             "openrouter_api_key_env_var": "OPENROUTER_API_KEY",
             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
             "buttonify_prompt_active": (
@@ -1926,15 +1963,20 @@ def _resolve_settings_api_key(
         value = load_secret_from_env_or_file(name, f"{name}_FILE")
         if value:
             return value
-    dotenv_values = read_repo_dotenv_values(names)
+    dotenv_keys = tuple(key for name in names for key in (name, f"{name}_FILE"))
+    dotenv_values = read_repo_dotenv_values(dotenv_keys)
     for name in names:
         value = dotenv_values.get(name)
+        if value:
+            return value
+        value = read_secret_file(dotenv_values.get(f"{name}_FILE"))
         if value:
             return value
     return None
 
 
 _GEMINI_SETTINGS_KEY_ENV_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+_META_SETTINGS_KEY_ENV_VAR = "META_API_KEY"
 
 
 def _normalise_settings_key_check_env_var(value: object) -> str | None:
@@ -1942,6 +1984,8 @@ def _normalise_settings_key_check_env_var(value: object) -> str | None:
 
     name = str(value or "").strip()
     if name == "OPENROUTER_API_KEY":
+        return name
+    if name == _META_SETTINGS_KEY_ENV_VAR:
         return name
     if name in _GEMINI_SETTINGS_KEY_ENV_VARS:
         return name
@@ -1986,6 +2030,13 @@ def _normalise_gemini_settings_key_env_var(value: object) -> str | None:
 
     name = str(value or "").strip()
     return name if name in _GEMINI_SETTINGS_KEY_ENV_VARS else None
+
+
+def _normalise_meta_settings_key_env_var(value: object) -> str | None:
+    """Accept only Meta's canonical provider-specific key source."""
+
+    name = str(value or "").strip()
+    return name if name == _META_SETTINGS_KEY_ENV_VAR else None
 
 
 @settings_bp.route("/models/ollama", methods=["GET"])
@@ -2132,6 +2183,36 @@ def get_openrouter_models():
         )
         return _jsonify_no_store(
             {"error": "Could not retrieve OpenRouter models with the configured key."},
+            400,
+        )
+
+
+@settings_bp.route("/models/meta", methods=["GET"])
+def get_meta_models():
+    """Return the available subset of Von's fixed Meta Muse catalogue."""
+
+    api_key = _resolve_settings_api_key(_META_SETTINGS_KEY_ENV_VAR)
+    if not api_key:
+        return _jsonify_no_store(
+            {"error": "Meta API key was not found in META_API_KEY."},
+            400,
+        )
+    try:
+        models = [
+            model
+            for model in MetaMuseClient(api_key=api_key).list_models()
+            if model in META_MUSE_SUPPORTED_MODELS
+        ]
+        if not models:
+            raise RuntimeError("fixed Meta Muse catalogue is unavailable")
+        return _jsonify_no_store(models, 200)
+    except Exception as exc:
+        current_app.logger.warning(
+            "Could not load the supported Meta Muse catalogue (error_type=%s)",
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {"error": "Could not load the supported Meta Muse catalogue."},
             400,
         )
 
@@ -2591,6 +2672,62 @@ def verify_gemini_api_key():
             {
                 "success": False,
                 "error": "Gemini API verification failed with the configured key.",
+            },
+            400,
+        )
+
+
+@settings_bp.route("/meta/verify", methods=["POST"])
+def verify_meta_api_key():
+    """Verify the Meta key with catalogue discovery, without model generation."""
+
+    payload = request.get_json(silent=True) or {}
+    api_key_env_var = _normalise_meta_settings_key_env_var(
+        payload.get("api_key_env_var") or _META_SETTINGS_KEY_ENV_VAR
+    )
+    if not api_key_env_var:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "Meta key source must be META_API_KEY.",
+            },
+            400,
+        )
+    api_key = _resolve_settings_api_key(api_key_env_var)
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "Meta API key was not found in META_API_KEY.",
+            },
+            400,
+        )
+
+    try:
+        models = [
+            model
+            for model in MetaMuseClient(api_key=api_key).list_models()
+            if model in META_MUSE_SUPPORTED_MODELS
+        ]
+        if not models:
+            raise RuntimeError("fixed Meta Muse catalogue is unavailable")
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "models": models,
+                "verification_kind": "authenticated_model_catalogue",
+            },
+            200,
+        )
+    except Exception as exc:
+        current_app.logger.warning(
+            "Meta API key configuration check failed (error_type=%s)",
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "Could not load the supported Meta Muse catalogue.",
             },
             400,
         )
@@ -3977,6 +4114,67 @@ def _classify_gemini_probe_exception(exc: Exception) -> tuple[str, str]:
     return "unexpected_error", "Unexpected Gemini model probe failure."
 
 
+def _classify_meta_probe_exception(exc: Exception) -> tuple[str, str]:
+    """Map Meta failures to bounded, secret-free Settings diagnostics."""
+
+    raw_tokens = [
+        getattr(exc, "failure_kind", None),
+        getattr(exc, "provider_error_code", None),
+        getattr(exc, "code", None),
+    ]
+    body = getattr(exc, "body", None)
+    if isinstance(body, Mapping):
+        raw_tokens.extend(body.get(key) for key in ("code", "type", "status"))
+        nested_error = body.get("error")
+        if isinstance(nested_error, Mapping):
+            raw_tokens.extend(
+                nested_error.get(key) for key in ("code", "type", "status")
+            )
+    tokens = {
+        str(value).strip().lower().replace("-", "_").replace(" ", "_")
+        for value in raw_tokens
+        if value is not None and str(value).strip()
+    }
+    lowered = str(exc).strip().lower()
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+
+    if (
+        "billing_not_configured" in tokens
+        or "billing_not_configured" in lowered
+        or "billing not configured" in lowered
+        or status_code == 402
+    ):
+        return (
+            "billing_not_configured",
+            "Meta API billing is not configured for this key.",
+        )
+    if tokens.intersection({"authentication_error", "authentication_failed"}) or (
+        status_code == 401
+    ):
+        return "authentication_error", "Meta API authentication failed."
+    if "permission_denied" in tokens or status_code == 403:
+        return "permission_denied", "Meta API access was denied for this model."
+    if "model_not_found" in tokens or status_code == 404:
+        return "model_not_found", "The selected Meta Muse model was not found."
+    if "quota_exhausted" in tokens:
+        return "quota_exhausted", "Meta API quota is exhausted."
+    if "rate_limited" in tokens or status_code == 429:
+        return "rate_limited", "Meta API rate limit exceeded."
+    if "bad_request" in tokens or status_code == 400:
+        return "bad_request", "Meta rejected the selected model probe."
+    if "connection_error" in tokens or any(
+        marker in lowered for marker in ("connect", "network", "dns")
+    ):
+        return "connection_error", "Could not reach the Meta API."
+    return "unexpected_error", "Unexpected Meta Muse model probe failure."
+
+
 def _gemini_probe_api_surface(client: object, model: str) -> str:
     metadata = getattr(client, "last_response_metadata", None)
     observed = (
@@ -4123,6 +4321,167 @@ def test_gemini_model():
         failure_kind, reason = _classify_gemini_probe_exception(exc)
         current_app.logger.warning(
             "[gemini_test_model] Probe failed for %s (error_type=%s)",
+            requested_model,
+            type(exc).__name__,
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": False,
+                "model": requested_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
+                "failure_kind": failure_kind,
+                "reason": reason,
+            }
+        )
+
+
+@settings_bp.route("/meta/test_model", methods=["POST"])
+def test_meta_model():
+    """Run a paid probe only for an exactly allowed Meta Muse model."""
+
+    payload = request.get_json(silent=True) or {}
+    api_key_env_var = _normalise_meta_settings_key_env_var(
+        payload.get("api_key_env_var") or _META_SETTINGS_KEY_ENV_VAR
+    )
+    requested_model = str(payload.get("model") or "").strip()
+    if not api_key_env_var:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "invalid_key_env_var",
+                "reason": "Meta key source must be META_API_KEY.",
+            },
+            400,
+        )
+    if not requested_model:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "missing_model",
+                "reason": "No Meta Muse model is selected.",
+            },
+            400,
+        )
+    if requested_model not in META_MUSE_SUPPORTED_MODELS:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": requested_model,
+                "failure_kind": "model_unavailable",
+                "reason": "The selected Meta Muse model is not supported by Von.",
+            },
+            400,
+        )
+
+    actor_user_concept_id, actor_source = (
+        get_effective_user_concept_id_with_source()
+    )
+    if (
+        not actor_user_concept_id
+        or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
+    ):
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": requested_model,
+                "failure_kind": "authenticated_actor_context_required",
+                "reason": (
+                    "An authenticated actor context is required before testing "
+                    "a paid Meta model."
+                ),
+            },
+            401,
+        )
+    actor_org_concept_id = get_effective_organisation_concept_id()
+    try:
+        assert_model_execution_allowed(
+            provider="meta",
+            model=requested_model,
+            user_concept_id=actor_user_concept_id,
+            org_concept_id=actor_org_concept_id,
+            allow_ambient_actor_scope=False,
+        )
+    except ModelExecutionEligibilityError as exc:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": exc.model or requested_model,
+                "failure_kind": exc.failure_kind,
+                "reason": str(exc),
+            },
+            403,
+        )
+
+    # Credential resolution and client construction occur only after the exact
+    # actor-scoped provider/model eligibility check above.
+    api_key = _resolve_settings_api_key(api_key_env_var)
+    if not api_key:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "model": requested_model,
+                "failure_kind": "missing_api_key",
+                "reason": "Meta API key was not found in META_API_KEY.",
+            },
+            400,
+        )
+
+    model_parameters = normalise_model_parameters_for_storage(
+        payload.get(MODEL_PARAMETERS_KEY) or payload.get("modelParameters"),
+        provider="meta",
+        model=requested_model,
+        api_surface="responses",
+        include_registry=True,
+    )
+    parameter_capabilities = build_model_parameter_capabilities(
+        provider="meta",
+        model=requested_model,
+        api_surface="responses",
+        include_registry=True,
+    )
+    try:
+        client = MetaMuseClient(
+            api_key=api_key,
+            default_model=requested_model,
+            model_execution_user_concept_id=actor_user_concept_id,
+            model_execution_org_concept_id=actor_org_concept_id,
+            model_execution_actor_scope_bound=True,
+        )
+        client.generate(
+            "Reply exactly with OK.",
+            model=requested_model,
+            llm_params=model_parameters or None,
+        )
+        metadata = getattr(client, "last_response_metadata", None)
+        observed_surface = (
+            str(metadata.get("api_surface") or "").strip()
+            if isinstance(metadata, Mapping)
+            else ""
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": True,
+                "model": requested_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
+                "failure_kind": None,
+                "reason": "The selected Meta Muse model completed a live probe successfully.",
+                "api_surface": observed_surface or "responses",
+            }
+        )
+    except Exception as exc:
+        failure_kind, reason = _classify_meta_probe_exception(exc)
+        current_app.logger.warning(
+            "[meta_test_model] Probe failed for %s (error_type=%s)",
             requested_model,
             type(exc).__name__,
         )

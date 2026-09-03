@@ -85,3 +85,10 @@ def test_von_main_overrides_openai_backup_credentials_from_dotenv() -> None:
         "OPENAI_API_BACKUP_KEY",
         "OPENAI_API_BACKUP_KEY_FILE",
     }.issubset(keys)
+
+
+def test_von_main_overrides_meta_credentials_from_dotenv() -> None:
+    keys = _get_von_main_dotenv_override_keys()
+
+    assert {"META_API_KEY", "META_API_KEY_FILE"}.issubset(keys)
+    assert "MODEL_API_KEY" not in keys

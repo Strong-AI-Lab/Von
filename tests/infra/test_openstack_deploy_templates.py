@@ -86,6 +86,7 @@ def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> Non
     assert "MONGO_URI_FILE" in content
     assert "OPENAI_API_KEY_FILE" in content
     assert "GEMINI_API_KEY_FILE" in content
+    assert "META_API_KEY_FILE" in content
     assert "OPENROUTER_API_KEY_FILE" in content
 
 
@@ -98,6 +99,7 @@ def test_cloud_init_bootstrap_can_seed_scoped_llm_setting() -> None:
     assert "--user-concept-id" in content
     assert "'${openai_api_key_file}'" in content
     assert "'${gemini_api_key_file}'" in content
+    assert "'${meta_api_key_file}'" in content
     assert "'${openrouter_api_key_file}'" in content
     assert 'lower(default_llm_provider) == "gemini"' in content
     assert "VON_DEFAULT_GEMINI_MODEL" in content
@@ -244,6 +246,7 @@ def test_openstack_environment_examples_do_not_null_secret_runtime_inputs() -> N
         "bootstrap_google_oauth_client_secret",
         "bootstrap_openai_api_key",
         "bootstrap_gemini_api_key",
+        "bootstrap_meta_api_key",
         "bootstrap_openrouter_api_key",
         "bootstrap_mongo_uri",
     ]

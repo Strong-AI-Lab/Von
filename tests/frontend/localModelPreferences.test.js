@@ -419,6 +419,45 @@ describe('local model preferences', () => {
         });
     });
 
+    test('persists Meta Muse as a first-class premium provider and resolves its exact request identity', async () => {
+        const {
+            buildLocalModelRequestFields,
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setLocalPremiumModelUseEnabled,
+            setStoredMetaModelParameters,
+            setStoredMetaSelectedModel,
+            setStoredPremiumModelProvider,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredPremiumModelProvider('meta');
+        setStoredMetaSelectedModel('muse-spark-1.3');
+        setStoredMetaModelParameters({ reasoning_effort: 'medium' });
+        setLocalPremiumModelUseEnabled(true, 'meta');
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'meta',
+            premiumProvider: 'meta',
+            openaiModel: null,
+            metaModel: 'muse-spark-1.3',
+            metaModelParameters: { reasoning_effort: 'medium' },
+            ollamaSelection: null,
+        });
+        const requested = resolveLocalRequestedLlm();
+        expect(requested).toEqual({
+            provider: 'meta',
+            model: 'muse-spark-1.3',
+            requestModel: 'meta:muse-spark-1.3',
+            model_parameters: { reasoning_effort: 'medium' },
+        });
+        expect(buildLocalModelRequestFields(requested)).toEqual({
+            model: 'muse-spark-1.3',
+            model_provider: 'meta',
+            model_parameters: { reasoning_effort: 'medium' },
+        });
+    });
+
     test('rejects object events as premium providers without replacing the stored provider', async () => {
         const {
             getStoredPremiumModelProvider,

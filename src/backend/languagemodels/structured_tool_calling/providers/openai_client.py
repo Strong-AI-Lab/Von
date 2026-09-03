@@ -44,13 +44,18 @@ from ..types import (
     ToolResult,
     UnsupportedStructuredToolTransportError,
 )
+from ...model_defaults import (
+    META_MUSE_MAX_OUTPUT_TOKENS,
+    META_MUSE_TEMPERATURE,
+    META_MUSE_TOP_P,
+)
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 from ....services.llm_api_key_resolution import (
     classify_api_key_failover_exception,
 )
 from ....services.model_parameter_service import (
     chat_completions_kwargs_from_model_parameters,
-    openai_responses_kwargs_from_model_parameters,
+    responses_kwargs_from_model_parameters,
 )
 
 
@@ -105,6 +110,14 @@ def _merge_provider_parameter_kwargs(
             target[key] = {**dict(current), **dict(value)}
         else:
             target[key] = value
+
+
+def _provider_label(provider: str) -> str:
+    return {
+        "openai": "OpenAI",
+        "openrouter": "OpenRouter",
+        "meta": "Meta Model API",
+    }.get(str(provider or "").strip().lower(), "OpenAI-compatible provider")
 
 
 class OpenAIClient(LLMClient):
@@ -204,7 +217,7 @@ class OpenAIClient(LLMClient):
             allow_advertised_surface_override=continuation is not None,
         )
         decision_telemetry = decision.to_telemetry()
-        provider_label = "OpenRouter" if decision.provider == "openrouter" else "OpenAI"
+        provider_label = _provider_label(decision.provider)
         if decision.status != "compatible":
             raise UnsupportedStructuredToolTransportError(
                 "No represented API profile supports structured tools for "
@@ -310,6 +323,10 @@ class OpenAIClient(LLMClient):
             raise
         except Exception as exc:
             safe_error = self._sanitise_provider_error(exc)
+            if decision.provider == "meta":
+                for secret in (self.config.api_key, self.config.backup_api_key):
+                    if secret:
+                        safe_error = safe_error.replace(secret, "[redacted]")
             self.logger.error(
                 "%s structured-tool API error: %s", provider_label, safe_error
             )
@@ -600,6 +617,13 @@ class OpenAIClient(LLMClient):
                     profile_concept_id=decision.profile_concept_id,
                 ),
             )
+        if decision.provider == "meta":
+            projected_reasoning = effective_parameters.get("reasoning")
+            effective_parameters = (
+                {"reasoning": dict(projected_reasoning)}
+                if isinstance(projected_reasoning, Mapping)
+                else {}
+            )
         _merge_provider_parameter_kwargs(request_kwargs, effective_parameters)
         if (
             tools
@@ -718,10 +742,15 @@ class OpenAIClient(LLMClient):
             requested_parameters["reasoning_effort"] = direct_reasoning_effort
             _merge_provider_parameter_kwargs(
                 effective_parameters,
-                openai_responses_kwargs_from_model_parameters(
+                responses_kwargs_from_model_parameters(
                     {"reasoning_effort": direct_reasoning_effort},
+                    provider=decision.provider,
                     model=request_model,
                     profile_concept_id=decision.profile_concept_id,
+                    include_registry=(
+                        decision.provider != "meta"
+                        or decision.profile_concept_id is not None
+                    ),
                 ),
             )
         input_items = self._build_responses_input(
@@ -731,14 +760,19 @@ class OpenAIClient(LLMClient):
             tool_results=tool_results,
         )
         if self.config.max_tokens is not None:
-            request_kwargs["max_output_tokens"] = self.config.max_tokens
+            request_kwargs.setdefault("max_output_tokens", self.config.max_tokens)
         if isinstance(llm_params, Mapping) and llm_params:
             _merge_provider_parameter_kwargs(
                 effective_parameters,
-                openai_responses_kwargs_from_model_parameters(
+                responses_kwargs_from_model_parameters(
                     llm_params,
+                    provider=decision.provider,
                     model=request_model,
                     profile_concept_id=decision.profile_concept_id,
+                    include_registry=(
+                        decision.provider != "meta"
+                        or decision.profile_concept_id is not None
+                    ),
                 ),
             )
         _merge_provider_parameter_kwargs(request_kwargs, effective_parameters)
@@ -747,21 +781,34 @@ class OpenAIClient(LLMClient):
             and "temperature" in request_kwargs
         ):
             requested_parameters["temperature"] = request_kwargs["temperature"]
-        requested_temperature = requested_parameters.get(
-            "temperature",
-            request_kwargs.get("temperature", self.config.temperature),
+        requested_temperature = (
+            META_MUSE_TEMPERATURE
+            if decision.provider == "meta"
+            else requested_parameters.get(
+                "temperature",
+                request_kwargs.get("temperature", self.config.temperature),
+            )
         )
         request_kwargs.pop("temperature", None)
         effective_parameters.pop("temperature", None)
-        safe_temperature = resolve_safe_temperature_for_model(
-            request_model,
-            requested_temperature,
-            api_surface=API_SURFACE_RESPONSES,
-            profile_concept_id=decision.profile_concept_id,
+        safe_temperature = (
+            META_MUSE_TEMPERATURE
+            if decision.provider == "meta"
+            else resolve_safe_temperature_for_model(
+                request_model,
+                requested_temperature,
+                api_surface=API_SURFACE_RESPONSES,
+                profile_concept_id=decision.profile_concept_id,
+            )
         )
         if safe_temperature is not None:
             request_kwargs["temperature"] = safe_temperature
             effective_parameters["temperature"] = safe_temperature
+        if decision.provider == "meta":
+            request_kwargs["max_output_tokens"] = META_MUSE_MAX_OUTPUT_TOKENS
+            request_kwargs.pop("top_p", None)
+            request_kwargs["top_p"] = META_MUSE_TOP_P
+            effective_parameters["top_p"] = META_MUSE_TOP_P
         request_kwargs["store"] = decision.store
         if decision.continuation_mode == "stateless" and not decision.store:
             requested_include = request_kwargs.get("include")
@@ -784,6 +831,13 @@ class OpenAIClient(LLMClient):
         ):
             request_kwargs["previous_response_id"] = continuation.response_id
 
+        if decision.provider == "meta":
+            # Meta Muse is exposed through the streaming Responses contract.
+            # The final completed response remains the canonical source for
+            # tool items, usage, and provider-observed identity.
+            request_kwargs["stream"] = True
+            request_kwargs["extra_headers"] = {"Accept": "text/event-stream"}
+
         response = await request_client.responses.create(
             model=request_model,
             input=input_items,  # type: ignore[arg-type]
@@ -791,6 +845,11 @@ class OpenAIClient(LLMClient):
             tools=tools,  # type: ignore[arg-type]
             **request_kwargs,
         )
+        if decision.provider == "meta":
+            response = await self._consume_meta_responses_stream(
+                response,
+                decision=decision,
+            )
         parsed = self._parse_responses_response(
             response,
             available_tools,
@@ -820,7 +879,64 @@ class OpenAIClient(LLMClient):
             requested=requested_parameters,
             effective=effective_parameters,
         )
+        if decision.provider == "meta":
+            parsed.transport_metadata["stream"] = True
         return parsed
+
+    @staticmethod
+    async def _consume_meta_responses_stream(
+        stream: Any,
+        *,
+        decision: StructuredToolTransportDecision,
+    ) -> Any:
+        """Return the final response.completed payload from Meta's SDK stream."""
+
+        if not hasattr(stream, "__aiter__"):
+            raise StructuredToolProtocolError(
+                "Meta Responses did not return an asynchronous event stream.",
+                decision={
+                    **decision.to_telemetry(),
+                    "failure_kind": "meta_stream_missing",
+                },
+            )
+        completed_response: Any = None
+        try:
+            async for event in stream:
+                event_type = str(_value(event, "type") or "").strip()
+                if event_type == "response.completed":
+                    completed_response = _value(event, "response")
+                    continue
+                if event_type in {
+                    "error",
+                    "response.error",
+                    "response.failed",
+                    "response.incomplete",
+                }:
+                    raise StructuredToolTransportError(
+                        f"Meta Responses stream terminated with {event_type}.",
+                        decision={
+                            **decision.to_telemetry(),
+                            "failure_kind": "meta_stream_provider_failure",
+                            "provider_event_type": event_type,
+                        },
+                    )
+        finally:
+            close = getattr(stream, "close", None)
+            if not callable(close):
+                close = getattr(stream, "aclose", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        if completed_response is None:
+            raise StructuredToolProtocolError(
+                "Meta Responses stream ended without response.completed.",
+                decision={
+                    **decision.to_telemetry(),
+                    "failure_kind": "meta_stream_incomplete",
+                },
+            )
+        return completed_response
 
     def generate_with_tools_sync(
         self,

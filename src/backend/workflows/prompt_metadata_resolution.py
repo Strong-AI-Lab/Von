@@ -516,7 +516,15 @@ def _provider_from_model_token(model: str) -> tuple[str | None, str]:
         return None, cleaned
     provider, remainder = cleaned.split(":", 1)
     provider_token = _normalise_match_token(provider)
-    if provider_token in {"openai", "openrouter", "anthropic", "gemini", "ollama", "deepseek"}:
+    if provider_token in {
+        "openai",
+        "openrouter",
+        "anthropic",
+        "gemini",
+        "meta",
+        "ollama",
+        "deepseek",
+    }:
         return provider_token, remainder.strip()
     return None, cleaned
 

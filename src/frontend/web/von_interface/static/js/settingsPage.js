@@ -17,9 +17,11 @@ import {
   loadOllamaHosts,
   populateModelDropdown,
   populateGeminiModelDropdown,
+  populateMetaModelDropdown,
   populateOpenRouterModelDropdown,
   populateOpenAIModelDropdown,
   renderGeminiModelOptions,
+  renderMetaModelOptions,
   renderOpenRouterModelOptions,
   renderOpenAIModelOptions,
   populateOrganisationsDropdown,
@@ -62,6 +64,8 @@ import {
   clearStoredOllamaSelection,
   getStoredGeminiModelParameters,
   getStoredGeminiSelectedModel,
+  getStoredMetaModelParameters,
+  getStoredMetaSelectedModel,
   getStoredPremiumModelProvider,
   getEffectiveLocalModelPreference,
   getStoredOpenAiModelParameters,
@@ -73,6 +77,8 @@ import {
   setLocalPremiumModelUseEnabled,
   setStoredGeminiModelParameters,
   setStoredGeminiSelectedModel,
+  setStoredMetaModelParameters,
+  setStoredMetaSelectedModel,
   setStoredOllamaSelection,
   setStoredOpenAiModelParameters,
   setStoredOpenAiSelectedModel,
@@ -158,6 +164,8 @@ let latestGeminiModelProbe = null;
 let latestGeminiModelParameterCapability = null;
 let latestOpenRouterModelProbe = null;
 let latestOpenRouterModelParameterCapability = null;
+let latestMetaModelProbe = null;
+let latestMetaModelParameterCapability = null;
 let openAiModelCostSummaryGeneration = 0;
 let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
@@ -456,6 +464,22 @@ const PREMIUM_PROVIDER_CONFIG = Object.freeze({
     testEndpoint: '/api/settings/openrouter/test_model',
     apiSurface: 'chat_completions',
   }),
+  meta: Object.freeze({
+    label: 'Meta Muse',
+    envInputId: 'metaApiKeyEnvVar',
+    verifyButtonId: 'verifyMetaApiKeyButton',
+    providerContainerId: 'metaProviderSettings',
+    modelsContainerId: 'metaModelsContainer',
+    modelSelectId: 'metaModelSelect',
+    testButtonId: 'testMetaModelButton',
+    addButtonId: 'addMetaToWorkflowPoolButton',
+    eligibilityStatusId: 'metaModelEligibilityStatus',
+    modelStatusId: 'metaModelStatusMessage',
+    providerStatusId: 'metaStatusMessage',
+    verifyEndpoint: '/api/settings/meta/verify',
+    testEndpoint: '/api/settings/meta/test_model',
+    apiSurface: 'responses',
+  }),
 });
 
 function normalisePremiumProvider(value) {
@@ -475,12 +499,14 @@ function selectedPremiumProvider() {
 function getStoredPremiumSelectedModel(provider) {
   if (provider === 'gemini') return getStoredGeminiSelectedModel();
   if (provider === 'openrouter') return getStoredOpenRouterSelectedModel();
+  if (provider === 'meta') return getStoredMetaSelectedModel();
   return getStoredOpenAiSelectedModel();
 }
 
 function setStoredPremiumSelectedModel(provider, model) {
   if (provider === 'gemini') setStoredGeminiSelectedModel(model);
   else if (provider === 'openrouter') setStoredOpenRouterSelectedModel(model);
+  else if (provider === 'meta') setStoredMetaSelectedModel(model);
   else setStoredOpenAiSelectedModel(model);
 }
 
@@ -489,6 +515,8 @@ function renderPremiumModelOptions(provider, selectId, models, selectedModel) {
     renderGeminiModelOptions(selectId, models, selectedModel);
   } else if (provider === 'openrouter') {
     renderOpenRouterModelOptions(selectId, models, selectedModel);
+  } else if (provider === 'meta') {
+    renderMetaModelOptions(selectId, models, selectedModel);
   } else {
     renderOpenAIModelOptions(selectId, models, selectedModel);
   }
@@ -500,6 +528,9 @@ async function populatePremiumModelDropdown(provider, selectId, selectedModel) {
   }
   if (provider === 'openrouter') {
     return populateOpenRouterModelDropdown(selectId, selectedModel);
+  }
+  if (provider === 'meta') {
+    return populateMetaModelDropdown(selectId, selectedModel);
   }
   return populateOpenAIModelDropdown(selectId, selectedModel);
 }
@@ -516,7 +547,7 @@ function getSettingsConcernModelSnapshot() {
   const premiumToggle = document.getElementById('enableOpenAiPremiumToggle');
   const premiumEnabled = premiumToggle
     ? !!premiumToggle.checked
-    : ['openai', 'openrouter', 'gemini'].includes(localModelPreference.activeSource);
+    : ['openai', 'openrouter', 'gemini', 'meta'].includes(localModelPreference.activeSource);
   const premiumProvider = selectedPremiumProvider();
   const premiumModel = selectedPremiumModelName(premiumProvider);
   const ollamaSelection = resolveOllamaSelection(false) || localModelPreference.ollamaSelection || null;
@@ -580,7 +611,7 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         description: 'Review language and concept-display preferences here, then move on to the model surface this browser should prefer.',
         actionLabel: 'Review model setup',
         actionTarget: 'premium-model-settings',
-        focusSelector: '#globalModelSelect, #premiumProviderSelect, #openaiModelSelect, #openrouterModelSelect, #geminiModelSelect',
+        focusSelector: '#globalModelSelect, #premiumProviderSelect, #openaiModelSelect, #openrouterModelSelect, #geminiModelSelect, #metaModelSelect',
         source: 'temporary-placeholder',
       };
     }
@@ -1032,6 +1063,7 @@ function resolveDisplayedProviderModels(settings) {
   let currentOpenAIModel = null;
   let currentOpenRouterModel = null;
   let currentGeminiModel = null;
+  let currentMetaModel = null;
 
   for (const entry of enabledLlms) {
     if (!entry || typeof entry !== 'object') continue;
@@ -1043,6 +1075,8 @@ function resolveDisplayedProviderModels(settings) {
       currentOpenRouterModel = entry.model;
     } else if (entry.provider === 'gemini' && entry.model && !currentGeminiModel) {
       currentGeminiModel = entry.model;
+    } else if (entry.provider === 'meta' && entry.model && !currentMetaModel) {
+      currentMetaModel = entry.model;
     }
   }
 
@@ -1054,6 +1088,8 @@ function resolveDisplayedProviderModels(settings) {
     currentOpenRouterModel = effectiveLlm.model;
   } else if (effectiveLlm?.provider === 'gemini' && effectiveLlm.model) {
     currentGeminiModel = effectiveLlm.model;
+  } else if (effectiveLlm?.provider === 'meta' && effectiveLlm.model) {
+    currentMetaModel = effectiveLlm.model;
   }
 
   return {
@@ -1062,6 +1098,7 @@ function resolveDisplayedProviderModels(settings) {
     currentOpenAIModel,
     currentOpenRouterModel,
     currentGeminiModel,
+    currentMetaModel,
   };
 }
 
@@ -1254,6 +1291,7 @@ function setInlineStatusMessage(element, text, tone = null) {
 function getStoredPremiumModelParameters(provider) {
   if (provider === 'gemini') return getStoredGeminiModelParameters();
   if (provider === 'openrouter') return getStoredOpenRouterModelParameters();
+  if (provider === 'meta') return getStoredMetaModelParameters();
   return getStoredOpenAiModelParameters();
 }
 
@@ -1262,6 +1300,8 @@ function setStoredPremiumModelParameters(provider, parameters) {
     setStoredGeminiModelParameters(parameters);
   } else if (provider === 'openrouter') {
     setStoredOpenRouterModelParameters(parameters);
+  } else if (provider === 'meta') {
+    setStoredMetaModelParameters(parameters);
   } else {
     setStoredOpenAiModelParameters(parameters);
   }
@@ -1270,6 +1310,7 @@ function setStoredPremiumModelParameters(provider, parameters) {
 function getLatestPremiumModelParameterCapability(provider) {
   if (provider === 'gemini') return latestGeminiModelParameterCapability;
   if (provider === 'openrouter') return latestOpenRouterModelParameterCapability;
+  if (provider === 'meta') return latestMetaModelParameterCapability;
   return latestOpenAiModelParameterCapability;
 }
 
@@ -1278,6 +1319,8 @@ function setLatestPremiumModelParameterCapability(provider, capability) {
     latestGeminiModelParameterCapability = capability;
   } else if (provider === 'openrouter') {
     latestOpenRouterModelParameterCapability = capability;
+  } else if (provider === 'meta') {
+    latestMetaModelParameterCapability = capability;
   } else {
     latestOpenAiModelParameterCapability = capability;
   }
@@ -1369,6 +1412,7 @@ async function refreshOpenAiReasoningEffortControls() {
 function latestPremiumModelProbe(provider) {
   if (provider === 'gemini') return latestGeminiModelProbe;
   if (provider === 'openrouter') return latestOpenRouterModelProbe;
+  if (provider === 'meta') return latestMetaModelProbe;
   return latestOpenAiModelProbe;
 }
 
@@ -1377,6 +1421,8 @@ function setLatestPremiumModelProbe(provider, probe) {
     latestGeminiModelProbe = probe;
   } else if (provider === 'openrouter') {
     latestOpenRouterModelProbe = probe;
+  } else if (provider === 'meta') {
+    latestMetaModelProbe = probe;
   } else {
     latestOpenAiModelProbe = probe;
   }
@@ -1660,6 +1706,10 @@ async function testSelectedGeminiModel() {
 
 async function testSelectedOpenRouterModel() {
   return testSelectedPremiumModel('openrouter');
+}
+
+async function testSelectedMetaModel() {
+  return testSelectedPremiumModel('meta');
 }
 
 async function testSelectedOllamaModel() {
@@ -2066,6 +2116,10 @@ function selectedOpenRouterPoolEntry() {
   return selectedPremiumPoolEntry('openrouter');
 }
 
+function selectedMetaPoolEntry() {
+  return selectedPremiumPoolEntry('meta');
+}
+
 function isPersistedEffectiveModelAllowed(entry) {
   const canonical = buildCanonicalLlmEntry(entry);
   return Boolean(
@@ -2381,6 +2435,7 @@ function renderWorkflowModelPool() {
       updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
       updatePoolActionButton('addOpenRouterToWorkflowPoolButton', selectedOpenRouterPoolEntry());
       updatePoolActionButton('addGeminiToWorkflowPoolButton', selectedGeminiPoolEntry());
+      updatePoolActionButton('addMetaToWorkflowPoolButton', selectedMetaPoolEntry());
       updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
       updateScopedPrimaryActionButtons();
       updateSelectedPremiumEligibilityControls();
@@ -2447,6 +2502,7 @@ function renderWorkflowModelPool() {
   updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
   updatePoolActionButton('addOpenRouterToWorkflowPoolButton', selectedOpenRouterPoolEntry());
   updatePoolActionButton('addGeminiToWorkflowPoolButton', selectedGeminiPoolEntry());
+  updatePoolActionButton('addMetaToWorkflowPoolButton', selectedMetaPoolEntry());
   updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
   updateScopedPrimaryActionButtons();
   updateSelectedPremiumEligibilityControls();
@@ -5012,6 +5068,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('openrouterModelSelect')?.addEventListener('change', () => {
     void handlePremiumModelSelectionChange('openrouter');
   });
+  document.getElementById('metaModelSelect')?.addEventListener('change', () => {
+    void handlePremiumModelSelectionChange('meta');
+  });
   document.getElementById('openaiReasoningEffortSelect')?.addEventListener('change', async () => {
     const provider = selectedPremiumProvider();
     setStoredPremiumModelParameters(provider, readPremiumModelParametersFromUi(provider));
@@ -5146,9 +5205,13 @@ document.getElementById('verifyGeminiApiKeyButton')?.addEventListener('click', (
 document.getElementById('verifyOpenRouterApiKeyButton')?.addEventListener('click', () => {
   verifyOpenRouterApiKey();
 });
+document.getElementById('verifyMetaApiKeyButton')?.addEventListener('click', () => {
+  verifyMetaApiKey();
+});
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
 document.getElementById('testGeminiModelButton')?.addEventListener('click', testSelectedGeminiModel);
 document.getElementById('testOpenRouterModelButton')?.addEventListener('click', testSelectedOpenRouterModel);
+document.getElementById('testMetaModelButton')?.addEventListener('click', testSelectedMetaModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 document.getElementById('addOpenAiToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOpenAiPoolEntry());
@@ -5158,6 +5221,9 @@ document.getElementById('addGeminiToWorkflowPoolButton')?.addEventListener('clic
 });
 document.getElementById('addOpenRouterToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOpenRouterPoolEntry());
+});
+document.getElementById('addMetaToWorkflowPoolButton')?.addEventListener('click', () => {
+  addOrUpdateWorkflowPoolEntry(selectedMetaPoolEntry());
 });
 document.getElementById('addOllamaToWorkflowPoolButton')?.addEventListener('click', () => {
   addOrUpdateWorkflowPoolEntry(selectedOllamaPoolEntry());
@@ -5477,6 +5543,7 @@ async function loadAndDisplaySettings() {
       currentOpenAIModel,
       currentOpenRouterModel,
       currentGeminiModel,
+      currentMetaModel,
     } = resolveDisplayedProviderModels(settings);
     currentEffectiveLlm = settings.effective_llm || settings.resolved_llm || null;
     currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(
@@ -5489,14 +5556,17 @@ async function loadAndDisplaySettings() {
     const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
     const preferredOpenRouterModel = currentOpenRouterModel || localModelPreference.openrouterModel || null;
     const preferredGeminiModel = currentGeminiModel || localModelPreference.geminiModel || null;
-    const premiumEnabled = ['openai', 'openrouter', 'gemini'].includes(localModelPreference.activeSource);
+    const preferredMetaModel = currentMetaModel || localModelPreference.metaModel || null;
+    const premiumEnabled = ['openai', 'openrouter', 'gemini', 'meta'].includes(localModelPreference.activeSource);
     const preferredPremiumProvider = normalisePremiumProvider(
       localModelPreference.premiumProvider || localModelPreference.activeSource,
     )
       || normalisePremiumProvider(displayedEffectiveLlm?.provider)
       || (currentOpenRouterModel && !currentOpenAIModel
         ? 'openrouter'
-        : currentGeminiModel && !currentOpenAIModel ? 'gemini' : 'openai');
+        : currentGeminiModel && !currentOpenAIModel
+          ? 'gemini'
+          : currentMetaModel && !currentOpenAIModel ? 'meta' : 'openai');
     const premiumProviderSelect = document.getElementById('premiumProviderSelect');
     if (premiumProviderSelect) premiumProviderSelect.value = preferredPremiumProvider;
     syncPremiumProviderPanels();
@@ -5543,6 +5613,15 @@ async function loadAndDisplaySettings() {
         await refreshPremiumReasoningEffortControls('openrouter');
       } catch (error) {
         console.log('Could not directly load OpenRouter models, will need verification:', error.message);
+      }
+    } else if (preferredPremiumProvider === 'meta' && preferredMetaModel) {
+      try {
+        await populateMetaModelDropdown('metaModelSelect', preferredMetaModel);
+        const container = document.getElementById('metaModelsContainer');
+        if (container) { container.style.display = 'block'; container.classList.remove('hidden'); }
+        await refreshPremiumReasoningEffortControls('meta');
+      } catch (error) {
+        console.log('Could not directly load Meta Muse models, will need verification:', error.message);
       }
     }
 
@@ -5681,6 +5760,10 @@ async function loadAndDisplaySettings() {
     if (openrouterEnvVarInput && settings.openrouter_api_key_env_var) {
       openrouterEnvVarInput.value = settings.openrouter_api_key_env_var;
     }
+    const metaEnvVarInput = document.getElementById('metaApiKeyEnvVar');
+    if (metaEnvVarInput) {
+      metaEnvVarInput.value = 'META_API_KEY';
+    }
     const openAiPremiumToggle = document.getElementById('enableOpenAiPremiumToggle');
     if (openAiPremiumToggle) {
       openAiPremiumToggle.checked = premiumEnabled;
@@ -5694,10 +5777,14 @@ async function loadAndDisplaySettings() {
     if (preferredOpenRouterModel) {
       setStoredOpenRouterSelectedModel(preferredOpenRouterModel);
     }
+    if (preferredMetaModel) {
+      setStoredMetaSelectedModel(preferredMetaModel);
+    }
     setStoredPremiumModelProvider(preferredPremiumProvider);
     latestOpenAiModelProbe = null;
     latestGeminiModelProbe = null;
     latestOpenRouterModelProbe = null;
+    latestMetaModelProbe = null;
     latestOllamaModelProbe = null;
     updateOpenAiModelStatusMessage();
     updateOllamaModelStatusMessage();
@@ -5884,7 +5971,9 @@ async function loadAndDisplaySettings() {
           ? preferredGeminiModel
           : preferredPremiumProvider === 'openrouter'
             ? preferredOpenRouterModel
-            : preferredOpenAiModel,
+            : preferredPremiumProvider === 'meta'
+              ? preferredMetaModel
+              : preferredOpenAiModel,
       );
     }
 
@@ -6287,6 +6376,10 @@ export async function checkOpenRouterEnvVar() {
   return checkPremiumProviderEnvVar('openrouter');
 }
 
+export async function checkMetaEnvVar() {
+  return checkPremiumProviderEnvVar('meta');
+}
+
 async function verifyPremiumApiKey(providerName, savedModel = null) {
   const provider = normalisePremiumProvider(providerName) || 'openai';
   const config = PREMIUM_PROVIDER_CONFIG[provider];
@@ -6299,7 +6392,9 @@ async function verifyPremiumApiKey(providerName, savedModel = null) {
 
   setInlineStatusMessage(
     statusMessage,
-    `Verifying ${config.label} API key and loading models...`,
+    provider === 'meta'
+      ? 'Checking Meta API key configuration and loading supported models...'
+      : `Verifying ${config.label} API key and loading models...`,
     null,
   );
 
@@ -6309,7 +6404,9 @@ async function verifyPremiumApiKey(providerName, savedModel = null) {
     if (response.success) {
       setInlineStatusMessage(
         statusMessage,
-        `${config.label} API key verified. Models loaded. Test the selected model before relying on it.`,
+        provider === 'meta'
+          ? 'Meta API key configuration found. Supported models loaded. Test the selected model before relying on it.'
+          : `${config.label} API key verified. Models loaded. Test the selected model before relying on it.`,
         null,
       );
       if (modelsContainer) {
@@ -6380,6 +6477,10 @@ async function verifyGeminiApiKey(savedModel = null) {
 
 async function verifyOpenRouterApiKey(savedModel = null) {
   return verifyPremiumApiKey('openrouter', savedModel);
+}
+
+async function verifyMetaApiKey(savedModel = null) {
+  return verifyPremiumApiKey('meta', savedModel);
 }
 
 // Remove the old, separate save functions (saveGlobalModel, saveCurrentUser, saveOpenAISettings)

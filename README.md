@@ -74,8 +74,8 @@ architecture:
 - a browser application centred on persistent, multi-turn conversations, with
   inspectable shared situations, uploads, tasks, tool progress, and workflow
   state;
-- model support for local Ollama and configured OpenAI, Gemini, and opt-in
-  OpenRouter providers;
+- model support for local Ollama, configured OpenAI, and actor-scoped, opt-in
+  Gemini, Meta Muse, and OpenRouter providers;
 - an internal Model Context Protocol (MCP) gateway and capability catalogue spanning represented
   knowledge, retrieval, scholarly sources, web search, tasks, workflows, and
   configured external services;
@@ -190,8 +190,10 @@ Remote database failures do not silently fall back to a possibly stale local
 database unless that fallback is explicitly enabled.
 
 For local models, install and run Ollama and configure `OLLAMA_HOSTS_LIST`. For
-hosted providers, set the applicable credential, such as `OPENAI_API_KEY` or
-`GEMINI_API_KEY`, then select an eligible provider and model in Von's settings.
+hosted providers, set the applicable credential, such as `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, or `META_API_KEY`, then select an eligible provider and model
+in Von's settings. Meta Muse supports the fixed model `muse-spark-1.3`; managed
+hosts may supply its key through `META_API_KEY_FILE`.
 You may also configure `OPENAI_API_BACKUP_KEY` or `GEMINI_API_BACKUP_KEY` (or
 their `*_FILE` forms). Von uses a backup once only after the primary credential
 is rejected for authentication, quota, or rate limiting, and marks the model

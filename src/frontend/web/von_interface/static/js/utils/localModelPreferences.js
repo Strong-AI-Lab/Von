@@ -6,7 +6,7 @@ const LS_PREMIUM_MODEL_USE_ENABLED = 'von:premiumModelUseEnabled';
 const LOCAL_MODEL_PREFERENCE_SCHEMA = 'localModelPreference.v1';
 const LOCAL_MODEL_UNAVAILABLE_REASON_NO_OLLAMA_MODEL = 'premium_disabled_no_ollama_model';
 const LOCAL_MODEL_UNAVAILABLE_REASON_NO_PREMIUM_MODEL = 'premium_enabled_no_model';
-const PREMIUM_MODEL_PROVIDERS = new Set(['openai', 'openrouter', 'gemini']);
+const PREMIUM_MODEL_PROVIDERS = new Set(['openai', 'openrouter', 'gemini', 'meta']);
 
 function readStoredJson(key) {
   try {
@@ -116,6 +116,8 @@ function buildCanonicalLocalModelPreference({
   geminiModelParameters = null,
   openrouterModel = null,
   openrouterModelParameters = null,
+  metaModel = null,
+  metaModelParameters = null,
   ollamaSelection = null,
 } = {}) {
   const normalisedActiveSource = normaliseActiveSource(activeSource);
@@ -124,6 +126,7 @@ function buildCanonicalLocalModelPreference({
   const normalisedOpenAiParameters = normaliseModelParameters(openaiModelParameters);
   const normalisedGeminiParameters = normaliseModelParameters(geminiModelParameters);
   const normalisedOpenRouterParameters = normaliseModelParameters(openrouterModelParameters);
+  const normalisedMetaParameters = normaliseModelParameters(metaModelParameters);
   const canonical = {
     schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: normalisedActiveSource,
@@ -152,6 +155,13 @@ function buildCanonicalLocalModelPreference({
   if (normalisedOpenRouterParameters) {
     canonical.openrouterModelParameters = normalisedOpenRouterParameters;
   }
+  const normalisedMetaModel = normaliseLocalModelName(metaModel);
+  if (normalisedMetaModel) {
+    canonical.metaModel = normalisedMetaModel;
+  }
+  if (normalisedMetaParameters) {
+    canonical.metaModelParameters = normalisedMetaParameters;
+  }
 
   if (
     !canonical.activeSource
@@ -159,6 +169,7 @@ function buildCanonicalLocalModelPreference({
     && !canonical.openaiModel
     && !canonical.geminiModel
     && !canonical.openrouterModel
+    && !canonical.metaModel
     && !canonical.ollamaSelection
   ) {
     return null;
@@ -192,6 +203,12 @@ function cloneLocalModelPreference(preference) {
     ...(normaliseModelParameters(preference.openrouterModelParameters)
       ? { openrouterModelParameters: normaliseModelParameters(preference.openrouterModelParameters) }
       : {}),
+    ...(normaliseLocalModelName(preference.metaModel)
+      ? { metaModel: normaliseLocalModelName(preference.metaModel) }
+      : {}),
+    ...(normaliseModelParameters(preference.metaModelParameters)
+      ? { metaModelParameters: normaliseModelParameters(preference.metaModelParameters) }
+      : {}),
     ollamaSelection: normaliseOllamaSelection(preference.ollamaSelection),
   };
 }
@@ -219,6 +236,12 @@ function normaliseStoredLocalModelPreference(stored) {
     openrouterModelParameters: (
       stored.openrouterModelParameters
       ?? stored.openrouter_model_parameters
+      ?? null
+    ),
+    metaModel: stored.metaModel ?? stored.meta_model ?? null,
+    metaModelParameters: (
+      stored.metaModelParameters
+      ?? stored.meta_model_parameters
       ?? null
     ),
     ollamaSelection: stored.ollamaSelection ?? stored.ollama_selection ?? null,
@@ -347,12 +370,16 @@ function buildEffectiveLocalModelPreference(preference) {
         ? canonical.geminiModel
         : provider === 'openrouter'
           ? canonical.openrouterModel
-          : canonical.openaiModel,
+          : provider === 'meta'
+            ? canonical.metaModel
+            : canonical.openaiModel,
       provider === 'gemini'
         ? canonical.geminiModelParameters
         : provider === 'openrouter'
           ? canonical.openrouterModelParameters
-          : canonical.openaiModelParameters,
+          : provider === 'meta'
+            ? canonical.metaModelParameters
+            : canonical.openaiModelParameters,
     );
   } else if (canonical.activeSource === 'ollama') {
     requestedLlm = buildOllamaRequestedLlm(canonical.ollamaSelection);
@@ -586,6 +613,48 @@ export function setStoredOpenRouterModelParameters(modelParameters) {
     next.openrouterModelParameters = params;
   } else {
     delete next.openrouterModelParameters;
+  }
+  persistLocalModelPreference(next);
+}
+
+export function getStoredMetaSelectedModel() {
+  return getEffectiveLocalModelPreference().metaModel || '';
+}
+
+export function setStoredMetaSelectedModel(modelName) {
+  const stored = getStoredLocalModelPreference();
+  const next = cloneLocalModelPreference(stored) || {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: null,
+    openaiModel: null,
+    ollamaSelection: null,
+  };
+  const model = normaliseLocalModelName(modelName);
+  if (model) {
+    next.metaModel = model;
+  } else {
+    delete next.metaModel;
+  }
+  persistLocalModelPreference(next);
+}
+
+export function getStoredMetaModelParameters() {
+  return getEffectiveLocalModelPreference().metaModelParameters || null;
+}
+
+export function setStoredMetaModelParameters(modelParameters) {
+  const stored = getStoredLocalModelPreference();
+  const next = cloneLocalModelPreference(stored) || {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: null,
+    openaiModel: null,
+    ollamaSelection: null,
+  };
+  const params = normaliseModelParameters(modelParameters);
+  if (params) {
+    next.metaModelParameters = params;
+  } else {
+    delete next.metaModelParameters;
   }
   persistLocalModelPreference(next);
 }
