@@ -352,6 +352,50 @@ def test_foreground_generate_returns_json_when_cancelled_during_context_setup(
     assert adaptive_turn.calls == []
 
 
+def test_foreground_cancellation_wins_over_late_provider_failure(monkeypatch):
+    import src.backend.server.routes.von_routes as von_routes
+
+    task_registry = _CapturingTaskRegistry()
+    adaptive_turn = _StubAdaptiveTurn(
+        AdaptiveTurnResult(
+            response_text="Provider failed after Stop",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+            terminal_status="model_error",
+        )
+    )
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
+
+    def _finish_provider_after_cancellation(**kwargs):
+        task_registry.cancelled_task_ids.add("late-provider-result")
+        return adaptive_turn.execute(**kwargs)
+
+    monkeypatch.setattr(
+        von_routes,
+        "execute_adaptive_turn",
+        _finish_provider_after_cancellation,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Stop this provider call",
+            "background": False,
+            "background_task_id": "late-provider-result",
+            "client_request_id": "late-provider-result",
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 409
+    assert response.is_json
+    assert response.get_json()["terminal_status"] == "cancelled"
+    assert response.get_json()["request_id"] == "late-provider-result"
+    assert len(adaptive_turn.calls) == 1
+
+
 def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
     monkeypatch,
 ):
