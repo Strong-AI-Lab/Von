@@ -1667,6 +1667,7 @@ def cancel_chat_prompt_queue_route(queue_id: str):
     if isinstance(scope, tuple):
         return scope
     try:
+        cancellation_pending = False
         record = chat_prompt_queue_service.cancel_prompt_record(
             scope=scope,
             queue_id=queue_id,
@@ -1693,7 +1694,21 @@ def cancel_chat_prompt_queue_route(queue_id: str):
             )
         finally:
             wake_chat_prompt_queue_dispatcher()
-        return jsonify({"success": True, "item": record})
+    except chat_prompt_queue_service.ConversationTurnAlreadyActive:
+        try:
+            record = chat_prompt_queue_service.request_prompt_cancellation(
+                scope=scope,
+                queue_id=queue_id,
+            )
+            cancellation_pending = True
+            wake_chat_prompt_queue_dispatcher()
+        except Exception as exc:
+            return _chat_prompt_queue_error_response(
+                exc,
+                action="cancel",
+                queue_id=queue_id,
+                scope=scope,
+            )
     except Exception as exc:
         return _chat_prompt_queue_error_response(
             exc,
@@ -1701,6 +1716,13 @@ def cancel_chat_prompt_queue_route(queue_id: str):
             queue_id=queue_id,
             scope=scope,
         )
+    return jsonify(
+        {
+            "success": True,
+            "item": record,
+            "status": "cancelling" if cancellation_pending else "cancelled",
+        }
+    )
 
 
 @von_bp.route("/api/chat_prompt_queue/<queue_id>/claim", methods=["POST"])
@@ -7679,11 +7701,19 @@ def cancel_task(task_id: str):
         )
 
     queue_id = _normalise_non_empty_text(getattr(status, "queue_id", None))
+    queue_cancellation_status = "cancelling"
+    queue_cancellation_record = None
     if queue_id:
         try:
             cancelled_record = chat_prompt_queue_service.cancel_prompt_record(
                 scope=scope,
                 queue_id=queue_id,
+            )
+            queue_cancellation_record = cancelled_record
+            queue_cancellation_status = (
+                str(cancelled_record.get("status") or "cancelled")
+                if isinstance(cancelled_record, Mapping)
+                else "cancelled"
             )
             try:
                 reconcile_linked_task_execution_terminal(
@@ -7709,17 +7739,37 @@ def cancel_task(task_id: str):
             finally:
                 wake_chat_prompt_queue_dispatcher()
         except chat_prompt_queue_service.ConversationTurnAlreadyActive:
-            # The running generate request owns this fence and observes the
-            # cancellation flag; its teardown will terminalise the exact
-            # attempt as cancelled.
-            pass
+            # Preserve the user's decision on the exact durable attempt.  The
+            # running provider call keeps its conversation fence until it can
+            # observe cancellation; a replacement server can then reconcile
+            # this intent without replaying the stopped turn.
+            queue_cancellation_record = (
+                chat_prompt_queue_service.request_prompt_cancellation(
+                    scope=scope,
+                    queue_id=queue_id,
+                    attempt_id=_normalise_non_empty_text(
+                        getattr(status, "attempt_id", None)
+                    ),
+                )
+            )
+            wake_chat_prompt_queue_dispatcher()
         except chat_prompt_queue_service.ChatPromptQueueRecordNotFound:
             # The exact attempt may already have reached a terminal state.
             pass
 
     return (
         jsonify(
-            {"success": True, "task_id": task_id, "message": "Cancellation requested"}
+            {
+                "success": True,
+                "task_id": task_id,
+                "message": "Cancellation requested",
+                "status": queue_cancellation_status,
+                **(
+                    {"item": queue_cancellation_record}
+                    if isinstance(queue_cancellation_record, Mapping)
+                    else {}
+                ),
+            }
         ),
         200,
     )
@@ -11981,19 +12031,32 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         _emit_generate_progress(payload)
 
     def _is_background_cancellation_requested() -> bool:
-        if background_task_id is None:
+        if background_task_id is not None:
+            try:
+                is_requested = getattr(
+                    background_task_registry,
+                    "is_cancellation_requested",
+                    None,
+                )
+                if callable(is_requested) and bool(
+                    is_requested(background_task_id)
+                ):
+                    return True
+            except Exception:
+                pass
+        admission_token = getattr(g, _TURN_ADMISSION_CONTEXT_KEY, None)
+        if admission_token is None or not getattr(admission_token, "queue_id", None):
             return False
         try:
-            is_requested = getattr(
-                background_task_registry,
-                "is_cancellation_requested",
-                None,
+            return chat_prompt_queue_service.is_prompt_cancellation_requested(
+                scope=admission_token.scope,
+                queue_id=admission_token.queue_id,
+                attempt_id=admission_token.attempt_id,
             )
-            if callable(is_requested):
-                return bool(is_requested(background_task_id))
         except Exception:
+            # The in-memory flag remains the low-latency path. A transient
+            # read failure here must not manufacture cancellation.
             return False
-        return False
 
     def _check_background_cancellation(subtask: str) -> None:
         if not _is_background_cancellation_requested():
@@ -15550,6 +15613,19 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             error_text="generate_task_cancelled",
             error_class="CancellationRequested",
         )
+        if background_task_id is None:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "terminal_status": "cancelled",
+                        "error": "generate_task_cancelled",
+                        "detail": "Cancellation was acknowledged by the running turn.",
+                        "request_id": request_id,
+                    }
+                ),
+                409,
+            )
         raise
     except Exception as e:
         if assistant_opening_claimed:

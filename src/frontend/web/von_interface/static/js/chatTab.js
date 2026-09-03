@@ -34230,6 +34230,17 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
 
     if (abortButton) {
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        const cancellationRequested = isThinking
+            && request?.backgroundCancellationRequested === true;
+        abortButton.disabled = cancellationRequested;
+        abortButton.setAttribute(
+            'aria-label',
+            cancellationRequested ? 'Cancellation requested' : 'Stop generating'
+        );
+        abortButton.setAttribute(
+            'title',
+            cancellationRequested ? 'Waiting for the running turn to stop' : 'Stop generating'
+        );
     }
     if (retryButton) {
         const canRetryThinkingRequest = isThinking
@@ -34307,13 +34318,16 @@ function restorePromptEditingState(request, options = {}) {
     }
 }
 
-async function requestObservedServerDispatchCancellation(request) {
+async function requestServerCancellation(request) {
     const requestId = (typeof request?.clientRequestId === 'string')
         ? request.clientRequestId.trim()
         : '';
+    const queueId = (typeof request?.promptQueueRecordId === 'string')
+        ? request.promptQueueRecordId.trim()
+        : '';
+    const observedServerDispatch = request?.observingServerDispatch === true;
     if (
-        !requestId
-        || request?.observingServerDispatch !== true
+        (!queueId && (!observedServerDispatch || !requestId))
         || request?.backgroundCancellationRequested === true
     ) {
         return false;
@@ -34321,9 +34335,11 @@ async function requestObservedServerDispatchCancellation(request) {
     request.backgroundCancellationRequested = true;
     try {
         const response = await fetch(
-            `/von/api/task/cancel/${encodeURIComponent(requestId)}`,
+            observedServerDispatch
+                ? `/von/api/task/cancel/${encodeURIComponent(requestId)}`
+                : `/von/api/chat_prompt_queue/${encodeURIComponent(queueId)}`,
             {
-                method: 'POST',
+                method: observedServerDispatch ? 'POST' : 'DELETE',
                 headers: buildChatFetchHeaders({
                     'Content-Type': 'application/json'
                 }),
@@ -34338,7 +34354,7 @@ async function requestObservedServerDispatchCancellation(request) {
                 || `HTTP ${response.status}`
             );
         }
-        publishChatPromptQueueChange('observed_retry_cancellation_requested');
+        publishChatPromptQueueChange('turn_cancellation_requested');
         return true;
     } catch (error) {
         request.backgroundCancellationRequested = false;
@@ -34358,8 +34374,30 @@ function abortActiveChatRequest(options = {}) {
 
     const request = activeChatRequest;
     const observingServerDispatch = request.observingServerDispatch === true;
-    if (observingServerDispatch) {
-        void requestObservedServerDispatchCancellation(request);
+    const canRequestServerCancellation = observingServerDispatch
+        || (typeof request.promptQueueRecordId === 'string'
+            && request.promptQueueRecordId.trim());
+    if (canRequestServerCancellation) {
+        const previousProgress = cloneThinkingLatestProgress(request.latestProgress);
+        const cancellationPromise = requestServerCancellation(request);
+        request.latestProgress = {
+            ...(request.latestProgress && typeof request.latestProgress === 'object'
+                ? request.latestProgress
+                : {}),
+            status: 'cancelling',
+            phase: 'cancelling',
+            phase_label: 'Cancelling',
+            result_summary: 'Cancellation requested; waiting for the running turn to stop.'
+        };
+        syncActiveChatSessionThinkingState();
+        void cancellationPromise.then((acknowledged) => {
+            if (acknowledged || !isLiveChatRequest(request)) {
+                return;
+            }
+            request.latestProgress = previousProgress;
+            syncActiveChatSessionThinkingState();
+        });
+        return;
     }
     request.aborted = true;
     releaseRequestFileCopyBinding(request);
@@ -37674,6 +37712,10 @@ async function handleSendPrompt(options = {}) {
             request.serverQueueTerminalObserved = true;
             acknowledgeQueuedSource();
             deliverSuccessfulResponseData(data, 'generate_response');
+        } else if (String(data?.terminal_status || '').toLowerCase() === 'cancelled') {
+            request.serverQueueTerminalObserved = true;
+            acknowledgeQueuedSource();
+            deliverCancelledResponseData(data);
         } else if (
             data?.retryable === true
             || response.status === 429
