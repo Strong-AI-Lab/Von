@@ -1347,6 +1347,19 @@ class OllamaClient(LLMInterface):
         messages = to_ollama_messages(conv)
 
         ollama_options = {}
+        ollama_think = ollama_params.pop("think", None)
+        if not (
+            isinstance(ollama_think, bool)
+            or (
+                isinstance(ollama_think, str)
+                and ollama_think in {"low", "medium", "high"}
+            )
+        ):
+            if ollama_think is not None:
+                logger.warning(
+                    "Ignoring invalid llm_param: think for Ollama client"
+                )
+            ollama_think = None
         if ollama_params:
             # Only pass parameters that are valid for ollama.Client.chat options
             valid_ollama_options = [
@@ -1385,12 +1398,15 @@ class OllamaClient(LLMInterface):
 
                 _generate_started = time.perf_counter()
                 request_client = self.client
+                chat_kwargs = {
+                    "model": target_model,
+                    "messages": messages,
+                    "options": ollama_options if ollama_options else None,
+                }
+                if ollama_think is not None:
+                    chat_kwargs["think"] = ollama_think
                 response = request_client.chat(
-                    model=target_model,
-                    messages=messages,
-                    options=(
-                        ollama_options if ollama_options else None
-                    ),  # Pass options if any
+                    **chat_kwargs,
                 )
                 if _should_log_llm_io():
                     logger.debug("Ollama raw response: %s", response)

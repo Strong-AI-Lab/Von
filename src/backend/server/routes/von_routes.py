@@ -40,6 +40,7 @@ from ...workflows.durable.turn_execution_runtime_support import (
 )
 from ...languagemodels.llm_interface import (
     ModelExecutionEligibilityError,
+    OllamaClient,
     _extract_ollama_model_id,
     _extract_openai_model_id,
     _looks_like_browser_object_model_reference,
@@ -20995,8 +20996,13 @@ def _llm_generate_spoken_backfill(
         ],
         "model": model,
     }
-    if isinstance(model_parameters, Mapping) and model_parameters:
-        kwargs["llm_params"] = dict(model_parameters)
+    bounded_parameters = _bounded_ollama_auxiliary_model_parameters(
+        llm_client,
+        model_parameters,
+        num_predict_limit=_OLLAMA_SPOKEN_BACKFILL_NUM_PREDICT_LIMIT,
+    )
+    if bounded_parameters:
+        kwargs["llm_params"] = bounded_parameters
     return llm_client.generate(**kwargs)
 
 
@@ -21006,9 +21012,46 @@ def _llm_generate_buttonify(llm_client, prompt, model, model_parameters=None):
         "context": [],
         "model": model,
     }
-    if isinstance(model_parameters, Mapping) and model_parameters:
-        kwargs["llm_params"] = dict(model_parameters)
+    bounded_parameters = _bounded_ollama_auxiliary_model_parameters(
+        llm_client,
+        model_parameters,
+        num_predict_limit=_OLLAMA_BUTTONIFY_NUM_PREDICT_LIMIT,
+    )
+    if bounded_parameters:
+        kwargs["llm_params"] = bounded_parameters
     return llm_client.generate(**kwargs)
+
+
+_OLLAMA_SPOKEN_BACKFILL_NUM_PREDICT_LIMIT = 512
+_OLLAMA_BUTTONIFY_NUM_PREDICT_LIMIT = 128
+
+
+def _bounded_ollama_auxiliary_model_parameters(
+    llm_client,
+    model_parameters,
+    *,
+    num_predict_limit: int,
+) -> dict[str, Any]:
+    parameters = (
+        dict(model_parameters) if isinstance(model_parameters, Mapping) else {}
+    )
+    if not isinstance(llm_client, OllamaClient):
+        return parameters
+
+    # These are mechanical presentation transforms. Local reasoning models can
+    # otherwise spend the entire small output budget in hidden thinking and
+    # return no usable narration or JSON options.
+    parameters["think"] = False
+    requested_limit = parameters.get("num_predict")
+    if (
+        not isinstance(requested_limit, int)
+        or isinstance(requested_limit, bool)
+        or requested_limit <= 0
+    ):
+        parameters["num_predict"] = num_predict_limit
+    else:
+        parameters["num_predict"] = min(requested_limit, num_predict_limit)
+    return parameters
 
 
 def _contains_openai_quota_error(message: object) -> bool:

@@ -12,6 +12,113 @@ from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
 _ADAPTIVE_RESPONSE = "A useful answer chosen by the adaptive turn."
 
 
+def test_ollama_auxiliary_generations_have_provider_request_token_bounds() -> None:
+    from src.backend.languagemodels.llm_interface import OllamaClient
+    from src.backend.server.routes import von_routes
+
+    class _RecordingOllamaClient(OllamaClient):
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, **kwargs: Any) -> str:
+            self.calls.append(dict(kwargs))
+            return "ok"
+
+    client = _RecordingOllamaClient()
+
+    von_routes._llm_generate_spoken_backfill(
+        client,
+        "system",
+        "user",
+        "qwen3.5:27b",
+    )
+    von_routes._llm_generate_buttonify(
+        client,
+        "prompt",
+        "qwen3.5:27b",
+    )
+
+    assert client.calls[0]["llm_params"] == {
+        "think": False,
+        "num_predict": 512,
+    }
+    assert client.calls[1]["llm_params"] == {
+        "think": False,
+        "num_predict": 128,
+    }
+
+
+def test_ollama_auxiliary_bounds_preserve_lower_caller_limit_without_mutation() -> None:
+    from src.backend.languagemodels.llm_interface import OllamaClient
+    from src.backend.server.routes import von_routes
+
+    class _RecordingOllamaClient(OllamaClient):
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, **kwargs: Any) -> str:
+            self.calls.append(dict(kwargs))
+            return "ok"
+
+    client = _RecordingOllamaClient()
+    requested_parameters = {"temperature": 0.2, "num_predict": 64}
+
+    von_routes._llm_generate_spoken_backfill(
+        client,
+        "system",
+        "user",
+        "qwen3.5:27b",
+        requested_parameters,
+    )
+    von_routes._llm_generate_buttonify(
+        client,
+        "prompt",
+        "qwen3.5:27b",
+        {"temperature": 0.2, "num_predict": 2048},
+    )
+
+    assert client.calls[0]["llm_params"] == {
+        "temperature": 0.2,
+        "think": False,
+        "num_predict": 64,
+    }
+    assert client.calls[1]["llm_params"] == {
+        "temperature": 0.2,
+        "think": False,
+        "num_predict": 128,
+    }
+    assert requested_parameters == {"temperature": 0.2, "num_predict": 64}
+
+
+def test_cloud_auxiliary_generation_parameters_are_unchanged() -> None:
+    from src.backend.server.routes import von_routes
+
+    class _RecordingCloudClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, **kwargs: Any) -> str:
+            self.calls.append(dict(kwargs))
+            return "ok"
+
+    client = _RecordingCloudClient()
+    von_routes._llm_generate_buttonify(
+        client,
+        "prompt",
+        "gpt-5.6-luna",
+        {"temperature": 0.4},
+    )
+
+    assert client.calls == [
+        {
+            "prompt": "prompt",
+            "context": [],
+            "model": "gpt-5.6-luna",
+            "llm_params": {"temperature": 0.4},
+        }
+    ]
+
+
 @pytest.fixture()
 def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
