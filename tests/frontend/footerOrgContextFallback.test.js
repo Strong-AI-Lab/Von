@@ -34,11 +34,12 @@ describe('footer org context fallback', () => {
     test('uses von_org_context to render org footer segment', async () => {
         const { setModelInfoFooterText, updateHeaderOrgName } = require(domUtilsPath);
 
-        updateHeaderOrgName();
+        await updateHeaderOrgName();
         await setModelInfoFooterText();
 
         expect(document.querySelector('#headerOrgName')?.textContent)
             .toBe('The Lu Witbrock Household');
+        expect(document.title).toBe('Von · The Lu Witbrock Household');
         const orgSegment = Array.from(document.querySelectorAll('.footer-segment'))
             .find((seg) => seg.querySelector('.footer-label-inline')?.textContent?.trim() === 'Org:');
         expect(orgSegment).toBeTruthy();

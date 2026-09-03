@@ -13,6 +13,7 @@ import {
   subscribeToWorkflowCapabilityIndexStatus,
 } from './utils/workflowCapabilityStatusCoordinator.js';
 import { createFooterOrganisationSwitcher } from './components/footerOrganisationSwitcher.js';
+import { selectShortestNameForContext } from './utils/nameSelection.js';
 
 export const elements = {};
 
@@ -88,6 +89,54 @@ let _orgDescriptionCacheId = null;
 
 // Default fallback description concept ID (Von system description)
 const VON_SYSTEM_CONCEPT_ID = '#V#von_system';
+const VON_DOCUMENT_TITLE = 'Von';
+
+let _documentTitleRequestGeneration = 0;
+
+function formatVonDocumentTitle(organisationName) {
+  const name = typeof organisationName === 'string' ? organisationName.trim() : '';
+  return name ? `${VON_DOCUMENT_TITLE} · ${name}` : VON_DOCUMENT_TITLE;
+}
+
+/**
+ * Update the browser tab title for the active organisation.
+ *
+ * The stored organisation name is shown immediately, then replaced with the
+ * shortest represented name when the concept read succeeds. Request ordering
+ * prevents a slow read for a previously active organisation from winning.
+ * @param {Object|null} orgContext - Optional already-read organisation context
+ * @returns {Promise<void>}
+ */
+export async function updateDocumentTitle(orgContext = getSessionScopedOrgContext()) {
+  const requestGeneration = ++_documentTitleRequestGeneration;
+  const orgConceptId = orgContext?.concept_id || null;
+  const fallbackName = orgContext?.name || null;
+
+  document.title = formatVonDocumentTitle(fallbackName);
+  if (!orgConceptId) return;
+
+  try {
+    const response = await fetch(`/api/concepts/${encodeURIComponent(orgConceptId)}`);
+    if (!response.ok) return;
+
+    const doc = await response.json();
+    const names = Array.isArray(doc.names) && doc.names.length
+      ? doc.names
+      : (Array.isArray(doc.raw_doc?.names) ? doc.raw_doc.names : []);
+    const shortestName = selectShortestNameForContext(names);
+    if (!shortestName) return;
+
+    const currentOrgConceptId = getSessionScopedOrgContext()?.concept_id || null;
+    if (
+      requestGeneration === _documentTitleRequestGeneration
+      && currentOrgConceptId === orgConceptId
+    ) {
+      document.title = formatVonDocumentTitle(shortestName);
+    }
+  } catch (error) {
+    console.warn('[domUtils] Unable to load the organisation name for the browser title:', error);
+  }
+}
 
 /**
  * Fetch organisation description from Vontology text relations.
@@ -142,15 +191,19 @@ async function fetchOrganisationDescription(orgConceptId) {
  * Update the header organisation name display.
  */
 export function updateHeaderOrgName() {
+  const orgContext = getSessionScopedOrgContext();
+  const documentTitleUpdate = updateDocumentTitle(orgContext);
+
   const headerOrgNameEl = document.getElementById('headerOrgName');
-  if (!headerOrgNameEl) return;
+  if (!headerOrgNameEl) return documentTitleUpdate;
 
   // Read current org from session-scoped storage
-  const orgName = getSessionScopedOrgContext()?.name || null;
+  const orgName = orgContext?.name || null;
 
   const displayName = orgName || 'Personal';
   headerOrgNameEl.textContent = displayName;
   headerOrgNameEl.title = displayName;
+  return documentTitleUpdate;
 }
 
 /**
