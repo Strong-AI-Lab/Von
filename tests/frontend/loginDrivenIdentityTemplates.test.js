@@ -50,4 +50,11 @@ describe('login-driven identity templates', () => {
         expect(settingsSource).not.toContain('populatePeopleDropdown');
         expect(settingsPageSource).not.toContain('currentUserSelect');
     });
+
+    test('Settings never writes the temporary Google auth token to the console', () => {
+        expect(settingsTemplate).toContain("console.log('Received Google login success message');");
+        expect(settingsTemplate).not.toContain(
+            "console.log('Received Google login success message with token:', event.data.authToken);",
+        );
+    });
 });
