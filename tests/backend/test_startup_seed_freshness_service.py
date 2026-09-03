@@ -63,7 +63,9 @@ class _FakeSnapshotCollection:
     def find(self, query: Mapping[str, Any]):
         def matches(document: Mapping[str, Any]) -> bool:
             for field_name, condition in query.items():
-                allowed = condition.get("$in") if isinstance(condition, Mapping) else None
+                allowed = (
+                    condition.get("$in") if isinstance(condition, Mapping) else None
+                )
                 if allowed is None or document.get(field_name) not in allowed:
                     return False
             return True
@@ -84,6 +86,10 @@ class _FakeSnapshotDatabase:
                         "_id": "concept-document",
                         "concept_id": "#V#subject",
                         "name": "Subject",
+                        "embedding_status": "pending",
+                        "embedding_updated_at": "before",
+                        "inherited_salient_binary_predicates": ["#V#old"],
+                        "inherited_salient_computed_at": 1,
                     }
                 ]
             ),
@@ -148,7 +154,7 @@ def _record(
     )
 
 
-def _check(monkeypatch: pytest.MonkeyPatch, db: _FakeDatabase) -> dict[str, Any]:
+def _check(monkeypatch: pytest.MonkeyPatch, db: Any) -> dict[str, Any]:
     monkeypatch.setattr(freshness, "_get_db", lambda: db)
     return freshness.check_startup_seed_freshness(
         family_id="test_family",
@@ -157,6 +163,30 @@ def _check(monkeypatch: pytest.MonkeyPatch, db: _FakeDatabase) -> dict[str, Any]
         concept_ids=["#V#subject"],
         text_relation_subject_ids=["#V#subject"],
         text_relation_predicates=["#V#has_config"],
+    )
+
+
+def _record_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    db: _FakeSnapshotDatabase,
+) -> dict[str, Any]:
+    monkeypatch.setattr(freshness, "_get_db", lambda: db)
+    observation = freshness.begin_startup_seed_freshness_observation(
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+    )
+    return freshness.record_startup_seed_freshness(
+        family_id="test_family",
+        source_digest="source-digest",
+        producer_schema_version="producer.v1",
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+        tracked_concept_document_ids=["concept-document"],
+        tracked_text_relation_document_ids=["relation-document"],
+        tracked_text_value_document_ids=["text-document"],
+        observation=observation,
     )
 
 
@@ -278,6 +308,77 @@ def test_standalone_snapshot_detects_new_relevant_relation(
     assert checked["fresh"] is False
     assert checked["reason"] == "dependency_snapshot_mismatch"
     assert checked["verification_mode"] == "dependency_snapshot"
+
+
+def test_standalone_snapshot_ignores_derived_concept_index_churn(
+    receipt_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeSnapshotDatabase()
+    recorded = _record_snapshot(monkeypatch, db)
+    assert recorded["persisted"] is True
+
+    concept = db.collections["concepts"].documents[0]
+    concept["embedding_status"] = "indexed"
+    concept["embedding_updated_at"] = "after"
+    concept["inherited_salient_binary_predicates"] = ["#V#new"]
+    concept["inherited_salient_computed_at"] = 2
+
+    checked = _check(monkeypatch, db)
+    assert checked["fresh"] is True
+    assert checked["reason"] == "dependency_snapshot_receipt_current"
+
+
+def test_standalone_snapshot_still_detects_semantic_concept_change(
+    receipt_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeSnapshotDatabase()
+    recorded = _record_snapshot(monkeypatch, db)
+    assert recorded["persisted"] is True
+
+    db.collections["concepts"].documents[0]["name"] = "Changed"
+
+    checked = _check(monkeypatch, db)
+    assert checked["fresh"] is False
+    assert checked["reason"] == "dependency_snapshot_mismatch"
+
+
+def test_change_stream_ignores_derived_concept_index_churn(
+    receipt_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeDatabase(
+        [
+            _FakeChangeStream(resume_token={"_data": "recorded"}),
+            _FakeChangeStream(
+                events=[
+                    {
+                        "operationType": "update",
+                        "ns": {"coll": "concepts"},
+                        "documentKey": {"_id": "concept-document"},
+                        "fullDocument": {"concept_id": "#V#subject"},
+                        "updateDescription": {
+                            "updatedFields": {
+                                "embedding_status": "indexed",
+                                "embedding_updated_at": "after",
+                            },
+                            "removedFields": ["embedding_error"],
+                        },
+                    }
+                ],
+                resume_token={"_data": "advanced"},
+            ),
+        ]
+    )
+
+    recorded = _record(monkeypatch, db)
+    checked = _check(monkeypatch, db)
+
+    assert recorded["persisted"] is True
+    assert checked["fresh"] is True
+    assert checked["reason"] == "dependency_receipt_current"
+    assert checked["events_examined"] == 1
 
 
 def test_standalone_snapshot_change_during_verification_is_not_persisted(
