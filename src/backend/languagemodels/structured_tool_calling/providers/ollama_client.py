@@ -285,43 +285,58 @@ USER REQUEST:
         Accepts a single JSON object, a JSON array of tool calls, or multiple
         JSON objects separated by whitespace.
         """
-        stripped = text.strip()
-        if not stripped:
-            return []
-
-        if stripped.startswith("{") or stripped.startswith("["):
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError:
-                parsed = None
-
-            if isinstance(parsed, dict):
-                if parsed.get("action") == "call_tool":
-                    return [parsed]
-            if isinstance(parsed, list):
-                calls: List[Dict[str, Any]] = []
-                for item in parsed:
-                    if isinstance(item, dict) and item.get("action") == "call_tool":
-                        calls.append(item)
-                    else:
-                        return []
-                return calls
-
-        import re
-
         calls: List[Dict[str, Any]] = []
-        for json_match in re.finditer(
-            r'\{[^{}]*"action"\s*:\s*"call_tool"[^{}]*\}',
-            text,
-        ):
-            try:
-                obj = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                return []
-            if isinstance(obj, dict):
-                calls.append(obj)
+        for _, _, decoded_calls in self._json_tool_call_segments(text):
+            calls.extend(decoded_calls)
 
         return calls
+
+    def _json_tool_call_segments(
+        self, text: str
+    ) -> List[tuple[int, int, List[Dict[str, Any]]]]:
+        """Decode complete tool-call JSON values and retain their source spans.
+
+        ``json.loads`` cannot consume consecutive top-level JSON objects, while
+        the former regular-expression fallback could not cross nested payload
+        objects. Ollama's constrained prompt explicitly permits both forms, so
+        use ``raw_decode`` from each plausible JSON boundary instead.
+        """
+
+        decoder = json.JSONDecoder()
+        segments: List[tuple[int, int, List[Dict[str, Any]]]] = []
+        cursor = 0
+
+        while cursor < len(text):
+            object_start = text.find("{", cursor)
+            array_start = text.find("[", cursor)
+            candidates = [index for index in (object_start, array_start) if index >= 0]
+            if not candidates:
+                break
+            start = min(candidates)
+            try:
+                parsed, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+
+            decoded_calls: List[Dict[str, Any]] = []
+            if isinstance(parsed, dict) and parsed.get("action") == "call_tool":
+                decoded_calls = [parsed]
+            elif (
+                isinstance(parsed, list)
+                and parsed
+                and all(
+                    isinstance(item, dict) and item.get("action") == "call_tool"
+                    for item in parsed
+                )
+            ):
+                decoded_calls = list(parsed)
+
+            if decoded_calls:
+                segments.append((start, end, decoded_calls))
+            cursor = max(end, start + 1)
+
+        return segments
 
     def _remove_json_from_text(
         self,
@@ -331,16 +346,18 @@ USER REQUEST:
         """Remove JSON tool calls from response text."""
         import re
 
-        cleaned = text
-        if cleaned.strip().startswith("["):
-            try:
-                if isinstance(json.loads(cleaned.strip()), list):
-                    return ""
-            except json.JSONDecodeError:
-                pass
+        del tool_calls  # Source spans are exact; reconstructed JSON is not.
+        segments = self._json_tool_call_segments(text)
+        if not segments:
+            return text.strip()
 
-        for tool_call in tool_calls:
-            json_str = json.dumps(tool_call)
-            cleaned = re.sub(re.escape(json_str), "", cleaned)
+        parts: List[str] = []
+        cursor = 0
+        for start, end, _ in segments:
+            parts.append(text[cursor:start])
+            cursor = end
+        parts.append(text[cursor:])
+        cleaned = "".join(parts)
+        cleaned = re.sub(r"```(?:json)?\s*```", "", cleaned, flags=re.IGNORECASE)
 
         return cleaned.strip()
