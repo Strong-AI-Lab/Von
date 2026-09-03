@@ -18,14 +18,23 @@
         if (el.hasAttribute('data-keep-title')) return;
         const title = el.getAttribute('title');
         if (!title) return;
-        // Preserve original title if not already stored
-        if (!el.hasAttribute(ORIGINAL_TITLE_ATTR)) {
-            el.setAttribute(ORIGINAL_TITLE_ATTR, title);
-        }
-        // Promote to aria-label if no accessible name
-        if (!el.hasAttribute('aria-label') && !el.hasAttribute('aria-labelledby')) {
+        const previousOriginalTitle = el.getAttribute(ORIGINAL_TITLE_ATTR);
+        const currentAriaLabel = el.getAttribute('aria-label');
+        const ariaLabelWasPromotedFromTitle = (
+            previousOriginalTitle !== null
+            && currentAriaLabel === previousOriginalTitle
+        );
+        // Keep an automatically promoted label in sync with a dynamic title,
+        // while preserving an independently authored accessible name.
+        if (
+            !el.hasAttribute('aria-labelledby')
+            && (!currentAriaLabel || ariaLabelWasPromotedFromTitle)
+        ) {
             el.setAttribute('aria-label', title);
         }
+        // Retain the latest value so the restore hook and the next mutation can
+        // distinguish an auto-promoted label from an authored one.
+        el.setAttribute(ORIGINAL_TITLE_ATTR, title);
         el.removeAttribute('title');
     }
 
