@@ -242,6 +242,36 @@ class TestOllamaToolCallParsing:
             '{"status":"no tool requested","payload":{"reason":"done"}}'
         )
 
+    def test_constrained_prompt_exposes_exact_tool_input_schema(self):
+        client = self._client()
+        prompt = client._build_constrained_prompt(
+            "Find the exact capabilities needed.",
+            [
+                ToolDefinition(
+                    name="turn_capabilities",
+                    description="Inspect delegated capabilities.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "names": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                )
+            ],
+            system_message=None,
+        )
+
+        assert "Input JSON schema:" in prompt
+        assert '"names": {"items": {"type": "string"}' in prompt
+        assert '"additionalProperties": false' in prompt
+        assert '"payload": {' in prompt
+        assert '"payload": "<tool_arguments>"' not in prompt
+        assert "do not add undeclared fields" in prompt
+
 
 class TestTemperatureGuards:
     """Tests for model-specific temperature safeguards."""

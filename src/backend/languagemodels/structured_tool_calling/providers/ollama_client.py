@@ -145,8 +145,15 @@ class OllamaClient(LLMClient):
         instructions and examples to elicit proper JSON formatting.
         """
 
-        tool_descriptions = "\n".join(
-            [f"- {tool.name}: {tool.description}" for tool in available_tools]
+        tool_descriptions = "\n\n".join(
+            [
+                (
+                    f"- {tool.name}: {tool.description}\n"
+                    "  Input JSON schema: "
+                    f"{json.dumps(tool.input_schema, sort_keys=True)}"
+                )
+                for tool in available_tools
+            ]
         )
 
         constraint_prompt = f"""You are a helpful assistant that can invoke tools.
@@ -160,15 +167,17 @@ INSTRUCTIONS:
 {json.dumps({
     "action": "call_tool",
     "tool": "<tool_name>",
-    "payload": "<tool_arguments>"
+    "payload": {"<argument_name>": "<value>"}
 }, indent=2)}
 
    If you need to call multiple tools, respond with a JSON array of tool calls
    or multiple JSON objects separated by newlines.
 
 3. You can only call tools listed above.
-4. Ensure all JSON is valid and complete.
-5. Do not include any text after the JSON.
+4. The payload must be a JSON object that matches that tool's Input JSON schema.
+   Copy argument names exactly and do not add undeclared fields.
+5. Ensure all JSON is valid and complete.
+6. Do not include any text after the JSON.
 
 USER REQUEST:
 {prompt}
