@@ -538,4 +538,39 @@ describe('chatTab latest execution telemetry publication', () => {
             }),
         );
     });
+
+    test('publishes backup-credential telemetry from the live adaptive-turn call shape', () => {
+        const chatTab = require(chatTabModulePath);
+
+        chatTab.__testOnly_clearLlmDebugData();
+        chatTab.setLlmDebugDataForTurn('a-live-backup-key', {
+            timestamp: '2026-09-03T15:26:53.031668Z',
+            model: 'gpt-5.6-luna',
+            llm_interaction: {
+                requested_model: 'gpt-5.6-luna',
+                calls: [
+                    {
+                        type: 'adaptive_turn_model_call',
+                        model: 'gpt-5.6-luna',
+                        provider: 'openai',
+                        transport: {
+                            credential_source: 'backup',
+                            credential_failover_used: true,
+                            primary_credential_failure_kind: 'quota_exhausted',
+                        },
+                    },
+                ],
+            },
+        });
+
+        expect(chatTab.__testOnly_getLatestLlmExecutionTelemetry()).toEqual(
+            expect.objectContaining({
+                credential_source: 'backup',
+                credential_failover_used: true,
+                primary_credential_failure_kind: 'quota_exhausted',
+                actual_model: 'gpt-5.6-luna',
+                actual_provider: 'openai',
+            }),
+        );
+    });
 });
