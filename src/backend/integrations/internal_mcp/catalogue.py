@@ -10489,6 +10489,23 @@ def _organisation_membership_receipt_output_schema() -> Schema:
 
 
 def _concepts_create_input_schema() -> Schema:
+    concept_item_schema = Schema(
+        required={"name": str, "kind": str},
+        optional={
+            "concept_id": (str, type(None)),
+            "description": (str, type(None)),
+            "notes": (str, type(None)),
+            "vontology_path": (str, type(None)),
+            "instance_of_type": (str, type(None)),
+        },
+        enum_values={"kind": ["instance", "type", "predicate"]},
+        allow_unknown=False,
+        description=(
+            "one core concept specification; publication scope belongs in the "
+            "top-level scope_mode field and semantic typing belongs in the "
+            "top-level parent_id field"
+        ),
+    )
     return Schema(
         required={
             "parent_id": str,
@@ -10521,6 +10538,7 @@ def _concepts_create_input_schema() -> Schema:
             ],
         },
         array_length_constraints={"concepts": (1, 1)},
+        array_item_schemas={"concepts": concept_item_schema},
         allow_unknown=True,
         description=(
             "Governed create_concepts input: parent_id is one exact semantic type "

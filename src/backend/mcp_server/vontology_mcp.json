@@ -1352,7 +1352,60 @@
                     },
                     "concepts": {
                         "type": "array",
-                        "items": {}
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "instance",
+                                        "type",
+                                        "predicate"
+                                    ]
+                                },
+                                "concept_id": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                },
+                                "description": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                },
+                                "notes": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                },
+                                "vontology_path": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                },
+                                "instance_of_type": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "kind"
+                            ],
+                            "additionalProperties": false,
+                            "description": "one core concept specification; publication scope belongs in the top-level scope_mode field and semantic typing belongs in the top-level parent_id field"
+                        },
+                        "minItems": 1,
+                        "maxItems": 1
                     },
                     "collision_resolution_mode": {
                         "type": [

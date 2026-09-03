@@ -280,6 +280,36 @@ def test_schema_array_length_constraints_are_validated() -> None:
     ]
 
 
+def test_schema_array_item_contract_is_advertised_and_validated() -> None:
+    item_schema = Schema(
+        required={"name": str, "kind": str},
+        enum_values={"kind": ("instance", "type", "predicate")},
+        allow_unknown=False,
+    )
+    schema = Schema(
+        required={"concepts": list},
+        array_item_schemas={"concepts": item_schema},
+    )
+
+    json_schema = schema_to_json_schema(schema)
+    advertised_item = json_schema["properties"]["concepts"]["items"]
+    assert advertised_item["required"] == ["name", "kind"]
+    assert advertised_item["properties"]["kind"]["enum"] == [
+        "instance",
+        "type",
+        "predicate",
+    ]
+    assert advertised_item["additionalProperties"] is False
+
+    ok, errors = validate_payload(
+        schema,
+        {"concepts": [{"name": "Website", "type": "#V#individual"}]},
+    )
+    assert ok is False
+    assert any("Missing required field 'kind'" in error for error in errors)
+    assert any("Unexpected field 'type'" in error for error in errors)
+
+
 def test_gateway_invoke_extracts_declared_scalar_from_object_payload() -> None:
     observed: dict[str, object] = {}
 
@@ -395,6 +425,102 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
     assert json_schema["properties"]["profile"]["enum"] == [
         "zhan-gmail",
         "lab-gmail",
+    ]
+
+
+def test_orchestrator_schema_conversion_preserves_array_item_contract() -> None:
+    orchestrator = cast(Any, object.__new__(InternalMCPChatOrchestrator))
+
+    json_schema = orchestrator._mcp_schema_to_json_schema(
+        {
+            "required": ["concepts"],
+            "optional": [],
+            "array_item_schemas": {
+                "concepts": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["instance", "type", "predicate"],
+                        },
+                    },
+                    "required": ["name", "kind"],
+                    "additionalProperties": False,
+                }
+            },
+        }
+    )
+
+    assert json_schema["properties"]["concepts"]["items"]["required"] == [
+        "name",
+        "kind",
+    ]
+
+
+def test_orchestrator_preserves_an_existing_json_schema_without_reinterpreting_it(
+) -> None:
+    orchestrator = cast(Any, object.__new__(InternalMCPChatOrchestrator))
+    supplied = {
+        "type": "object",
+        "properties": {
+            "concepts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["concepts"],
+        "additionalProperties": False,
+    }
+
+    converted = orchestrator._mcp_schema_to_json_schema(supplied)
+
+    assert converted == supplied
+    assert converted is not supplied
+
+
+def test_gateway_snapshot_preserves_complete_nested_schema_for_orchestrator() -> None:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="create_one",
+            handler=lambda **kwargs: {"success": True, **kwargs},
+            input_schema=Schema(
+                required={"concepts": list},
+                array_item_schemas={
+                    "concepts": Schema(
+                        required={"name": str, "kind": str},
+                        enum_values={
+                            "kind": ("instance", "type", "predicate")
+                        },
+                        allow_unknown=False,
+                    )
+                },
+            ),
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    orchestrator = cast(Any, object.__new__(InternalMCPChatOrchestrator))
+
+    json_schema = orchestrator._mcp_schema_to_json_schema(
+        gateway.describe_methods()["create_one"]["input_schema"]
+    )
+
+    item_schema = json_schema["properties"]["concepts"]["items"]
+    assert item_schema["required"] == ["name", "kind"]
+    assert item_schema["properties"]["kind"]["enum"] == [
+        "instance",
+        "type",
+        "predicate",
     ]
 
 

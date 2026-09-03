@@ -42,6 +42,7 @@ from .schemas import (
     coerce_payload_types,
     expected_to_json_schema,
     normalise_payload_aliases,
+    schema_to_json_schema,
     validate_payload,
 )
 from .tool_call_contracts import (
@@ -11136,6 +11137,20 @@ class InternalMCPChatOrchestrator:
 
         MCP schemas use required/optional dicts, JSON Schema uses properties + required list.
         """
+        if (
+            mcp_schema.get("type") == "object"
+            and isinstance(mcp_schema.get("properties"), Mapping)
+        ):
+            return copy.deepcopy(dict(mcp_schema))
+
+        complete_json_schema = mcp_schema.get("json_schema")
+        if (
+            isinstance(complete_json_schema, Mapping)
+            and complete_json_schema.get("type") == "object"
+            and isinstance(complete_json_schema.get("properties"), Mapping)
+        ):
+            return copy.deepcopy(dict(complete_json_schema))
+
         required_fields = mcp_schema.get("required", {})
         optional_fields = mcp_schema.get("optional", {})
         allow_unknown = mcp_schema.get("allow_unknown")
@@ -11145,6 +11160,7 @@ class InternalMCPChatOrchestrator:
         scalar_source_fields = mcp_schema.get("scalar_source_fields")
         comma_separated_list_fields = mcp_schema.get("comma_separated_list_fields")
         array_length_constraints = mcp_schema.get("array_length_constraints")
+        array_item_schemas = mcp_schema.get("array_item_schemas")
         description = mcp_schema.get("description")
 
         properties: Dict[str, Any] = {}
@@ -11226,6 +11242,22 @@ class InternalMCPChatOrchestrator:
                     and maximum >= 0
                 ):
                     field_schema["maxItems"] = maximum
+
+        if isinstance(array_item_schemas, Mapping):
+            for field_name, item_schema in array_item_schemas.items():
+                field_schema = properties.get(field_name)
+                if not isinstance(field_schema, dict):
+                    continue
+                field_types = field_schema.get("type")
+                is_array = field_types == "array" or (
+                    isinstance(field_types, list) and "array" in field_types
+                )
+                if not is_array:
+                    field_schema["type"] = "array"
+                if isinstance(item_schema, McpSchema):
+                    field_schema["items"] = schema_to_json_schema(item_schema)
+                elif isinstance(item_schema, Mapping):
+                    field_schema["items"] = copy.deepcopy(dict(item_schema))
 
         json_schema = {
             "type": "object",
@@ -19233,6 +19265,7 @@ class InternalMCPChatOrchestrator:
             array_length_constraints: dict[
                 str, tuple[int | None, int | None]
             ] = {}
+            array_item_schemas: dict[str, McpSchema] = {}
             for field_name, field_schema in properties.items():
                 if not isinstance(field_name, str) or not field_name.strip():
                     continue
@@ -19265,6 +19298,14 @@ class InternalMCPChatOrchestrator:
                     )
                     if minimum is not None or maximum is not None:
                         array_length_constraints[field_name] = (minimum, maximum)
+                    raw_items = field_schema.get("items")
+                    if (
+                        isinstance(raw_items, Mapping)
+                        and raw_items.get("type") == "object"
+                    ):
+                        array_item_schemas[field_name] = _schema_from_json_schema(
+                            raw_items
+                        )
                 if field_name in required_names:
                     required_fields[field_name] = expected
                 else:
@@ -19314,6 +19355,7 @@ class InternalMCPChatOrchestrator:
                 ),
                 enum_values=enum_values,
                 array_length_constraints=array_length_constraints,
+                array_item_schemas=array_item_schemas,
                 scalar_source_fields=(
                     {
                         str(field_name).strip(): tuple(
@@ -19386,6 +19428,14 @@ class InternalMCPChatOrchestrator:
         ):
             return _schema_from_json_schema(raw_schema)
 
+        complete_json_schema = raw_schema.get("json_schema")
+        if (
+            isinstance(complete_json_schema, Mapping)
+            and complete_json_schema.get("type") == "object"
+            and isinstance(complete_json_schema.get("properties"), Mapping)
+        ):
+            return _schema_from_json_schema(complete_json_schema)
+
         return McpSchema(
             required=_coerce_fields(raw_schema.get("required") or {}),
             optional=_coerce_fields(raw_schema.get("optional") or {}),
@@ -19448,6 +19498,20 @@ class InternalMCPChatOrchestrator:
                     and len(limits) == 2
                 }
                 if isinstance(raw_schema.get("array_length_constraints"), Mapping)
+                else {}
+            ),
+            array_item_schemas=(
+                {
+                    str(field_name).strip(): _schema_from_json_schema(item_schema)
+                    for field_name, item_schema in raw_schema.get(
+                        "array_item_schemas", {}
+                    ).items()
+                    if isinstance(field_name, str)
+                    and field_name.strip()
+                    and isinstance(item_schema, Mapping)
+                    and item_schema.get("type") == "object"
+                }
+                if isinstance(raw_schema.get("array_item_schemas"), Mapping)
                 else {}
             ),
             scalar_source_fields=(

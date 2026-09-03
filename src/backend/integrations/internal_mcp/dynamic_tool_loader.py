@@ -224,6 +224,11 @@ def _build_dynamic_input_schema(
             for field_name, limits in target_schema.array_length_constraints.items()
             if field_name in remaining_fields
         },
+        array_item_schemas={
+            field_name: item_schema
+            for field_name, item_schema in target_schema.array_item_schemas.items()
+            if field_name in remaining_fields
+        },
     )
 
 
