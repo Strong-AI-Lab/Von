@@ -433,7 +433,10 @@ def test_summary_field_explicit_reconciliation_verifies_after_write(
     observations: list[dict[str, Any]] = []
     recorded: list[dict[str, Any]] = []
 
-    def _observe() -> dict[str, Any]:
+    def _observe(**kwargs) -> dict[str, Any]:
+        assert kwargs["concept_ids"]
+        assert kwargs["text_relation_subject_ids"]
+        assert kwargs["text_relation_predicates"]
         observation = {
             "success": True,
             "_start_at_operation_time": f"before-pass-{len(observations) + 1}",

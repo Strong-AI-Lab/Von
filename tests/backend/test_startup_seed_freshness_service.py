@@ -51,6 +51,65 @@ class _FakeDatabase:
         return self._streams.pop(0)
 
 
+class _FakeSnapshotCursor(list):
+    def limit(self, count: int):
+        return _FakeSnapshotCursor(self[:count])
+
+
+class _FakeSnapshotCollection:
+    def __init__(self, documents: list[dict[str, Any]]) -> None:
+        self.documents = documents
+
+    def find(self, query: Mapping[str, Any]):
+        def matches(document: Mapping[str, Any]) -> bool:
+            for field_name, condition in query.items():
+                allowed = condition.get("$in") if isinstance(condition, Mapping) else None
+                if allowed is None or document.get(field_name) not in allowed:
+                    return False
+            return True
+
+        return _FakeSnapshotCursor(
+            [dict(document) for document in self.documents if matches(document)]
+        )
+
+
+class _FakeSnapshotDatabase:
+    name = "von_db"
+
+    def __init__(self) -> None:
+        self.collections = {
+            "concepts": _FakeSnapshotCollection(
+                [
+                    {
+                        "_id": "concept-document",
+                        "concept_id": "#V#subject",
+                        "name": "Subject",
+                    }
+                ]
+            ),
+            "text_relations": _FakeSnapshotCollection(
+                [
+                    {
+                        "_id": "relation-document",
+                        "subject_concept_id": "#V#subject",
+                        "predicate": "#V#has_config",
+                        "text_value_id": "text-document",
+                    }
+                ]
+            ),
+            "text_values": _FakeSnapshotCollection(
+                [{"_id": "text-document", "text": "configuration"}]
+            ),
+        }
+
+    def command(self, name: str) -> dict[str, Any]:
+        assert name == "hello"
+        return {"isWritablePrimary": True}
+
+    def __getitem__(self, collection_name: str) -> _FakeSnapshotCollection:
+        return self.collections[collection_name]
+
+
 @pytest.fixture
 def receipt_environment(
     tmp_path: Path,
@@ -134,6 +193,122 @@ def test_receipt_round_trip_skips_unrelated_changes(
     assert "resume_token" not in str(checked)
     assert db.watch_calls[0]["kwargs"]["start_at_operation_time"] == ("operation-time")
     assert "resume_after" in db.watch_calls[1]["kwargs"]
+
+
+def test_standalone_mongo_uses_bounded_dependency_snapshot_receipt(
+    receipt_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeSnapshotDatabase()
+    monkeypatch.setattr(freshness, "_get_db", lambda: db)
+
+    observation = freshness.begin_startup_seed_freshness_observation(
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+    )
+    recorded = freshness.record_startup_seed_freshness(
+        family_id="test_family",
+        source_digest="source-digest",
+        producer_schema_version="producer.v1",
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+        tracked_concept_document_ids=["concept-document"],
+        tracked_text_relation_document_ids=["relation-document"],
+        tracked_text_value_document_ids=["text-document"],
+        observation=observation,
+        metadata={"counts": {"items": 1}},
+    )
+    checked = _check(monkeypatch, db)
+
+    assert observation["verification_mode"] == "dependency_snapshot"
+    assert recorded["persisted"] is True
+    assert recorded["reason"] == "dependency_snapshot_receipt_persisted"
+    assert checked["fresh"] is True
+    assert checked["reason"] == "dependency_snapshot_receipt_current"
+    assert checked["verification_mode"] == "dependency_snapshot"
+    assert checked["document_counts"] == {
+        "concepts": 1,
+        "text_relations": 1,
+        "text_values": 1,
+    }
+    assert receipt_environment.exists()
+    assert "dependency_snapshot_sha256" not in str(checked)
+
+
+def test_standalone_snapshot_detects_new_relevant_relation(
+    receipt_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeSnapshotDatabase()
+    monkeypatch.setattr(freshness, "_get_db", lambda: db)
+    observation = freshness.begin_startup_seed_freshness_observation(
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+    )
+    recorded = freshness.record_startup_seed_freshness(
+        family_id="test_family",
+        source_digest="source-digest",
+        producer_schema_version="producer.v1",
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+        tracked_concept_document_ids=["concept-document"],
+        tracked_text_relation_document_ids=["relation-document"],
+        tracked_text_value_document_ids=["text-document"],
+        observation=observation,
+    )
+    assert recorded["persisted"] is True
+
+    db.collections["text_relations"].documents.append(
+        {
+            "_id": "new-relation",
+            "subject_concept_id": "#V#subject",
+            "predicate": "#V#has_config",
+            "text_value_id": "new-text",
+        }
+    )
+    db.collections["text_values"].documents.append(
+        {"_id": "new-text", "text": "changed configuration"}
+    )
+
+    checked = _check(monkeypatch, db)
+    assert checked["fresh"] is False
+    assert checked["reason"] == "dependency_snapshot_mismatch"
+    assert checked["verification_mode"] == "dependency_snapshot"
+
+
+def test_standalone_snapshot_change_during_verification_is_not_persisted(
+    receipt_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeSnapshotDatabase()
+    monkeypatch.setattr(freshness, "_get_db", lambda: db)
+    observation = freshness.begin_startup_seed_freshness_observation(
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+    )
+    db.collections["concepts"].documents[0]["name"] = "Changed"
+
+    recorded = freshness.record_startup_seed_freshness(
+        family_id="test_family",
+        source_digest="source-digest",
+        producer_schema_version="producer.v1",
+        concept_ids=["#V#subject"],
+        text_relation_subject_ids=["#V#subject"],
+        text_relation_predicates=["#V#has_config"],
+        tracked_concept_document_ids=["concept-document"],
+        tracked_text_relation_document_ids=["relation-document"],
+        tracked_text_value_document_ids=["text-document"],
+        observation=observation,
+    )
+
+    assert recorded["persisted"] is False
+    assert recorded["reason"] == "dependency_snapshot_changed_during_verification"
+    assert not receipt_environment.exists()
 
 
 @pytest.mark.parametrize(

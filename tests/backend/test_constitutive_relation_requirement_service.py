@@ -485,7 +485,7 @@ def test_reconciliation_rechecks_after_materialising_profile(monkeypatch):
     monkeypatch.setattr(
         service.seed_freshness,
         "begin_startup_seed_freshness_observation",
-        lambda: {"success": True},
+        lambda **_kwargs: {"success": True},
     )
     monkeypatch.setattr(
         service,
