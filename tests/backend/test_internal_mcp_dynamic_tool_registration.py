@@ -221,6 +221,7 @@ def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
                 "mode": ("value",),
             },
             comma_separated_list_fields=("filters",),
+            array_length_constraints={"filters": (1, 3)},
         ),
         category="read",
     )
@@ -238,6 +239,7 @@ def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
     assert schema.enum_values == {"scope": ("brief", "full")}
     assert schema.scalar_source_fields == {"target": ("concept_id",)}
     assert schema.comma_separated_list_fields == ("filters",)
+    assert schema.array_length_constraints == {"filters": (1, 3)}
 
     catalogue = MethodCatalogue()
     catalogue.register(base_definition)

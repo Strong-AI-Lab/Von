@@ -256,6 +256,8 @@ class TestOllamaToolCallParsing:
                             "names": {
                                 "type": "array",
                                 "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 1,
                             }
                         },
                         "additionalProperties": False,
@@ -267,10 +269,12 @@ class TestOllamaToolCallParsing:
 
         assert "Input JSON schema:" in prompt
         assert '"names": {"items": {"type": "string"}' in prompt
+        assert '"maxItems": 1' in prompt
         assert '"additionalProperties": false' in prompt
         assert '"payload": {' in prompt
         assert '"payload": "<tool_arguments>"' not in prompt
         assert "do not add undeclared fields" in prompt
+        assert "emit a separate tool-call" in prompt
 
 
 class TestTemperatureGuards:

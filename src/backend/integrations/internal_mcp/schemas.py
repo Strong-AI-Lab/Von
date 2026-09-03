@@ -136,6 +136,8 @@ class Schema:
         description: human readable context for diagnostics / errors.
         comma_separated_list_fields: list-valued fields whose string items may
             be safely split on commas at the tool boundary.
+        array_length_constraints: per-field ``(minimum, maximum)`` item counts
+            exposed in JSON Schema and enforced by payload validation.
     """
 
     required: Mapping[str, JsonCompatibleType] = field(default_factory=dict)
@@ -147,6 +149,9 @@ class Schema:
     enum_values: Mapping[str, Sequence[Any]] = field(default_factory=dict)
     scalar_source_fields: Mapping[str, Sequence[str]] = field(default_factory=dict)
     comma_separated_list_fields: Sequence[str] = field(default_factory=tuple)
+    array_length_constraints: Mapping[
+        str, tuple[int | None, int | None]
+    ] = field(default_factory=dict)
 
     def expect(self, key: str) -> JsonCompatibleType | None:
         if key in self.required:
@@ -236,6 +241,22 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
         enum_values = schema.enum_values.get(field_name)
         if enum_values:
             properties[field_name]["enum"] = list(enum_values)
+
+    for field_name, limits in schema.array_length_constraints.items():
+        field_schema = properties.get(field_name)
+        if not isinstance(field_schema, dict):
+            continue
+        field_types = field_schema.get("type")
+        is_array = field_types == "array" or (
+            isinstance(field_types, list) and "array" in field_types
+        )
+        if not is_array or not isinstance(limits, tuple) or len(limits) != 2:
+            continue
+        minimum, maximum = limits
+        if isinstance(minimum, int) and not isinstance(minimum, bool) and minimum >= 0:
+            field_schema["minItems"] = minimum
+        if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum >= 0:
+            field_schema["maxItems"] = maximum
 
     payload: Dict[str, Any] = {
         "type": "object",
@@ -371,6 +392,30 @@ def validate_payload(
             allowed_values = ", ".join(repr(item) for item in enum_values)
             errors.append(
                 f"Optional field '{key}' expected one of {allowed_values} but received {value!r}."
+            )
+
+    for key, limits in schema.array_length_constraints.items():
+        value = payload.get(key)
+        if not isinstance(value, list) or not isinstance(limits, tuple) or len(limits) != 2:
+            continue
+        minimum, maximum = limits
+        if (
+            isinstance(minimum, int)
+            and not isinstance(minimum, bool)
+            and minimum >= 0
+            and len(value) < minimum
+        ):
+            errors.append(
+                f"Field '{key}' expected at least {minimum} item(s) but received {len(value)}."
+            )
+        if (
+            isinstance(maximum, int)
+            and not isinstance(maximum, bool)
+            and maximum >= 0
+            and len(value) > maximum
+        ):
+            errors.append(
+                f"Field '{key}' expected at most {maximum} item(s) but received {len(value)}."
             )
 
     return not errors, errors

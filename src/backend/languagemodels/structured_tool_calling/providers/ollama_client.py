@@ -176,6 +176,8 @@ INSTRUCTIONS:
 3. You can only call tools listed above.
 4. The payload must be a JSON object that matches that tool's Input JSON schema.
    Copy argument names exactly and do not add undeclared fields.
+   Obey minItems and maxItems. If maxItems is 1, emit a separate tool-call
+   object for each intended item instead of batching items in that argument.
 5. Ensure all JSON is valid and complete.
 6. Do not include any text after the JSON.
 
