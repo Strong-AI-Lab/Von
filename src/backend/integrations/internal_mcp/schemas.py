@@ -138,6 +138,8 @@ class Schema:
             be safely split on commas at the tool boundary.
         array_length_constraints: per-field ``(minimum, maximum)`` item counts
             exposed in JSON Schema and enforced by payload validation.
+        array_item_schemas: per-field schemas for object items in list-valued
+            fields, exposed recursively and enforced for every supplied item.
     """
 
     required: Mapping[str, JsonCompatibleType] = field(default_factory=dict)
@@ -152,6 +154,7 @@ class Schema:
     array_length_constraints: Mapping[
         str, tuple[int | None, int | None]
     ] = field(default_factory=dict)
+    array_item_schemas: Mapping[str, "Schema"] = field(default_factory=dict)
 
     def expect(self, key: str) -> JsonCompatibleType | None:
         if key in self.required:
@@ -257,6 +260,17 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
             field_schema["minItems"] = minimum
         if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum >= 0:
             field_schema["maxItems"] = maximum
+
+    for field_name, item_schema in schema.array_item_schemas.items():
+        field_schema = properties.get(field_name)
+        if not isinstance(field_schema, dict) or not isinstance(item_schema, Schema):
+            continue
+        field_types = field_schema.get("type")
+        is_array = field_types == "array" or (
+            isinstance(field_types, list) and "array" in field_types
+        )
+        if is_array:
+            field_schema["items"] = schema_to_json_schema(item_schema)
 
     payload: Dict[str, Any] = {
         "type": "object",
@@ -416,6 +430,22 @@ def validate_payload(
         ):
             errors.append(
                 f"Field '{key}' expected at most {maximum} item(s) but received {len(value)}."
+            )
+
+    for key, item_schema in schema.array_item_schemas.items():
+        value = payload.get(key)
+        if not isinstance(value, list) or not isinstance(item_schema, Schema):
+            continue
+        for index, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                errors.append(
+                    f"Field '{key}[{index}]' expected an object but received "
+                    f"{type(item).__name__}."
+                )
+                continue
+            _, item_errors = validate_payload(item_schema, item)
+            errors.extend(
+                f"Field '{key}[{index}]': {item_error}" for item_error in item_errors
             )
 
     return not errors, errors

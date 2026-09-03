@@ -466,6 +466,14 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     assert create_definition.input_schema.array_length_constraints == {
         "concepts": (1, 1)
     }
+    create_item_schema = create_definition.input_schema.array_item_schemas["concepts"]
+    assert create_item_schema.required == {"name": str, "kind": str}
+    assert create_item_schema.enum_values["kind"] == [
+        "instance",
+        "type",
+        "predicate",
+    ]
+    assert create_item_schema.allow_unknown is False
     marker_definition = catalogue.get("record_source_processing_marker")
     assert marker_definition.ordinary_turn_trusted_argument_bindings == {
         "namespace": "turn_namespace",

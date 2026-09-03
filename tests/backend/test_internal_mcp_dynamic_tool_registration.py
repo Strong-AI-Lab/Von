@@ -205,7 +205,7 @@ def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
         handler=lambda **kwargs: {"success": True, **kwargs},
         input_schema=Schema(
             required={"target": str, "mode": str},
-            optional={"filters": list, "scope": str},
+            optional={"filters": list, "records": list, "scope": str},
             allow_unknown=False,
             aliases={
                 "target_id": "target",
@@ -222,6 +222,9 @@ def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
             },
             comma_separated_list_fields=("filters",),
             array_length_constraints={"filters": (1, 3)},
+            array_item_schemas={
+                "records": Schema(required={"field": str}, allow_unknown=False)
+            },
         ),
         category="read",
     )
@@ -240,6 +243,7 @@ def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
     assert schema.scalar_source_fields == {"target": ("concept_id",)}
     assert schema.comma_separated_list_fields == ("filters",)
     assert schema.array_length_constraints == {"filters": (1, 3)}
+    assert schema.array_item_schemas["records"].required == {"field": str}
 
     catalogue = MethodCatalogue()
     catalogue.register(base_definition)

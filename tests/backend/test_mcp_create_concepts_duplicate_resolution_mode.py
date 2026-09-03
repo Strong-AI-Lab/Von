@@ -769,7 +769,7 @@ def test_duplicate_resolution_mode_schema_and_handler_reject_unknown_value() -> 
         schema,
         {
             "parent_id": _PARENT_ID,
-            "concepts": [],
+            "concepts": [{"name": "Canonical item", "kind": "instance"}],
             "duplicate_resolution_mode": "canonical_id_only",
         },
     )
@@ -780,7 +780,7 @@ def test_duplicate_resolution_mode_schema_and_handler_reject_unknown_value() -> 
         schema,
         {
             "parent_id": _PARENT_ID,
-            "concepts": [],
+            "concepts": [{"name": "Default item", "kind": "instance"}],
             "duplicate_resolution_mode": None,
         },
     )
@@ -791,7 +791,7 @@ def test_duplicate_resolution_mode_schema_and_handler_reject_unknown_value() -> 
         schema,
         {
             "parent_id": _PARENT_ID,
-            "concepts": [],
+            "concepts": [{"name": "Rejected item", "kind": "instance"}],
             "duplicate_resolution_mode": "semantic",
         },
     )

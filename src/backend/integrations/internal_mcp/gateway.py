@@ -25,6 +25,7 @@ from .schemas import (
     SchemaValidationError,
     coerce_payload_types,
     normalise_payload_aliases,
+    schema_to_json_schema,
     validate_payload,
 )
 from .transport import (
@@ -326,6 +327,14 @@ class MethodCatalogue:
                 for field_name, limits in schema.array_length_constraints.items()
                 if isinstance(field_name, str) and field_name
             },
+            "array_item_schemas": {
+                field_name: schema_to_json_schema(item_schema)
+                for field_name, item_schema in schema.array_item_schemas.items()
+                if isinstance(field_name, str)
+                and field_name
+                and isinstance(item_schema, Schema)
+            },
+            "json_schema": schema_to_json_schema(schema),
         }
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
