@@ -10453,10 +10453,19 @@ def _add_chat_history_message(
         organisation_concept_id=organisation_concept_id,
         role_in_org=role_in_org,
     )
+    stored_message = dict(message)
+    if stored_message.get("role") == "assistant" and isinstance(
+        llm_debug_data, Mapping
+    ):
+        llm_execution_summary = (
+            chat_history_service.build_history_llm_execution_summary(llm_debug_data)
+        )
+        if llm_execution_summary is not None:
+            stored_message["llm_execution_summary"] = llm_execution_summary
     chat_history_service.add_message_to_history(
         user_id,
         session_id,
-        message,
+        stored_message,
         llm_debug_data=llm_debug_data,
         skip_rag_indexing=skip_rag_indexing,
         **context_kwargs,
@@ -15822,6 +15831,55 @@ def _with_viewer_scoped_history_reference_manifests(
     return projected
 
 
+def _with_latest_history_llm_execution_summary(
+    messages: list[dict[str, Any]],
+    *,
+    owner_user_id: str,
+    owner_namespace: str | None,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """Add one bounded footer summary without exposing the full debug payload."""
+
+    projected = [dict(message) for message in messages]
+    for index in range(len(projected) - 1, -1, -1):
+        message = projected[index]
+        if message.get("role") != "assistant":
+            continue
+        if isinstance(message.get("llm_execution_summary"), Mapping):
+            break
+        location = message.get("history_location")
+        history_index = (
+            location.get("history_index") if isinstance(location, Mapping) else None
+        )
+        if not isinstance(history_index, int) or history_index < 0:
+            break
+        try:
+            debug_data = chat_history_service.get_chat_history_debug_entry(
+                user_id=owner_user_id,
+                session_id=session_id,
+                history_index=history_index,
+                namespace=owner_namespace,
+            )
+            if not debug_data and owner_namespace is not None:
+                debug_data = chat_history_service.get_chat_history_debug_entry(
+                    user_id=owner_user_id,
+                    session_id=session_id,
+                    history_index=history_index,
+                    namespace=None,
+                )
+            summary = chat_history_service.build_history_llm_execution_summary(
+                debug_data
+            )
+            if summary is not None:
+                message["llm_execution_summary"] = summary
+        except Exception as exc:
+            current_app.logger.debug(
+                "Could not project latest history LLM execution summary: %s", exc
+            )
+        break
+    return projected
+
+
 @von_bp.route("/history", methods=["GET"])
 def history():
     """Retrieve chat history segments for the current user."""
@@ -16025,6 +16083,13 @@ def history():
                 flattened_history,
                 user_concept_id=user_concept_id,
                 organisation_concept_id=organisation_concept_id,
+            )
+        else:
+            flattened_history = _with_latest_history_llm_execution_summary(
+                flattened_history,
+                owner_user_id=owner_user_id,
+                owner_namespace=owner_namespace,
+                session_id=session_id,
             )
         segments_returned = len(selected_segments)
         history_truncated = bool(meta.get("history_truncated"))

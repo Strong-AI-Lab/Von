@@ -569,11 +569,20 @@ function deriveLlmExecutionContextBinding(debugData, baseBinding = null) {
         binding.conversation_session_id = historySessionId;
     }
 
+    const historyExecutionSummary = (
+        debugData?.llm_execution_summary
+        && typeof debugData.llm_execution_summary === 'object'
+    ) ? debugData.llm_execution_summary : null;
     const llmInteraction = debugData?.llm_interaction && typeof debugData.llm_interaction === 'object'
         ? debugData.llm_interaction
+        : (
+            historyExecutionSummary?.llm_interaction
+            && typeof historyExecutionSummary.llm_interaction === 'object'
+        )
+        ? historyExecutionSummary.llm_interaction
         : null;
     const requestedModel = normaliseLlmExecutionContextString(
-        llmInteraction?.requested_model || debugData?.model,
+        llmInteraction?.requested_model || debugData?.model || historyExecutionSummary?.model,
     );
     if (requestedModel) {
         const interactionCalls = Array.isArray(llmInteraction?.calls) ? llmInteraction.calls : [];
@@ -913,11 +922,17 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
         return null;
     }
 
+    const historyExecutionSummary = (
+        debugData.llm_execution_summary
+        && typeof debugData.llm_execution_summary === 'object'
+    ) ? debugData.llm_execution_summary : null;
     const llmInteraction = (debugData.llm_interaction && typeof debugData.llm_interaction === 'object')
         ? debugData.llm_interaction
         : ((debugData.metadata?.llm_interaction && typeof debugData.metadata.llm_interaction === 'object')
             ? debugData.metadata.llm_interaction
-            : null);
+            : ((historyExecutionSummary?.llm_interaction && typeof historyExecutionSummary.llm_interaction === 'object')
+                ? historyExecutionSummary.llm_interaction
+                : null));
     const rawCalls = Array.isArray(llmInteraction?.calls) ? llmInteraction.calls : [];
     const callModels = [];
     const callProviders = [];
@@ -988,7 +1003,11 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
     const uniqueCallProviders = normaliseTelemetryStringArray([...callProviders, ...fallbackCallProviders]);
     const requestedModel = (typeof llmInteraction?.requested_model === 'string' && llmInteraction.requested_model.trim())
         ? llmInteraction.requested_model.trim()
-        : ((typeof debugData.model === 'string' && debugData.model.trim()) ? debugData.model.trim() : null);
+        : ((typeof debugData.model === 'string' && debugData.model.trim())
+            ? debugData.model.trim()
+            : ((typeof historyExecutionSummary?.model === 'string' && historyExecutionSummary.model.trim())
+                ? historyExecutionSummary.model.trim()
+                : null));
     const topLevelError = (typeof debugData.error === 'string' && debugData.error.trim())
         ? debugData.error.trim()
         : null;
@@ -1027,7 +1046,7 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
             ? { ...executionContextBinding }
             : null,
         turn_id: typeof turnId === 'string' ? turnId : null,
-        timestamp: debugData.timestamp ?? null,
+        timestamp: debugData.timestamp ?? historyExecutionSummary?.timestamp ?? null,
         requested_model: effectiveRequestedModel,
         actual_model: effectiveActualModel,
         actual_provider: effectiveActualProvider,
@@ -29575,6 +29594,9 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             if (msg.role === 'assistant') {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
+                    llm_execution_summary: (
+                        msg.llm_execution_summary && typeof msg.llm_execution_summary === 'object'
+                    ) ? msg.llm_execution_summary : null,
                     history_location: msg.history_location || null,
                     reference_manifest: msg.reference_manifest
                         || msg.llm_debug_data?.reference_manifest

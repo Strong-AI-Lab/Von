@@ -72,6 +72,8 @@ _CONVERSATION_SEARCH_TEXT_INDEX_NAME = "conversation_search_text_v1"
 _CONCEPT_QA_ACTIVE_KEY_INDEX_NAME = "concept_q_and_a_active_key_unique_v1"
 _CONVERSATION_SEARCH_MAX_SEGMENT_CHARS = 5_000
 _MAX_FOCAL_CONCEPT_IDS = 4
+HISTORY_LLM_EXECUTION_SUMMARY_SCHEMA_VERSION = "history_llm_execution_summary.v1"
+_HISTORY_LLM_EXECUTION_SUMMARY_STRING_MAX_CHARS = 240
 CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE = "browser_test_fixture"
 CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS = "benchmark_harness"
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
@@ -86,6 +88,124 @@ CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS = frozenset(
         "agent_test",
     }
 )
+
+
+def _bounded_history_llm_execution_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned[:_HISTORY_LLM_EXECUTION_SUMMARY_STRING_MAX_CHARS]
+
+
+def build_history_llm_execution_summary(
+    llm_debug_data: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Project only safe model and credential provenance needed after reload.
+
+    The full debug payload can contain prompts, tool results, and other material
+    that normal history deliberately omits.  This projection is an explicit
+    allow-list and must remain small enough to return with ordinary history.
+    """
+
+    if not isinstance(llm_debug_data, Mapping):
+        return None
+    raw_interaction = llm_debug_data.get("llm_interaction")
+    if not isinstance(raw_interaction, Mapping):
+        return None
+
+    projected_calls: list[dict[str, Any]] = []
+    raw_calls = raw_interaction.get("calls")
+    if isinstance(raw_calls, list):
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, Mapping):
+                continue
+            projected_call: dict[str, Any] = {}
+            for field_name in ("type", "model", "provider", "stage", "status"):
+                clean_value = _bounded_history_llm_execution_string(
+                    raw_call.get(field_name)
+                )
+                if clean_value is not None:
+                    projected_call[field_name] = clean_value
+            if isinstance(raw_call.get("success"), bool):
+                projected_call["success"] = raw_call["success"]
+
+            transport_candidates = (
+                raw_call.get("transport"),
+                raw_call.get("transport_metadata"),
+                (
+                    raw_call.get("candidate", {}).get("transport_metadata")
+                    if isinstance(raw_call.get("candidate"), Mapping)
+                    else None
+                ),
+                (
+                    raw_call.get("candidate", {}).get("llm_transport")
+                    if isinstance(raw_call.get("candidate"), Mapping)
+                    else None
+                ),
+                (
+                    raw_call.get("metadata", {}).get("transport_metadata")
+                    if isinstance(raw_call.get("metadata"), Mapping)
+                    else None
+                ),
+            )
+            projected_transport: dict[str, Any] = {}
+            for raw_transport in transport_candidates:
+                if not isinstance(raw_transport, Mapping):
+                    continue
+                source = _bounded_history_llm_execution_string(
+                    raw_transport.get("credential_source")
+                )
+                if source and source.lower() in {"primary", "backup"}:
+                    projected_transport["credential_source"] = source.lower()
+                if isinstance(raw_transport.get("credential_failover_used"), bool):
+                    projected_transport["credential_failover_used"] = raw_transport[
+                        "credential_failover_used"
+                    ]
+                failure_kind = _bounded_history_llm_execution_string(
+                    raw_transport.get("primary_credential_failure_kind")
+                )
+                if failure_kind is not None:
+                    projected_transport["primary_credential_failure_kind"] = (
+                        failure_kind
+                    )
+            if projected_transport:
+                projected_call["transport"] = projected_transport
+            if projected_call:
+                projected_calls.append(projected_call)
+
+    projected_interaction: dict[str, Any] = {"calls": projected_calls}
+    for field_name in (
+        "requested_model",
+        "requested_provider",
+        "ordinary_turn_terminal_status",
+    ):
+        clean_value = _bounded_history_llm_execution_string(
+            raw_interaction.get(field_name)
+        )
+        if clean_value is not None:
+            projected_interaction[field_name] = clean_value
+
+    top_level_model = _bounded_history_llm_execution_string(llm_debug_data.get("model"))
+    if not projected_calls and len(projected_interaction) == 1 and not top_level_model:
+        return None
+
+    summary: dict[str, Any] = {
+        "schema_version": HISTORY_LLM_EXECUTION_SUMMARY_SCHEMA_VERSION,
+        "llm_interaction": projected_interaction,
+    }
+    if top_level_model is not None:
+        summary["model"] = top_level_model
+    timestamp = _bounded_history_llm_execution_string(
+        llm_debug_data.get("timestamp")
+        or llm_debug_data.get("interaction_timestamp_utc")
+    )
+    if timestamp is not None:
+        summary["timestamp"] = timestamp
+    return summary
+
+
 CHAT_SESSION_PROVENANCE_FIELDS = (
     "mode",
     "origin_kind",
@@ -1685,6 +1805,9 @@ def _split_history_into_segments_with_locations(
                 author_user_id = owner_user_id
         if author_user_id:
             copied["author_user_id"] = author_user_id
+        llm_execution_summary = entry.get("llm_execution_summary")
+        if isinstance(llm_execution_summary, Mapping):
+            copied["llm_execution_summary"] = dict(llm_execution_summary)
         if include_debug and "llm_debug_data" in entry:
             copied["llm_debug_data"] = entry.get("llm_debug_data")
         existing_location = entry.get("history_location")

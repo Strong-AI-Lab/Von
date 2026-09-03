@@ -87,6 +87,7 @@ import {
     __testOnly_getConversationTranscriptTurnsSnapshot,
     __testOnly_copyConversationInfoToClipboard,
     __testOnly_clearLlmDebugData,
+    __testOnly_getLatestLlmExecutionTelemetry,
     __testOnly_resetChatRequestState,
     __testOnly_refreshConversationRuntimeCostSnapshot,
     __testOnly_setConversationRuntimeCostLiveSummary,
@@ -226,6 +227,61 @@ describe('external conversation imports', () => {
         expect(headers[1]).not.toContain('Von •');
         expect(scrollableField.querySelector('.chat-edit-button')).toBeNull();
         expect(scrollableField.querySelector('.btn-delete-exchange')).toBeNull();
+    });
+});
+
+describe('history LLM execution summary rehydration', () => {
+    afterEach(() => {
+        __testOnly_clearLlmDebugData();
+        document.body.innerHTML = '';
+    });
+
+    test('restores bounded backup credential provenance without full debug data', () => {
+        const scrollableField = document.createElement('div');
+        scrollableField.id = 'scrollableField';
+        document.body.appendChild(scrollableField);
+
+        __test_only__rehydrateHistory(scrollableField, [
+            {
+                role: 'assistant',
+                content: 'BACKUP-FOOTER-PASS',
+                timestamp: '2026-09-03T15:38:44Z',
+                turn_id: 'a-request-backup',
+                history_location: {
+                    session_id: 'session-backup',
+                    history_index: 3
+                },
+                llm_execution_summary: {
+                    schema_version: 'history_llm_execution_summary.v1',
+                    model: 'gpt-5.6-luna',
+                    llm_interaction: {
+                        requested_model: 'gpt-5.6-luna',
+                        calls: [
+                            {
+                                type: 'adaptive_turn_model_call',
+                                model: 'gpt-5.6-luna',
+                                provider: 'openai',
+                                transport: {
+                                    credential_source: 'backup',
+                                    credential_failover_used: true,
+                                    primary_credential_failure_kind: 'quota_exhausted'
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        ], { scrollToBottom: false });
+
+        expect(__testOnly_getLatestLlmExecutionTelemetry()).toEqual(
+            expect.objectContaining({
+                actual_model: 'gpt-5.6-luna',
+                actual_provider: 'openai',
+                credential_source: 'backup',
+                credential_failover_used: true,
+                primary_credential_failure_kind: 'quota_exhausted'
+            })
+        );
     });
 });
 
@@ -2853,6 +2909,23 @@ describe('loadChatHistory degraded handling', () => {
                                 role: 'assistant',
                                 content: 'Done',
                                 timestamp: '2026-06-02T14:13:00Z',
+                                llm_execution_summary: {
+                                    schema_version: 'history_llm_execution_summary.v1',
+                                    model: 'gpt-5.6-luna',
+                                    llm_interaction: {
+                                        requested_model: 'gpt-5.6-luna',
+                                        calls: [
+                                            {
+                                                model: 'gpt-5.6-luna',
+                                                provider: 'openai',
+                                                transport: {
+                                                    credential_source: 'primary',
+                                                    credential_failover_used: false
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
                                 history_location: {
                                     session_id: 'session-1',
                                     history_index: 4
@@ -2929,6 +3002,13 @@ describe('loadChatHistory degraded handling', () => {
 
         await __testOnly_loadChatHistory({ segments: 1 });
 
+        expect(__testOnly_getLatestLlmExecutionTelemetry()).toEqual(
+            expect.objectContaining({
+                credential_source: 'primary',
+                credential_failover_used: false,
+                actual_model: 'gpt-5.6-luna'
+            })
+        );
         const eagerDebugFetches = global.fetch.mock.calls.filter(
             ([url]) => typeof url === 'string' && url.startsWith('/von/history/debug?')
         );

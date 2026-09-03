@@ -1494,6 +1494,7 @@ export async function setModelInfoFooterText() {
       && actualProvider.trim().toLowerCase() !== configuredProvider.trim().toLowerCase();
     const failureReason = executionTelemetry?.primaryFailureReason || executionTelemetry?.error || '';
     const recoveredFailureReason = executionTelemetry?.recoveredFailureReason || '';
+    const credentialSource = executionTelemetry?.credentialSource || '';
     const credentialFailoverUsed = executionTelemetry?.credentialFailoverUsed === true;
     const explicitStageModelOverride = !!executionTelemetry?.explicitStageModelOverride;
     const activeLlmSelectionModes = new Set([
@@ -1564,6 +1565,7 @@ export async function setModelInfoFooterText() {
     if (configuredModel) titleParts.push(`Configured model: ${configuredModel}`);
     if (llmHost) titleParts.push(`Host: ${llmHost}`);
     if (errorMsg) titleParts.push(`Error: ${errorMsg}`);
+    if (credentialSource) titleParts.push(`Credential: ${credentialSource} key`);
     if (executionOverlayActive) {
       const hasHardFailure = !!failureReason || unexpectedModelMismatch;
       llmClass = hasHardFailure ? 'fatal' : 'warning';
@@ -1572,7 +1574,6 @@ export async function setModelInfoFooterText() {
       if (actualProvider) titleParts.push(`Executed provider: ${actualProvider}`);
       if (actualModel) titleParts.push(`Executed model: ${actualModel}`);
       if (credentialFailoverUsed) {
-        titleParts.push('Credential: backup key');
         if (executionTelemetry.primaryCredentialFailureKind) {
           titleParts.push(`Primary credential failure: ${executionTelemetry.primaryCredentialFailureKind}`);
         }
@@ -1629,8 +1630,8 @@ export async function setModelInfoFooterText() {
     if (executionOverlayActive) {
       accessibilityParts.push(`Last execution status ${executionStatusLabel}`);
     }
-    if (credentialFailoverUsed) {
-      accessibilityParts.push('Credential backup key');
+    if (credentialSource) {
+      accessibilityParts.push(`Credential ${credentialSource} key`);
     }
     if (failureReason) {
       accessibilityParts.push(`Failure reason ${failureReason}`);

@@ -303,6 +303,36 @@ describe('footer latest LLM execution status', () => {
         expect(modelButton.title).not.toContain('sk-');
     });
 
+    test('identifies primary-key use in the tooltip without changing the model label', async () => {
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+
+        window.__vonLatestLlmExecutionTelemetry = bindExecutionTelemetry({
+            requested_model: 'gpt-5.4-mini',
+            actual_model: 'gpt-5.4-mini',
+            actual_provider: 'openai',
+            call_models: ['gpt-5.4-mini'],
+            execution_succeeded: true,
+            fallback_used: false,
+            credential_source: 'primary',
+            credential_failover_used: false,
+        });
+        document.dispatchEvent(new CustomEvent('von:latestLlmExecutionTelemetryUpdated', {
+            detail: window.__vonLatestLlmExecutionTelemetry
+        }));
+        await flushUiTicks();
+
+        const modelSegment = await waitForModelSegment((seg) => (
+            seg.querySelector('.concept-footer-button')?.textContent?.trim() === 'gpt-5.4-mini'
+            && seg.querySelector('.concept-footer-button')?.title?.includes('Credential: primary key')
+        ));
+        const modelButton = modelSegment.querySelector('.concept-footer-button');
+        expect(modelButton.textContent.trim()).toBe('gpt-5.4-mini');
+        expect(modelButton.title).toContain('Credential: primary key');
+        expect(modelButton.getAttribute('aria-label')).toContain('Credential primary key');
+    });
+
     test('does not turn footer red for OpenAI alias resolution (dated snapshot)', async () => {
         const { setModelInfoFooterText } = require(domUtilsPath);
 
