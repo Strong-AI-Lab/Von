@@ -5,6 +5,9 @@ Examples:
     python -m src.backend.utilities.migrate_von_organisation_membership_predicates
     python -m src.backend.utilities.migrate_von_organisation_membership_predicates \
       --role-override '#V#user=#V#organisation=owner'
+    python -m src.backend.utilities.migrate_von_organisation_membership_predicates \
+      --preserve-pre-cutover-authority \
+      --role-override '#V#user=#V#organisation=member'
     python -m src.backend.utilities.migrate_von_organisation_membership_predicates --apply --approved
 
 The default is a read-only dry run.  Applying requires both flags so an
@@ -56,6 +59,15 @@ def main() -> int:
         help="Maximum detailed records to include in the JSON report.",
     )
     parser.add_argument(
+        "--preserve-pre-cutover-authority",
+        action="store_true",
+        help=(
+            "Copy every legacy membership edge accepted by the pre-cutover "
+            "reader, using its default member role when no role was stored. "
+            "This does not make future generic edges authoritative."
+        ),
+    )
+    parser.add_argument(
         "--role-override",
         action="append",
         type=_parse_role_override,
@@ -74,6 +86,7 @@ def main() -> int:
         approved=args.approved,
         sample_limit=args.sample_limit,
         role_overrides=args.role_override,
+        preserve_pre_cutover_authority=args.preserve_pre_cutover_authority,
     )
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return 0 if report.get("success") is True else 1

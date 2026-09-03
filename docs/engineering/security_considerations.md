@@ -113,6 +113,10 @@ address authenticate as the person. Login-email bindings are an explicit
 operator-reviewed allow-list, are unique across user concepts, and fail closed
 when absent, stale, or ambiguous. An unbound OAuth identity must not inherit a
 browser-supplied or prior-session concept and must not auto-create a user.
+For a database upgraded from the pre-cutover reader, an explicitly approved
+one-time migration may preserve the unambiguous `#V#has_email` bindings that
+already granted login authority before this boundary existed. The migration
+does not make subsequent ordinary contact-email assertions authoritative.
 
 `#V#hasVonLoginEmail` specialises and entails `#V#has_email`; the reverse
 inference is forbidden. Generic ontology mutation surfaces reserve the narrow
