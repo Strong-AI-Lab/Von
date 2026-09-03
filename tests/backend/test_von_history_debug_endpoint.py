@@ -127,6 +127,72 @@ def test_history_projects_terminal_concept_q_and_a_carrier_state(monkeypatch):
     assert body["qa_session"]["lifecycle"]["status"] == "cancelled"
 
 
+def test_history_projects_retryable_initial_concept_q_and_a_question(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    initial_question = {
+        "status": "retryable_failure",
+        "retryable": True,
+        "attempt_count": 1,
+        "failure": {
+            "error_code": "initial_question_generation_failed",
+            "message": "The initial question could not be generated.",
+        },
+    }
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#test_user"},
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: ("#V#test_user", None),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "mode": "concept_q_and_a",
+            "origin_kind": "concept_q_and_a",
+            "focal_concept_ids": ["#V#primary_labs"],
+            "concept_q_and_a": {
+                "schema_version": "concept_q_and_a_session.v1",
+                "concept": {
+                    "concept_id": "#V#primary_labs",
+                    "name": "Primary Labs",
+                },
+                "lifecycle": {"status": "active", "revision": 0},
+                "initial_question": initial_question,
+            },
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    response = app.test_client().get(
+        "/von/history",
+        query_string={"session_id": "qa-retryable"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["session"]["initial_question"] == initial_question
+    assert body["qa_session"]["initial_question"] == initial_question
+
+
 def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypatch):
     from src.backend.server.routes.von_routes import von_bp
 

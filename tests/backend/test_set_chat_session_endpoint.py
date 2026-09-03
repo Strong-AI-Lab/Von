@@ -203,7 +203,11 @@ def test_set_chat_session_projects_terminal_concept_q_and_a_state(
     _, client = app_client
 
     class _FakeColl:
+        def __init__(self):
+            self.projections = []
+
         def find_one(self, query, projection=None):
+            self.projections.append(projection)
             if query.get("user_id") != "#V#u" or query.get("session_id") != "qa-1":
                 return None
             return {
@@ -219,15 +223,21 @@ def test_set_chat_session_projects_terminal_concept_q_and_a_state(
                         "name": "Primary Labs",
                     },
                     "lifecycle": {"status": "finished", "revision": 1},
+                    "initial_question": {
+                        "status": "ready",
+                        "retryable": False,
+                        "attempt_count": 1,
+                    },
                 },
             }
 
     import src.backend.services.chat_history_service as chat_history_service
 
+    coll = _FakeColl()
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda **_kwargs: _FakeColl(),
+        lambda **_kwargs: coll,
     )
     with client.session_transaction() as sess:
         sess["user_concept_id"] = "#V#u"
@@ -243,6 +253,13 @@ def test_set_chat_session_projects_terminal_concept_q_and_a_state(
     assert body["origin_kind"] == "concept_q_and_a"
     assert body["focal_concept_ids"] == ["#V#primary_labs"]
     assert body["qa_session"]["lifecycle"]["status"] == "finished"
+    assert body["qa_session"]["initial_question"] == {
+        "status": "ready",
+        "retryable": False,
+        "attempt_count": 1,
+    }
+    assert coll.projections
+    assert coll.projections[-1]["concept_q_and_a.initial_question"] == 1
 
 
 def test_set_chat_session_allows_shared_invite(monkeypatch, app_client):
@@ -359,6 +376,144 @@ def test_history_uses_query_session_id(monkeypatch, app_client):
 
     with client.session_transaction() as sess:
         assert sess.get("session_id") == "session-from-cookie"
+
+
+def test_merge_shared_histories_deduplicates_equivalent_structured_content():
+    blob_ref = {
+        "schema_version": "debug_payload_blob_ref.v1",
+        "blob_ref": {"backend": "local", "key": "debug/shared.json.gz"},
+    }
+
+    merged = von_routes._merge_shared_histories(
+        [
+            {
+                "role": "assistant",
+                "content": blob_ref,
+                "author_user_id": "#V#owner",
+                "timestamp": "2026-09-02T12:00:00Z",
+            }
+        ],
+        [
+            {
+                "role": "assistant",
+                "content": {
+                    "blob_ref": {
+                        "key": "debug/shared.json.gz",
+                        "backend": "local",
+                    },
+                    "schema_version": "debug_payload_blob_ref.v1",
+                },
+                "author_user_id": "#V#owner",
+                "timestamp": "2026-09-02T12:00:00Z",
+            }
+        ],
+    )
+
+    assert merged == [
+        {
+            "role": "assistant",
+            "content": blob_ref,
+            "author_user_id": "#V#owner",
+            "timestamp": "2026-09-02T12:00:00Z",
+        }
+    ]
+
+
+def test_shared_history_paging_keeps_structured_blob_content(monkeypatch, app_client):
+    _, client = app_client
+    import src.backend.services.chat_history_service as chat_history_service
+
+    blob_ref = {
+        "schema_version": "debug_payload_blob_ref.v1",
+        "blob_ref": {"backend": "local", "key": "debug/shared.json.gz"},
+    }
+    owner_history = [
+        {
+            "role": "assistant",
+            "content": "Earlier owner response",
+            "author_user_id": "#V#owner",
+            "timestamp": "2026-09-02T12:00:00Z",
+        },
+        {
+            "role": "assistant",
+            "content": blob_ref,
+            "author_user_id": "#V#owner",
+            "timestamp": "2026-09-02T12:00:01Z",
+        },
+    ]
+    invitee_history = [
+        {
+            "role": "assistant",
+            "content": {
+                "blob_ref": {
+                    "key": "debug/shared.json.gz",
+                    "backend": "local",
+                },
+                "schema_version": "debug_payload_blob_ref.v1",
+            },
+            "author_user_id": "#V#owner",
+            "timestamp": "2026-09-02T12:00:01Z",
+        }
+    ]
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {"namespace": "#V#invitee@org"},
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: (
+            "#V#owner",
+            {
+                "conversation_owner_user_id": "#V#owner",
+                "organisation_concept_id": "#V#org",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_load_conversation_session_state_fail_soft",
+        lambda **kwargs: (
+            owner_history,
+            None,
+            None,
+            None,
+            [],
+            {"history_offset": 0, "history_truncated": False},
+        ),
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {"history": invitee_history, "history_truncated": False},
+    )
+    monkeypatch.setattr(von_routes, "chat_history_service", chat_history_service)
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#invitee"
+
+    response = client.get(
+        "/von/history?session_id=shared-session&segments=1&segment_size=1"
+        "&include_debug=0"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()
+    assert payload["history"] == [
+        {
+            "role": "assistant",
+            "content": blob_ref,
+            "author_user_id": "#V#owner",
+            "timestamp": "2026-09-02T12:00:01Z",
+            "history_location": {
+                "session_id": "shared-session",
+                "history_index": 1,
+            },
+        }
+    ]
+    assert payload["has_more_history"] is True
 
 
 def test_set_chat_session_returns_retryable_on_transient_mongo_failure(

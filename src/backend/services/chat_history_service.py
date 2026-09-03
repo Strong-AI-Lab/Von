@@ -799,11 +799,47 @@ def project_concept_q_and_a_session_metadata(
                 lifecycle[key] = timestamp.isoformat()
             elif isinstance(value, str) and value.strip():
                 lifecycle[key] = value.strip()
-    return {
+    raw_initial_question = raw_state.get("initial_question")
+    initial_question: Dict[str, Any] = {}
+    if isinstance(raw_initial_question, Mapping):
+        status = raw_initial_question.get("status")
+        if isinstance(status, str) and status.strip():
+            initial_question["status"] = status.strip()
+        retryable = raw_initial_question.get("retryable")
+        if isinstance(retryable, bool):
+            initial_question["retryable"] = retryable
+        attempt_count = raw_initial_question.get("attempt_count")
+        if (
+            isinstance(attempt_count, int)
+            and not isinstance(attempt_count, bool)
+            and attempt_count >= 0
+        ):
+            initial_question["attempt_count"] = attempt_count
+        last_attempt_at = raw_initial_question.get("last_attempt_at")
+        timestamp = _coerce_datetime(last_attempt_at)
+        if timestamp is not None:
+            initial_question["last_attempt_at"] = timestamp.isoformat()
+        elif isinstance(last_attempt_at, str) and last_attempt_at.strip():
+            initial_question["last_attempt_at"] = last_attempt_at.strip()
+        raw_failure = raw_initial_question.get("failure")
+        if isinstance(raw_failure, Mapping):
+            failure: Dict[str, Any] = {}
+            error_code = raw_failure.get("error_code")
+            if isinstance(error_code, str) and error_code.strip():
+                failure["error_code"] = error_code.strip()
+            message = raw_failure.get("message")
+            if isinstance(message, str) and message.strip():
+                failure["message"] = message.strip()
+            if failure:
+                initial_question["failure"] = failure
+    projection = {
         "schema_version": raw_state.get("schema_version"),
         "concept": concept,
         "lifecycle": lifecycle or None,
     }
+    if initial_question:
+        projection["initial_question"] = initial_question
+    return projection
 
 
 def _concept_q_and_a_metadata_field(doc: Mapping[str, Any]) -> Dict[str, Any]:
@@ -842,6 +878,7 @@ def project_chat_session_mode_state(doc: Mapping[str, Any]) -> Dict[str, Any]:
         projection["concept_q_and_a"] = concept_q_and_a
         projection["concept"] = concept_q_and_a.get("concept")
         projection["lifecycle"] = concept_q_and_a.get("lifecycle")
+        projection["initial_question"] = concept_q_and_a.get("initial_question")
     return projection
 
 
@@ -1112,6 +1149,7 @@ def _add_chat_session_provenance_projection(
     projection["concept_q_and_a.schema_version"] = 1
     projection["concept_q_and_a.concept"] = 1
     projection["concept_q_and_a.lifecycle"] = 1
+    projection["concept_q_and_a.initial_question"] = 1
     return projection
 
 
@@ -1911,6 +1949,7 @@ def get_chat_history_session_state(
                             "concept_q_and_a.schema_version": 1,
                             "concept_q_and_a.concept": 1,
                             "concept_q_and_a.lifecycle": 1,
+                            "concept_q_and_a.initial_question": 1,
                         }
                     },
                 ]
@@ -1944,6 +1983,7 @@ def get_chat_history_session_state(
                     "concept_q_and_a.schema_version": 1,
                     "concept_q_and_a.concept": 1,
                     "concept_q_and_a.lifecycle": 1,
+                    "concept_q_and_a.initial_question": 1,
                 }
                 if include_history:
                     projection["history"] = 1

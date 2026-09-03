@@ -1246,6 +1246,53 @@ def test_generic_chat_state_preserves_terminal_q_and_a_mode_and_focal_state(
     assert summary["completed_at"] == "2026-09-02T12:00:00+00:00"
 
 
+@pytest.mark.parametrize("history_tail_limit", [None, 1])
+def test_generic_chat_state_preserves_retryable_initial_question_state(
+    monkeypatch,
+    history_tail_limit,
+):
+    from src.backend.services import chat_history_service
+
+    collection = _chat_collection()
+    doc = _session_doc()
+    doc["concept_q_and_a"]["initial_question"] = {
+        "status": "retryable_failure",
+        "retryable": True,
+        "attempt_count": 1,
+        "last_attempt_at": "2026-09-02T12:00:00+00:00",
+        "failure": {
+            "error_code": "initial_question_generation_failed",
+            "message": "The initial Q&A question could not be generated.",
+        },
+    }
+    collection.insert_one(doc)
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: collection,
+    )
+
+    state = chat_history_service.get_chat_history_session_state(
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        namespace=NAMESPACE,
+        history_tail_limit=history_tail_limit,
+    )
+
+    expected = {
+        "status": "retryable_failure",
+        "retryable": True,
+        "attempt_count": 1,
+        "last_attempt_at": "2026-09-02T12:00:00+00:00",
+        "failure": {
+            "error_code": "initial_question_generation_failed",
+            "message": "The initial Q&A question could not be generated.",
+        },
+    }
+    assert state["concept_q_and_a"]["initial_question"] == expected
+    assert state["initial_question"] == expected
+
+
 def test_start_resumes_same_active_carrier_and_initial_assistant_is_once(monkeypatch):
     from src.backend.services import concept_qa_conversation_service as service
 
@@ -1310,6 +1357,149 @@ def test_start_resumes_same_active_carrier_and_initial_assistant_is_once(monkeyp
     assert (
         collection.count_documents({"concept_q_and_a.lifecycle.status": "active"}) == 1
     )
+
+
+def test_initial_question_failure_is_typed_and_retries_same_active_carrier(
+    monkeypatch, caplog
+):
+    from src.backend.services import concept_qa_conversation_service as service
+
+    collection = _chat_collection()
+    collection.create_index(
+        [("concept_q_and_a.active_key", 1)],
+        name="concept_q_and_a_active_key_unique_v1",
+        unique=True,
+        partialFilterExpression={
+            "mode": "concept_q_and_a",
+            "origin_kind": "concept_q_and_a",
+            "concept_q_and_a.lifecycle.status": "active",
+            "concept_q_and_a.active_key": {"$type": "string"},
+        },
+    )
+    _patch_chat_store(monkeypatch, service, collection)
+    monkeypatch.setattr(service.chat_history_service, "get_session_context", dict)
+    monkeypatch.setattr(
+        service.concept_service,
+        "_normalise_interaction_llm_selection",
+        lambda **_kwargs: None,
+    )
+    attempts = {"count": 0}
+
+    def generate_initial_question(*_args, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("simulated provider transport failure")
+        return {
+            "status": "success",
+            "question": "Which organisation is Primary Labs a member of?",
+        }
+
+    monkeypatch.setattr(
+        service.concept_service,
+        "generate_initial_question",
+        generate_initial_question,
+    )
+
+    with caplog.at_level("ERROR", logger=service.__name__):
+        failed_start = service.start_concept_qa_conversation(
+            concept_id=CONCEPT_ID,
+            user_id=USER_ID,
+            namespace=NAMESPACE,
+            organisation_concept_id=ORG_ID,
+        )
+
+    assert failed_start["created"] is True
+    assert failed_start["resumed"] is False
+    assert failed_start["lifecycle"]["status"] == "active"
+    assert failed_start["initial_question"] == {
+        "status": "retryable_failure",
+        "retryable": True,
+        "attempt_count": 1,
+        "last_attempt_at": failed_start["initial_question"]["last_attempt_at"],
+        "failure": {
+            "error_code": "initial_question_generation_failed",
+            "message": "The initial Q&A question could not be generated.",
+        },
+    }
+    assert failed_start["turns"] == []
+    assert any(
+        record.exc_info
+        and "Initial concept Q&A question generation failed" in record.getMessage()
+        for record in caplog.records
+    )
+    assert collection.count_documents({"concept_q_and_a.lifecycle.status": "active"}) == 1
+
+    with pytest.raises(service.ConceptQAConversationConflict) as exc_info:
+        service.submit_concept_qa_turn(
+            concept_id=CONCEPT_ID,
+            session_id=failed_start["session_id"],
+            turn_id="premature-answer",
+            user_id=USER_ID,
+            answer="An answer without a question",
+            namespace=NAMESPACE,
+            organisation_concept_id=ORG_ID,
+        )
+    assert exc_info.value.error_code == "initial_question_not_ready"
+    assert failed_start["turns"] == []
+
+    retried = service.start_concept_qa_conversation(
+        concept_id=CONCEPT_ID,
+        user_id=USER_ID,
+        namespace=NAMESPACE,
+        organisation_concept_id=ORG_ID,
+    )
+
+    assert retried["created"] is False
+    assert retried["resumed"] is True
+    assert retried["session_id"] == failed_start["session_id"]
+    assert retried["initial_question"]["status"] == "ready"
+    assert retried["initial_question"]["retryable"] is False
+    assert retried["initial_question"]["attempt_count"] == 2
+    assert retried["initial_question"].get("failure") is None
+    assert [turn["content"] for turn in retried["turns"]] == [
+        "Which organisation is Primary Labs a member of?"
+    ]
+    assert collection.count_documents({"concept_q_and_a.lifecycle.status": "active"}) == 1
+
+
+def test_pre_state_machine_active_carrier_without_question_is_retryable():
+    from src.backend.services import concept_qa_conversation_service as service
+
+    doc = _session_doc()
+    doc["history"] = []
+
+    projected = service._project_session(doc)
+
+    assert projected["lifecycle"]["status"] == "active"
+    assert projected["initial_question"] == {
+        "status": "retryable_failure",
+        "retryable": True,
+        "attempt_count": 0,
+        "failure": {
+            "error_code": "initial_question_missing",
+            "message": "The active Q&A conversation has no initial question.",
+        },
+    }
+
+
+def test_projection_prefers_durable_question_over_stale_retry_marker():
+    from src.backend.services import concept_qa_conversation_service as service
+
+    doc = _session_doc()
+    doc["concept_q_and_a"]["initial_question"] = {
+        "status": "retryable_failure",
+        "retryable": True,
+        "attempt_count": 2,
+        "failure": {"error_code": "initial_question_generation_failed"},
+    }
+
+    projected = service._project_session(doc)
+
+    assert projected["initial_question"] == {
+        "status": "ready",
+        "retryable": False,
+        "attempt_count": 2,
+    }
 
 
 def test_initial_assistant_omits_model_debug_when_legacy_generator_has_none(

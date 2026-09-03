@@ -18438,6 +18438,7 @@ def set_chat_session():
             "concept_q_and_a.schema_version": 1,
             "concept_q_and_a.concept": 1,
             "concept_q_and_a.lifecycle": 1,
+            "concept_q_and_a.initial_question": 1,
         }
         if include_history:
             projection["history"] = 1
@@ -20142,6 +20143,28 @@ def _normalise_history_timestamp(value: Any) -> datetime | None:
     return None
 
 
+def _history_merge_content_key(content: Any) -> tuple[str, Any]:
+    """Return a hashable, stable identity component for history content."""
+
+    try:
+        hash(content)
+    except TypeError:
+        try:
+            return (
+                "structured",
+                json.dumps(
+                    content,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            )
+        except (TypeError, ValueError):
+            return ("structured_repr", repr(content))
+    return ("scalar", content)
+
+
 def _history_merge_key(message: dict) -> tuple | None:
     if not isinstance(message, dict):
         return None
@@ -20155,7 +20178,7 @@ def _history_merge_key(message: dict) -> tuple | None:
         ts_key = ts
     else:
         ts_key = None
-    return (role, content, author, ts_key)
+    return (role, _history_merge_content_key(content), author, ts_key)
 
 
 def _merge_shared_histories(

@@ -9,6 +9,7 @@ per-turn representation receipts.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import uuid
 from collections.abc import Mapping
@@ -40,6 +41,7 @@ FINISHED = "finished"
 CANCELLED = "cancelled"
 TERMINAL_STATUSES = frozenset({FINISHED, CANCELLED})
 _MAX_SESSIONS = 20
+logger = logging.getLogger(__name__)
 
 
 class ConceptQAConversationError(RuntimeError):
@@ -267,6 +269,43 @@ def _structured_turns(doc: Mapping[str, Any]) -> list[dict[str, Any]]:
     return turns
 
 
+def _initial_question_state(doc: Mapping[str, Any]) -> dict[str, Any]:
+    """Project explicit state or recover a pre-state-machine active carrier."""
+
+    qa_state = doc.get("concept_q_and_a")
+    explicit = (
+        qa_state.get("initial_question") if isinstance(qa_state, Mapping) else None
+    )
+    history = doc.get("history") if isinstance(doc.get("history"), list) else []
+    if any(
+        isinstance(item, Mapping) and item.get("role") == "assistant"
+        for item in history
+    ):
+        # The durable turn is stronger evidence than a stale failure marker from
+        # a concurrent attempt. Preserve attempt telemetry, but project truth.
+        ready = dict(explicit) if isinstance(explicit, Mapping) else {}
+        ready.update({"status": "ready", "retryable": False})
+        ready.setdefault("attempt_count", 0)
+        ready.pop("failure", None)
+        return _iso(ready)
+
+    if isinstance(explicit, Mapping):
+        return _iso(dict(explicit))
+
+    if _session_lifecycle(doc).get("status") == ACTIVE:
+        return {
+            "status": "retryable_failure",
+            "retryable": True,
+            "attempt_count": 0,
+            "failure": {
+                "error_code": "initial_question_missing",
+                "message": "The active Q&A conversation has no initial question.",
+            },
+        }
+
+    return {"status": "not_available", "retryable": False, "attempt_count": 0}
+
+
 def _project_session(doc: Mapping[str, Any]) -> dict[str, Any]:
     user_id = str(doc.get("user_id") or "")
     session_id = str(doc.get("session_id") or "")
@@ -294,6 +333,7 @@ def _project_session(doc: Mapping[str, Any]) -> dict[str, Any]:
         "focal_concept_ids": list(doc.get("focal_concept_ids") or []),
         "concept": _session_concept(doc),
         "lifecycle": _session_lifecycle(doc),
+        "initial_question": _initial_question_state(doc),
         "llm_selection": _iso(qa_state.get("llm_selection"))
         if isinstance(qa_state, Mapping)
         else None,
@@ -1029,6 +1069,54 @@ def _record_turn_receipt(
         raise ConceptQAConversationError(
             "Could not persist the Q&A representation receipt",
             error_code="turn_receipt_write_failed",
+        ) from exc
+    if getattr(result, "matched_count", 0) != 1:
+        raise ConceptQAConversationNotFound(
+            "Q&A conversation was not found", error_code="conversation_not_found"
+        )
+
+
+def _record_initial_question_state(
+    *,
+    user_id: str,
+    namespace: str,
+    session_id: str,
+    status: str,
+    retryable: bool,
+    failure_code: str | None = None,
+) -> None:
+    """Record a bounded, retryable initial-question outcome on its carrier."""
+
+    query = _actor_query(
+        user_id=user_id,
+        namespace=namespace,
+        session_id=session_id,
+    )
+    now = _now()
+    fields: dict[str, Any] = {
+        "concept_q_and_a.initial_question.status": status,
+        "concept_q_and_a.initial_question.retryable": retryable,
+        "concept_q_and_a.initial_question.last_attempt_at": now,
+        "updated_at": now,
+    }
+    if failure_code:
+        # Do not persist a provider exception or response body in the carrier.
+        fields["concept_q_and_a.initial_question.failure"] = {
+            "error_code": failure_code,
+            "message": "The initial Q&A question could not be generated.",
+        }
+    try:
+        update: dict[str, Any] = {
+            "$set": fields,
+            "$inc": {"concept_q_and_a.initial_question.attempt_count": 1},
+        }
+        if not failure_code:
+            update["$unset"] = {"concept_q_and_a.initial_question.failure": ""}
+        result = _collection().update_one(query, update)
+    except PyMongoError as exc:
+        raise ConceptQAConversationError(
+            "Could not record the initial Q&A question state",
+            error_code="initial_question_state_write_failed",
         ) from exc
     if getattr(result, "matched_count", 0) != 1:
         raise ConceptQAConversationNotFound(
@@ -1795,7 +1883,7 @@ def _ensure_initial_assistant_turn(
     session_id: str,
     concept: Mapping[str, Any],
     session_doc: Mapping[str, Any],
-) -> None:
+) -> bool:
     history = (
         session_doc.get("history")
         if isinstance(session_doc.get("history"), list)
@@ -1805,7 +1893,7 @@ def _ensure_initial_assistant_turn(
         isinstance(item, Mapping) and item.get("role") == "assistant"
         for item in history
     ):
-        return
+        return True
     qa_state = session_doc.get("concept_q_and_a")
     initial_notes = (
         qa_state.get("initial_notes") if isinstance(qa_state, Mapping) else None
@@ -1818,26 +1906,54 @@ def _ensure_initial_assistant_turn(
         if isinstance(qa_state, Mapping)
         else None,
     }
-    result = concept_service.generate_initial_question(
-        str(concept.get("concept_id")),
-        initial_notes=str(initial_notes or ""),
-        interaction_session=runtime_session,
-        persist_interaction_question=False,
-    )
-    if not isinstance(result, Mapping) or result.get("status") != "success":
-        raise ConceptQAConversationError(
-            "Could not generate the initial Q&A turn",
-            error_code=str(
-                (result or {}).get("status")
-                if isinstance(result, Mapping)
-                else "initial_question_failed"
-            ),
+    try:
+        result = concept_service.generate_initial_question(
+            str(concept.get("concept_id")),
+            initial_notes=str(initial_notes or ""),
+            interaction_session=runtime_session,
+            persist_interaction_question=False,
         )
+    except Exception:
+        # This intentionally covers any ordinary provider/transport exception:
+        # the active carrier was committed before generation, so returning it
+        # with bounded recovery state is safer than losing its only reference.
+        # Preserve the traceback in operational logs, never in the carrier.
+        logger.exception(
+            "Initial concept Q&A question generation failed; preserving carrier for retry "
+            "session_id=%s concept_id=%s",
+            session_id,
+            concept.get("concept_id"),
+        )
+        _record_initial_question_state(
+            user_id=user_id,
+            namespace=namespace,
+            session_id=session_id,
+            status="retryable_failure",
+            retryable=True,
+            failure_code="initial_question_generation_failed",
+        )
+        return False
+    if not isinstance(result, Mapping) or result.get("status") != "success":
+        _record_initial_question_state(
+            user_id=user_id,
+            namespace=namespace,
+            session_id=session_id,
+            status="retryable_failure",
+            retryable=True,
+            failure_code="initial_question_generation_failed",
+        )
+        return False
     question = str(result.get("question") or "").strip()
     if not question:
-        raise ConceptQAConversationError(
-            "Initial Q&A turn was empty", error_code="initial_question_empty"
+        _record_initial_question_state(
+            user_id=user_id,
+            namespace=namespace,
+            session_id=session_id,
+            status="retryable_failure",
+            retryable=True,
+            failure_code="initial_question_empty",
         )
+        return False
     emitted_predicate = result.get("elicitation_predicate")
     elicitation_predicate = (
         concept_service._project_elicitation_metadata(emitted_predicate)
@@ -1866,6 +1982,14 @@ def _ensure_initial_assistant_turn(
         message=assistant_message,
         require_active=True,
     )
+    _record_initial_question_state(
+        user_id=user_id,
+        namespace=namespace,
+        session_id=session_id,
+        status="ready",
+        retryable=False,
+    )
+    return True
 
 
 def start_concept_qa_conversation(
@@ -1935,6 +2059,11 @@ def start_concept_qa_conversation(
             },
             "turn_receipts": {},
             "initial_notes": str(initial_notes or "").strip() or None,
+            "initial_question": {
+                "status": "pending",
+                "retryable": False,
+                "attempt_count": 0,
+            },
         }
         if llm_selection:
             qa_state["llm_selection"] = llm_selection
@@ -2227,6 +2356,11 @@ def submit_concept_qa_turn(
         raise ConceptQAConversationConflict(
             f"Q&A conversation is {lifecycle.get('status') or 'not active'}",
             error_code="conversation_terminal",
+        )
+    if _initial_question_state(doc).get("status") != "ready":
+        raise ConceptQAConversationConflict(
+            "Retry the initial Q&A question before submitting an answer",
+            error_code="initial_question_not_ready",
         )
     effective_org_id = _normalise_org_id(doc.get("organisation_concept_id")) or org_id
     prior_doc = doc

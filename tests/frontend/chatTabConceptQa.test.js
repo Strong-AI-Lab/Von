@@ -137,6 +137,31 @@ describe('chat workspace concept Q&A mode', () => {
         expect(document.getElementById('promptInput').disabled).toBe(true);
     });
 
+    test('keeps an incomplete Q&A transcript inspectable but blocks answers until retry', async () => {
+        const qa = require(qaModulePath);
+        const chat = require(chatTabModulePath);
+        chat.__testOnly_setConceptQaSession(activeSession({
+            initial_question: {
+                status: 'retryable_failure',
+                retryable: true,
+                attempt_count: 1,
+            },
+            turns: [],
+        }));
+
+        expect(document.getElementById('conceptQaConversationControls').textContent)
+            .toContain('Needs retry');
+        expect(document.getElementById('promptInput').disabled).toBe(true);
+        expect(document.getElementById('promptInput').placeholder)
+            .toContain('Retry the initial question from the concept card');
+        expect(document.getElementById('sendButton').disabled).toBe(true);
+        expect(document.getElementById('sendButton').textContent).toBe('Retry question first');
+
+        document.getElementById('promptInput').value = 'An answer without a question';
+        await chat.__testOnly_sendChatPrompt();
+        expect(qa.submitConceptQaTurn).not.toHaveBeenCalled();
+    });
+
     test('rehydrates stable turn IDs, LLM access and separate receipts in the normal transcript', () => {
         const chat = require(chatTabModulePath);
         chat.__testOnly_setConceptQaSession(activeSession());

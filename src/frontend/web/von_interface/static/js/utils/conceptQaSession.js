@@ -33,6 +33,21 @@ function normaliseActionList(value, lifecycle) {
   return ['open_transcript', 'copy_reference'];
 }
 
+function normaliseInitialQuestion(value) {
+  const source = firstObject(value) || {};
+  const status = cleanText(source.status).toLowerCase().replace(/[\s-]+/g, '_');
+  const failure = firstObject(source.failure);
+  return {
+    status: status || 'ready',
+    retryable: source.retryable === true || status === 'retryable_failure',
+    attempt_count: Number.isInteger(source.attempt_count) ? source.attempt_count : 0,
+    failure: failure ? {
+      error_code: cleanText(failure.error_code) || null,
+      message: cleanText(failure.message) || null,
+    } : null,
+  };
+}
+
 export function normaliseConceptQaReceipts(value) {
   const source = firstObject(value?.receipts, value?.representation, value) || {};
   return {
@@ -80,6 +95,11 @@ export function normaliseConceptQaSession(value, defaults = {}) {
     ? source.turns
     : (Array.isArray(root.turns) ? root.turns : []);
   const receipts = normaliseConceptQaReceipts(root.receipts || source.receipts || source.latest_receipts);
+  const initialQuestion = normaliseInitialQuestion(source.initial_question);
+  const availableActions = normaliseActionList(
+    source.available_actions || source.allowed_actions,
+    lifecycle,
+  ).filter((action) => !(initialQuestion.retryable && action === 'submit_turn'));
 
   return {
     ...source,
@@ -92,13 +112,11 @@ export function normaliseConceptQaSession(value, defaults = {}) {
     origin_kind: CONCEPT_QA_ORIGIN_KIND,
     lifecycle,
     status: lifecycle,
-    available_actions: normaliseActionList(
-      source.available_actions || source.allowed_actions,
-      lifecycle,
-    ),
+    available_actions: availableActions,
     conversation_reference: canonicalRef || null,
     turns,
     receipts,
+    initial_question: initialQuestion,
     created: root.created === true || source.created === true,
     resumed: root.resumed === true || source.resumed === true,
     updated_at: cleanText(source.updated_at) || cleanText(root.updated_at) || null,
@@ -186,7 +204,10 @@ export function conceptQaActionAllowed(session, action) {
   if (!projection) return false;
   const actions = new Set(projection.available_actions);
   if (actions.has(action)) return true;
-  if (action === 'submit_turn') return projection.lifecycle === 'active';
+  if (action === 'submit_turn') {
+    return projection.lifecycle === 'active'
+      && projection.initial_question?.retryable !== true;
+  }
   return ['open_transcript', 'copy_reference'].includes(action);
 }
 
