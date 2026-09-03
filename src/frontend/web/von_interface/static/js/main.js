@@ -41,6 +41,7 @@ import {
   resolveBrowserBootstrapOrganisationContext,
   resolveBrowserBootstrapUserContext
 } from './utils/runtimeIdentityBootstrap.js';
+import { recoverPersonalContextAfterMembershipDenial } from './utils/organisationSessionRecovery.js';
 import { hydrateStoredSelectionsFromUserPreferences } from './utils/userPreferenceBootstrap.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
@@ -406,9 +407,27 @@ async function syncFlaskSessionOrg() {
 
     console.log('[main] Syncing organisation to window session from storage:', orgConceptId,
       context.organisation_id ? `(was: ${context.organisation_id} from ${context.context_source})` : '(no previous org)');
-    const syncData = await postJson('/von/api/session/set_organisation', {
-      organisation_concept_id: orgConceptId
-    });
+    let syncData;
+    try {
+      syncData = await postJson('/von/api/session/set_organisation', {
+        organisation_concept_id: orgConceptId
+      });
+    } catch (err) {
+      const currentUser = parseStoredContextValue(localStorage.getItem('von_current_user'));
+      const recovery = await recoverPersonalContextAfterMembershipDenial({
+        error: err,
+        postJson,
+        userContext: currentUser,
+      });
+      if (!recovery) {
+        throw err;
+      }
+      console.warn(
+        '[main] Stored organisation is unavailable to the authenticated user; recovered to Personal:',
+        orgConceptId
+      );
+      return recovery;
+    }
     console.log('[main] Window session org synced:', syncData);
     if (syncData.namespace) {
       setSessionScopedNamespace(syncData.namespace);
