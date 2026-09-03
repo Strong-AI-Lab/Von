@@ -99,24 +99,32 @@ function formatVonDocumentTitle(organisationName) {
 }
 
 /**
- * Update the browser tab title for the active organisation.
+ * Update the browser tab title for the active organisation or personal user.
  *
- * The stored organisation name is shown immediately, then replaced with the
- * shortest represented name when the concept read succeeds. Request ordering
- * prevents a slow read for a previously active organisation from winning.
+ * The stored name is shown immediately, then replaced with the shortest
+ * represented name when the concept read succeeds. Request ordering prevents
+ * a slow read for a previously active context from winning.
  * @param {Object|null} orgContext - Optional already-read organisation context
+ * @param {boolean} isPersonalContext - Whether Personal was explicitly selected
  * @returns {Promise<void>}
  */
-export async function updateDocumentTitle(orgContext = getSessionScopedOrgContext()) {
+export async function updateDocumentTitle(
+  orgContext = getSessionScopedOrgContext(),
+  isPersonalContext = hasSessionPersonalOrgContext(),
+) {
   const requestGeneration = ++_documentTitleRequestGeneration;
-  const orgConceptId = orgContext?.concept_id || null;
-  const fallbackName = orgContext?.name || null;
+  const userContext = isPersonalContext ? readSessionScopedJson('von_current_user') : null;
+  const targetConceptId = orgContext?.concept_id || userContext?.concept_id || null;
+  const fallbackName = orgContext?.name
+    || userContext?.name
+    || userContext?.display_name
+    || (isPersonalContext ? 'Personal' : null);
 
   document.title = formatVonDocumentTitle(fallbackName);
-  if (!orgConceptId) return;
+  if (!targetConceptId) return;
 
   try {
-    const response = await fetch(`/api/concepts/${encodeURIComponent(orgConceptId)}`);
+    const response = await fetch(`/api/concepts/${encodeURIComponent(targetConceptId)}`);
     if (!response.ok) return;
 
     const doc = await response.json();
@@ -126,15 +134,21 @@ export async function updateDocumentTitle(orgContext = getSessionScopedOrgContex
     const shortestName = selectShortestNameForContext(names);
     if (!shortestName) return;
 
-    const currentOrgConceptId = getSessionScopedOrgContext()?.concept_id || null;
+    const currentTargetConceptId = isPersonalContext
+      ? readSessionScopedJson('von_current_user')?.concept_id || null
+      : getSessionScopedOrgContext()?.concept_id || null;
+    const contextStillActive = isPersonalContext
+      ? hasSessionPersonalOrgContext()
+      : !hasSessionPersonalOrgContext();
     if (
       requestGeneration === _documentTitleRequestGeneration
-      && currentOrgConceptId === orgConceptId
+      && contextStillActive
+      && currentTargetConceptId === targetConceptId
     ) {
       document.title = formatVonDocumentTitle(shortestName);
     }
   } catch (error) {
-    console.warn('[domUtils] Unable to load the organisation name for the browser title:', error);
+    console.warn('[domUtils] Unable to load the context name for the browser title:', error);
   }
 }
 
