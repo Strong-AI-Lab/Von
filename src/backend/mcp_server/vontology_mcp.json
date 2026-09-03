@@ -1451,6 +1451,26 @@
                             "null"
                         ]
                     },
+                    "publication_scope": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "private",
+                            "user_only",
+                            "user_only_default",
+                            "organisation",
+                            "organization",
+                            "organisation_general",
+                            "organization_general",
+                            "org_general",
+                            "global",
+                            "public",
+                            "global_general",
+                            null
+                        ]
+                    },
                     "ontology_delegation_id": {
                         "type": "string",
                         "description": "Opaque server-issued delegation for this exact canonical ontology mutation. It does not identify or authenticate a user."
@@ -1465,7 +1485,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "Governed create_concepts input: parent_id is one exact semantic type concept ID, and concepts must contain exactly one core concept specification: {name, kind, concept_id?, description?, notes?, vontology_path?, instance_of_type?}. kind is 'instance' for an individual, 'type' for a subtype, or 'predicate' for a relationship type. duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-ID miss; omitting it preserves the default semantic duplicate check. A name match may block a duplicate and return a candidate for inspection, but it is never silently treated as person identity by this governed command. This effect idempotently reuses only the exact requested actor-visible concept. Reuse requires compatible kind and direct or transitive requested typing, then returns that effective existing ID and its actual publication context. Requested description, notes, path, and creation scope are reported as satisfied or unapplied; reuse never silently mutates them. When an actor-hidden ID collision prevents an instance create, the failure may advertise one executable create_actor_scoped_referent_after_id_conflict action. Use that action's complete arguments to opt into collision_resolution_mode='actor_scoped_referent'; the server derives the actor-private ID from trusted actor context and does not create an alias or identity/equivalence assertion. Recovery mode treats requested_concept_id only as an identity seed; it does not inspect or confirm whether that ID is occupied. This governed effect does not accept batched concepts, external identity or identity review fields, attributes, tags, linked concepts, duplicate suffixing, or multiple parents. Add further classifications or relationships after creation through separate add_relationship effects using exact existing predicate IDs. Omit scope_mode for actor-private visibility, or choose exactly 'user_only_default', 'organisation_general', or 'global_general' according to the intended audience. The requested scope succeeds only under the authenticated actor's matching live authority; denial never silently creates a narrower private concept. Optional namespace is propagated for tenancy attribution. Unknown top-level fields remain tolerated for orchestrator-added context but do not enlarge the governed effect."
+                "description": "Governed create_concepts input: parent_id is one exact semantic type concept ID, and concepts must contain exactly one core concept specification: {name, kind, concept_id?, description?, notes?, vontology_path?, instance_of_type?}. kind is 'instance' for an individual, 'type' for a subtype, or 'predicate' for a relationship type. duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-ID miss; omitting it preserves the default semantic duplicate check. A name match may block a duplicate and return a candidate for inspection, but it is never silently treated as person identity by this governed command. This effect idempotently reuses only the exact requested actor-visible concept. Reuse requires compatible kind and direct or transitive requested typing, then returns that effective existing ID and its actual publication context. Requested description, notes, path, and creation scope are reported as satisfied or unapplied; reuse never silently mutates them. When an actor-hidden ID collision prevents an instance create, the failure may advertise one executable create_actor_scoped_referent_after_id_conflict action. Use that action's complete arguments to opt into collision_resolution_mode='actor_scoped_referent'; the server derives the actor-private ID from trusted actor context and does not create an alias or identity/equivalence assertion. Recovery mode treats requested_concept_id only as an identity seed; it does not inspect or confirm whether that ID is occupied. This governed effect does not accept batched concepts, external identity or identity review fields, attributes, tags, linked concepts, duplicate suffixing, or multiple parents. Add further classifications or relationships after creation through separate add_relationship effects using exact existing predicate IDs. Omit scope_mode for actor-private visibility, or choose exactly 'user_only_default', 'organisation_general', or 'global_general' according to the intended audience. publication_scope is a compatibility alias and accepts natural 'organisation'/'organization' values. Conflicting scope fields are rejected before mutation. The requested scope succeeds only under the authenticated actor's matching live authority; denial never silently creates a narrower private concept. Optional namespace is propagated for tenancy attribution. Unknown top-level fields remain tolerated for orchestrator-added context but do not enlarge the governed effect."
             }
         },
         {

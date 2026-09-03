@@ -1,6 +1,38 @@
 import pytest
 
 
+def test_create_concepts_publication_scope_alias_resolves_without_authority_change():
+    from src.backend.integrations.internal_mcp.catalogue import (
+        _resolve_create_concepts_scope_mode,
+    )
+
+    scope_mode, source, error = _resolve_create_concepts_scope_mode(
+        {"publication_scope": "organisation"}
+    )
+
+    assert error is None
+    assert scope_mode == "organisation_general"
+    assert source == "request.publication_scope"
+
+
+def test_create_concepts_scope_alias_conflict_is_not_started():
+    from src.backend.integrations.internal_mcp.catalogue import (
+        _resolve_create_concepts_scope_mode,
+    )
+
+    _, _, error = _resolve_create_concepts_scope_mode(
+        {
+            "scope_mode": "user_only_default",
+            "publication_scope": "organisation",
+        }
+    )
+
+    assert error is not None
+    assert error["error_code"] == "conflicting_scope_mode_fields"
+    assert error["effect_status"] == "not_started"
+    assert error["changed"] is False
+
+
 @pytest.fixture
 def trusted_gmail_operator(monkeypatch):
     """Explicit local-operator provenance for handler-mechanics tests."""
@@ -462,6 +494,10 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "organisation_general",
         "global_general",
         None,
+    ]
+    assert "publication_scope" in create_definition.input_schema.optional
+    assert "organisation" in create_definition.input_schema.enum_values[
+        "publication_scope"
     ]
     assert create_definition.input_schema.array_length_constraints == {
         "concepts": (1, 1)
