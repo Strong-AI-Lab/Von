@@ -9,6 +9,13 @@ function storeOrganisation(conceptId, name) {
     }));
 }
 
+function storeUser(conceptId, name) {
+    sessionStorage.setItem('von_current_user', JSON.stringify({
+        concept_id: conceptId,
+        name,
+    }));
+}
+
 describe('organisation-aware browser title', () => {
     beforeEach(() => {
         jest.resetModules();
@@ -54,6 +61,37 @@ describe('organisation-aware browser title', () => {
         await updateDocumentTitle();
 
         expect(document.title).toBe('Von');
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('uses the shortest represented user name for Personal context', async () => {
+        storeOrganisation('#V#primary_labs', 'Primary Labs');
+        storeUser('#V#michael_witbrock', 'Michael Witbrock');
+        sessionStorage.setItem('von_org_selection', 'personal');
+        global.fetch.mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                names: [
+                    { name: 'Michael Witbrock', language: 'en-NZ', type: 'NL' },
+                    { name: 'Michael', language: 'en-NZ', type: 'ABBR' },
+                ],
+            }),
+        });
+
+        const { updateDocumentTitle } = require(domUtilsPath);
+        await updateDocumentTitle();
+
+        expect(document.title).toBe('Von · Michael');
+        expect(global.fetch).toHaveBeenCalledWith('/api/concepts/%23V%23michael_witbrock');
+    });
+
+    test('uses Personal when no usable user name is available', async () => {
+        sessionStorage.setItem('von_org_selection', 'personal');
+
+        const { updateDocumentTitle } = require(domUtilsPath);
+        await updateDocumentTitle();
+
+        expect(document.title).toBe('Von · Personal');
         expect(global.fetch).not.toHaveBeenCalled();
     });
 
