@@ -34569,26 +34569,14 @@ function getLatestLlmDebugEntryForExport() {
         return null;
     }
 
-    const getTurnTimestamp = (turnId) => {
-        if (typeof turnId !== 'string') {
-            return 0;
-        }
-        const parts = turnId.split('-');
-        const tail = parts.length > 1 ? Number.parseInt(parts[parts.length - 1], 10) : 0;
-        return Number.isFinite(tail) ? tail : 0;
-    };
-
+    // Entries are inserted in transcript order. Updating an existing Map key
+    // (for example, when its stored Thinking details are loaded) preserves
+    // that order. Turn IDs are opaque and commonly contain UUIDs, so parsing a
+    // UUID fragment as a timestamp can select an older turn after reload.
     let latest = null;
     for (const [turnId, debugData] of llmDebugData.entries()) {
         const executionContextBinding = llmDebugExecutionContextBindings.get(turnId) || null;
-        if (!latest) {
-            latest = { turnId, debugData, executionContextBinding, timestamp: getTurnTimestamp(turnId) };
-            continue;
-        }
-        const nextTimestamp = getTurnTimestamp(turnId);
-        if (nextTimestamp >= latest.timestamp) {
-            latest = { turnId, debugData, executionContextBinding, timestamp: nextTimestamp };
-        }
+        latest = { turnId, debugData, executionContextBinding };
     }
     return latest;
 }
