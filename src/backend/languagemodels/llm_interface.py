@@ -28,6 +28,7 @@ from ..services.llm_api_key_resolution import (
     classify_api_key_failover_exception,
     get_gemini_api_key,
     get_gemini_backup_api_key,
+    get_meta_api_key,
     get_openai_backup_api_key,
     get_openrouter_api_key,
 )
@@ -39,12 +40,18 @@ from ..services.settings_service import (
 from ..services.model_parameter_service import (
     chat_completions_kwargs_from_model_parameters,
     gemini_kwargs_from_model_parameters,
+    meta_responses_kwargs_from_model_parameters,
+    normalise_model_parameters_for_storage,
     openai_responses_kwargs_from_model_parameters,
 )
 from .model_defaults import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_META_MUSE_MODEL,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OPENAI_MODEL,
+    META_MUSE_MAX_OUTPUT_TOKENS,
+    META_MUSE_TEMPERATURE,
+    META_MUSE_TOP_P,
 )
 from .structured_tool_calling import (
     LLMClientConfig,
@@ -164,6 +171,8 @@ def infer_llm_client_provider(client: Any) -> Optional[str]:
     if client is None:
         return None
     class_ref = f"{type(client).__module__}.{type(client).__name__}".lower()
+    if "metamuse" in class_ref:
+        return "meta"
     if "ollama" in class_ref:
         return "ollama"
     if "openai" in class_ref:
@@ -537,7 +546,7 @@ def _looks_like_browser_object_model_reference(value: str) -> bool:
     if not cleaned:
         return False
     lowered = cleaned.lower()
-    for prefix in ("openai:", "openrouter:", "ollama:", "gemini:"):
+    for prefix in ("openai:", "openrouter:", "ollama:", "gemini:", "meta:"):
         if lowered.startswith(prefix):
             cleaned = cleaned.split(":", 1)[1].strip()
             break
@@ -570,6 +579,19 @@ def _extract_openrouter_model_id(value: str) -> Optional[str]:
     return cleaned or None
 
 
+def _extract_meta_muse_model_id(value: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.lower().startswith("meta:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    if _looks_like_browser_object_model_reference(cleaned):
+        return None
+    return cleaned or None
+
+
 def _extract_ollama_model_id(value: str) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -591,7 +613,7 @@ def _looks_like_ollama_model(name: str) -> bool:
         return False
     if raw.startswith("#V#"):
         return False
-    if raw.lower().startswith(("openai:", "ft:")):
+    if raw.lower().startswith(("openai:", "meta:", "ft:")):
         return False
     direct = _extract_openai_model_id(raw)
     if direct and _looks_like_openai_model(direct):
@@ -640,6 +662,13 @@ def resolve_provider_from_model_concept(model: Optional[str]) -> Optional[str]:
         lowered = text.lower()
         if "openrouter" in lowered:
             return "openrouter"
+        if (
+            lowered.strip() == "meta"
+            or "meta model api" in lowered
+            or "meta muse" in lowered
+            or "muse spark" in lowered
+        ):
+            return "meta"
         if "openai" in lowered:
             return "openai"
         if "ollama" in lowered:
@@ -780,6 +809,40 @@ def resolve_openrouter_model_name(model: Optional[str]) -> Optional[str]:
     return candidates[0] if candidates else direct
 
 
+def resolve_meta_muse_model_name(model: Optional[str]) -> Optional[str]:
+    """Resolve only the fixed Meta Muse model enabled by this integration."""
+
+    if not isinstance(model, str):
+        return model
+    raw = model.strip()
+    if not raw or _looks_like_browser_object_model_reference(raw):
+        return None
+    direct = _extract_meta_muse_model_id(raw)
+    if direct == DEFAULT_META_MUSE_MODEL:
+        return direct
+    if not raw.startswith("#V#"):
+        return None
+
+    try:
+        from ..security.access_control import bypass_access_control
+        from ..services.text_value_service import get_texts_for_concept
+
+        with bypass_access_control():
+            rows = get_texts_for_concept(raw, predicate="hasName", limit=20)
+    except Exception:
+        rows = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str):
+            continue
+        candidate = _extract_meta_muse_model_id(text)
+        if candidate == DEFAULT_META_MUSE_MODEL:
+            return candidate
+    return None
+
+
 def _resolve_effective_llm_actor_scope(
     user_concept_id: Optional[str] = None,
     org_concept_id: Optional[str] = None,
@@ -849,6 +912,8 @@ def _normalise_model_execution_key(
         model_key = resolve_openai_model_name(model_key) or model_key
     elif provider_key == "openrouter":
         model_key = resolve_openrouter_model_name(model_key) or model_key
+    elif provider_key == "meta":
+        model_key = resolve_meta_muse_model_name(model_key) or model_key
     return provider_key, model_key
 
 
@@ -881,6 +946,7 @@ def assert_model_execution_allowed(
         "openai": "OpenAI",
         "openrouter": "OpenRouter",
         "gemini": "Gemini",
+        "meta": "Meta Muse",
     }.get(provider_key, provider_key or "External")
     if not model_key:
         raise ModelExecutionEligibilityError(
@@ -2729,6 +2795,319 @@ class OpenRouterClient(OpenAIClient):
         return models
 
 
+META_MODEL_API_BASE_URL = "https://api.meta.ai/v1"
+META_MODEL_API_CONNECTION_ID = "#V#meta_provider"
+
+
+class MetaMuseClient(LLMInterface):
+    """Opt-in Muse Spark client for Meta's OpenAI-compatible Responses API."""
+
+    DEFAULT_MODEL = DEFAULT_META_MUSE_MODEL
+    SUPPORTED_MODELS = (DEFAULT_META_MUSE_MODEL,)
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        api_key_env_var: str = "META_API_KEY",
+        *,
+        default_model: str = DEFAULT_META_MUSE_MODEL,
+        model_execution_user_concept_id: Optional[str] = None,
+        model_execution_org_concept_id: Optional[str] = None,
+        model_execution_actor_scope_bound: bool = False,
+    ):
+        if api_key_env_var != "META_API_KEY":
+            raise ValueError("Meta Muse uses only the META_API_KEY secret source.")
+        resolved_default = resolve_meta_muse_model_name(default_model)
+        if resolved_default != DEFAULT_META_MUSE_MODEL:
+            raise ValueError(
+                f"Meta Muse supports only model '{DEFAULT_META_MUSE_MODEL}'."
+            )
+        self.api_key = api_key or get_meta_api_key() or ""
+        if not self.api_key:
+            raise ValueError(
+                "Meta Model API key not provided or found in META_API_KEY "
+                "or META_API_KEY_FILE."
+            )
+        self.default_model = resolved_default
+        self.base_url = META_MODEL_API_BASE_URL
+        self._model_execution_user_concept_id = model_execution_user_concept_id
+        self._model_execution_org_concept_id = model_execution_org_concept_id
+        self._model_execution_actor_scope_bound = bool(
+            model_execution_actor_scope_bound
+        )
+        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self.last_response_metadata: Dict[str, Any] = {}
+        logger.info("MetaMuseClient initialised.")
+
+    def _target_model(self, model: Optional[str]) -> str:
+        candidate = resolve_meta_muse_model_name(model or self.default_model)
+        if candidate != DEFAULT_META_MUSE_MODEL:
+            raise ValueError(
+                f"Meta Muse supports only model '{DEFAULT_META_MUSE_MODEL}'."
+            )
+        return candidate
+
+    def _sanitise_error(self, exc: BaseException) -> str:
+        safe = sanitise_transport_telemetry_text(str(exc))
+        if self.api_key:
+            safe = safe.replace(self.api_key, "[redacted]")
+        return safe
+
+    @staticmethod
+    def _event_value(event: Any, key: str, default: Any = None) -> Any:
+        if isinstance(event, Mapping):
+            return event.get(key, default)
+        return getattr(event, key, default)
+
+    def _consume_response_stream(self, stream: Any) -> tuple[Any, str]:
+        """Return the completed response and observed deltas from an SDK stream."""
+
+        completed_response: Any = None
+        text_parts: list[str] = []
+        try:
+            for event in stream:
+                event_type = str(self._event_value(event, "type") or "").strip()
+                if event_type == "response.output_text.delta":
+                    delta = self._event_value(event, "delta")
+                    if isinstance(delta, str):
+                        text_parts.append(delta)
+                    continue
+                if event_type == "response.completed":
+                    completed_response = self._event_value(event, "response")
+                    continue
+                if event_type in {
+                    "error",
+                    "response.error",
+                    "response.failed",
+                    "response.incomplete",
+                }:
+                    provider_error = self._event_value(event, "error")
+                    failed_response = self._event_value(event, "response")
+                    if provider_error is None and failed_response is not None:
+                        provider_error = self._event_value(
+                            failed_response, "error", event_type
+                        )
+                    raise RuntimeError(
+                        f"Meta Responses stream terminated with {event_type}: "
+                        f"{provider_error or 'provider did not return a completed response'}"
+                    )
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        if completed_response is None:
+            raise RuntimeError(
+                "Meta Responses stream ended without a response.completed event."
+            )
+        return completed_response, "".join(text_parts)
+
+    def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
+        target_model = self._target_model(model)
+        return LLMClientConfig(
+            model=target_model,
+            provider="meta",
+            api_key=self.api_key,
+            base_url=self.base_url,
+            connection_id=META_MODEL_API_CONNECTION_ID,
+            deployment_id=target_model,
+            requested_api_surface="responses",
+            temperature=META_MUSE_TEMPERATURE,
+            max_tokens=META_MUSE_MAX_OUTPUT_TOKENS,
+        )
+
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: List[ToolDefinition],
+        context: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        system_message: Optional[str] = None,
+        llm_params: Optional[Dict[str, Any]] = None,
+        **provider_options: Any,
+    ) -> LLMResponse:
+        effective_params = normalise_model_parameters_for_storage(
+            llm_params,
+            provider="meta",
+            model=self._target_model(model),
+            api_surface="responses",
+            include_registry=False,
+        )
+        reasoning_effort = effective_params.get("reasoning_effort")
+        effective_params = (
+            {"reasoning_effort": reasoning_effort}
+            if isinstance(reasoning_effort, str) and reasoning_effort
+            else {"reasoning_effort": "medium"}
+        )
+        options = {
+            key: value
+            for key, value in provider_options.items()
+            if key
+            in {
+                "continuation",
+                "tool_results",
+                "tool_choice",
+                "parallel_tool_calls",
+            }
+        }
+        options["top_p"] = META_MUSE_TOP_P
+        response = super().generate_with_tools(
+            prompt=prompt,
+            available_tools=available_tools,
+            context=context,
+            model=model,
+            system_message=system_message,
+            llm_params=effective_params,
+            **options,
+        )
+        response.transport_metadata["stream"] = True
+        return response
+
+    def generate(
+        self,
+        prompt: str,
+        context: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        llm_params: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        target_model = self._target_model(model)
+        self._assert_model_execution_allowed(provider="meta", model=target_model)
+        request_started_monotonic = time.monotonic()
+        llm_params_for_model, request_advisory_seconds = (
+            _split_request_timeout_from_llm_params(llm_params)
+        )
+        effective_params = normalise_model_parameters_for_storage(
+            llm_params_for_model,
+            provider="meta",
+            model=target_model,
+            api_surface="responses",
+            include_registry=False,
+        )
+        effective_params.setdefault("reasoning_effort", "medium")
+        request_kwargs = meta_responses_kwargs_from_model_parameters(
+            effective_params,
+            model=target_model,
+        )
+        projected_reasoning = request_kwargs.get("reasoning")
+        request_kwargs = (
+            {"reasoning": dict(projected_reasoning)}
+            if isinstance(projected_reasoning, Mapping)
+            else {}
+        )
+        for reserved_key in (
+            "model",
+            "input",
+            "instructions",
+            "tools",
+            "stream",
+        ):
+            request_kwargs.pop(reserved_key, None)
+        request_kwargs.setdefault("reasoning", {"effort": "medium"})
+        request_kwargs["temperature"] = META_MUSE_TEMPERATURE
+        request_kwargs["top_p"] = META_MUSE_TOP_P
+        request_kwargs["max_output_tokens"] = META_MUSE_MAX_OUTPUT_TOKENS
+        request_kwargs["store"] = False
+        request_kwargs["include"] = ["reasoning.encrypted_content"]
+        input_items = to_openai_messages(build_conversation(prompt, context))
+
+        try:
+            stream = self.client.responses.create(  # type: ignore[attr-defined]
+                model=target_model,
+                input=input_items,  # type: ignore[arg-type]
+                stream=True,
+                extra_headers={"Accept": "text/event-stream"},
+                **request_kwargs,
+            )
+            response, streamed_text = self._consume_response_stream(stream)
+            actual_model = _read_response_field(response, "model") or target_model
+            content = _extract_openai_responses_text(response) or streamed_text
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError("Meta Responses payload contained no text.")
+            usage = OpenAIClient._openai_usage_mapping(
+                _read_response_field(response, "usage")
+            )
+            duration_ms = int(
+                max(0.0, time.monotonic() - request_started_monotonic) * 1000
+            )
+            transport_metadata: Dict[str, Any] = {
+                "requested_provider": "meta",
+                "effective_provider": "meta",
+                "requested_model": target_model,
+                "effective_model": actual_model,
+                "effective_api_surface": "responses",
+                "connection_id": META_MODEL_API_CONNECTION_ID,
+                "deployment_id": target_model,
+                "generation_id": sanitise_transport_telemetry_value(
+                    _read_response_field(response, "id")
+                ),
+                "provider_status": sanitise_transport_telemetry_value(
+                    _read_response_field(response, "status")
+                ),
+                "stream": True,
+                "store": False,
+                "duration_ms": duration_ms,
+                "effective_provider_parameters": sanitise_transport_telemetry_value(
+                    request_kwargs
+                ),
+            }
+            self.last_response_metadata = {
+                "provider": "meta",
+                "api_surface": "responses",
+                "requested_model": target_model,
+                "effective_model": actual_model,
+                "usage": usage,
+                "transport_metadata": transport_metadata,
+                "raw_response": {
+                    "id": _read_response_field(response, "id"),
+                    "model": actual_model,
+                    "status": _read_response_field(response, "status"),
+                },
+            }
+            _observe_request_advisory(
+                provider="meta",
+                advisory_seconds=request_advisory_seconds,
+                started_monotonic=request_started_monotonic,
+            )
+            return content.strip()
+        except ModelExecutionEligibilityError:
+            raise
+        except Exception as exc:
+            safe_error = self._sanitise_error(exc)
+            logger.error(
+                "Meta Responses request failed (error_type=%s): %s",
+                type(exc).__name__,
+                safe_error,
+            )
+            raise RuntimeError(f"Meta Responses request failed: {safe_error}") from exc
+
+    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+        raise NotImplementedError(
+            "Meta Muse embeddings are not enabled in this release."
+        )
+
+    def list_models(self) -> List[str]:
+        try:
+            response = self.client.models.list()
+            raw_models = _read_response_field(response, "data") or []
+            available = {
+                model_id
+                for item in raw_models
+                if isinstance(
+                    (model_id := _read_response_field(item, "id")), str
+                )
+            }
+            return [model for model in self.SUPPORTED_MODELS if model in available]
+        except Exception as exc:
+            safe_error = self._sanitise_error(exc)
+            logger.error(
+                "Meta model catalogue request failed (error_type=%s): %s",
+                type(exc).__name__,
+                safe_error,
+            )
+            raise RuntimeError(
+                f"Meta model catalogue request failed: {safe_error}"
+            ) from exc
+
+
 class GeminiClient(LLMInterface):
     """Client for interacting with the Google Gemini API."""
 
@@ -3446,6 +3825,29 @@ def get_llm_client(
             logger.error("Failed to initialise OpenRouter client: %s", safe_error)
             raise RuntimeError(
                 "OpenRouter was selected, but its client could not be initialised. "
+                "No cross-provider fallback was attempted."
+            ) from e
+
+    elif provider == "meta":
+        try:
+            trusted_user_concept_id, trusted_org_concept_id = (
+                _resolve_effective_llm_actor_scope(
+                    user_concept_id,
+                    org_concept_id,
+                )
+            )
+            meta_kwargs = dict(kwargs)
+            if model:
+                meta_kwargs.setdefault("default_model", model)
+            meta_kwargs["model_execution_user_concept_id"] = trusted_user_concept_id
+            meta_kwargs["model_execution_org_concept_id"] = trusted_org_concept_id
+            meta_kwargs["model_execution_actor_scope_bound"] = True
+            return MetaMuseClient(**meta_kwargs)
+        except Exception as e:
+            safe_error = sanitise_transport_telemetry_text(str(e))
+            logger.error("Failed to initialise Meta Muse client: %s", safe_error)
+            raise RuntimeError(
+                "Meta Muse was selected, but its client could not be initialised. "
                 "No cross-provider fallback was attempted."
             ) from e
 

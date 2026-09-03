@@ -340,7 +340,7 @@ def resolve_structured_tool_transport(
     requested_surface = _normalise(requested_api_surface) or "auto"
     projection = dict(parameter_projection or {})
 
-    if provider_key not in {"openai", "openrouter"}:
+    if provider_key not in {"openai", "openrouter", "meta"}:
         return StructuredToolTransportDecision(
             provider=provider_key,
             model=model_name,
@@ -522,6 +522,94 @@ def resolve_structured_tool_transport(
             if item[1] == API_SURFACE_CHAT_COMPLETIONS
         ]
 
+    if provider_key == "meta":
+        stateful_profiles = [
+            item
+            for item in applicable
+            if item[3] != "stateless" or item[5]
+        ]
+        if stateful_profiles:
+            profile, surface, _capability, _mode, _policy, _store, _specificity = (
+                stateful_profiles[0]
+            )
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=surface,
+                status="unsupported",
+                reason="meta_stateless_responses_only",
+                capability_class="provider_surface_not_enabled",
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                profile_concept_id=(
+                    str(profile.get("profile_concept_id"))
+                    if profile.get("profile_concept_id")
+                    else None
+                ),
+                advertised_alternatives=(),
+            )
+        non_responses_required_surfaces = required_surfaces - {
+            API_SURFACE_RESPONSES
+        }
+        if non_responses_required_surfaces:
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=sorted(non_responses_required_surfaces)[0],
+                status="unsupported",
+                reason="meta_responses_only",
+                capability_class="provider_surface_not_enabled",
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                advertised_alternatives=(),
+            )
+        non_responses_advertised_surfaces = {
+            item[1]
+            for item in advertised
+            if item[1] != API_SURFACE_RESPONSES
+        }
+        if non_responses_advertised_surfaces:
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=sorted(non_responses_advertised_surfaces)[0],
+                status="unsupported",
+                reason="meta_responses_only",
+                capability_class="provider_surface_not_enabled",
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                advertised_alternatives=(),
+            )
+        if requested_surface not in {"auto", API_SURFACE_RESPONSES}:
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=requested_surface,
+                status="unsupported",
+                reason="meta_responses_only",
+                capability_class="provider_surface_not_enabled",
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                advertised_alternatives=(),
+            )
+        # Meta's bounded provider contract exposes Responses only. A represented
+        # Chat profile cannot create a fallback path that the client does not
+        # support.
+        applicable = [
+            item for item in applicable if item[1] == API_SURFACE_RESPONSES
+        ]
+        advertised = [
+            item for item in advertised if item[1] == API_SURFACE_RESPONSES
+        ]
+        explicitly_unsupported = [
+            surface
+            for surface in explicitly_unsupported
+            if surface == API_SURFACE_RESPONSES
+        ]
+        required_surfaces = {
+            item[1] for item in advertised if item[2] == "required"
+        }
+
     # Contradictory represented authority is invalid independently of whether
     # this particular request carries tools.  Answer-only traffic must not
     # silently choose one side of a same-surface contradiction.
@@ -651,6 +739,30 @@ def resolve_structured_tool_transport(
                 ),
             )
 
+        if provider_key == "meta":
+            if API_SURFACE_RESPONSES in explicitly_unsupported:
+                return StructuredToolTransportDecision(
+                    **common,
+                    effective_api_surface=API_SURFACE_RESPONSES,
+                    status="unsupported",
+                    reason="represented_profiles_explicitly_unsupported",
+                    capability_class="explicitly_unsupported",
+                    capability_source=str(
+                        provenance.get("source") or "model_registry"
+                    ),
+                    advertised_alternatives=(),
+                )
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=API_SURFACE_RESPONSES,
+                status="compatible",
+                reason="meta_responses_provider_contract",
+                capability_class="provider_contract_responses",
+                capability_source="provider_interface_contract",
+                continuation_mode="stateless",
+                store=False,
+            )
+
         return StructuredToolTransportDecision(
             **common,
             effective_api_surface=API_SURFACE_CHAT_COMPLETIONS,
@@ -722,6 +834,18 @@ def resolve_structured_tool_transport(
             capability_class="explicitly_unsupported",
             capability_source=str(provenance.get("source") or "model_registry"),
             advertised_alternatives=(),
+        )
+
+    if provider_key == "meta":
+        return StructuredToolTransportDecision(
+            **common,
+            effective_api_surface=API_SURFACE_RESPONSES,
+            status="compatible",
+            reason="meta_responses_provider_contract",
+            capability_class="provider_contract_responses",
+            capability_source="provider_interface_contract",
+            continuation_mode="stateless",
+            store=False,
         )
 
     return StructuredToolTransportDecision(

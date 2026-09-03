@@ -363,6 +363,8 @@ def _provider_from_llm_client(llm_client: Any) -> str | None:
         return "openai"
     if "gemini" in class_name:
         return "gemini"
+    if "metamuse" in class_name or "meta_muse" in class_name:
+        return "meta"
     if "anthropic" in class_name or "claude" in class_name:
         return "anthropic"
     return None
@@ -385,7 +387,14 @@ def _model_identifier_looks_local_ollama(model: Any) -> bool:
     if cleaned.startswith("ollama:"):
         return True
     if cleaned.startswith(
-        ("openai:", "openrouter:", "anthropic:", "gemini:", "azure_openai:")
+        (
+            "openai:",
+            "openrouter:",
+            "anthropic:",
+            "gemini:",
+            "meta:",
+            "azure_openai:",
+        )
     ):
         return False
     if cleaned.startswith(("gpt-", "o1-", "claude", "gemini")):
@@ -13654,7 +13663,13 @@ class InternalMCPChatOrchestrator:
 
         candidate_tail = candidate
         lowered_candidate = candidate.lower()
-        for provider_prefix in ("openai:", "openrouter:", "ollama:", "gemini:"):
+        for provider_prefix in (
+            "openai:",
+            "openrouter:",
+            "ollama:",
+            "gemini:",
+            "meta:",
+        ):
             if lowered_candidate.startswith(provider_prefix):
                 candidate_tail = candidate.split(":", 1)[1].strip()
                 break
@@ -13766,7 +13781,13 @@ class InternalMCPChatOrchestrator:
         elif ":" in candidate:
             provider_prefix, _, model_suffix = candidate.partition(":")
             provider_prefix = provider_prefix.strip().lower()
-            if provider_prefix in {"openai", "openrouter", "ollama", "gemini"}:
+            if provider_prefix in {
+                "openai",
+                "openrouter",
+                "ollama",
+                "gemini",
+                "meta",
+            }:
                 provider = provider_prefix
                 model = model_suffix.strip()
             elif candidate.lower().startswith("ft:"):
@@ -13792,6 +13813,7 @@ class InternalMCPChatOrchestrator:
         if model == "default":
             from src.backend.languagemodels.model_defaults import (
                 DEFAULT_GEMINI_MODEL,
+                DEFAULT_META_MUSE_MODEL,
                 DEFAULT_OLLAMA_MODEL,
                 DEFAULT_OPENAI_MODEL,
             )
@@ -13800,6 +13822,7 @@ class InternalMCPChatOrchestrator:
                 "ollama": DEFAULT_OLLAMA_MODEL,
                 "openai": DEFAULT_OPENAI_MODEL,
                 "gemini": DEFAULT_GEMINI_MODEL,
+                "meta": DEFAULT_META_MUSE_MODEL,
             }
             resolved = _provider_defaults.get(provider)
             if resolved:
@@ -14022,7 +14045,13 @@ class InternalMCPChatOrchestrator:
         if ":" in raw and not raw.startswith("#V#"):
             provider, _, _model = raw.partition(":")
             provider_text = provider.strip().lower()
-            if provider_text in {"openai", "openrouter", "ollama", "gemini"}:
+            if provider_text in {
+                "openai",
+                "openrouter",
+                "ollama",
+                "gemini",
+                "meta",
+            }:
                 return provider_text
             if raw.lower().startswith("ft:"):
                 return "openai"
@@ -15057,7 +15086,7 @@ class InternalMCPChatOrchestrator:
                     model_implied_provider
                     and model_implied_provider != default_provider
                     and model_implied_provider
-                    in {"openai", "openrouter", "ollama", "gemini"}
+                    in {"openai", "openrouter", "ollama", "gemini", "meta"}
                 ):
                     requested_provider_client = model_implied_provider
                     client = get_llm_client(
@@ -15091,10 +15120,11 @@ class InternalMCPChatOrchestrator:
                     resolved_model = resolve_ollama_model_name(resolved_model)
                 resolved_model = self._normalise_llm_model_name(resolved_model)
             except Exception as exc:
-                if requested_provider_client == "gemini":
+                if requested_provider_client in {"gemini", "meta"}:
+                    failed_provider = requested_provider_client
                     telemetry.update(
                         {
-                            "provider": "gemini",
+                            "provider": failed_provider,
                             "model": default_model,
                             "error": "candidate_client_resolution_failed",
                             "error_class": type(exc).__name__,
@@ -15104,7 +15134,7 @@ class InternalMCPChatOrchestrator:
                         }
                     )
                     raise _ModelCandidateClientResolutionError(
-                        provider="gemini",
+                        provider=failed_provider,
                         model=default_model,
                         telemetry=telemetry,
                         cause_class=type(exc).__name__,
@@ -15152,7 +15182,15 @@ class InternalMCPChatOrchestrator:
         if model:
             telemetry["model"] = model
 
-        if provider in {None, "", "openai", "openrouter", "ollama", "gemini"}:
+        if provider in {
+            None,
+            "",
+            "openai",
+            "openrouter",
+            "ollama",
+            "gemini",
+            "meta",
+        }:
             pass
         else:
             telemetry["error"] = "unsupported_provider"
@@ -15198,10 +15236,10 @@ class InternalMCPChatOrchestrator:
                     telemetry["model_resolution_source"] = "client_default"
             return client, model or default_model, telemetry
         except Exception as exc:
-            if provider == "gemini":
+            if provider in {"gemini", "meta"}:
                 telemetry.update(
                     {
-                        "provider": "gemini",
+                        "provider": provider,
                         "model": model,
                         "error": "candidate_client_resolution_failed",
                         "error_class": type(exc).__name__,
@@ -15211,7 +15249,7 @@ class InternalMCPChatOrchestrator:
                     }
                 )
                 raise _ModelCandidateClientResolutionError(
-                    provider="gemini",
+                    provider=provider,
                     model=model,
                     telemetry=telemetry,
                     cause_class=type(exc).__name__,

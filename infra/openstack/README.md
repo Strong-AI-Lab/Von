@@ -192,6 +192,9 @@ needed for real chat/workflow execution:
 - `bootstrap_gemini_api_key_file` defaults to
   `/etc/von/secrets/gemini_api_key`. Gemini keys can be injected with
   `TF_VAR_bootstrap_gemini_api_key` or pre-provisioned at that path.
+- `bootstrap_meta_api_key_file` defaults to `/etc/von/secrets/meta_api_key`.
+  Meta Model API keys can be injected with `TF_VAR_bootstrap_meta_api_key` or
+  pre-provisioned at that path.
 - `bootstrap_default_llm_provider`, `bootstrap_default_llm_model`, and either
   `bootstrap_default_llm_organisation_concept_id` or
   `bootstrap_default_llm_user_concept_id` can seed the scoped LLM setting after
@@ -200,6 +203,7 @@ needed for real chat/workflow execution:
 Do not assign `bootstrap_openai_api_key = null` in local tfvars when using
 `TF_VAR_bootstrap_openai_api_key`; tfvars values override runtime environment
 variables. The same rule applies to `bootstrap_gemini_api_key`.
+It also applies to `bootstrap_meta_api_key`.
 
 Operational note:
 

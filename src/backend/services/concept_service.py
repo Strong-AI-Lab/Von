@@ -2671,7 +2671,7 @@ def get_user_concept_tracking_collection_service() -> Optional[Collection]:
 # --- Interaction Session Management ---
 
 
-_INTERACTION_LLM_PROVIDERS = {"openai", "openrouter", "ollama", "gemini"}
+_INTERACTION_LLM_PROVIDERS = {"openai", "openrouter", "ollama", "gemini", "meta"}
 
 
 def _canonical_organisation_concept_id(value: Any) -> Optional[str]:

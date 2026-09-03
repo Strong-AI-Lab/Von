@@ -2,6 +2,8 @@ import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildThinkingCardProgressViewModel,
     __testOnly_buildRetainedThinkingCardRequestFromDebugData,
+    __testOnly_createThinkingCardHistorySnapshot,
+    __testOnly_syncThinkingCredentialProvenanceFromDebugData,
     __testOnly_buildThinkingDiagnosticsPayload,
     __testOnly_buildDiagnosticsExportRequestPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
@@ -4972,6 +4974,61 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Sent');
     });
 
+    test('shows premium backup-key provenance from the active live LLM exchange', () => {
+        const request = {
+            clientRequestId: 'req-live-premium-backup',
+            thinkingCardMode: 'debug',
+            promptRaw: 'use the selected premium model',
+            latestProgress: {
+                status: 'llm_call_chunk',
+                stage: 'plain_response',
+                phase: 'plain_response',
+                model: 'gpt-5.6-luna',
+                provider: 'openai',
+                llm_request_state: 'received_output',
+                llm_transport: {
+                    credential_source: 'backup',
+                    credential_failover_used: true,
+                    primary_credential_failure_kind: 'quota_exhausted'
+                },
+                llm_request: {
+                    prompt: {
+                        text: 'Answer using the selected premium model.',
+                        char_count: 40
+                    },
+                    context_summary: { message_count: 2 },
+                    context_message_count: 2
+                },
+                llm_response_preview: {
+                    text: 'The response has started.',
+                    char_count: 25
+                }
+            },
+            workflowStagePath: {
+                path: [{ stage_id: 'plain_response', stage_label: 'Plain response' }]
+            },
+            stageDiagnostics: []
+        };
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.stage_diagnostics[0].diagnostics).toEqual(
+            expect.objectContaining({
+                llm_selected_model: 'gpt-5.6-luna',
+                llm_selected_provider: 'openai',
+                llm_credential_source: 'backup',
+                latest_llm_exchange: expect.objectContaining({
+                    credential_source: 'backup'
+                })
+            })
+        );
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain(
+            'Model: gpt-5.6-luna · Provider: openai · Class: premium · Credential: backup key'
+        );
+        expect(html).not.toContain('quota_exhausted');
+    });
+
     test('renders full LLM call log toggle in expert mode', () => {
         const request = {
             clientRequestId: 'req-llm-log-toggle',
@@ -6001,7 +6058,7 @@ describe('thinking activity history normalisation', () => {
         }));
     });
 
-    test('shows the exact retained turn backup credential in debug LLM input details', () => {
+    test('shows retained turn-level backup credential use in debug LLM input details', () => {
         const request = __testOnly_buildRetainedThinkingCardRequestFromDebugData(
             'turn-backup-credential',
             {
@@ -6016,6 +6073,14 @@ describe('thinking activity history normalisation', () => {
                                 credential_source: 'backup',
                                 credential_failover_used: true,
                                 primary_credential_failure_kind: 'quota_exhausted'
+                            }
+                        },
+                        {
+                            model: 'gpt-5.6-luna',
+                            provider: 'openai',
+                            transport: {
+                                credential_source: 'primary',
+                                credential_failover_used: false
                             }
                         }
                     ]
@@ -6039,14 +6104,63 @@ describe('thinking activity history normalisation', () => {
         request.thinkingCardMode = 'debug';
 
         const html = __testOnly_renderThinkingCardBodyHTML(request);
-        expect(html).toContain('Model: gpt-5.6-luna');
-        expect(html).toContain('Provider: openai');
-        expect(html).toContain('Credential: backup key');
+        expect(request.thinkingCredentialFailoverUsed).toBe(true);
+        expect(html).toContain(
+            'Model: gpt-5.6-luna · Provider: openai · Class: premium · Backup key used in turn'
+        );
+        expect(html).not.toContain('Credential: backup key');
         expect(html).not.toContain('quota_exhausted');
     });
 
-    test('shows primary credential provenance from live lifecycle telemetry in debug mode', () => {
-        const html = __testOnly_renderThinkingCardBodyHTML({
+    test('retains premium backup-key provenance on the immediately completed card', () => {
+        const request = {
+            clientRequestId: 'req-immediate-backup',
+            resultTurnId: 'turn-immediate-backup',
+            thinkingCardMode: 'debug',
+            latestProgress: {
+                status: 'completed',
+                stage: 'completed',
+                progress_view_model: {
+                    llm_input_lifecycle: {
+                        state: 'completed',
+                        model: 'gpt-5.6-luna',
+                        provider: 'openai'
+                    }
+                }
+            }
+        };
+        const debugData = {
+            timestamp: '2026-09-03T16:13:00Z',
+            llm_interaction: {
+                requested_model: 'gpt-5.6-luna',
+                calls: [{
+                    model: 'gpt-5.6-luna',
+                    provider: 'openai',
+                    transport: {
+                        credential_source: 'backup',
+                        credential_failover_used: true
+                    }
+                }]
+            }
+        };
+
+        expect(__testOnly_syncThinkingCredentialProvenanceFromDebugData(
+            request,
+            request.resultTurnId,
+            debugData
+        )).toBe('backup');
+        const snapshot = __testOnly_createThinkingCardHistorySnapshot(request);
+        const html = __testOnly_renderThinkingCardBodyHTML(snapshot);
+
+        expect(snapshot.thinkingCredentialSource).toBe('backup');
+        expect(snapshot.thinkingCredentialFailoverUsed).toBe(true);
+        expect(html).toContain('Class: premium');
+        expect(html).toContain('Backup key used in turn');
+        expect(html).not.toContain('Credential: backup key');
+    });
+
+    test('keeps exact lifecycle credential distinct from backup use elsewhere in the turn', () => {
+        const request = {
             thinkingCardMode: 'debug',
             latestProgress: {
                 status: 'completed',
@@ -6060,10 +6174,66 @@ describe('thinking activity history normalisation', () => {
                     }
                 }
             }
-        });
+        };
+        expect(__testOnly_syncThinkingCredentialProvenanceFromDebugData(
+            request,
+            'turn-multiple-credentials',
+            {
+                llm_interaction: {
+                    requested_model: 'gemini-2.5-pro',
+                    calls: [
+                        {
+                            model: 'gpt-5.6-luna',
+                            provider: 'openai',
+                            transport: {
+                                credential_source: 'backup',
+                                credential_failover_used: true
+                            }
+                        },
+                        {
+                            model: 'gemini-2.5-pro',
+                            provider: 'gemini',
+                            transport: {
+                                credential_source: 'primary',
+                                credential_failover_used: false
+                            }
+                        }
+                    ]
+                }
+            }
+        )).toBe('backup');
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
 
         expect(html).toContain('Provider: gemini');
+        expect(html).toContain('Class: premium');
         expect(html).toContain('Credential: primary key');
+        expect(html).toContain('Backup key used in turn');
+        expect(html).not.toContain('Credential: backup key');
+    });
+
+    test('keeps local model fallback distinct from premium credential backup', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
+            latestProgress: {
+                status: 'sent',
+                stage: 'plain_response',
+                progress_view_model: {
+                    llm_input_lifecycle: {
+                        state: 'sent',
+                        model: 'gemma4:26b',
+                        provider: 'ollama',
+                        fallback_attempt_no: 2,
+                        fallback_candidate_count: 2
+                    }
+                }
+            }
+        });
+
+        expect(html).toContain('Provider: ollama');
+        expect(html).toContain('Fallback 2 of 2');
+        expect(html).not.toContain('Class: premium');
+        expect(html).not.toContain('Credential:');
     });
 
     test('does not render an unrecognised credential-source value', () => {

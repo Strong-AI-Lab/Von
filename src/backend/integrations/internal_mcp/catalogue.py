@@ -34321,6 +34321,7 @@ def _chat_introspect(
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
         "GEMINI_API_BACKUP_KEY",
+        "META_API_KEY",
         "GOOGLE_API_KEY",
         "GOOGLE_API_BACKUP_KEY",
         "MISTRAL_API_KEY",

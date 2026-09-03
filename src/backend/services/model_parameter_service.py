@@ -16,6 +16,7 @@ MODEL_PARAMETER_REASONING_EFFORT = "reasoning_effort"
 MODEL_PARAMETER_CAPABILITY_SCHEMA = "model_parameter_capabilities.v1"
 OPENAI_REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
 GEMINI_REASONING_EFFORT_VALUES = ("low", "medium", "high")
+META_MUSE_REASONING_EFFORT_VALUES = ("minimal", "low", "medium", "high")
 
 _OPENAI_REASONING_EFFORT_API_MAPPINGS = {
     "responses": {
@@ -36,6 +37,13 @@ _GEMINI_REASONING_EFFORT_API_MAPPINGS = {
     "gemini_generate_content": {
         "type": "nested_object",
         "path": ["thinking_config", "thinking_level"],
+    },
+}
+
+_META_MUSE_REASONING_EFFORT_API_MAPPINGS = {
+    "responses": {
+        "type": "nested_object",
+        "path": ["reasoning", "effort"],
     },
 }
 
@@ -127,6 +135,18 @@ def _gemini_reasoning_effort_supported(model: str | None) -> bool:
     return lowered == "gemini-3.7-flash" or lowered.startswith("gemini-3.7-flash-")
 
 
+def _meta_muse_reasoning_effort_supported(model: str | None) -> bool:
+    """Return whether this integration's fixed Muse model supports effort."""
+
+    model_id = _clean_text(model)
+    if not model_id:
+        return False
+    lowered = model_id.lower()
+    if lowered.startswith("meta:"):
+        lowered = lowered.split(":", 1)[1].strip()
+    return lowered == "muse-spark-1.3"
+
+
 def _parameter_capability(
     *,
     parameter_id: str,
@@ -175,13 +195,19 @@ def _provider_default_reasoning_effort_capability(
     gemini_supported = provider == "gemini" and _gemini_reasoning_effort_supported(
         model
     )
-    supported = openai_supported or gemini_supported
+    meta_muse_supported = (
+        provider == "meta" and _meta_muse_reasoning_effort_supported(model)
+    )
+    supported = openai_supported or gemini_supported or meta_muse_supported
     if openai_supported:
         allowed_values = list(OPENAI_REASONING_EFFORT_VALUES)
         provider_api_mapping: Mapping[str, Any] = _OPENAI_REASONING_EFFORT_API_MAPPINGS
     elif gemini_supported:
         allowed_values = list(GEMINI_REASONING_EFFORT_VALUES)
         provider_api_mapping = _GEMINI_REASONING_EFFORT_API_MAPPINGS
+    elif meta_muse_supported:
+        allowed_values = list(META_MUSE_REASONING_EFFORT_VALUES)
+        provider_api_mapping = _META_MUSE_REASONING_EFFORT_API_MAPPINGS
     else:
         allowed_values = []
         provider_api_mapping = {}
@@ -488,6 +514,44 @@ def openai_responses_kwargs_from_model_parameters(
         api_surface="responses",
         include_registry=True,
         profile_concept_id=profile_concept_id,
+    )
+
+
+def responses_kwargs_from_model_parameters(
+    raw: Any,
+    *,
+    provider: str,
+    model: str | None,
+    profile_concept_id: str | None = None,
+    include_registry: bool = True,
+) -> dict[str, Any]:
+    """Project neutral parameters onto an OpenAI-compatible Responses surface."""
+
+    return provider_kwargs_from_model_parameters(
+        raw,
+        provider=provider,
+        model=model,
+        api_surface="responses",
+        include_registry=include_registry,
+        profile_concept_id=profile_concept_id,
+    )
+
+
+def meta_responses_kwargs_from_model_parameters(
+    raw: Any,
+    *,
+    model: str | None,
+    profile_concept_id: str | None = None,
+    include_registry: bool = False,
+) -> dict[str, Any]:
+    """Project Von's neutral reasoning effort onto Meta Responses."""
+
+    return responses_kwargs_from_model_parameters(
+        raw,
+        provider="meta",
+        model=model,
+        profile_concept_id=profile_concept_id,
+        include_registry=include_registry,
     )
 
 

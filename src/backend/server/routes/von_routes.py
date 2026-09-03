@@ -3568,6 +3568,43 @@ def _copy_live_progress_mapping(value: Any) -> dict[str, Any] | None:
     return {str(key): item for key, item in value.items() if isinstance(key, str)}
 
 
+def _resolve_live_llm_credential_source(
+    source: Mapping[str, Any],
+) -> str | None:
+    """Project only the bounded credential provenance needed by the UI."""
+
+    candidate_mapping = source.get("candidate")
+    candidate: Mapping[str, Any] = (
+        cast(Mapping[str, Any], candidate_mapping)
+        if isinstance(candidate_mapping, Mapping)
+        else {}
+    )
+    transport_candidates = (
+        source,
+        source.get("transport"),
+        source.get("transport_metadata"),
+        source.get("llm_transport"),
+        source.get("structured_tool_transport"),
+        candidate.get("transport_metadata"),
+        candidate.get("llm_transport"),
+        candidate.get("structured_tool_transport"),
+    )
+    primary_observed = False
+    for transport in transport_candidates:
+        if not isinstance(transport, Mapping):
+            continue
+        credential_source = _progress_str(transport.get("credential_source"))
+        normalised_source = credential_source.lower() if credential_source else None
+        if (
+            normalised_source == "backup"
+            or transport.get("credential_failover_used") is True
+        ):
+            return "backup"
+        if normalised_source == "primary":
+            primary_observed = True
+    return "primary" if primary_observed else None
+
+
 def _build_live_llm_exchange_summary(
     *,
     stage_id: str,
@@ -3654,6 +3691,9 @@ def _build_live_llm_exchange_summary(
     selected_provider = _progress_str(source.get("provider"))
     if selected_provider:
         summary["selected_provider"] = selected_provider
+    credential_source = _resolve_live_llm_credential_source(source)
+    if credential_source:
+        summary["credential_source"] = credential_source
     fallback_attempt_no = _progress_number(source.get("fallback_attempt_no"))
     if fallback_attempt_no is not None:
         summary["fallback_attempt_no"] = int(max(0.0, fallback_attempt_no))
@@ -7500,7 +7540,13 @@ def _resolve_generate_requested_model(
             if isinstance(provider_value, str) and provider_value.strip():
                 requested_provider_name = provider_value.strip().lower()
                 break
-    if requested_provider_name not in {"openai", "openrouter", "ollama", "gemini"}:
+    if requested_provider_name not in {
+        "openai",
+        "openrouter",
+        "ollama",
+        "gemini",
+        "meta",
+    }:
         requested_provider_name = None
 
     explicit_client_type = None
@@ -7541,7 +7587,13 @@ def _resolve_generate_requested_model(
             active_provider = (
                 str(resolved_setting.get("provider") or "").strip().lower()
             )
-            if active_provider in {"openai", "openrouter", "ollama", "gemini"}:
+            if active_provider in {
+                "openai",
+                "openrouter",
+                "ollama",
+                "gemini",
+                "meta",
+            }:
                 explicit_client_type = active_provider
         model_name = get_active_model_name(
             user_concept_id=user_concept_id,
@@ -13501,6 +13553,8 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 return "openai"
             if lowered.startswith("gemini"):
                 return "gemini"
+            if lowered.startswith("meta:") or lowered == "muse-spark-1.3":
+                return "meta"
             if lowered.startswith("ollama:"):
                 return "ollama"
             if ":" in lowered and not lowered.startswith("ft:"):

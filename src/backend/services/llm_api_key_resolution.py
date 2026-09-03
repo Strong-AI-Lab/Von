@@ -71,6 +71,12 @@ def get_openrouter_api_key() -> str | None:
     return _first_nonempty_env_value(("OPENROUTER_API_KEY",))
 
 
+def get_meta_api_key() -> str | None:
+    """Return the Meta Model API key from its sole supported secret source."""
+
+    return _first_nonempty_env_value(("META_API_KEY",))
+
+
 def _normalised_provider_token(value: Any) -> str | None:
     if not isinstance(value, (str, int)):
         return None

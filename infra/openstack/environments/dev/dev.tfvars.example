@@ -95,6 +95,10 @@ bootstrap_openai_api_key_file = "/etc/von/secrets/openai_api_key"
 # Leave bootstrap_gemini_api_key unset when using TF_VAR_bootstrap_gemini_api_key.
 # bootstrap_gemini_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
 bootstrap_gemini_api_key_file = "/etc/von/secrets/gemini_api_key"
+# Leave bootstrap_meta_api_key unset when using TF_VAR_bootstrap_meta_api_key.
+# Meta Muse remains opt-in; do not make it the default without an explicit scoped model.
+# bootstrap_meta_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
+bootstrap_meta_api_key_file = "/etc/von/secrets/meta_api_key"
 # Leave bootstrap_openrouter_api_key unset when using TF_VAR_bootstrap_openrouter_api_key.
 # OpenRouter remains opt-in; do not make it the default without an explicit scoped model.
 # bootstrap_openrouter_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
@@ -105,6 +109,7 @@ bootstrap_openrouter_api_key_file = "/etc/von/secrets/openrouter_api_key"
 # bootstrap_default_llm_provider = "openai"
 # bootstrap_default_llm_model = "gpt-5.5"
 # Gemini alternative: provider = "gemini", model = "gemini-3.7-flash".
+# Meta Muse alternative: provider = "meta", model = "muse-spark-1.3".
 # bootstrap_default_llm_organisation_concept_id = "#V#university_of_auckland_strong_ai_lab"
 
 # Mongo Atlas hardening (dev can remain non-strict while preserving TLS defaults).

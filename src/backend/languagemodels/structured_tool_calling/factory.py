@@ -30,6 +30,8 @@ def get_llm_client(config: LLMClientConfig) -> LLMClient:
         return OpenAIClient(config)
     if provider == "openrouter":
         return OpenAIClient(config)
+    if provider == "meta":
+        return OpenAIClient(config)
     if provider == "gemini":
         return GeminiClient(config)
     if provider == "ollama":

@@ -268,6 +268,8 @@ _apply_dotenv_overrides(
         "GOOGLE_API_KEY_FILE",
         "GOOGLE_API_BACKUP_KEY",
         "GOOGLE_API_BACKUP_KEY_FILE",
+        "META_API_KEY",
+        "META_API_KEY_FILE",
         "VON_DEFAULT_OLLAMA_MODEL",
         "VON_DEFAULT_OPENAI_MODEL",
         "VON_DEFAULT_GEMINI_MODEL",
