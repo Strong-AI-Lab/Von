@@ -167,7 +167,9 @@ def _install_fake_openai(
 
     async_client = types.SimpleNamespace(
         responses=types.SimpleNamespace(create=responses_create),
-        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=chat_create)),
+        chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=chat_create)
+        ),
     )
 
     def with_options(**kwargs: Any) -> Any:
@@ -221,10 +223,60 @@ def test_openai_response_preserves_usage_breakdown_and_effective_service_tier(
         "cache_write_input_tokens": 1,
     }
     assert result.transport_metadata["effective_service_tier"] == "default"
-    assert (
-        result.transport_metadata["effective_connection_id"]
-        == "#V#openai_provider"
+    assert result.transport_metadata["effective_connection_id"] == "#V#openai_provider"
+
+
+def test_openai_structured_generation_uses_backup_once_without_changing_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "backup-credential-model"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    primary_calls: list[dict[str, Any]] = []
+    backup_calls: list[dict[str, Any]] = []
+
+    async def _primary_create(**kwargs: Any) -> Any:
+        primary_calls.append(dict(kwargs))
+        raise _RateLimitError("limited")
+
+    async def _backup_create(**kwargs: Any) -> Any:
+        backup_calls.append(dict(kwargs))
+        return _text_response(model=model, text="backup ok")
+
+    primary_client = types.SimpleNamespace(
+        responses=types.SimpleNamespace(create=_primary_create)
     )
+    backup_client = types.SimpleNamespace(
+        responses=types.SimpleNamespace(create=_backup_create)
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="primary-secret",
+            backup_api_key="backup-secret",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Test",
+            available_tools=[_tool()],
+            _request_client=primary_client,
+            _backup_request_client=backup_client,
+        )
+    )
+
+    assert result.text_response == "backup ok"
+    assert [call["model"] for call in primary_calls] == [model]
+    assert [call["model"] for call in backup_calls] == [model]
+    assert result.transport_metadata["credential_source"] == "backup"
+    assert result.transport_metadata["credential_failover_used"] is True
+    assert (
+        result.transport_metadata["primary_credential_failure_kind"] == "rate_limited"
+    )
+    assert "primary-secret" not in repr(result.transport_metadata)
+    assert "backup-secret" not in repr(result.transport_metadata)
 
 
 def test_sync_calls_close_each_async_client_before_its_loop_closes(
@@ -724,12 +776,9 @@ def test_responses_serialises_actual_adaptive_tools_with_explicit_strictness() -
         )
     )
     tools = [
-        client._tool_definition_to_responses_dict(tool)
-        for tool in _tool_definitions()
+        client._tool_definition_to_responses_dict(tool) for tool in _tool_definitions()
     ]
-    read_tool = next(
-        tool for tool in tools if tool["name"] == "turn_invoke_capability"
-    )
+    read_tool = next(tool for tool in tools if tool["name"] == "turn_invoke_capability")
     assert read_tool["strict"] is False
     assert (
         read_tool["parameters"]["properties"]["arguments"]["additionalProperties"]
@@ -2600,9 +2649,7 @@ def test_no_tool_request_preserves_required_responses_profile_and_policy(
         "temperature": 0.7
     }
     assert result.transport_metadata["effective_provider_parameters"] == {}
-    assert result.transport_metadata["omitted_model_parameter_names"] == [
-        "temperature"
-    ]
+    assert result.transport_metadata["omitted_model_parameter_names"] == ["temperature"]
 
 
 @pytest.mark.parametrize(
@@ -2625,9 +2672,7 @@ def test_temperature_policy_follows_exact_selected_connection_profile(
         {
             "profile_concept_id": "#V#connection_a_responses",
             "connection_id": "#V#connection_a",
-            "parameter_constraints": [
-                {"parameter": "temperature", "action": "omit"}
-            ],
+            "parameter_constraints": [{"parameter": "temperature", "action": "omit"}],
         }
     )
     connection_b = _responses_profile()

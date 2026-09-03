@@ -192,6 +192,10 @@ database unless that fallback is explicitly enabled.
 For local models, install and run Ollama and configure `OLLAMA_HOSTS_LIST`. For
 hosted providers, set the applicable credential, such as `OPENAI_API_KEY` or
 `GEMINI_API_KEY`, then select an eligible provider and model in Von's settings.
+You may also configure `OPENAI_API_BACKUP_KEY` or `GEMINI_API_BACKUP_KEY` (or
+their `*_FILE` forms). Von uses a backup once only after the primary credential
+is rejected for authentication, quota, or rate limiting, and marks the model
+footer with `backup key` when it succeeds. It does not switch provider or model.
 Never commit `.env`.
 
 ### Run Von

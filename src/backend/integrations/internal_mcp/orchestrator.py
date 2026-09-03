@@ -384,7 +384,9 @@ def _model_identifier_looks_local_ollama(model: Any) -> bool:
         return False
     if cleaned.startswith("ollama:"):
         return True
-    if cleaned.startswith(("openai:", "openrouter:", "anthropic:", "gemini:", "azure_openai:")):
+    if cleaned.startswith(
+        ("openai:", "openrouter:", "anthropic:", "gemini:", "azure_openai:")
+    ):
         return False
     if cleaned.startswith(("gpt-", "o1-", "claude", "gemini")):
         return False
@@ -2866,7 +2868,9 @@ class InternalMCPChatOrchestrator:
         recovery_outcome = (
             "retry_needed"
             if retry_needed
-            else "retry_suppressed" if retry_suppressed else "no_retry_required"
+            else "retry_suppressed"
+            if retry_suppressed
+            else "no_retry_required"
         )
         if retry_suppressed:
             try:
@@ -4060,9 +4064,9 @@ class InternalMCPChatOrchestrator:
             retry_suppressed = True
             retry_attempts = max(retry_attempts, retry_budget)
             retries_remaining_after = 0
-            cast(MutableMapping[str, Any], data)[
-                "missing_tool_call_retry_attempts"
-            ] = retry_attempts
+            cast(MutableMapping[str, Any], data)["missing_tool_call_retry_attempts"] = (
+                retry_attempts
+            )
             try:
                 aux_log.append(
                     annotate_python_decision_event(
@@ -4332,7 +4336,9 @@ class InternalMCPChatOrchestrator:
             classifier_verdict_text = (
                 "yes"
                 if classifier_verdict is True
-                else "no" if classifier_verdict is False else "unavailable"
+                else "no"
+                if classifier_verdict is False
+                else "unavailable"
             )
             if "missing_tool_call_detection" not in existing_types:
                 aux_log.append(
@@ -4393,7 +4399,9 @@ class InternalMCPChatOrchestrator:
         retry_stage = (
             "completed"
             if retry_success
-            else "skipped" if retry_suppressed else "failed"
+            else "skipped"
+            if retry_suppressed
+            else "failed"
         )
         aux_log.append(
             {
@@ -11137,9 +11145,8 @@ class InternalMCPChatOrchestrator:
 
         MCP schemas use required/optional dicts, JSON Schema uses properties + required list.
         """
-        if (
-            mcp_schema.get("type") == "object"
-            and isinstance(mcp_schema.get("properties"), Mapping)
+        if mcp_schema.get("type") == "object" and isinstance(
+            mcp_schema.get("properties"), Mapping
         ):
             return copy.deepcopy(dict(mcp_schema))
 
@@ -15049,7 +15056,8 @@ class InternalMCPChatOrchestrator:
                 if (
                     model_implied_provider
                     and model_implied_provider != default_provider
-                    and model_implied_provider in {"openai", "openrouter", "ollama", "gemini"}
+                    and model_implied_provider
+                    in {"openai", "openrouter", "ollama", "gemini"}
                 ):
                     requested_provider_client = model_implied_provider
                     client = get_llm_client(
@@ -15721,7 +15729,7 @@ class InternalMCPChatOrchestrator:
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
-        )
+            )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
             try:
@@ -17149,7 +17157,7 @@ class InternalMCPChatOrchestrator:
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
-        )
+            )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
             try:
@@ -17622,7 +17630,20 @@ class InternalMCPChatOrchestrator:
                     "transport_metadata",
                     None,
                 )
+                structured_response_telemetry = (
+                    dict(telemetry) if isinstance(telemetry, Mapping) else {}
+                )
+                if provider_response_model:
+                    structured_response_telemetry["effective_model"] = (
+                        provider_response_model
+                    )
+                    structured_response_telemetry["model_identity_source"] = (
+                        "provider_response"
+                    )
                 if isinstance(response_transport, Mapping) and response_transport:
+                    structured_response_telemetry["transport_metadata"] = dict(
+                        response_transport
+                    )
                     attempt_meta["structured_tool_transport"] = dict(response_transport)
                     aux_log.append(
                         {
@@ -17745,7 +17766,7 @@ class InternalMCPChatOrchestrator:
                         ),
                         stage=stage,
                         provider=provider,
-                        candidate=telemetry,
+                        candidate=structured_response_telemetry,
                         workflow_stage_id=workflow_stage_id,
                         status="failed",
                         success=False,
@@ -17776,7 +17797,7 @@ class InternalMCPChatOrchestrator:
                     )
                     errors.append(
                         {
-                            "candidate": telemetry,
+                            "candidate": structured_response_telemetry,
                             "model_resolved": model_name,
                             "error": validation_reason,
                             "error_class": validation_error_class,
@@ -17816,11 +17837,7 @@ class InternalMCPChatOrchestrator:
                                 else []
                             ),
                             "validation": dict(response_validation_failure),
-                            "candidate": (
-                                dict(telemetry)
-                                if isinstance(telemetry, Mapping)
-                                else None
-                            ),
+                            "candidate": dict(structured_response_telemetry),
                         }
                     )
                     continue
@@ -17866,7 +17883,7 @@ class InternalMCPChatOrchestrator:
                         if isinstance(telemetry, Mapping)
                         else None
                     ),
-                    candidate=telemetry,
+                    candidate=structured_response_telemetry,
                     workflow_stage_id=workflow_stage_id,
                     exchange_blob_ref=self._capture_llm_exchange_blob(
                         stage=stage,
@@ -17927,9 +17944,7 @@ class InternalMCPChatOrchestrator:
                             )
                             else []
                         ),
-                        "candidate": (
-                            dict(telemetry) if isinstance(telemetry, Mapping) else None
-                        ),
+                        "candidate": dict(structured_response_telemetry),
                     }
                 )
                 selection_metadata = self._build_stage_model_selection_metadata(
@@ -19262,9 +19277,7 @@ class InternalMCPChatOrchestrator:
             required_fields: dict[str, Any] = {}
             optional_fields: dict[str, Any] = {}
             enum_values: dict[str, Sequence[Any]] = {}
-            array_length_constraints: dict[
-                str, tuple[int | None, int | None]
-            ] = {}
+            array_length_constraints: dict[str, tuple[int | None, int | None]] = {}
             array_item_schemas: dict[str, McpSchema] = {}
             for field_name, field_schema in properties.items():
                 if not isinstance(field_name, str) or not field_name.strip():
@@ -21634,21 +21647,13 @@ class InternalMCPChatOrchestrator:
                     field_value = relation_metadata.get(field_name)
                     if isinstance(field_value, str) and field_value.strip():
                         compact_hit[field_name] = field_value.strip()
-                assertion_revision = relation_metadata.get(
-                    "assertion_revision"
-                )
+                assertion_revision = relation_metadata.get("assertion_revision")
                 if isinstance(assertion_revision, (int, float)):
-                    compact_hit["assertion_revision"] = int(
-                        assertion_revision
-                    )
+                    compact_hit["assertion_revision"] = int(assertion_revision)
                 link_confidence = relation_metadata.get("link_confidence")
                 if isinstance(link_confidence, (int, float)):
-                    compact_hit["link_confidence"] = round(
-                        float(link_confidence), 3
-                    )
-                if isinstance(
-                    relation_metadata.get("canonical_publication"), bool
-                ):
+                    compact_hit["link_confidence"] = round(float(link_confidence), 3)
+                if isinstance(relation_metadata.get("canonical_publication"), bool):
                     compact_hit["canonical_publication"] = relation_metadata[
                         "canonical_publication"
                     ]
@@ -21684,9 +21689,8 @@ class InternalMCPChatOrchestrator:
             target_value = hit.get("target_value")
             if target_concept_id:
                 compact_hit["target_concept_id"] = target_concept_id
-            elif (
-                isinstance(target_value, str)
-                and target_value.strip().startswith("#V#")
+            elif isinstance(target_value, str) and target_value.strip().startswith(
+                "#V#"
             ):
                 compact_hit["target_concept_id"] = target_value.strip()
             if target_name:
@@ -22201,22 +22205,14 @@ class InternalMCPChatOrchestrator:
                         field_value = metadata_map.get(field_name)
                         if isinstance(field_value, str) and field_value.strip():
                             compact_row[field_name] = field_value.strip()
-                    assertion_revision = metadata_map.get(
-                        "assertion_revision"
-                    )
+                    assertion_revision = metadata_map.get("assertion_revision")
                     if isinstance(assertion_revision, (int, float)):
-                        compact_row["assertion_revision"] = int(
-                            assertion_revision
-                        )
-                    if isinstance(
-                        metadata_map.get("canonical_publication"), bool
-                    ):
+                        compact_row["assertion_revision"] = int(assertion_revision)
+                    if isinstance(metadata_map.get("canonical_publication"), bool):
                         compact_row["canonical_publication"] = metadata_map[
                             "canonical_publication"
                         ]
-                    assertion_provenance = metadata_map.get(
-                        "assertion_provenance"
-                    )
+                    assertion_provenance = metadata_map.get("assertion_provenance")
                     if isinstance(assertion_provenance, Mapping):
                         compact_provenance = {
                             key: assertion_provenance.get(key)
@@ -22230,9 +22226,7 @@ class InternalMCPChatOrchestrator:
                             if assertion_provenance.get(key) is not None
                         }
                         if compact_provenance:
-                            compact_row["assertion_provenance"] = (
-                                compact_provenance
-                            )
+                            compact_row["assertion_provenance"] = compact_provenance
                 _bump(source_system_counts, metadata_map.get("source_system"))
                 _bump(item_kind_counts, metadata_map.get("item_kind"))
                 _bump(type_counts, metadata_map.get("type"))

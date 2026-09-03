@@ -45,6 +45,9 @@ from ..types import (
     UnsupportedStructuredToolTransportError,
 )
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
+from ....services.llm_api_key_resolution import (
+    classify_api_key_failover_exception,
+)
 from ....services.model_parameter_service import (
     chat_completions_kwargs_from_model_parameters,
     openai_responses_kwargs_from_model_parameters,
@@ -115,6 +118,10 @@ class OpenAIClient(LLMClient):
         if config.base_url:
             kwargs["base_url"] = config.base_url
         self._client_kwargs = kwargs
+        self._backup_client_kwargs = {
+            **kwargs,
+            **({"api_key": config.backup_api_key} if config.backup_api_key else {}),
+        }
         self._client: Any | None = None
 
     async def aclose(self) -> None:
@@ -150,10 +157,15 @@ class OpenAIClient(LLMClient):
 
         request_kwargs = dict(kwargs)
         request_client_base = request_kwargs.pop("_request_client", None)
+        injected_backup_client = request_kwargs.pop("_backup_request_client", None)
         if request_client_base is None:
             if self._client is None:
                 self._client = openai.AsyncOpenAI(**self._client_kwargs)
             request_client_base = self._client
+        active_request_client = request_client_base
+        owned_backup_client: Any | None = None
+        credential_source = "primary"
+        primary_credential_failure_kind: str | None = None
         request_model = request_kwargs.pop("model", None) or self.config.model
         raw_llm_params = request_kwargs.pop("llm_params", None)
         llm_params, request_advisory_seconds = split_request_advisory_from_llm_params(
@@ -192,9 +204,7 @@ class OpenAIClient(LLMClient):
             allow_advertised_surface_override=continuation is not None,
         )
         decision_telemetry = decision.to_telemetry()
-        provider_label = (
-            "OpenRouter" if decision.provider == "openrouter" else "OpenAI"
-        )
+        provider_label = "OpenRouter" if decision.provider == "openrouter" else "OpenAI"
         if decision.status != "compatible":
             raise UnsupportedStructuredToolTransportError(
                 "No represented API profile supports structured tools for "
@@ -206,9 +216,9 @@ class OpenAIClient(LLMClient):
 
         async def _invoke(
             selected_decision: StructuredToolTransportDecision,
+            request_client: Any,
         ) -> LLMResponse:
             selected_request_kwargs = dict(request_kwargs)
-            request_client = request_client_base
             if selected_decision.effective_api_surface == API_SURFACE_RESPONSES:
                 response = await self._generate_responses(
                     prompt=prompt,
@@ -245,8 +255,57 @@ class OpenAIClient(LLMClient):
             )
             return response
 
+        async def _invoke_with_credential_failover(
+            selected_decision: StructuredToolTransportDecision,
+        ) -> LLMResponse:
+            nonlocal active_request_client
+            nonlocal credential_source
+            nonlocal owned_backup_client
+            nonlocal primary_credential_failure_kind
+
+            try:
+                response = await _invoke(selected_decision, active_request_client)
+            except StructuredToolTransportError:
+                raise
+            except Exception as primary_exc:
+                if credential_source != "primary":
+                    raise
+                failure_kind = classify_api_key_failover_exception(
+                    selected_decision.provider,
+                    primary_exc,
+                )
+                if not failure_kind or not self.config.backup_api_key:
+                    raise
+                primary_credential_failure_kind = failure_kind
+                if injected_backup_client is not None:
+                    active_request_client = injected_backup_client
+                else:
+                    owned_backup_client = openai.AsyncOpenAI(
+                        **self._backup_client_kwargs
+                    )
+                    active_request_client = owned_backup_client
+                credential_source = "backup"
+                self.logger.warning(
+                    "%s primary credential rejected (%s); retrying once with backup credential.",
+                    provider_label,
+                    failure_kind,
+                )
+                response = await _invoke(selected_decision, active_request_client)
+
+            response.transport_metadata.update(
+                {
+                    "credential_source": credential_source,
+                    "credential_failover_used": credential_source == "backup",
+                }
+            )
+            if primary_credential_failure_kind:
+                response.transport_metadata["primary_credential_failure_kind"] = (
+                    primary_credential_failure_kind
+                )
+            return response
+
         try:
-            return await _invoke(decision)
+            return await _invoke_with_credential_failover(decision)
         except StructuredToolTransportError:
             raise
         except Exception as exc:
@@ -327,16 +386,16 @@ class OpenAIClient(LLMClient):
                         alternate_surface = None
                 if alternate_surface is not None:
                     try:
-                        alternate_response = await _invoke(alternate_decision)
+                        alternate_response = await _invoke_with_credential_failover(
+                            alternate_decision
+                        )
                     except StructuredToolTransportError:
                         raise
                     except Exception as alternate_exc:
                         alternate_safe_error = self._sanitise_provider_error(
                             alternate_exc
                         )
-                        if self._has_exact_context_length_exceeded_code(
-                            alternate_exc
-                        ):
+                        if self._has_exact_context_length_exceeded_code(alternate_exc):
                             raise StructuredToolContextLimitError(
                                 f"{provider_label} rejected the advertised alternate "
                                 "structured-tool surface because its context "
@@ -446,6 +505,8 @@ class OpenAIClient(LLMClient):
                     decision=rejection_telemetry,
                 ) from exc
             raise ToolCallError(f"{provider_label} call failed: {safe_error}") from exc
+        finally:
+            await self._close_request_client(owned_backup_client)
 
     def _resolved_connection_id(self) -> str:
         configured = str(self.config.connection_id or "").strip()
@@ -819,8 +880,7 @@ class OpenAIClient(LLMClient):
                 *[dict(item) for item in continuation.output_items],
             ]
             messages.extend(
-                self._chat_tool_result_message(result)
-                for result in correlated_results
+                self._chat_tool_result_message(result) for result in correlated_results
             )
             messages.extend(
                 self._chat_rejected_tool_result_message(rejected)
@@ -833,9 +893,7 @@ class OpenAIClient(LLMClient):
             }
             stage_messages: list[Mapping[str, Any]] = []
             if system_message:
-                stage_messages.append(
-                    {"role": "system", "content": system_message}
-                )
+                stage_messages.append({"role": "system", "content": system_message})
             stage_messages.extend(context or ())
             for message in stage_messages:
                 if not isinstance(message, Mapping) or "content" not in message:
@@ -910,8 +968,7 @@ class OpenAIClient(LLMClient):
                 {
                     "status": "not_executed",
                     "error_code": str(
-                        rejected.get("error_code")
-                        or "invalid_provider_tool_call"
+                        rejected.get("error_code") or "invalid_provider_tool_call"
                     ),
                 },
                 ensure_ascii=True,
@@ -1319,9 +1376,7 @@ class OpenAIClient(LLMClient):
         continuation: LLMContinuation,
     ) -> list[dict[str, str]]:
         raw = continuation.transport_decision.get("rejected_tool_calls")
-        if not isinstance(raw, Sequence) or isinstance(
-            raw, (str, bytes, bytearray)
-        ):
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
             return []
         accepted = set(OpenAIClient._continuation_accepted_tool_call_ids(continuation))
         rejected: list[dict[str, str]] = []
@@ -1426,9 +1481,7 @@ class OpenAIClient(LLMClient):
             str(item.get("error_code") or "invalid_provider_tool_call")[:120]
             for item in diagnostics
         ]
-        transport_metadata["provider_tool_call_diagnostic_codes"] = (
-            diagnostic_codes
-        )
+        transport_metadata["provider_tool_call_diagnostic_codes"] = diagnostic_codes
         rejected_tool_calls: list[dict[str, str]] = []
         seen_rejected_call_ids: set[str] = set()
         for diagnostic in diagnostics:
@@ -1443,13 +1496,12 @@ class OpenAIClient(LLMClient):
                 {
                     "call_id": call_id,
                     "error_code": str(
-                        diagnostic.get("error_code")
-                        or "invalid_provider_tool_call"
+                        diagnostic.get("error_code") or "invalid_provider_tool_call"
                     )[:120],
                 }
             )
-        transport_metadata["rejected_tool_calls"] = (
-            sanitise_transport_telemetry_value(rejected_tool_calls)
+        transport_metadata["rejected_tool_calls"] = sanitise_transport_telemetry_value(
+            rejected_tool_calls
         )
         if diagnostics and not tool_calls:
             raise StructuredToolProtocolError(
@@ -1595,21 +1647,18 @@ class OpenAIClient(LLMClient):
                 {
                     "call_id": call_id,
                     "error_code": str(
-                        diagnostic.get("error_code")
-                        or "invalid_provider_tool_call"
+                        diagnostic.get("error_code") or "invalid_provider_tool_call"
                     )[:120],
                 }
             )
-        transport_metadata["rejected_tool_calls"] = (
-            sanitise_transport_telemetry_value(rejected_tool_calls)
+        transport_metadata["rejected_tool_calls"] = sanitise_transport_telemetry_value(
+            rejected_tool_calls
         )
         diagnostic_codes = [
             str(item.get("error_code") or "invalid_provider_tool_call")[:120]
             for item in diagnostics
         ]
-        transport_metadata["provider_tool_call_diagnostic_codes"] = (
-            diagnostic_codes
-        )
+        transport_metadata["provider_tool_call_diagnostic_codes"] = diagnostic_codes
         if (
             tool_calls
             and decision.continuation_mode == "provider_managed"
@@ -1655,9 +1704,7 @@ class OpenAIClient(LLMClient):
                 api_surface=decision.effective_api_surface,
                 model=decision.model,
                 state_mode=decision.continuation_mode,
-                response_id=(
-                    str(raw_response_id) if raw_response_id else None
-                ),
+                response_id=(str(raw_response_id) if raw_response_id else None),
                 connection_id=decision.connection_id,
                 deployment_id=decision.deployment_id,
                 input_items=input_items,
@@ -1865,8 +1912,7 @@ class OpenAIClient(LLMClient):
         metadata = OpenAIClient._provider_error_metadata(exc)
         code = metadata.get("provider_error_code")
         return (
-            isinstance(code, str)
-            and code.strip().lower() == "context_length_exceeded"
+            isinstance(code, str) and code.strip().lower() == "context_length_exceeded"
         )
 
     @staticmethod
@@ -1914,10 +1960,8 @@ class OpenAIClient(LLMClient):
             if value is None and isinstance(error_body, Mapping):
                 value = error_body.get(key)
             if isinstance(value, (str, int, float, bool)):
-                metadata[f"provider_error_{key}"] = (
-                    sanitise_transport_telemetry_value(
-                        value,
-                        key=f"provider_error_{key}",
-                    )
+                metadata[f"provider_error_{key}"] = sanitise_transport_telemetry_value(
+                    value,
+                    key=f"provider_error_{key}",
                 )
         return metadata

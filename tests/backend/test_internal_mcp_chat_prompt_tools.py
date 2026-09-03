@@ -337,6 +337,7 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
         ],
     )
     monkeypatch.setenv("OPENAI_API_KEY", "sk-live")
+    monkeypatch.setenv("OPENAI_API_BACKUP_KEY", "sk-backup")
     monkeypatch.setenv("VON_WORKFLOWS_TRACE_ENABLED", "0")
     monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "1")
     monkeypatch.setenv("VON_MCP_ALLOW_WRITES", "0")
@@ -356,6 +357,8 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     assert result["configured_openai_api_key_env_var"] == "OPENAI_API_KEY"
     assert result["configured_openai_api_key_env_var_present"] is True
     assert result["sensitive_env_presence"]["OPENAI_API_KEY"] is True
+    assert result["sensitive_env_presence"]["OPENAI_API_BACKUP_KEY"] is True
+    assert "sk-backup" not in str(result)
     assert result["workflow_mode"]["ordinary_turn_path"] == "direct_adaptive_turn"
     assert result["workflow_mode"]["automatic_workflow_selector_enabled"] is False
     assert result["workflow_mode"]["legacy_orchestrator_status"] == "retired"

@@ -103,9 +103,15 @@ def test_internal_mcp_helper_applies_external_model_dotenv_override_keys():
     assert isinstance(keys, tuple)
     assert "OPENAI_API_KEY" in keys
     assert "OPENAI_API_KEY_FILE" in keys
+    assert "OPENAI_API_BACKUP_KEY" in keys
+    assert "OPENAI_API_BACKUP_KEY_FILE" in keys
     assert "VON_DEFAULT_OPENAI_MODEL" in keys
     assert "GEMINI_API_KEY" in keys
     assert "GEMINI_API_KEY_FILE" in keys
+    assert "GEMINI_API_BACKUP_KEY" in keys
+    assert "GEMINI_API_BACKUP_KEY_FILE" in keys
     assert "GOOGLE_API_KEY" in keys
     assert "GOOGLE_API_KEY_FILE" in keys
+    assert "GOOGLE_API_BACKUP_KEY" in keys
+    assert "GOOGLE_API_BACKUP_KEY_FILE" in keys
     assert "VON_DEFAULT_GEMINI_MODEL" in keys
