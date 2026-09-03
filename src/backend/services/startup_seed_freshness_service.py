@@ -4,8 +4,10 @@ The receipts in this module are derived support state.  They never replace
 Vontology as authority: a missing, incompatible, or unresumable receipt makes
 the affected startup subsystem unavailable until an explicit release or
 maintenance reconciliation verifies canonical state and publishes a new
-receipt.  Ordinary process startup never turns that miss into hidden canonical
-reads or writes.
+receipt. Replica-set deployments use change-stream checkpoints. Standalone
+Mongo deployments, where change streams do not exist, compare a bounded digest
+of the exact dependency documents; ordinary startup still never performs seed
+reconciliation or hidden canonical writes.
 """
 
 from __future__ import annotations
@@ -22,9 +24,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from bson import BSON
+from bson import BSON, ObjectId
+from bson.json_util import CANONICAL_JSON_OPTIONS, dumps as bson_json_dumps
 
-STARTUP_SEED_FRESHNESS_RECEIPT_SCHEMA_VERSION = "startup_seed_freshness_receipt.v1"
+STARTUP_SEED_FRESHNESS_RECEIPT_SCHEMA_VERSION = "startup_seed_freshness_receipt.v2"
 _RECEIPT_FILE_SCHEMA_VERSION = "startup_seed_freshness_receipts.v1"
 _DEFAULT_RECEIPT_PATH = (
     Path(__file__).resolve().parents[3]
@@ -80,6 +83,16 @@ def _max_events() -> int:
     except (TypeError, ValueError):
         configured = 10_000
     return max(1, min(configured, 1_000_000))
+
+
+def _max_snapshot_documents() -> int:
+    try:
+        configured = int(
+            os.getenv("VON_STARTUP_SEED_SNAPSHOT_MAX_DOCUMENTS", "5000")
+        )
+    except (TypeError, ValueError):
+        configured = 5_000
+    return max(100, min(configured, 100_000))
 
 
 def _dependency_scope(
@@ -354,6 +367,126 @@ def _watch_pipeline() -> list[dict[str, Any]]:
     ]
 
 
+def _snapshot_find(
+    db: Any,
+    *,
+    collection_name: str,
+    query: Mapping[str, Any],
+    remaining: int,
+) -> list[Mapping[str, Any]]:
+    if remaining <= 0:
+        raise ValueError("dependency_snapshot_document_limit_exceeded")
+    cursor = db[collection_name].find(dict(query)).limit(remaining + 1)
+    documents = [dict(document) for document in cursor]
+    if len(documents) > remaining:
+        raise ValueError("dependency_snapshot_document_limit_exceeded")
+    return documents
+
+
+def _text_value_id_candidates(relations: Sequence[Mapping[str, Any]]) -> list[Any]:
+    candidates: list[Any] = []
+    for relation in relations:
+        for field_name in ("text_value_id", "object_text_id"):
+            value = relation.get(field_name)
+            if value is None or value in candidates:
+                continue
+            candidates.append(value)
+            if isinstance(value, str) and ObjectId.is_valid(value):
+                object_id = ObjectId(value)
+                if object_id not in candidates:
+                    candidates.append(object_id)
+    return candidates
+
+
+def _build_dependency_snapshot(
+    db: Any,
+    *,
+    scope: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Digest the bounded raw documents that the canonical seed depends on."""
+
+    concept_ids = _normalised_strings(scope.get("concept_ids"))
+    subject_ids = _normalised_strings(scope.get("text_relation_subject_ids"))
+    predicates = _normalised_strings(scope.get("text_relation_predicates"))
+    if not concept_ids and not subject_ids and not predicates:
+        return {
+            "success": False,
+            "reason": "dependency_snapshot_scope_missing",
+        }
+
+    maximum = _max_snapshot_documents()
+    counts: dict[str, int] = {}
+    try:
+        concepts = _snapshot_find(
+            db,
+            collection_name="concepts",
+            query={"concept_id": {"$in": concept_ids}},
+            remaining=maximum,
+        )
+        counts["concepts"] = len(concepts)
+        remaining = maximum - len(concepts)
+
+        relations: list[Mapping[str, Any]] = []
+        if subject_ids and predicates:
+            relations = _snapshot_find(
+                db,
+                collection_name="text_relations",
+                query={
+                    "subject_concept_id": {"$in": subject_ids},
+                    "predicate": {"$in": predicates},
+                },
+                remaining=remaining,
+            )
+        counts["text_relations"] = len(relations)
+        remaining -= len(relations)
+
+        text_values: list[Mapping[str, Any]] = []
+        value_ids = _text_value_id_candidates(relations)
+        if value_ids:
+            text_values = _snapshot_find(
+                db,
+                collection_name="text_values",
+                query={"_id": {"$in": value_ids}},
+                remaining=remaining,
+            )
+        counts["text_values"] = len(text_values)
+    except Exception as exc:  # noqa: BLE001 - a snapshot failure is typed
+        return {
+            "success": False,
+            "reason": (
+                "dependency_snapshot_document_limit_exceeded"
+                if str(exc) == "dependency_snapshot_document_limit_exceeded"
+                else "dependency_snapshot_read_failed"
+            ),
+            "error_type": type(exc).__name__,
+        }
+
+    digest = hashlib.sha256()
+    for collection_name, documents in (
+        ("concepts", concepts),
+        ("text_relations", relations),
+        ("text_values", text_values),
+    ):
+        digest.update(collection_name.encode("utf-8"))
+        digest.update(b"\0")
+        for document in sorted(documents, key=lambda item: _text(item.get("_id"))):
+            encoded = bson_json_dumps(
+                document,
+                json_options=CANONICAL_JSON_OPTIONS,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return {
+        "success": True,
+        "reason": "dependency_snapshot_captured",
+        "_dependency_snapshot_sha256": digest.hexdigest(),
+        "document_counts": counts,
+        "query_count": 2 + int(bool(value_ids)),
+    }
+
+
 def _drain_changes(
     *,
     db: Any,
@@ -464,7 +597,12 @@ def _drain_changes(
                 pass
 
 
-def begin_startup_seed_freshness_observation() -> dict[str, Any]:
+def begin_startup_seed_freshness_observation(
+    *,
+    concept_ids: Sequence[str] = (),
+    text_relation_subject_ids: Sequence[str] = (),
+    text_relation_predicates: Sequence[str] = (),
+) -> dict[str, Any]:
     """Capture a server operation time before canonical verification begins."""
 
     if not _receipts_enabled():
@@ -474,9 +612,17 @@ def begin_startup_seed_freshness_observation() -> dict[str, Any]:
         hello = db.command("hello")
         operation_time = hello.get("operationTime")
         if operation_time is None:
+            scope = _dependency_scope(
+                concept_ids=concept_ids,
+                text_relation_subject_ids=text_relation_subject_ids,
+                text_relation_predicates=text_relation_predicates,
+            )
+            snapshot = _build_dependency_snapshot(db, scope=scope)
+            if not snapshot.get("success"):
+                return _public_result(snapshot)
             return {
-                "success": False,
-                "reason": "mongo_operation_time_unavailable",
+                **snapshot,
+                "verification_mode": "dependency_snapshot",
             }
         return {
             "success": True,
@@ -557,13 +703,6 @@ def check_startup_seed_freshness(
             "reason": "tracked_dependency_ids_missing",
             "duration_ms": int((time.perf_counter() - started_at) * 1000),
         }
-    token = _decode_resume_token(entry.get("resume_token_bson_base64"))
-    if token is None:
-        return {
-            **base_result,
-            "reason": "resume_token_invalid",
-            "duration_ms": int((time.perf_counter() - started_at) * 1000),
-        }
     try:
         db = _get_db()
         authority_fingerprint = _current_authority_fingerprint(db)
@@ -578,6 +717,60 @@ def check_startup_seed_freshness(
         return {
             **base_result,
             "reason": "authority_fingerprint_mismatch",
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        }
+    if entry.get("verification_mode") == "dependency_snapshot":
+        snapshot = _build_dependency_snapshot(db, scope=scope)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        if not snapshot.get("success"):
+            return {
+                **base_result,
+                **_public_result(snapshot),
+                "verification_mode": "dependency_snapshot",
+                "duration_ms": duration_ms,
+            }
+        expected_digest = _text(entry.get("dependency_snapshot_sha256"))
+        actual_digest = _text(snapshot.get("_dependency_snapshot_sha256"))
+        if not expected_digest or actual_digest != expected_digest:
+            return {
+                **base_result,
+                "reason": "dependency_snapshot_mismatch",
+                "verification_mode": "dependency_snapshot",
+                "document_counts": snapshot.get("document_counts"),
+                "query_count": snapshot.get("query_count"),
+                "duration_ms": duration_ms,
+            }
+        refreshed_entry = {
+            **dict(entry),
+            "last_checked_at_epoch_seconds": time.time(),
+        }
+        try:
+            _persist_receipt_entry(family_id, refreshed_entry)
+        except Exception as exc:  # noqa: BLE001 - persistence failure is a miss
+            return {
+                **base_result,
+                "reason": "receipt_checkpoint_persist_failed",
+                "verification_mode": "dependency_snapshot",
+                "error_type": type(exc).__name__,
+                "duration_ms": duration_ms,
+            }
+        return {
+            **base_result,
+            "fresh": True,
+            "reason": "dependency_snapshot_receipt_current",
+            "verification_mode": "dependency_snapshot",
+            "document_counts": snapshot.get("document_counts"),
+            "query_count": snapshot.get("query_count"),
+            "verified_at_epoch_seconds": entry.get("verified_at_epoch_seconds"),
+            "metadata": dict(entry.get("metadata") or {}),
+            "duration_ms": duration_ms,
+        }
+
+    token = _decode_resume_token(entry.get("resume_token_bson_base64"))
+    if token is None:
+        return {
+            **base_result,
+            "reason": "resume_token_invalid",
             "duration_ms": int((time.perf_counter() - started_at) * 1000),
         }
     drained = _drain_changes(
@@ -677,6 +870,64 @@ def record_startup_seed_freshness(
             "reason": "authority_fingerprint_unavailable",
             "error_type": type(exc).__name__,
             "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        }
+    if observation.get("verification_mode") == "dependency_snapshot":
+        snapshot = _build_dependency_snapshot(db, scope=scope)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        if not snapshot.get("success"):
+            return {
+                **base_result,
+                **_public_result(snapshot),
+                "verification_mode": "dependency_snapshot",
+                "duration_ms": duration_ms,
+            }
+        initial_digest = _text(observation.get("_dependency_snapshot_sha256"))
+        current_digest = _text(snapshot.get("_dependency_snapshot_sha256"))
+        if not initial_digest or current_digest != initial_digest:
+            return {
+                **base_result,
+                "reason": "dependency_snapshot_changed_during_verification",
+                "verification_mode": "dependency_snapshot",
+                "document_counts": snapshot.get("document_counts"),
+                "query_count": snapshot.get("query_count"),
+                "duration_ms": duration_ms,
+            }
+        now = time.time()
+        entry = {
+            "schema_version": STARTUP_SEED_FRESHNESS_RECEIPT_SCHEMA_VERSION,
+            "family_id": family_id,
+            "source_digest": source_digest,
+            "producer_schema_version": producer_schema_version,
+            "authority_fingerprint": authority_fingerprint,
+            "dependency_scope": scope,
+            "tracked_ids": tracked_ids,
+            "verification_mode": "dependency_snapshot",
+            "dependency_snapshot_sha256": current_digest,
+            "verified_at_epoch_seconds": now,
+            "last_checked_at_epoch_seconds": now,
+            "metadata": dict(metadata or {}),
+        }
+        try:
+            _persist_receipt_entry(family_id, entry)
+        except Exception as exc:  # noqa: BLE001 - persistence failure is non-current
+            return {
+                **base_result,
+                "reason": "receipt_persist_failed",
+                "verification_mode": "dependency_snapshot",
+                "error_type": type(exc).__name__,
+                "duration_ms": duration_ms,
+            }
+        return {
+            **base_result,
+            "persisted": True,
+            "reason": "dependency_snapshot_receipt_persisted",
+            "verification_mode": "dependency_snapshot",
+            "document_counts": snapshot.get("document_counts"),
+            "query_count": snapshot.get("query_count"),
+            "tracked_dependency_counts": {
+                key: len(value) for key, value in tracked_ids.items()
+            },
+            "duration_ms": duration_ms,
         }
     drained = _drain_changes(
         db=db,

@@ -409,10 +409,15 @@ def reconcile_canonical_constitutive_relation_requirement_profiles(
     started_at = time.perf_counter()
     bundle = _load_seed_bundle(asset_path)
     source_digest = _startup_source_digest(bundle)
+    scope = _startup_freshness_scope(bundle)
     passes: list[dict[str, Any]] = []
 
     def run_canonical_pass() -> dict[str, Any]:
-        observation = seed_freshness.begin_startup_seed_freshness_observation()
+        observation = seed_freshness.begin_startup_seed_freshness_observation(
+            concept_ids=scope["concept_ids"],
+            text_relation_subject_ids=scope["text_relation_subject_ids"],
+            text_relation_predicates=scope["text_relation_predicates"],
+        )
         report = ensure_canonical_constitutive_relation_requirement_profiles(
             asset_path=asset_path,
             freshness_context={
@@ -473,7 +478,7 @@ def ensure_constitutive_relation_requirement_profiles_current_for_startup(
     *,
     asset_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Check the release receipt without reading or writing canonical profiles."""
+    """Check freshness without running reconciliation or canonical writes."""
 
     started_at = time.perf_counter()
     bundle = _load_seed_bundle(asset_path)
@@ -489,13 +494,18 @@ def ensure_constitutive_relation_requirement_profiles_current_for_startup(
         text_relation_predicates=scope["text_relation_predicates"],
     )
     public_check = seed_freshness.public_startup_seed_freshness_result(freshness_check)
+    read_strategy = (
+        "dependency_snapshot_receipt"
+        if freshness_check.get("verification_mode") == "dependency_snapshot"
+        else "dependency_receipt"
+    )
     common = {
         "skipped": True,
         "changed": False,
         "asset_path": bundle.get("asset_path"),
         "schema_version": bundle.get("schema_version"),
         "seed_version": bundle.get("seed_version"),
-        "read_strategy": "dependency_receipt",
+        "read_strategy": read_strategy,
         "read_phases": 1,
         "canonical_read_batches": {"concepts": 0, "text_assertions": 0},
         "duration_ms": int((time.perf_counter() - started_at) * 1000),

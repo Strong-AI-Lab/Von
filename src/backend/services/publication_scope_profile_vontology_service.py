@@ -560,10 +560,15 @@ def reconcile_canonical_publication_scope_profiles(
     started_at = time.perf_counter()
     bundle = _load_seed_bundle(asset_path)
     source_digest = _startup_source_digest(bundle)
+    scope = _startup_freshness_scope(bundle)
     passes: list[dict[str, Any]] = []
 
     def run_canonical_pass() -> dict[str, Any]:
-        observation = seed_freshness.begin_startup_seed_freshness_observation()
+        observation = seed_freshness.begin_startup_seed_freshness_observation(
+            concept_ids=scope["concept_ids"],
+            text_relation_subject_ids=scope["text_relation_subject_ids"],
+            text_relation_predicates=scope["text_relation_predicates"],
+        )
         report = _bootstrap_canonical_publication_scope_profiles(
             asset_path=asset_path,
             freshness_context={
@@ -640,6 +645,11 @@ def ensure_publication_scope_profiles_current_for_startup(
         text_relation_predicates=scope["text_relation_predicates"],
     )
     public_check = seed_freshness.public_startup_seed_freshness_result(freshness_check)
+    read_strategy = (
+        "dependency_snapshot_receipt"
+        if freshness_check.get("verification_mode") == "dependency_snapshot"
+        else "dependency_receipt"
+    )
     if freshness_check.get("fresh"):
         metadata = freshness_check.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
@@ -656,7 +666,7 @@ def ensure_publication_scope_profiles_current_for_startup(
             "seed_version": bundle.get("seed_version"),
             "source_tag": metadata.get("source_tag") or bundle.get("source_tag"),
             "managed_by": metadata.get("managed_by") or bundle.get("managed_by"),
-            "read_strategy": "dependency_receipt",
+            "read_strategy": read_strategy,
             "read_phases": 1,
             "canonical_read_batches": {"concepts": 0, "text_assertions": 0},
             "duration_ms": int((time.perf_counter() - started_at) * 1000),
@@ -675,7 +685,7 @@ def ensure_publication_scope_profiles_current_for_startup(
         "asset_path": bundle.get("asset_path"),
         "schema_version": bundle.get("schema_version"),
         "seed_version": bundle.get("seed_version"),
-        "read_strategy": "dependency_receipt",
+        "read_strategy": read_strategy,
         "read_phases": 1,
         "canonical_read_batches": {"concepts": 0, "text_assertions": 0},
         "duration_ms": int((time.perf_counter() - started_at) * 1000),
