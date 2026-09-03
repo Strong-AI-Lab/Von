@@ -4,9 +4,13 @@ import threading
 import time
 
 import pytest
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import AutoReconnect, ConnectionFailure
 
 from src.backend.db import mongo_client as mc
+
+
+class _OperationCancelled(Exception):
+    """Test double matching PyMongo's private recovery exception name."""
 
 
 class _FakeAdmin:
@@ -16,10 +20,12 @@ class _FakeAdmin:
         ping_started: threading.Event | None = None,
         release_ping: threading.Event | None = None,
         fail_ping: bool = False,
+        ping_error: Exception | None = None,
     ) -> None:
         self.ping_started = ping_started
         self.release_ping = release_ping
         self.fail_ping = fail_ping
+        self.ping_error = ping_error
         self.ping_count = 0
 
     def command(self, name: str, **_kwargs):
@@ -31,6 +37,8 @@ class _FakeAdmin:
                 self.ping_started.set()
             if self.release_ping is not None:
                 assert self.release_ping.wait(timeout=2)
+            if self.ping_error is not None:
+                raise self.ping_error
             if self.fail_ping:
                 raise ConnectionFailure("simulated health failure")
         return {"ok": 1}
@@ -428,6 +436,71 @@ def test_late_health_failure_cannot_erase_newer_client_and_probes_coalesce(
     assert probing_result[0]["client"] is replacement
     assert mc._mongo_client_real is replacement
     assert replacement.closed is False
+
+
+@pytest.mark.parametrize(
+    "probe_error",
+    (
+        _OperationCancelled("operation cancelled"),
+        AutoReconnect("127.0.0.1:27017: connection pool paused"),
+    ),
+)
+def test_periodic_probe_does_not_invalidate_while_driver_pool_is_recovering(
+    monkeypatch,
+    probe_error: Exception,
+) -> None:
+    recovering = _FakeClient(
+        "recovering",
+        _FakeAdmin(ping_error=probe_error),
+    )
+    with mc._CONNECTION_CONDITION:
+        mc._mongo_client_real = recovering
+        mc._last_auto_recovery_check_at = 0.0
+        original_generation = mc._connection_generation
+    monkeypatch.setenv("VON_MONGO_AUTO_RECOVERY", "1")
+    monkeypatch.setenv("VON_MONGO_AUTO_RECOVERY_CHECK_INTERVAL_SECONDS", "0.001")
+    connect_attempted = False
+
+    def _unexpected_connect(_uri: str, **_kwargs):
+        nonlocal connect_attempted
+        connect_attempted = True
+        raise AssertionError("driver-owned pool recovery must not replace the client")
+
+    monkeypatch.setattr(mc, "_try_connect_uri", _unexpected_connect)
+
+    db = mc.get_db()
+
+    assert db is not None
+    assert db["client"] is recovering
+    assert mc._mongo_client_real is recovering
+    assert mc._connection_generation == original_generation
+    assert connect_attempted is False
+    assert recovering.closed is False
+
+
+def test_periodic_probe_still_invalidates_genuine_transport_failure(
+    monkeypatch,
+) -> None:
+    failed = _FakeClient(
+        "failed",
+        _FakeAdmin(ping_error=ConnectionFailure("network unreachable")),
+    )
+    replacement = _FakeClient("replacement")
+    with mc._CONNECTION_CONDITION:
+        mc._mongo_client_real = failed
+        mc._last_auto_recovery_check_at = 0.0
+        original_generation = mc._connection_generation
+    monkeypatch.setenv("VON_MONGO_AUTO_RECOVERY", "1")
+    monkeypatch.setenv("VON_MONGO_AUTO_RECOVERY_CHECK_INTERVAL_SECONDS", "0.001")
+    monkeypatch.setattr(mc, "_try_connect_uri", lambda _uri, **_kwargs: replacement)
+
+    db = mc.get_db()
+
+    assert db is not None
+    assert db["client"] is replacement
+    assert mc._mongo_client_real is replacement
+    assert mc._connection_generation == original_generation + 1
+    assert failed.closed is False
 
 
 def test_ordinary_healthy_get_db_does_not_enter_connection_condition(
