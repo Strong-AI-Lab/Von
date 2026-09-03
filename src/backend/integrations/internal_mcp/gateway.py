@@ -321,6 +321,11 @@ class MethodCatalogue:
                 for field_name in schema.comma_separated_list_fields
                 if isinstance(field_name, str) and field_name
             ],
+            "array_length_constraints": {
+                field_name: list(limits)
+                for field_name, limits in schema.array_length_constraints.items()
+                if isinstance(field_name, str) and field_name
+            },
         }
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:

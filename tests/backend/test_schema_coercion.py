@@ -263,6 +263,23 @@ def test_schema_enum_values_are_validated() -> None:
     ]
 
 
+def test_schema_array_length_constraints_are_validated() -> None:
+    schema = Schema(
+        required={"concepts": list},
+        array_length_constraints={"concepts": (1, 1)},
+    )
+
+    ok, errors = validate_payload(
+        schema,
+        {"concepts": [{"name": "First"}, {"name": "Second"}]},
+    )
+
+    assert ok is False
+    assert errors == [
+        "Field 'concepts' expected at most 1 item(s) but received 2."
+    ]
+
+
 def test_gateway_invoke_extracts_declared_scalar_from_object_payload() -> None:
     observed: dict[str, object] = {}
 
@@ -328,12 +345,13 @@ def test_schema_aliases_are_normalised_without_mutating_unrelated_fields() -> No
 def test_schema_metadata_round_trips_to_json_schema_extensions() -> None:
     schema = Schema(
         required={"profile": str},
-        optional={"query": str},
+        optional={"query": str, "fields": list},
         aliases={"identity": "profile"},
         batch_propagated_fields=("profile",),
         enum_values={"profile": ("zhan-gmail", "lab-gmail")},
         scalar_source_fields={"query": ("search_query",)},
         comma_separated_list_fields=("query",),
+        array_length_constraints={"fields": (1, 2)},
     )
 
     json_schema = schema_to_json_schema(schema)
@@ -342,6 +360,8 @@ def test_schema_metadata_round_trips_to_json_schema_extensions() -> None:
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
     assert json_schema["x-von-scalar-source-fields"] == {"query": ["search_query"]}
     assert json_schema["x-von-comma-separated-list-fields"] == ["query"]
+    assert json_schema["properties"]["fields"]["minItems"] == 1
+    assert json_schema["properties"]["fields"]["maxItems"] == 2
     assert json_schema["properties"]["profile"]["enum"] == [
         "zhan-gmail",
         "lab-gmail",
@@ -361,6 +381,7 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
             "enum_values": {"profile": ["zhan-gmail", "lab-gmail"]},
             "scalar_source_fields": {"query": ["search_query"]},
             "comma_separated_list_fields": ["fields"],
+            "array_length_constraints": {"fields": [1, 4]},
         }
     )
 
@@ -369,6 +390,8 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
     assert json_schema["x-von-scalar-source-fields"] == {"query": ["search_query"]}
     assert json_schema["x-von-comma-separated-list-fields"] == ["fields"]
+    assert json_schema["properties"]["fields"]["minItems"] == 1
+    assert json_schema["properties"]["fields"]["maxItems"] == 4
     assert json_schema["properties"]["profile"]["enum"] == [
         "zhan-gmail",
         "lab-gmail",

@@ -209,13 +209,21 @@ def test_schema_to_json_schema_includes_items_for_arrays() -> None:
         Schema(
             required={"names": list},
             optional={"aliases": (list, type(None))},
+            array_length_constraints={
+                "names": (1, 1),
+                "aliases": (0, 3),
+            },
         )
     )
 
     assert payload["properties"]["names"]["type"] == "array"
     assert payload["properties"]["names"]["items"] == {}
+    assert payload["properties"]["names"]["minItems"] == 1
+    assert payload["properties"]["names"]["maxItems"] == 1
     assert payload["properties"]["aliases"]["type"] == ["array", "null"]
     assert payload["properties"]["aliases"]["items"] == {}
+    assert payload["properties"]["aliases"]["minItems"] == 0
+    assert payload["properties"]["aliases"]["maxItems"] == 3
 
 
 def test_vontology_stdio_payload_array_schemas_define_items() -> None:

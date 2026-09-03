@@ -10520,6 +10520,7 @@ def _concepts_create_input_schema() -> Schema:
                 None,
             ],
         },
+        array_length_constraints={"concepts": (1, 1)},
         allow_unknown=True,
         description=(
             "Governed create_concepts input: parent_id is one exact semantic type "

@@ -11144,6 +11144,7 @@ class InternalMCPChatOrchestrator:
         enum_values = mcp_schema.get("enum_values")
         scalar_source_fields = mcp_schema.get("scalar_source_fields")
         comma_separated_list_fields = mcp_schema.get("comma_separated_list_fields")
+        array_length_constraints = mcp_schema.get("array_length_constraints")
         description = mcp_schema.get("description")
 
         properties: Dict[str, Any] = {}
@@ -11195,6 +11196,36 @@ class InternalMCPChatOrchestrator:
                         values, (str, bytes, bytearray)
                     ):
                         properties[field_name]["enum"] = list(values)
+
+        if isinstance(array_length_constraints, Mapping):
+            for field_name, limits in array_length_constraints.items():
+                field_schema = properties.get(field_name)
+                if not isinstance(field_schema, dict):
+                    continue
+                field_types = field_schema.get("type")
+                is_array = field_types == "array" or (
+                    isinstance(field_types, list) and "array" in field_types
+                )
+                if (
+                    not is_array
+                    or not isinstance(limits, Sequence)
+                    or isinstance(limits, (str, bytes, bytearray))
+                    or len(limits) != 2
+                ):
+                    continue
+                minimum, maximum = limits
+                if (
+                    isinstance(minimum, int)
+                    and not isinstance(minimum, bool)
+                    and minimum >= 0
+                ):
+                    field_schema["minItems"] = minimum
+                if (
+                    isinstance(maximum, int)
+                    and not isinstance(maximum, bool)
+                    and maximum >= 0
+                ):
+                    field_schema["maxItems"] = maximum
 
         json_schema = {
             "type": "object",
@@ -19199,6 +19230,9 @@ class InternalMCPChatOrchestrator:
             required_fields: dict[str, Any] = {}
             optional_fields: dict[str, Any] = {}
             enum_values: dict[str, Sequence[Any]] = {}
+            array_length_constraints: dict[
+                str, tuple[int | None, int | None]
+            ] = {}
             for field_name, field_schema in properties.items():
                 if not isinstance(field_name, str) or not field_name.strip():
                     continue
@@ -19213,6 +19247,24 @@ class InternalMCPChatOrchestrator:
                         raw_enum, (str, bytes, bytearray)
                     ):
                         enum_values[field_name] = tuple(raw_enum)
+                    raw_minimum = field_schema.get("minItems")
+                    raw_maximum = field_schema.get("maxItems")
+                    minimum = (
+                        raw_minimum
+                        if isinstance(raw_minimum, int)
+                        and not isinstance(raw_minimum, bool)
+                        and raw_minimum >= 0
+                        else None
+                    )
+                    maximum = (
+                        raw_maximum
+                        if isinstance(raw_maximum, int)
+                        and not isinstance(raw_maximum, bool)
+                        and raw_maximum >= 0
+                        else None
+                    )
+                    if minimum is not None or maximum is not None:
+                        array_length_constraints[field_name] = (minimum, maximum)
                 if field_name in required_names:
                     required_fields[field_name] = expected
                 else:
@@ -19261,6 +19313,7 @@ class InternalMCPChatOrchestrator:
                     else ()
                 ),
                 enum_values=enum_values,
+                array_length_constraints=array_length_constraints,
                 scalar_source_fields=(
                     {
                         str(field_name).strip(): tuple(
@@ -19377,6 +19430,24 @@ class InternalMCPChatOrchestrator:
                     and not isinstance(values, (str, bytes, bytearray))
                 }
                 if isinstance(raw_schema.get("enum_values"), Mapping)
+                else {}
+            ),
+            array_length_constraints=(
+                {
+                    str(field_name).strip(): (
+                        limits[0] if isinstance(limits[0], int) else None,
+                        limits[1] if isinstance(limits[1], int) else None,
+                    )
+                    for field_name, limits in raw_schema.get(
+                        "array_length_constraints", {}
+                    ).items()
+                    if isinstance(field_name, str)
+                    and field_name.strip()
+                    and isinstance(limits, Sequence)
+                    and not isinstance(limits, (str, bytes, bytearray))
+                    and len(limits) == 2
+                }
+                if isinstance(raw_schema.get("array_length_constraints"), Mapping)
                 else {}
             ),
             scalar_source_fields=(

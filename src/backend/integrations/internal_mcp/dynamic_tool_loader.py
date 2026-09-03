@@ -219,6 +219,11 @@ def _build_dynamic_input_schema(
             for field_name in target_schema.comma_separated_list_fields
             if field_name in remaining_fields
         ),
+        array_length_constraints={
+            field_name: limits
+            for field_name, limits in target_schema.array_length_constraints.items()
+            if field_name in remaining_fields
+        },
     )
 
 
