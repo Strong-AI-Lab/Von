@@ -145,6 +145,13 @@ class MethodDefinition:
     ordinary_turn_excluded_reason: str | None = None
     # Map capability arguments to values resolved by the trusted entry point.
     ordinary_turn_trusted_argument_bindings: Mapping[str, str] | None = None
+    # Trusted bindings whose value may legitimately be absent for this method.
+    # The argument remains hidden from the model and is injected only when the
+    # trusted entry point supplies it, but absence does not remove the method
+    # from the ordinary-turn capability projection.
+    ordinary_turn_optional_trusted_argument_bindings: (
+        Mapping[str, str] | None
+    ) = None
     # Map capability arguments to actor-authorised constrained choices resolved
     # by the trusted entry point. The model may choose only from that bounded
     # set; dispatch maps the stable selector to the current runtime value.
@@ -362,6 +369,14 @@ class MethodCatalogue:
                     dict(definition.ordinary_turn_trusted_argument_bindings)
                     if isinstance(
                         definition.ordinary_turn_trusted_argument_bindings,
+                        Mapping,
+                    )
+                    else None
+                ),
+                "ordinary_turn_optional_trusted_argument_bindings": (
+                    dict(definition.ordinary_turn_optional_trusted_argument_bindings)
+                    if isinstance(
+                        definition.ordinary_turn_optional_trusted_argument_bindings,
                         Mapping,
                     )
                     else None

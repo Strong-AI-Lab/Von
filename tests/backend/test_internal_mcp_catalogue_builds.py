@@ -390,6 +390,15 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "store_text_assertion",
         "upsert_scoped_assertion",
     } <= actor_without_org
+    assert {
+        "conversation_list",
+        "conversation_search",
+        "conversation_get",
+        "conversation_transcript_page",
+        "conversation_inspect_batch",
+        "conversation_manage",
+        "conversation_manage_batch",
+    } <= actor_without_org
 
     # Capabilities that can persist state remain write-category even when
     # their primary output is a report or ranking.

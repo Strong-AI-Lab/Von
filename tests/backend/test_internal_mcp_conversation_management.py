@@ -29,8 +29,10 @@ def test_conversation_tools_are_actor_bound_and_manage_is_a_bounded_effect():
         assert definition.category == "read"
         assert definition.ordinary_turn_trusted_argument_bindings == {
             "acting_user_concept_id": "actor_user_concept_id",
-            "organisation_concept_id": "actor_organisation_concept_id",
             "namespace": "turn_namespace",
+        }
+        assert definition.ordinary_turn_optional_trusted_argument_bindings == {
+            "organisation_concept_id": "actor_organisation_concept_id",
         }
 
     manage = catalogue.get("conversation_manage")
@@ -38,15 +40,20 @@ def test_conversation_tools_are_actor_bound_and_manage_is_a_bounded_effect():
     assert manage.ordinary_turn_effect is True
     assert manage.ordinary_turn_trusted_argument_bindings == {
         "acting_user_concept_id": "actor_user_concept_id",
-        "organisation_concept_id": "actor_organisation_concept_id",
         "namespace": "turn_namespace",
         "request_id": "turn_id",
+    }
+    assert manage.ordinary_turn_optional_trusted_argument_bindings == {
+        "organisation_concept_id": "actor_organisation_concept_id",
     }
     batch = catalogue.get("conversation_manage_batch")
     assert batch.category == "write"
     assert batch.ordinary_turn_effect is True
     assert batch.ordinary_turn_trusted_argument_bindings == (
         manage.ordinary_turn_trusted_argument_bindings
+    )
+    assert batch.ordinary_turn_optional_trusted_argument_bindings == (
+        manage.ordinary_turn_optional_trusted_argument_bindings
     )
 
 

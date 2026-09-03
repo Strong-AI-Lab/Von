@@ -315,6 +315,51 @@ def test_dynamic_proxy_cannot_fix_a_trusted_bound_argument(monkeypatch):
     assert failure["conflicting_argument_names"] == ["profile"]
 
 
+def test_dynamic_proxy_preserves_optional_trusted_binding(monkeypatch):
+    _set_dynamic_tool_docs(
+        monkeypatch,
+        [
+            {
+                "concept_id": "#V#dynamic_conversation_proxy",
+                "attributes": {
+                    "mcp_tool_name": "conversation_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "conversation_base",
+                    "dynamic_fixed_payload": {"query": "recent"},
+                },
+            }
+        ],
+    )
+    optional_binding = {
+        "organisation_concept_id": "actor_organisation_concept_id",
+    }
+    base_definition = MethodDefinition(
+        name="conversation_base",
+        handler=lambda **kwargs: {"success": True, **kwargs},
+        input_schema=Schema(
+            optional={
+                "query": str,
+                "organisation_concept_id": (str, type(None)),
+            },
+            allow_unknown=False,
+        ),
+        category="read",
+        ordinary_turn_optional_trusted_argument_bindings=optional_binding,
+    )
+
+    load_result = load_dynamic_method_definitions(
+        base_definitions={"conversation_base": base_definition},
+        protected_method_names={"conversation_base"},
+    )
+
+    assert len(load_result.definitions) == 1
+    assert (
+        load_result.definitions[0].ordinary_turn_optional_trusted_argument_bindings
+        == optional_binding
+    )
+
+
 def test_dynamic_proxy_cannot_bypass_ordinary_turn_fixed_argument(monkeypatch):
     _set_dynamic_tool_docs(
         monkeypatch,
