@@ -2088,6 +2088,128 @@ def test_machine_observations_are_bounded_separate_and_not_redispatched() -> Non
     assert "reconcile that outcome into the visible answer" in system_message
 
 
+def test_invalid_provider_tool_call_gets_one_contract_informed_repair() -> None:
+    invoked_queries: list[str] = []
+
+    def _read(**kwargs: Any) -> dict[str, Any]:
+        invoked_queries.append(str(kwargs.get("query")))
+        return {"success": True, "value": "grounded result"}
+
+    diagnostic = {
+        "schema_version": "tool_call_validation.v1",
+        "status": "invalid",
+        "tool": "general_read",
+        "error_code": "unknown_tool",
+        "message": "Unknown tool requested: general_read",
+        "payload": {"must_not_be_replayed": "x" * 10_000},
+    }
+    client = _SequenceClient(
+        LLMResponse(text_response="", tool_call_diagnostics=[diagnostic]),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="corrected-read",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "grounded value"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The grounded result is available."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(_read),
+        prompt="Read the grounded value.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-tool-call-diagnostic-repair",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The grounded result is available."
+    assert invoked_queries == ["grounded value"]
+    assert len(client.calls) == 3
+    repair_context = next(
+        item
+        for item in client.calls[1]["context"]
+        if item.get("role") == "system"
+        and "provider rejected your previous tool-call" in item.get("content", "")
+    )
+    assert "turn_invoke_capability" in repair_context["content"]
+    assert "delegated capability name is not itself an exposed tool" in (
+        repair_context["content"]
+    )
+    assert "must_not_be_replayed" not in repair_context["content"]
+    assert result.llm_calls[0]["provider_tool_call_diagnostics"] == [
+        {
+            "error_code": "unknown_tool",
+            "tool": "general_read",
+            "message": "Unknown tool requested: general_read",
+        }
+    ]
+    recovery = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_tool_call_protocol_recovery"
+    )
+    assert recovery["action"] == "fresh_retry_with_contract_feedback"
+    assert recovery["repair_attempted"] is True
+    assert recovery["repair_succeeded"] is True
+    assert recovery["repair_result_call_id"] == (
+        "turn-tool-call-diagnostic-repair:llm:2"
+    )
+
+
+def test_repeated_invalid_provider_tool_call_returns_typed_non_success() -> None:
+    diagnostic = {
+        "error_code": "unknown_tool",
+        "tool": "general_read",
+        "message": "Unknown tool requested: general_read",
+    }
+    client = _SequenceClient(
+        LLMResponse(text_response="", tool_call_diagnostics=[diagnostic]),
+        LLMResponse(text_response="", tool_call_diagnostics=[diagnostic]),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Read the grounded value.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-tool-call-diagnostic-repeat",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(client.calls) == 2
+    assert result.terminal_status == "model_tool_call_invalid"
+    assert result.response_text == (
+        "The model attempted an invalid capability request and did not repair "
+        "it on the bounded retry."
+    )
+    recovery_events = [
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_tool_call_protocol_recovery"
+    ]
+    assert [event["action"] for event in recovery_events] == [
+        "fresh_retry_with_contract_feedback",
+        "terminal_invalid_tool_call",
+    ]
+    assert recovery_events[0]["repair_succeeded"] is False
+    assert recovery_events[0]["repair_result_call_id"] == (
+        "turn-tool-call-diagnostic-repeat:llm:2"
+    )
+
+
 def test_oversized_machine_observation_is_omitted_without_partial_projection() -> None:
     projection = _bounded_conversation_observation_projection(
         [

@@ -283,6 +283,8 @@ _PROVIDER_RETRY_WAIT_SLICE_SECONDS = 1.0
 _MAX_PROVIDER_RETRY_METADATA_SECONDS = 3_600.0
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
 _CAPABILITY_PURPOSE_MAX_CHARS = 160
+_TOOL_CALL_DIAGNOSTIC_RECOVERY_MAX_ITEMS = 4
+_TOOL_CALL_DIAGNOSTIC_MESSAGE_MAX_CHARS = 500
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
 _CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION = "capability_plan_profile.v1"
 _CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
@@ -6913,6 +6915,8 @@ def execute_adaptive_turn(
 
     seen_request_digests: set[str] = set()
     model_liveness_recovery_used = False
+    tool_call_diagnostic_recovery_used = False
+    tool_call_diagnostic_recovery_event: dict[str, Any] | None = None
     last_partial_text = ""
     final_synthesis = False
     answer_only = False
@@ -9375,6 +9379,21 @@ def execute_adaptive_turn(
             if isinstance(response.model, str) and response.model.strip()
             else None
         )
+        provider_tool_call_diagnostics = [
+            {
+                key: str(diagnostic.get(key) or "")[:limit]
+                for key, limit in (
+                    ("error_code", 120),
+                    ("tool", 200),
+                    ("message", _TOOL_CALL_DIAGNOSTIC_MESSAGE_MAX_CHARS),
+                )
+                if diagnostic.get(key) is not None
+            }
+            for diagnostic in response.tool_call_diagnostics[
+                :_TOOL_CALL_DIAGNOSTIC_RECOVERY_MAX_ITEMS
+            ]
+            if isinstance(diagnostic, Mapping)
+        ]
         llm_calls.append(
             {
                 "call_id": model_call_id,
@@ -9400,6 +9419,15 @@ def execute_adaptive_turn(
                 "response": response.text_response,
                 "transport": dict(response.transport_metadata),
                 "tool_call_count": len(response.tool_calls),
+                **(
+                    {
+                        "provider_tool_call_diagnostics": (
+                            provider_tool_call_diagnostics
+                        )
+                    }
+                    if provider_tool_call_diagnostics
+                    else {}
+                ),
             }
         )
         emit_model_call_end(llm_calls[-1])
@@ -9407,9 +9435,87 @@ def execute_adaptive_turn(
             last_partial_text = response.text_response.strip()
             last_partial_effect_generation = request_effect_generation
         calls = list(response.tool_calls)
+        if (
+            tool_call_diagnostic_recovery_event is not None
+            and tool_call_diagnostic_recovery_event.get("repair_succeeded") is None
+            and (calls or response.text_response.strip())
+        ):
+            tool_call_diagnostic_recovery_event["repair_succeeded"] = True
+            tool_call_diagnostic_recovery_event["repair_result_call_id"] = (
+                model_call_id
+            )
         if not calls:
             if response.text_response.strip():
                 return finish(response.text_response.strip())
+            if provider_tool_call_diagnostics:
+                available_tool_names = [tool.name for tool in request_tools]
+                if tool_call_diagnostic_recovery_used:
+                    if tool_call_diagnostic_recovery_event is not None:
+                        tool_call_diagnostic_recovery_event[
+                            "repair_succeeded"
+                        ] = False
+                        tool_call_diagnostic_recovery_event[
+                            "repair_result_call_id"
+                        ] = model_call_id
+                    aux_calls.append(
+                        {
+                            "type": "adaptive_turn_tool_call_protocol_recovery",
+                            "schema_version": (
+                                "adaptive_turn_tool_call_protocol_recovery.v1"
+                            ),
+                            "call_id": model_call_id,
+                            "action": "terminal_invalid_tool_call",
+                            "repair_attempted": True,
+                            "repair_succeeded": False,
+                            "available_tool_names": available_tool_names,
+                            "diagnostics": provider_tool_call_diagnostics,
+                        }
+                    )
+                    return finish(
+                        "The model attempted an invalid capability request and "
+                        "did not repair it on the bounded retry.",
+                        status="model_tool_call_invalid",
+                    )
+
+                tool_call_diagnostic_recovery_used = True
+                continuation = None
+                pending_results = []
+                diagnostic_json = json.dumps(
+                    provider_tool_call_diagnostics,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                exact_tools = ", ".join(available_tool_names) or "none"
+                current_context.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The provider rejected your previous tool-call "
+                            "output, leaving neither a valid call nor a visible "
+                            "answer. Repair it once and continue the existing "
+                            "user task. Call only these exact exposed tool "
+                            f"names: {exact_tools}. A delegated capability name "
+                            "is not itself an exposed tool; place it inside the "
+                            "declared payload of the appropriate exposed "
+                            "wrapper. Provider diagnostics: "
+                            f"{diagnostic_json}"
+                        ),
+                    }
+                )
+                tool_call_diagnostic_recovery_event = {
+                    "type": "adaptive_turn_tool_call_protocol_recovery",
+                    "schema_version": (
+                        "adaptive_turn_tool_call_protocol_recovery.v1"
+                    ),
+                    "call_id": model_call_id,
+                    "action": "fresh_retry_with_contract_feedback",
+                    "repair_attempted": True,
+                    "repair_succeeded": None,
+                    "available_tool_names": available_tool_names,
+                    "diagnostics": provider_tool_call_diagnostics,
+                }
+                aux_calls.append(tool_call_diagnostic_recovery_event)
+                continue
             if final_synthesis and not answer_only:
                 enter_answer_only("evidence_call_failed")
                 continue

@@ -1,6 +1,7 @@
 """Tests for LLMClient interface and factory."""
 
 import asyncio
+import logging
 import types
 
 import pytest
@@ -175,6 +176,7 @@ class TestOllamaToolCallParsing:
     def _client() -> OllamaClient:
         client = OllamaClient.__new__(OllamaClient)
         client.config = LLMClientConfig(model="qwen3.5:27b")
+        client.logger = logging.getLogger(__name__)
         return client
 
     @staticmethod
@@ -241,6 +243,24 @@ class TestOllamaToolCallParsing:
         assert response.text_response == (
             '{"status":"no tool requested","payload":{"reason":"done"}}'
         )
+
+    def test_unknown_tool_is_removed_and_exposed_as_typed_diagnostic(self):
+        response = self._client()._parse_response(
+            '{"action":"call_tool","tool":"general_read","payload":{}}',
+            self._tools(),
+        )
+
+        assert response.tool_calls == []
+        assert response.text_response == ""
+        assert response.tool_call_diagnostics == [
+            {
+                "schema_version": "tool_call_contract_validation.v1",
+                "status": "invalid",
+                "tool": "general_read",
+                "error_code": "unknown_tool",
+                "message": "Unknown tool requested: general_read",
+            }
+        ]
 
     def test_constrained_prompt_exposes_exact_tool_input_schema(self):
         client = self._client()
