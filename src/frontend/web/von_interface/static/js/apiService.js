@@ -34,6 +34,15 @@ async function ensureUniqueWindowSessionId() {
 }
 
 /**
+ * Replace a tab ID that the server has authoritatively bound to another actor.
+ * The rejected request has no effect, so callers may retry once with the new
+ * opaque ID while the authenticated server session remains the actor authority.
+ */
+async function replaceMismatchedWindowSessionId(expectedSessionId) {
+  return windowSessionIdentityCoordinator.replaceWindowSessionId(expectedSessionId);
+}
+
+/**
  * Builds the standard headers object for fetch requests.
  * Includes Content-Type and the window session header.
  */
@@ -57,6 +66,33 @@ export {
 // ============================================================================
 // Standard HTTP Helpers with Window Session Support
 // ============================================================================
+
+function buildHttpError(response, payload) {
+  const err = new Error(
+    (payload && (payload.error || payload.message)) || `HTTP ${response.status}`
+  );
+  err.status = response.status;
+  err.payload = payload;
+  const retryAfterHeader = response.headers?.get?.('Retry-After');
+  const parsedRetryAfter = Number.parseInt(retryAfterHeader || '', 10);
+  if (Number.isFinite(parsedRetryAfter)) {
+    err.retryAfterSeconds = parsedRetryAfter;
+  }
+  return err;
+}
+
+async function readJsonPayload(response) {
+  try {
+    return await response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function isWindowSessionActorMismatch(response, payload) {
+  return response.status === 403
+    && payload?.error_code === 'window_session_actor_mismatch';
+}
 
 export async function getJson(url) {
   const res = await fetch(url, {
@@ -111,13 +147,27 @@ export async function getJsonDetailed(url, options = {}) {
 }
 
 export async function postJson(url, data) {
-  const res = await fetch(url, {
+  let headers = await buildHeaders();
+  let res = await fetch(url, {
     method: 'POST',
-    headers: await buildHeaders(),
+    headers,
     body: data ? JSON.stringify(data) : '{}'
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  if (res.ok) return res.json();
+
+  let payload = await readJsonPayload(res);
+  if (isWindowSessionActorMismatch(res, payload)) {
+    await replaceMismatchedWindowSessionId(headers[WINDOW_SESSION_HEADER]);
+    headers = await buildHeaders();
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: data ? JSON.stringify(data) : '{}'
+    });
+    if (res.ok) return res.json();
+    payload = await readJsonPayload(res);
+  }
+  throw buildHttpError(res, payload);
 }
 
 export async function postJsonDetailed(url, data, options = {}) {

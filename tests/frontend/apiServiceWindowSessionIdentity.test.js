@@ -88,4 +88,67 @@ describe('apiService window-session request barrier', () => {
 
         incumbent.close();
     });
+
+    test('replaces a server-owned tab ID and retries only after typed actor mismatch', async () => {
+        sessionStorage.setItem('von_window_session_id', 'ws_owned_by_another_actor');
+        global.fetch = jest
+            .fn()
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 403,
+                json: async () => ({
+                    error: 'window_session_actor_mismatch',
+                    error_code: 'window_session_actor_mismatch',
+                }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ status: 'updated' }),
+            });
+
+        const { postJson } = require(apiServicePath);
+        await expect(postJson('/von/api/session/set_organisation', {
+            organisation_concept_id: null,
+        })).resolves.toEqual({ status: 'updated' });
+
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+        const firstWindowSessionId = global.fetch.mock.calls[0][1]
+            .headers['X-Von-Window-Session'];
+        const replacementWindowSessionId = global.fetch.mock.calls[1][1]
+            .headers['X-Von-Window-Session'];
+        expect(firstWindowSessionId).toBe('ws_owned_by_another_actor');
+        expect(replacementWindowSessionId).toMatch(/^ws_/);
+        expect(replacementWindowSessionId).not.toBe(firstWindowSessionId);
+        expect(sessionStorage.getItem('von_window_session_id'))
+            .toBe(replacementWindowSessionId);
+    });
+
+    test('does not replace or retry a membership denial', async () => {
+        sessionStorage.setItem('von_window_session_id', 'ws_current_actor');
+        global.fetch = jest.fn(async () => ({
+            ok: false,
+            status: 403,
+            json: async () => ({
+                error: 'organisation_membership_required',
+                error_code: 'organisation_membership_required',
+            }),
+        }));
+
+        const { postJson } = require(apiServicePath);
+        const request = postJson('/von/api/session/set_organisation', {
+            organisation_concept_id: '#V#not_my_org',
+        });
+
+        await expect(request).rejects.toMatchObject({
+            message: 'organisation_membership_required',
+            status: 403,
+            payload: {
+                error_code: 'organisation_membership_required',
+            },
+        });
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(sessionStorage.getItem('von_window_session_id'))
+            .toBe('ws_current_actor');
+    });
 });
