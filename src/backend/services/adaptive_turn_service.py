@@ -1440,6 +1440,35 @@ def _is_transient_model_request_liveness_failure(exc: BaseException) -> bool:
     return False
 
 
+def _provider_quota_exhaustion_message(
+    exc: BaseException,
+    *,
+    configured_provider: str | None,
+) -> str | None:
+    """Return an actionable, credential-free message for exhausted quota."""
+
+    lowered = str(exc).lower()
+    if not any(
+        marker in lowered
+        for marker in (
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "quota_exhausted",
+        )
+    ):
+        return None
+
+    provider = str(configured_provider or "model provider").strip().lower()
+    provider_label = "OpenAI" if provider == "openai" else "The model provider"
+    return (
+        f"{provider_label} rejected the model call because the configured API "
+        "project has no credits or quota remaining "
+        "(credit_balance_exhausted / insufficient_quota). Add credits to that "
+        "provider project, or choose another enabled model in Settings, then "
+        "retry."
+    )
+
+
 def _structured_transport_failure_telemetry(
     exc: StructuredToolTransportError,
 ) -> dict[str, Any]:
@@ -9013,6 +9042,10 @@ def execute_adaptive_turn(
                 if isinstance(exc, StructuredToolTransportError)
                 else {}
             )
+            quota_message = _provider_quota_exhaustion_message(
+                exc,
+                configured_provider=configured_provider or None,
+            )
             if "provider_request_sent" in transport_failure_telemetry:
                 provider_request_sent = transport_failure_telemetry[
                     "provider_request_sent"
@@ -9069,6 +9102,12 @@ def execute_adaptive_turn(
                     "partial_response_retained": bool(partial_response_text),
                     "error": str(exc),
                     "error_class": type(exc).__name__,
+                    **(
+                        {"failure_kind": "quota_exhausted"}
+                        if quota_message
+                        and "failure_kind" not in transport_failure_telemetry
+                        else {}
+                    ),
                     **transport_failure_telemetry,
                 }
             )
@@ -9286,6 +9325,11 @@ def execute_adaptive_turn(
                         continue
             terminal_status = "model_error"
             failure_kind = transport_failure_telemetry.get("failure_kind")
+            if quota_message:
+                return finish(
+                    last_partial_text.strip() or quota_message,
+                    status=terminal_status,
+                )
             if failure_kind == "provider_rate_limited":
                 text = last_partial_text.strip() or (
                     "I could not complete the request because the model provider "

@@ -243,6 +243,67 @@ def test_partial_answer_terminal_status_is_delivered_as_honest_success(
     ] == "answer_partially_completed"
 
 
+def test_failed_turn_does_not_retry_provider_for_optional_response_transforms(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    adaptive_state = app.config["_ADAPTIVE_TURN_STATE"]
+    adaptive_state["response_text"] = (
+        "OpenAI rejected the model call because the configured API project has "
+        "no credits remaining. Add credits or choose another enabled model in "
+        "Settings, then retry."
+    )
+    adaptive_state["terminal_status"] = "model_error"
+    app.config["TESTING"] = False
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(von_routes, "get_buttonify_model_enabled", lambda: True)
+
+    def _unexpected_transform_call(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("failed turns must not call the unavailable model again")
+
+    monkeypatch.setattr(
+        von_routes,
+        "_llm_generate_spoken_backfill",
+        _unexpected_transform_call,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_llm_generate_buttonify",
+        _unexpected_transform_call,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Represent this organisation.",
+            "presenter_mode": True,
+            "skip_buttonify": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert payload["terminal_status"] == "model_error"
+    assert payload["llm_debug"]["spoken_backfill_second_pass_attempted"] is False
+    transforms = {
+        item["transform_name"]: item
+        for item in payload["llm_debug"]["response_transformations"][
+            "transformations"
+        ]
+    }
+    assert transforms["spoken_backfill"]["status"] == "skipped"
+    assert (
+        transforms["spoken_backfill"]["suppression_reason"]
+        == "turn_not_deliverable"
+    )
+    assert transforms["buttonify"]["status"] == "skipped"
+    assert transforms["buttonify"]["suppression_reason"] == "turn_not_deliverable"
+    assert payload["llm_debug"]["llm_usage_cost_summary"]["call_count"] == 1
+
+
 def test_ordinary_generate_does_not_run_disabled_buttonify_model(
     app: Flask,
     monkeypatch: pytest.MonkeyPatch,

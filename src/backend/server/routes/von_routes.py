@@ -14268,7 +14268,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # falling back to reading the screen/markdown verbatim.
         needs_spoken_backfill = False
         spoken_from_screen_text = False
-        if presenter_mode_requested:
+        if presenter_mode_requested and not adaptive_delivery_success:
+            # A failed primary model call must not trigger another call to the
+            # same unavailable provider merely to narrate the failure.
+            spoken_backfill_second_pass_reason = "turn_not_deliverable"
+        elif presenter_mode_requested:
             if presenter_channels_missing:
                 needs_spoken_backfill = True
                 if has_tool_messages:
@@ -14479,7 +14483,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             spoken_backfill_suppression_reason = "presenter_mode_disabled"
         elif not needs_spoken_backfill:
             spoken_backfill_status = "skipped"
-            spoken_backfill_suppression_reason = "not_required"
+            spoken_backfill_suppression_reason = (
+                spoken_backfill_second_pass_reason or "not_required"
+            )
         elif spoken_backfill_applied:
             spoken_backfill_status = (
                 "fallback_success"
@@ -14782,7 +14788,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             canonical_outcome=canonical_outcome_response,
         )
 
-        if not buttonify_setting_enabled:
+        if not adaptive_delivery_success:
+            # Avoid a second request to a provider that just failed the turn.
+            buttonify_suppression_reason = "turn_not_deliverable"
+        elif not buttonify_setting_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
         elif not buttonify_requested and raw_skip_buttonify is None:
             buttonify_suppression_reason = "foreground_delivery_priority"

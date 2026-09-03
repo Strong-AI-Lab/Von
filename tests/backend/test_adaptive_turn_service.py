@@ -9989,6 +9989,39 @@ def test_non_liveness_model_failure_is_not_retried_after_compaction(
     )
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ToolCallError(
+            "OpenAI call failed: Error code: 429 - "
+            "{'error': {'code': 'credit_balance_exhausted', "
+            "'type': 'insufficient_quota'}}"
+        ),
+        ToolCallError("OpenAI call failed: quota_exhausted"),
+    ],
+)
+def test_quota_exhaustion_returns_actionable_provider_message(
+    error: Exception,
+) -> None:
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Represent this organisation.",
+        context=[],
+        llm_client=_SequenceClient(error),
+        model="gpt-test",
+        turn_id="turn-quota-exhausted",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "model_error"
+    assert "credit_balance_exhausted / insufficient_quota" in result.response_text
+    assert "Add credits" in result.response_text
+    assert "choose another enabled model in Settings" in result.response_text
+    assert "ToolCallError" not in result.response_text
+    assert result.llm_calls[0]["failure_kind"] == "quota_exhausted"
+
+
 def test_elapsed_thresholds_are_one_time_model_advisories_without_removing_tools() -> (
     None
 ):
