@@ -11,6 +11,9 @@ from src.backend.languagemodels.structured_tool_calling import (
     ToolDefinition,
     get_llm_client,
 )
+from src.backend.languagemodels.structured_tool_calling.providers.ollama_client import (
+    OllamaClient,
+)
 
 
 def _install_openai_temperature_registry(monkeypatch) -> dict[str, object]:
@@ -163,6 +166,81 @@ class TestGetLLMClient:
         client = get_llm_client(config)
 
         assert isinstance(client, OllamaClient)
+
+
+class TestOllamaToolCallParsing:
+    """Ollama text transport accepts every format its prompt advertises."""
+
+    @staticmethod
+    def _client() -> OllamaClient:
+        client = OllamaClient.__new__(OllamaClient)
+        client.config = LLMClientConfig(model="qwen3.5:27b")
+        return client
+
+    @staticmethod
+    def _tools() -> list[ToolDefinition]:
+        return [
+            ToolDefinition(
+                name="turn_capabilities",
+                description="List available capabilities.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            ToolDefinition(
+                name="turn_list_evidence",
+                description="List gathered evidence.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ]
+
+    def test_parses_newline_separated_calls_with_nested_payloads(self):
+        response = self._client()._parse_response(
+            """{
+  "action": "call_tool",
+  "tool": "turn_capabilities",
+  "payload": {"names": ["create_concepts"], "filter": {"exact": true}}
+}
+{
+  "action": "call_tool",
+  "tool": "turn_list_evidence",
+  "payload": {}
+}""",
+            self._tools(),
+        )
+
+        assert [call.tool_name for call in response.tool_calls] == [
+            "turn_capabilities",
+            "turn_list_evidence",
+        ]
+        assert response.tool_calls[0].payload == {
+            "names": ["create_concepts"],
+            "filter": {"exact": True},
+        }
+        assert response.text_response == ""
+
+    def test_removes_fenced_tool_calls_but_preserves_natural_text(self):
+        response = self._client()._parse_response(
+            """Checking the available evidence.
+```json
+{"action":"call_tool","tool":"turn_list_evidence","payload":{}}
+```""",
+            self._tools(),
+        )
+
+        assert [call.tool_name for call in response.tool_calls] == [
+            "turn_list_evidence"
+        ]
+        assert response.text_response == "Checking the available evidence."
+
+    def test_preserves_unrelated_json_as_answer_text(self):
+        response = self._client()._parse_response(
+            '{"status":"no tool requested","payload":{"reason":"done"}}',
+            self._tools(),
+        )
+
+        assert response.tool_calls == []
+        assert response.text_response == (
+            '{"status":"no tool requested","payload":{"reason":"done"}}'
+        )
 
 
 class TestTemperatureGuards:

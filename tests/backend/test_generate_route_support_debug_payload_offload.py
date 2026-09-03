@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from src.backend.server.routes.generate_route_support import (
+    _invoke_presenter_screen_backfill_prompt,
     _persist_generate_turn_messages,
 )
 from src.backend.services.blob_store import BlobRef
@@ -53,6 +54,64 @@ class _FakeBlobStore:
         return [
             write["key"] for write in self.writes if write["key"].startswith(prefix)
         ]
+
+
+def test_screen_backfill_bounds_local_ollama_generation(monkeypatch) -> None:
+    import src.backend.server.routes.generate_route_support as support
+
+    class _FakeOllamaClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return "<screen>usable answer</screen>"
+
+    monkeypatch.setattr(support, "OllamaClient", _FakeOllamaClient)
+    client = _FakeOllamaClient()
+
+    response, model = _invoke_presenter_screen_backfill_prompt(
+        llm_client=client,
+        represented_screen_prompt="Return one screen block.",
+        context_messages=[{"role": "user", "content": "evidence"}],
+        context_telemetry={"prompt_concept_ids": ["#V#screen_prompt"]},
+        model_name="qwen3.5:27b",
+        record_stage_llm_call=lambda **_kwargs: None,
+        emit_stage_progress=lambda _event: None,
+        infer_provider=lambda _model: "ollama",
+    )
+
+    assert response == "<screen>usable answer</screen>"
+    assert model == "qwen3.5:27b"
+    assert client.calls[0]["llm_params"] == {
+        "think": False,
+        "num_predict": 2048,
+    }
+
+
+def test_screen_backfill_does_not_send_ollama_options_to_cloud_client() -> None:
+    class _FakeCloudClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return "<screen>usable answer</screen>"
+
+    client = _FakeCloudClient()
+
+    _invoke_presenter_screen_backfill_prompt(
+        llm_client=client,
+        represented_screen_prompt="Return one screen block.",
+        context_messages=[],
+        context_telemetry={},
+        model_name="gpt-5.2",
+        record_stage_llm_call=lambda **_kwargs: None,
+        emit_stage_progress=lambda _event: None,
+        infer_provider=lambda _model: "openai",
+    )
+
+    assert "llm_params" not in client.calls[0]
 
 
 def test_persist_generate_turn_messages_offloads_tool_message_content(

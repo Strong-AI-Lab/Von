@@ -5,7 +5,10 @@ import time
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Callable, Mapping, Sequence, cast
 
-from src.backend.languagemodels.llm_interface import ModelExecutionEligibilityError
+from src.backend.languagemodels.llm_interface import (
+    ModelExecutionEligibilityError,
+    OllamaClient,
+)
 from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
     default_tool_message_threshold_bytes,
@@ -16,6 +19,7 @@ from src.backend.services.python_decision_authority_service import (
 
 SCREEN_BACKFILL_STAGE_CONCEPT_ID = "#V#screen_backfill_stage"
 SCREEN_BACKFILL_STAGE_PROMPT_IDS = ("#V#von_screen_content_prompt_for_witbrock",)
+_OLLAMA_SCREEN_BACKFILL_NUM_PREDICT_LIMIT = 2048
 
 
 def _normalise_prompt_concept_ids(values: Any) -> list[str]:
@@ -235,10 +239,21 @@ def _invoke_presenter_screen_backfill_prompt(
         {"status": "llm_call_start", "stage": "screen_backfill", "model": model_name}
     )
     try:
+        generate_kwargs: dict[str, Any] = {
+            "prompt": represented_screen_prompt,
+            "context": screen_context_messages,
+            "model": model_name,
+        }
+        if isinstance(llm_client, OllamaClient):
+            # Screen synthesis is a presentation transform. Disable hidden
+            # reasoning and cap output so a local reasoning model cannot spend
+            # minutes thinking without producing a usable <screen> block.
+            generate_kwargs["llm_params"] = {
+                "think": False,
+                "num_predict": _OLLAMA_SCREEN_BACKFILL_NUM_PREDICT_LIMIT,
+            }
         synthesis_response = llm_client.generate(
-            prompt=represented_screen_prompt,
-            context=screen_context_messages,
-            model=model_name,
+            **generate_kwargs,
         )
     except Exception as exc:
         screen_duration_ms = (time.perf_counter() - llm_start) * 1000.0
