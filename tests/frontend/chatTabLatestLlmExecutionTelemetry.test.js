@@ -573,4 +573,46 @@ describe('chatTab latest execution telemetry publication', () => {
             }),
         );
     });
+
+    test('uses transcript order rather than opaque UUID fragments after history reload', () => {
+        const chatTab = require(chatTabModulePath);
+
+        chatTab.__testOnly_clearLlmDebugData();
+        chatTab.setLlmDebugDataForTurn('a-bb7954fc-3f06-468f-9224-25ddc16962e3', {
+            timestamp: '2026-09-03T15:38:44.000Z',
+            history_location: { session_id: 'conversation-a', history_index: 1 },
+        });
+        chatTab.setLlmDebugDataForTurn('a-0a6886ec-e894-4913-958f-a395dd85e59d', {
+            timestamp: '2026-09-03T16:12:57.000Z',
+            history_location: { session_id: 'conversation-a', history_index: 3 },
+            llm_execution_summary: {
+                schema_version: 'history_llm_execution_summary.v1',
+                model: 'gpt-5.6-luna',
+                llm_interaction: {
+                    requested_model: 'gpt-5.6-luna',
+                    calls: [{
+                        type: 'adaptive_turn_model_call',
+                        model: 'gpt-5.6-luna',
+                        provider: 'openai',
+                        transport: {
+                            credential_source: 'backup',
+                            credential_failover_used: true,
+                            primary_credential_failure_kind: 'quota_exhausted',
+                        },
+                    }],
+                },
+            },
+        });
+
+        expect(chatTab.__testOnly_getLatestLlmExecutionTelemetry()).toEqual(
+            expect.objectContaining({
+                turn_id: 'a-0a6886ec-e894-4913-958f-a395dd85e59d',
+                credential_source: 'backup',
+                credential_failover_used: true,
+                primary_credential_failure_kind: 'quota_exhausted',
+                actual_model: 'gpt-5.6-luna',
+                actual_provider: 'openai',
+            }),
+        );
+    });
 });
