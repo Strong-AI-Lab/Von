@@ -7783,6 +7783,45 @@ def list_tasks():
 # ----------------- End Background Tasks -----------------
 
 
+def _normalise_model_context_message_content(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return a provider-safe projection without rewriting stored history.
+
+    Historical tool and debug rows can contain structured ``content`` values.
+    Model providers require message content to be text, so preserve strings
+    exactly and render legacy structured values as deterministic JSON in the
+    transient model-facing copy.
+    """
+
+    projected: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            projected.append(dict(message))
+            continue
+        try:
+            text_content = json.dumps(
+                content,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except (TypeError, ValueError):
+            try:
+                text_content = json.dumps(
+                    content,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            except (TypeError, ValueError):
+                text_content = str(content)
+        projected.append({**message, "content": text_content})
+    return projected
+
+
 def _truncate_large_tool_results(
     messages: list[dict], max_tool_content_chars: int = 5000
 ) -> list[dict]:
@@ -12662,6 +12701,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         for message in (context if isinstance(context, list) else [])
         if isinstance(message, Mapping)
     ]
+    structured_history_content_count = sum(
+        1
+        for message in normalised_history_context
+        if not isinstance(message.get("content"), str)
+    )
+    normalised_history_context = _normalise_model_context_message_content(
+        normalised_history_context
+    )
+    if structured_history_content_count:
+        namespace_report["structured_history_content_normalised_count"] = (
+            structured_history_content_count
+        )
+        current_app.logger.warning(
+            "Normalised %d structured history message content value(s) for "
+            "model use without rewriting canonical history; request_id=%s",
+            structured_history_content_count,
+            request_id,
+        )
     context = _limit_context_size(
         _truncate_large_tool_results(normalised_history_context)
     )
