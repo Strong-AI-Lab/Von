@@ -1,10 +1,16 @@
 """Migrate operational organisation membership to narrow predicates.
 
 The historical implementation treated generic ``memberOf`` assertions as Von
-access grants.  This migration deliberately does not copy every generic
-membership edge.  An old edge is eligible only when it is paired with the
-scoped legacy role relation written by the former governed membership
-lifecycle.  Generic-only ontology facts remain descriptive and grant nothing.
+access grants.  By default this migration deliberately does not copy every
+generic membership edge: an old edge is eligible only when it is paired with
+the scoped legacy role relation written by the former governed membership
+lifecycle.
+
+The explicitly approved ``preserve_pre_cutover_authority`` mode instead copies
+every legacy membership edge that the pre-cutover reader accepted.  Pairs
+without a stored role receive the same ``member`` default that reader used.
+This is a one-time compatibility operation over facts that existed at cutover;
+it does not make later generic ontology assertions authoritative.
 
 The migration is non-destructive and idempotent.  It creates the narrow
 predicate vocabulary, represents that ``memberOfVonOrg`` specialises (and
@@ -221,7 +227,13 @@ def audit_von_organisation_membership_predicates(
                 }
             )
         elif predicates and not roles:
-            generic_only.append({**common, "legacy_membership_predicates": predicates})
+            generic_only.append(
+                {
+                    **common,
+                    "legacy_membership_predicates": predicates,
+                    "already_narrow": pair in narrow_pairs,
+                }
+            )
         elif roles and not predicates:
             role_only.append({**common, "legacy_roles": roles})
         else:
@@ -370,8 +382,14 @@ def migrate_von_organisation_membership_predicates(
     approved: bool = False,
     sample_limit: int = 20,
     role_overrides: Iterable[Mapping[str, Any]] | None = None,
+    preserve_pre_cutover_authority: bool = False,
 ) -> dict[str, Any]:
-    """Copy only evidenced operational memberships to the narrow vocabulary."""
+    """Copy legacy memberships to the narrow vocabulary.
+
+    The default remains conservative.  When explicitly requested, the
+    pre-cutover compatibility mode also copies generic-only pairs with the old
+    reader's default ``member`` role.
+    """
 
     try:
         normalised_overrides = _normalise_role_overrides(role_overrides)
@@ -402,6 +420,21 @@ def migrate_von_organisation_membership_predicates(
         ],
     }
     eligible_records = list(audit["eligible_operational_memberships"])
+    compatibility_records: list[dict[str, Any]] = []
+    if preserve_pre_cutover_authority:
+        for record in audit["generic_only_non_authority_samples"]:
+            compatibility_record = {
+                "user_concept_id": record["user_concept_id"],
+                "organisation_concept_id": record["organisation_concept_id"],
+                "role": "member",
+                "legacy_membership_predicates": list(
+                    record.get("legacy_membership_predicates", [])
+                ),
+                "already_narrow": bool(record.get("already_narrow")),
+                "legacy_default_role_applied": True,
+            }
+            compatibility_records.append(compatibility_record)
+            eligible_records.append(compatibility_record)
     resolved_conflicts: list[dict[str, Any]] = []
     unresolved_conflicts: list[dict[str, Any]] = []
     override_errors: list[dict[str, Any]] = []
@@ -453,7 +486,10 @@ def migrate_von_organisation_membership_predicates(
         "schema_version": MIGRATION_SCHEMA_VERSION,
         "dry_run": bool(dry_run),
         "approved": bool(approved),
+        "preserve_pre_cutover_authority": bool(preserve_pre_cutover_authority),
         "audit": public_audit,
+        "pre_cutover_default_member_count": len(compatibility_records),
+        "pre_cutover_default_member_records": compatibility_records[:sample_count],
         "resolved_conflict_count": len(resolved_conflicts),
         "resolved_conflicts": resolved_conflicts[:sample_count],
         "unresolved_conflict_count": len(unresolved_conflicts),
@@ -481,7 +517,10 @@ def migrate_von_organisation_membership_predicates(
             "success": True,
             "effect_status": "not_started",
             "would_migrate_count": len(eligible_records),
-            "generic_only_relations_will_grant_authority": False,
+            "legacy_generic_only_pairs_will_be_copied": bool(
+                preserve_pre_cutover_authority
+            ),
+            "future_generic_relations_will_grant_authority": False,
         }
 
     vocabulary = ensure_von_organisation_membership_vocabulary()
@@ -564,7 +603,8 @@ def migrate_von_organisation_membership_predicates(
         "already_current": already_current[: max(0, int(sample_limit))],
         "failures": failures[: max(0, int(sample_limit))],
         "missing_read_back_pairs": missing_read_back[:sample_count],
-        "generic_only_relations_grant_authority": False,
+        "legacy_generic_only_pairs_copied": bool(preserve_pre_cutover_authority),
+        "future_generic_relations_grant_authority": False,
     }
 
 

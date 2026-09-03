@@ -64,8 +64,11 @@ See: docs/engineering/security_considerations.md.
 
 ### Operator migration and recovery
 
-The login-email migration accepts only an explicit reviewed allow-list. It
-never scans or copies `#V#has_email`:
+The login-email migration normally accepts only an explicit reviewed
+allow-list. For a database being upgraded from the pre-cutover runtime, an
+explicit compatibility mode copies the unambiguous `#V#has_email` bindings
+that the old login reader already treated as authority. This is retrospective
+only; later ordinary contact-email assertions remain non-authoritative:
 
 ```sh
 python -m src.backend.utilities.migrate_von_login_email_bindings \
@@ -73,22 +76,32 @@ python -m src.backend.utilities.migrate_von_login_email_bindings \
 
 python -m src.backend.utilities.migrate_von_login_email_bindings \
   --binding '#V#person_id=person@example.org' --apply --approved
+
+python -m src.backend.utilities.migrate_von_login_email_bindings \
+  --preserve-pre-cutover-authority
+
+python -m src.backend.utilities.migrate_von_login_email_bindings \
+  --preserve-pre-cutover-authority --apply --approved
 ```
 
-Run the first command before applying. If it reports a missing user or an
-address already bound to another user, correct that exact conflict and rerun
-the dry run; do not work around it by adding a generic email relation.
+Run the relevant command without `--apply --approved` before applying. If it
+reports a missing user or an address already bound to another user, correct
+that exact conflict and rerun the dry run; do not work around it by adding a
+generic email relation.
 
 The organisation-membership migration likewise performs a dry run by default.
-It copies only legacy membership pairs backed by exactly one scoped operational
-role. If it reports conflicting legacy roles, resolve each pair explicitly
+Its pre-cutover compatibility mode copies every legacy membership pair that the
+old reader accepted, retaining the old `member` default where no role was
+stored. If it reports conflicting legacy roles, resolve each pair explicitly
 with the exact `--role-override` form shown by `--help`, for example:
 
 ```sh
 python -m src.backend.utilities.migrate_von_organisation_membership_predicates \
+  --preserve-pre-cutover-authority \
   --role-override '#V#person_id=#V#organisation_id=owner'
 
 python -m src.backend.utilities.migrate_von_organisation_membership_predicates \
+  --preserve-pre-cutover-authority \
   --role-override '#V#person_id=#V#organisation_id=owner' \
   --apply --approved
 ```

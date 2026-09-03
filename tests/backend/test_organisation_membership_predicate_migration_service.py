@@ -102,7 +102,75 @@ def test_apply_migrates_only_role_backed_operational_membership(monkeypatch):
     assert report["migrated_count"] == 1
     assert create_calls == [(governed[0], governed[1], "owner")]
     assert descriptive not in narrow_pairs
-    assert report["generic_only_relations_grant_authority"] is False
+    assert report["future_generic_relations_grant_authority"] is False
+
+
+def test_pre_cutover_mode_copies_generic_only_pair_with_old_member_default(
+    monkeypatch,
+):
+    governed = ("#V#governed_user", "#V#von_org")
+    legacy_default = ("#V#legacy_user", "#V#legacy_org")
+    narrow_pairs: set[tuple[str, str]] = set()
+    roles: dict[tuple[str, str], str] = {}
+    create_calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        migration,
+        "_legacy_edge_pairs",
+        lambda: {
+            governed: {"memberOf"},
+            legacy_default: {"#V#member_of_organisation"},
+        },
+    )
+    monkeypatch.setattr(
+        migration,
+        "_legacy_role_pairs",
+        lambda: ({governed: {"owner"}}, []),
+    )
+    monkeypatch.setattr(
+        migration, "_narrow_membership_pairs", lambda: set(narrow_pairs)
+    )
+    monkeypatch.setattr(
+        migration,
+        "ensure_von_organisation_membership_vocabulary",
+        lambda: {"success": True},
+    )
+
+    def resolve(user_id, organisation_id):
+        role = roles.get((user_id, organisation_id))
+        if role is None:
+            return None
+        return {
+            "user_concept_id": user_id,
+            "organisation_concept_id": organisation_id,
+            "role": role,
+        }
+
+    def create(*, user_concept_id, organisation_concept_id, role):
+        pair = (user_concept_id, organisation_concept_id)
+        create_calls.append((user_concept_id, organisation_concept_id, role))
+        narrow_pairs.add(pair)
+        roles[pair] = role
+        return {"relationship_created": True}
+
+    monkeypatch.setattr(migration, "resolve_user_organisation_membership", resolve)
+    monkeypatch.setattr(migration, "create_organisation_membership", create)
+
+    report = migration.migrate_von_organisation_membership_predicates(
+        dry_run=False,
+        approved=True,
+        preserve_pre_cutover_authority=True,
+    )
+
+    assert report["success"] is True
+    assert report["migrated_count"] == 2
+    assert create_calls == [
+        (governed[0], governed[1], "owner"),
+        (legacy_default[0], legacy_default[1], "member"),
+    ]
+    assert report["pre_cutover_default_member_count"] == 1
+    assert report["legacy_generic_only_pairs_copied"] is True
+    assert report["future_generic_relations_grant_authority"] is False
 
 
 def test_apply_requires_explicit_approval(monkeypatch):

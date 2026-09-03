@@ -8,8 +8,15 @@ Examples:
     python -m src.backend.utilities.migrate_von_login_email_bindings \
       --binding '#V#alice=alice@example.org' --apply --approved
 
-The command never discovers or copies ``#V#has_email`` contact values.  Every
-authority-bearing login address must appear explicitly as ``USER=EMAIL``.
+    python -m src.backend.utilities.migrate_von_login_email_bindings \
+      --preserve-pre-cutover-authority
+
+    python -m src.backend.utilities.migrate_von_login_email_bindings \
+      --preserve-pre-cutover-authority --apply --approved
+
+The normal mode never discovers or copies ``#V#has_email`` contact values.
+The explicit pre-cutover compatibility mode copies only the unambiguous legacy
+bindings that the old login reader already accepted.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ import json
 
 from src.backend.services.von_login_email_migration_service import (
     migrate_explicit_von_login_email_bindings,
+    migrate_legacy_von_login_email_bindings,
 )
 
 
@@ -37,18 +45,28 @@ def _parse_binding(raw: str) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Populate hasVonLoginEmail only from an explicit reviewed allow-list."
+            "Populate hasVonLoginEmail from an explicit allow-list or the "
+            "pre-cutover compatibility inventory."
         )
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--binding",
         action="append",
         type=_parse_binding,
-        required=True,
         metavar="USER_CONCEPT_ID=EMAIL",
         help=(
             "Exact user/email login binding. Repeat for every permitted address; "
             "ordinary has_email values are never copied."
+        ),
+    )
+    mode.add_argument(
+        "--preserve-pre-cutover-authority",
+        action="store_true",
+        help=(
+            "Copy every unambiguous has_email binding accepted by the "
+            "pre-cutover login reader. Future has_email assertions remain "
+            "non-authoritative."
         ),
     )
     parser.add_argument(
@@ -59,15 +77,28 @@ def main() -> int:
     parser.add_argument(
         "--approved",
         action="store_true",
-        help="Explicitly approve this authority-bearing allow-list.",
+        help="Explicitly approve the selected authority-bearing migration.",
+    )
+    parser.add_argument(
+        "--sample-limit",
+        type=int,
+        default=20,
+        help="Maximum detailed legacy records to include in the JSON report.",
     )
     args = parser.parse_args()
 
-    report = migrate_explicit_von_login_email_bindings(
-        bindings=args.binding,
-        dry_run=not args.apply,
-        approved=args.approved,
-    )
+    if args.preserve_pre_cutover_authority:
+        report = migrate_legacy_von_login_email_bindings(
+            dry_run=not args.apply,
+            approved=args.approved,
+            sample_limit=args.sample_limit,
+        )
+    else:
+        report = migrate_explicit_von_login_email_bindings(
+            bindings=args.binding,
+            dry_run=not args.apply,
+            approved=args.approved,
+        )
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return 0 if report.get("success") is True else 1
 
