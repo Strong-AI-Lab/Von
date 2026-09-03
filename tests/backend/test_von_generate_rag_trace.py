@@ -2,6 +2,9 @@ import pytest
 from flask import Flask
 
 from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
+from src.backend.services.conversation_turn_admission_service import (
+    ConversationTurnAdmissionToken,
+)
 
 
 class _StubGateway:
@@ -77,7 +80,36 @@ def app(monkeypatch):
             aux_llm_calls=tuple(adaptive_state["aux_llm_calls"]),
         )
 
+    def _admit(**kwargs):
+        scope = kwargs.get("scope") or {}
+        return ConversationTurnAdmissionToken(
+            token_id="test-token",
+            queue_id=None,
+            attempt_id=None,
+            user_concept_id=scope.get("user_concept_id") or "#V#anonymous",
+            organisation_concept_id=scope.get("organisation_concept_id"),
+            namespace=scope.get("namespace"),
+            conversation_key=kwargs.get("conversation_key") or "test-conversation",
+            client_request_id=kwargs.get("client_request_id") or "test-request",
+            session_id=kwargs.get("session_id"),
+        )
+
+    def _release(token, **_kwargs):
+        token.released = True
+
     monkeypatch.setattr(von_routes, "execute_adaptive_turn", _execute_adaptive_turn)
+    monkeypatch.setattr(
+        von_routes.conversation_turn_admission_service, "acquire", _admit
+    )
+    monkeypatch.setattr(
+        von_routes.conversation_turn_admission_service,
+        "acquire_ephemeral",
+        _admit,
+    )
+    monkeypatch.setattr(
+        von_routes.conversation_turn_admission_service, "release", _release
+    )
+    monkeypatch.setattr(von_routes, "wake_chat_prompt_queue_dispatcher", lambda: None)
     monkeypatch.setattr(
         von_routes,
         "get_llm_client",
@@ -88,12 +120,18 @@ def app(monkeypatch):
         "get_active_model_name",
         lambda *_args, **_kwargs: "test-model",
     )
+    monkeypatch.setattr(von_routes, "get_model_registry_snapshot", lambda: None)
     monkeypatch.setattr(von_routes, "get_show_tool_use_during_thinking", lambda: False)
     monkeypatch.setattr(von_routes, "get_buttonify_model_enabled", lambda: False)
     monkeypatch.setattr(
         von_routes,
         "_ensure_generate_conversation_session",
         lambda **_kwargs: ("test-session", None, False),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_load_conversation_session_state_fail_soft",
+        lambda **_kwargs: ([], None, None, 0, [], {}),
     )
     monkeypatch.setattr(
         von_routes,
@@ -104,6 +142,11 @@ def app(monkeypatch):
         von_routes.chat_history_service,
         "get_chat_history",
         lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "is_external_conversation_read_only",
+        lambda **_kwargs: False,
     )
     monkeypatch.setattr(
         von_routes,
@@ -217,6 +260,68 @@ def test_generate_includes_rag_trace_when_authenticated(app):
     assert tool_invocations[0]["arguments"] == {"query": "x", "top_k": 5}
     turn_record = body["llm_debug"]["turn_execution_record"]
     assert turn_record["evidence_index"][0]["evidence_id"] == "ev_rag_trace"
+
+
+def test_generate_projects_structured_history_content_as_text_without_rewriting_it(
+    app,
+    monkeypatch,
+):
+    from src.backend.server.routes import von_routes
+
+    stored_content = {
+        "schema_version": "debug_payload.v1",
+        "recorded_at": "2026-09-03T07:09:45Z",
+    }
+    stored_message = {
+        "role": "tool",
+        "content": stored_content,
+        "name": "prior_debug_result",
+    }
+    monkeypatch.setattr(
+        von_routes,
+        "_load_conversation_session_state_fail_soft",
+        lambda **_kwargs: ([stored_message], None, None, 0, [], {}),
+    )
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["namespace"] = "#V#user@org"
+        sess["session_id"] = "test-session"
+
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "Continue after the failed tool turn."},
+    )
+
+    assert response.status_code == 200
+    adaptive_kwargs = app.config["_ADAPTIVE_STATE"]["adaptive_kwargs"]
+    prior_tool_message = next(
+        message
+        for message in adaptive_kwargs["context"]
+        if message.get("name") == "prior_debug_result"
+    )
+    assert prior_tool_message["content"] == (
+        '{"recorded_at":"2026-09-03T07:09:45Z",'
+        '"schema_version":"debug_payload.v1"}'
+    )
+    assert stored_message["content"] is stored_content
+    assert response.get_json()["llm_debug"]["namespace_report"][
+        "structured_history_content_normalised_count"
+    ] == 1
+
+
+def test_model_context_projection_preserves_string_content_exactly() -> None:
+    from src.backend.server.routes.von_routes import (
+        _normalise_model_context_message_content,
+    )
+
+    stored = [{"role": "assistant", "content": "  exact text\n"}]
+
+    projected = _normalise_model_context_message_content(stored)
+
+    assert projected == stored
+    assert projected is not stored
+    assert projected[0] is not stored[0]
 
 
 def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
