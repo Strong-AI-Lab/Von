@@ -170,3 +170,33 @@ def test_ollama_generate_uses_cache(monkeypatch):
     stats = cache.get_llm_response_cache_stats()
     assert stats["hits"] == 1
     assert stats["stores"] == 1
+
+
+def test_ollama_generate_maps_thinking_control_to_chat_transport(monkeypatch):
+    from src.backend.languagemodels.llm_interface import OllamaClient
+
+    client = OllamaClient.__new__(OllamaClient)
+    client.host = "http://127.0.0.1:11434"
+    client.default_model = "qwen3:8b"
+    captured: dict[str, Any] = {}
+
+    class _FakeOllama:
+        def chat(self, **kwargs: Any) -> dict[str, dict[str, str]]:
+            captured.update(kwargs)
+            return {"message": {"content": '["Continue", "Stop"]'}}
+
+    client.client = _FakeOllama()
+
+    with patch(
+        "src.backend.languagemodels.local_model_preflight.enforce_local_model_preflight",
+        lambda *args, **kwargs: None,
+    ):
+        response = client.generate(
+            "Return two options.",
+            model="qwen3:8b",
+            llm_params={"think": False, "num_predict": 128},
+        )
+
+    assert response == '["Continue", "Stop"]'
+    assert captured["think"] is False
+    assert captured["options"] == {"num_predict": 128}
