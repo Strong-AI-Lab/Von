@@ -13623,11 +13623,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
 
             progress_tracker = ProgressTracker(
                 callback=_progress_update,
-                cancellation_checker=(
-                    _is_background_cancellation_requested
-                    if background_task_id is not None
-                    else None
-                ),
+                cancellation_checker=_is_background_cancellation_requested,
                 task_id=background_task_id,
             )
 
@@ -13705,6 +13701,10 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             conversation_observation_state=conversation_observation_state,
             model_registry_snapshot=turn_model_registry_snapshot,
         )
+        # A provider may finish or fail just after the user presses Stop.  The
+        # durable queue intent is authoritative for that exact attempt, so do
+        # not project the provider's now-stale outcome back to the browser.
+        _check_background_cancellation("direct adaptive turn completion")
         llm_interaction["duration_ms"] = (
             time.perf_counter() - adaptive_turn_started
         ) * 1000.0
