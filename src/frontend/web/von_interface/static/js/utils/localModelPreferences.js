@@ -45,6 +45,10 @@ function normalisePremiumProvider(value) {
   return PREMIUM_MODEL_PROVIDERS.has(provider) ? provider : null;
 }
 
+export function isPremiumModelProvider(value) {
+  return normalisePremiumProvider(value) !== null;
+}
+
 function isObjectStringArtifact(value) {
   return /^\[object\s+[^\]]+\](?:\s|$)/i.test(value);
 }

@@ -960,6 +960,60 @@ def test_observational_events_retain_model_and_tool_evidence(monkeypatch) -> Non
     assert serialised["tool_success_count"] == 1
 
 
+def test_live_llm_exchange_projects_bounded_credential_provenance() -> None:
+    base_payload = {
+        "llm_request_state": "completed",
+        "llm_request": {
+            "prompt": {"text": "Answer this", "char_count": 11},
+        },
+        "model": "gpt-5.6-luna",
+        "provider": "openai",
+    }
+
+    ordinary_summary = von_routes._build_live_llm_exchange_summary(
+        stage_id="plain_response",
+        live_stage_payload={
+            **base_payload,
+            "llm_transport": {
+                "credential_source": "backup",
+                "credential_failover_used": True,
+                "api_key": "must-not-be-projected",
+            },
+        },
+        latest_stage_event=None,
+        latest_progress_payload=None,
+    )
+    assert ordinary_summary is not None
+    assert ordinary_summary["credential_source"] == "backup"
+    assert "llm_transport" not in ordinary_summary
+    assert "must-not-be-projected" not in str(ordinary_summary)
+
+    structured_summary = von_routes._build_live_llm_exchange_summary(
+        stage_id="workflow_dispatch",
+        live_stage_payload={
+            **base_payload,
+            "structured_tool_transport": {"credential_failover_used": True},
+        },
+        latest_stage_event=None,
+        latest_progress_payload=None,
+    )
+    assert structured_summary is not None
+    assert structured_summary["credential_source"] == "backup"
+
+    unrecognised_summary = von_routes._build_live_llm_exchange_summary(
+        stage_id="plain_response",
+        live_stage_payload={
+            **base_payload,
+            "llm_transport": {"credential_source": "secret-value"},
+        },
+        latest_stage_event=None,
+        latest_progress_payload=None,
+    )
+    assert unrecognised_summary is not None
+    assert "credential_source" not in unrecognised_summary
+    assert "secret-value" not in str(unrecognised_summary)
+
+
 def test_successful_update_clears_stale_error(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=4500.0)
     von_routes._set_tool_progress(

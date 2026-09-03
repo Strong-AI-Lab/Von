@@ -495,4 +495,15 @@ describe('local model preferences', () => {
             model_provider: 'ollama',
         });
     });
+
+    test('classifies only configured remote providers as premium', async () => {
+        const { isPremiumModelProvider } = await import(
+            '../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js'
+        );
+
+        expect(['openai', 'openrouter', 'gemini', 'meta'].every(isPremiumModelProvider)).toBe(true);
+        expect(isPremiumModelProvider(' OpenAI ')).toBe(true);
+        expect(isPremiumModelProvider('ollama')).toBe(false);
+        expect(isPremiumModelProvider('unknown-provider')).toBe(false);
+    });
 });
