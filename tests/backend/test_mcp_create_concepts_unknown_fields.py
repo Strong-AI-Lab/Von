@@ -249,11 +249,56 @@ def test_create_concepts_scope_mode_organisation_general():
 
     assert first_result.get("success") is True
     assert "specific_to_user" not in relationships
-    assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == ["#V#scope_org"]
+    assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == [
+        "#V#scope_org"
+    ]
     scope_selection = result.get("scope_selection") or {}
     assert scope_selection.get("requested_scope_mode") == "organisation_general"
     assert scope_selection.get("scope_mode_source") == "request.scope_mode"
     assert "organisation_general" in (scope_selection.get("effective_scope_modes") or [])
+
+
+def test_create_concepts_publication_scope_organisation_alias():
+    """The natural publication_scope alias must retain organisation audience."""
+    import uuid
+
+    unique_name = f"scope_mode_test_publication_alias_{uuid.uuid4().hex[:8]}"
+    result = _create_concepts(
+        parent_id="#V#abstract_object",
+        namespace="#V#scope_user@scope_org",
+        publication_scope="organisation",
+        concepts=[{"name": unique_name, "kind": "type"}],
+    )
+    first_result = (result.get("results") or [{}])[0]
+    relationships = (first_result.get("concept") or {}).get("relationships") or {}
+
+    assert first_result.get("success") is True
+    assert "specific_to_user" not in relationships
+    assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == ["#V#scope_org"]
+    scope_selection = result.get("scope_selection") or {}
+    assert scope_selection.get("requested_scope_mode") == "organisation_general"
+    assert scope_selection.get("scope_mode_source") == "request.publication_scope"
+
+
+def test_create_concepts_rejects_conflicting_scope_aliases_before_mutation():
+    result = _create_concepts(
+        parent_id="#V#abstract_object",
+        namespace="#V#scope_user@scope_org",
+        scope_mode="user_only_default",
+        publication_scope="organisation",
+        concepts=[{"name": "scope_mode_test_conflict", "kind": "type"}],
+    )
+
+    assert result.get("success") is False
+    assert result.get("error_code") == "conflicting_scope_mode_fields"
+    assert result.get("effect_status") == "not_started"
+    assert result.get("changed") is False
+    assert (
+        ConceptsRepository.collection().find_one(
+            {"concept_id": "#V#scope_mode_test_conflict"}
+        )
+        is None
+    )
 
 
 def test_create_concepts_scope_mode_global_general():
@@ -292,6 +337,18 @@ def test_create_concepts_scope_mode_org_general_requires_org_context():
     }
 
     result = _create_concepts(**payload)
+    assert result.get("success") is False
+    assert result.get("error_code") == "missing_organisation_context"
+
+
+def test_create_concepts_publication_scope_org_requires_org_context():
+    result = _create_concepts(
+        parent_id="#V#abstract_object",
+        namespace="#V#scope_user",
+        publication_scope="organisation",
+        concepts=[{"name": "scope_mode_test_missing_org_alias", "kind": "type"}],
+    )
+
     assert result.get("success") is False
     assert result.get("error_code") == "missing_organisation_context"
 

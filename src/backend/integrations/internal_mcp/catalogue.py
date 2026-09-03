@@ -1633,6 +1633,8 @@ _CREATE_CONCEPTS_SCOPE_MODE_ALIASES: dict[str, str] = {
     "user_only_default": _CREATE_CONCEPTS_SCOPE_USER_ONLY,
     "organisation_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
     "organization_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+    "organisation": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+    "organization": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
     "org_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
     "global_general": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
     "global": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
@@ -1753,6 +1755,96 @@ def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
     return _CREATE_CONCEPTS_SCOPE_MODE_ALIASES.get(cleaned)
 
 
+def _resolve_create_concepts_scope_mode(
+    arguments: Mapping[str, Any],
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Resolve supported scope aliases without silently changing audience."""
+
+    supplied: list[tuple[str, Any, str]] = []
+    for field_name in (
+        "scope_mode",
+        "visibility_scope_mode",
+        "publication_scope",
+    ):
+        raw_value = arguments.get(field_name)
+        if raw_value is None:
+            continue
+        normalised_value = _normalise_create_concepts_scope_mode(raw_value)
+        if normalised_value is None:
+            payload = make_error_response(
+                "invalid_parameter",
+                f"Invalid {field_name} '{raw_value}'.",
+                details={
+                    "field": field_name,
+                    "value": raw_value,
+                    "supported_scope_modes": sorted(
+                        _CREATE_CONCEPTS_SCOPE_MODE_ALIASES
+                    ),
+                },
+                suggestions=[
+                    "Use user_only_default for actor-private concepts",
+                    (
+                        "Use organisation or organisation_general for "
+                        "organisation-scoped shared concepts"
+                    ),
+                    "Use global_general for broadly visible concepts",
+                ],
+            )
+            payload.update(
+                {
+                    "effect_status": "not_started",
+                    "mutation_outcome": "not_started",
+                    "changed": False,
+                }
+            )
+            return (
+                _CREATE_CONCEPTS_SCOPE_USER_ONLY,
+                f"request.{field_name}",
+                payload,
+            )
+        supplied.append((field_name, raw_value, normalised_value))
+
+    if not supplied:
+        return (
+            _CREATE_CONCEPTS_SCOPE_USER_ONLY,
+            "default.user_only_default",
+            None,
+        )
+
+    distinct_modes = {normalised_value for _, _, normalised_value in supplied}
+    if len(distinct_modes) > 1:
+        payload = make_error_response(
+            "conflicting_scope_mode_fields",
+            (
+                "Conflicting publication-scope fields were supplied; "
+                "no mutation started."
+            ),
+            details={
+                "supplied_scope_fields": {
+                    field_name: raw_value for field_name, raw_value, _ in supplied
+                },
+                "normalised_scope_modes": sorted(distinct_modes),
+            },
+            suggestions=[
+                (
+                    "Supply exactly one of scope_mode, visibility_scope_mode, "
+                    "or publication_scope"
+                )
+            ],
+        )
+        payload.update(
+            {
+                "effect_status": "not_started",
+                "mutation_outcome": "not_started",
+                "changed": False,
+            }
+        )
+        return _CREATE_CONCEPTS_SCOPE_USER_ONLY, "conflict", payload
+
+    field_name, _, scope_mode = supplied[0]
+    return scope_mode, f"request.{field_name}", None
+
+
 @_governed_ontology_mutation("create_concepts")
 def _create_concepts(**kwargs):
     from .transport import (
@@ -1839,36 +1931,11 @@ def _create_concepts(**kwargs):
                     ),
                 ],
             )
-    raw_scope_mode = kwargs.get("scope_mode")
-    if raw_scope_mode is None:
-        raw_scope_mode = kwargs.get("visibility_scope_mode")
-    scope_mode = _normalise_create_concepts_scope_mode(raw_scope_mode)
-    if raw_scope_mode is None:
-        scope_mode = _CREATE_CONCEPTS_SCOPE_USER_ONLY
-    if (
-        raw_scope_mode is not None
-        and isinstance(raw_scope_mode, str)
-        and raw_scope_mode.strip()
-        and scope_mode is None
-    ):
-        return make_error_response(
-            "invalid_parameter",
-            f"Invalid scope_mode '{raw_scope_mode}'.",
-            details={
-                "scope_mode": raw_scope_mode,
-                "supported_scope_modes": [
-                    _CREATE_CONCEPTS_SCOPE_DEFAULT,
-                    _CREATE_CONCEPTS_SCOPE_USER_ONLY,
-                    _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
-                    _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
-                ],
-            },
-            suggestions=[
-                "Use scope_mode='user_only_default' for actor-private concepts",
-                "Use scope_mode='organisation_general' for organisation-scoped shared concepts",
-                "Use scope_mode='global_general' for broadly visible concepts",
-            ],
-        )
+    scope_mode, scope_mode_source, scope_mode_error = (
+        _resolve_create_concepts_scope_mode(kwargs)
+    )
+    if scope_mode_error is not None:
+        return scope_mode_error
 
     from ...services.workflow_event_integration_service import (
         resolve_event_actor_context,
@@ -2794,11 +2861,7 @@ def _create_concepts(**kwargs):
         "parent_resolution": parent_resolution.to_dict(),
         "scope_selection": {
             "requested_scope_mode": scope_mode or _CREATE_CONCEPTS_SCOPE_USER_ONLY,
-            "scope_mode_source": (
-                "request.scope_mode"
-                if isinstance(raw_scope_mode, str) and raw_scope_mode.strip()
-                else "default.user_only_default"
-            ),
+            "scope_mode_source": scope_mode_source,
             "created_by_concept_id": actor_user_id,
             "organisation_concept_id": actor_org_id,
             "effective_scope_modes": applied_scope_modes,
@@ -10518,6 +10581,7 @@ def _concepts_create_input_schema() -> Schema:
             "namespace": (str, type(None)),
             "scope_mode": (str, type(None)),
             "visibility_scope_mode": (str, type(None)),
+            "publication_scope": (str, type(None)),
             "created_by_concept_id": (str, type(None)),
             "organisation_concept_id": (str, type(None)),
         },
@@ -10533,6 +10597,20 @@ def _concepts_create_input_schema() -> Schema:
             "scope_mode": [
                 _CREATE_CONCEPTS_SCOPE_USER_ONLY,
                 _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+                _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
+                None,
+            ],
+            "publication_scope": [
+                "private",
+                "user_only",
+                _CREATE_CONCEPTS_SCOPE_USER_ONLY,
+                "organisation",
+                "organization",
+                _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+                "organization_general",
+                "org_general",
+                "global",
+                "public",
                 _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
                 None,
             ],
@@ -10571,7 +10649,10 @@ def _concepts_create_input_schema() -> Schema:
             "after creation through separate add_relationship effects using exact "
             "existing predicate IDs. Omit scope_mode for actor-private visibility, "
             "or choose exactly 'user_only_default', 'organisation_general', or "
-            "'global_general' according to the intended audience. The requested "
+            "'global_general' according to the intended audience. "
+            "publication_scope is a compatibility alias and accepts natural "
+            "'organisation'/'organization' values. Conflicting scope fields are "
+            "rejected before mutation. The requested "
             "scope succeeds only under the authenticated actor's matching live "
             "authority; denial never silently creates a narrower private concept. "
             "Optional namespace is propagated for tenancy attribution. Unknown "
