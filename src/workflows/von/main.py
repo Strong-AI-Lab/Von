@@ -77,6 +77,12 @@ for _noisy_logger_name in (
     "urllib3",
     "httpcore",
     "httpx",
+    # requests-oauthlib DEBUG records include authorisation codes, PKCE
+    # verifiers, credential-bearing headers, token response bodies, and full
+    # token dictionaries.  Keep OAuth failures visible without persisting any
+    # of that credential material.
+    "requests_oauthlib",
+    "oauthlib",
     # The OpenAI SDK logs complete request bodies at DEBUG, including private
     # document evidence embedded in model prompts.  Keep transport failures
     # visible without persisting those request bodies in local server logs.

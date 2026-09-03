@@ -1612,7 +1612,7 @@
 
                 // Check if this is our login success message
                 if (event.data && event.data.type === 'googleLoginSuccess') {
-                    console.log('Received Google login success message with token:', event.data.authToken);
+                    console.log('Received Google login success message');
                     messageReceived = true;
 
                     // Clean up event listener
