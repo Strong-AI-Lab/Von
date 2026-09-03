@@ -374,6 +374,155 @@ def test_history_endpoint_projects_reference_manifest_for_legacy_turn(monkeypatc
     assert references[instance_id]["reference_type"] == "workflow_instance"
 
 
+def test_history_endpoint_projects_bounded_latest_llm_credential_summary(monkeypatch):
+    from src.backend.server.routes.von_routes import von_bp
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#test_user@org"},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_session_state",
+        lambda **_kwargs: {
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "Used the backup credential.",
+                    "timestamp": "2026-09-03T15:38:44Z",
+                    "turn_id": "a-request-backup",
+                    "history_location": {
+                        "session_id": "session-backup",
+                        "history_index": 3,
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_debug_entry",
+        lambda **_kwargs: {
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "private prompt"}],
+            "llm_interaction": {
+                "requested_model": "gpt-5.6-luna",
+                "calls": [
+                    {
+                        "type": "adaptive_turn_model_call",
+                        "model": "gpt-5.6-luna",
+                        "provider": "openai",
+                        "transport": {
+                            "credential_source": "backup",
+                            "credential_failover_used": True,
+                            "primary_credential_failure_kind": "quota_exhausted",
+                            "api_key": "sk-must-not-leak",
+                        },
+                        "response": "private provider response",
+                    }
+                ],
+            },
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_bp, url_prefix="/von")
+
+    response = app.test_client().get(
+        "/von/history",
+        query_string={
+            "session_id": "session-backup",
+            "segments": 1,
+            "include_debug": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    message = response.get_json()["history"][0]
+    assert "llm_debug_data" not in message
+    assert message["llm_execution_summary"] == {
+        "schema_version": "history_llm_execution_summary.v1",
+        "model": "gpt-5.6-luna",
+        "llm_interaction": {
+            "requested_model": "gpt-5.6-luna",
+            "calls": [
+                {
+                    "type": "adaptive_turn_model_call",
+                    "model": "gpt-5.6-luna",
+                    "provider": "openai",
+                    "transport": {
+                        "credential_source": "backup",
+                        "credential_failover_used": True,
+                        "primary_credential_failure_kind": "quota_exhausted",
+                    },
+                }
+            ],
+        },
+    }
+    response_text = response.get_data(as_text=True)
+    assert "sk-must-not-leak" not in response_text
+    assert "private prompt" not in response_text
+    assert "private provider response" not in response_text
+
+
+def test_add_chat_history_message_persists_bounded_llm_execution_summary(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    stored: dict[str, object] = {}
+
+    def _store(_user_id, _session_id, message, **kwargs):
+        stored["message"] = message
+        stored["debug"] = kwargs.get("llm_debug_data")
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "add_message_to_history",
+        _store,
+    )
+
+    debug = {
+        "model": "gpt-5.6-luna",
+        "llm_interaction": {
+            "requested_model": "gpt-5.6-luna",
+            "calls": [
+                {
+                    "model": "gpt-5.6-luna",
+                    "provider": "openai",
+                    "transport": {
+                        "credential_source": "primary",
+                        "credential_failover_used": False,
+                        "api_key": "sk-never-project",
+                    },
+                }
+            ],
+        },
+    }
+    von_routes._add_chat_history_message(
+        user_id="#V#test_user",
+        session_id="session-primary",
+        message={"role": "assistant", "content": "Done"},
+        llm_debug_data=debug,
+    )
+
+    message = stored["message"]
+    assert isinstance(message, dict)
+    assert message["llm_execution_summary"]["llm_interaction"]["calls"][0][
+        "transport"
+    ] == {
+        "credential_source": "primary",
+        "credential_failover_used": False,
+    }
+    assert "sk-never-project" not in repr(message["llm_execution_summary"])
+    assert stored["debug"] is debug
+
+
 def test_history_debug_returns_stored_turn_execution_diagnostics(monkeypatch):
     from src.backend.server.routes.von_routes import von_bp
 

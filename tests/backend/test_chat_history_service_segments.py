@@ -1060,3 +1060,35 @@ def test_get_chat_history_segments_keeps_debug_projection_when_requested(
     assert collection.pipeline is not None
     projection = collection.pipeline[1]["$project"]
     assert "$slice" in projection["history"]
+
+
+def test_split_history_preserves_bounded_execution_summary_without_debug():
+    from src.backend.services import chat_history_service
+
+    summary = {
+        "schema_version": "history_llm_execution_summary.v1",
+        "llm_interaction": {
+            "calls": [
+                {
+                    "model": "gpt-5.6-luna",
+                    "provider": "openai",
+                    "transport": {"credential_source": "primary"},
+                }
+            ]
+        },
+    }
+    segments = chat_history_service._split_history_into_segments_with_locations(
+        [
+            {
+                "role": "assistant",
+                "content": "Done",
+                "llm_execution_summary": summary,
+                "llm_debug_data": {"messages": ["private"]},
+            }
+        ],
+        session_id="session-summary",
+        include_debug=False,
+    )
+
+    assert segments[0][0]["llm_execution_summary"] == summary
+    assert "llm_debug_data" not in segments[0][0]
