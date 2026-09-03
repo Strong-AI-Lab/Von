@@ -5385,6 +5385,11 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
         debugData.timestamp || diagnostics?.completed_at_utc || diagnostics?.started_at_utc
     );
     const requestId = normaliseThinkingActivityString(diagnostics?.request_id || debugData.request_id);
+    const llmExecutionTelemetry = buildLatestLlmExecutionTelemetrySummary(
+        turnId,
+        debugData,
+        llmDebugExecutionContextBindings.get(turnId) || null
+    );
     const request = {
         clientRequestId: requestId || null,
         resultTurnId: turnId,
@@ -5406,6 +5411,12 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
             debugData.llm_usage_cost_summary
             && typeof debugData.llm_usage_cost_summary === 'object'
         ) ? { ...debugData.llm_usage_cost_summary } : null,
+        // Retained Thinking details may use only the bounded source label from
+        // this exact turn. Never carry a key, filename, or provider exception
+        // into the presentation model.
+        thinkingCredentialSource: normaliseThinkingCredentialSource(
+            llmExecutionTelemetry?.credential_source
+        ),
         criticOutput: criticOutput ? cloneThinkingCriticObject(criticOutput) : null,
         thinkingCriticPanelOpen: false,
         thinkingCardMode: loadStoredThinkingCardMode(),
@@ -7109,6 +7120,10 @@ export function __testOnly_buildThinkingCardProgressViewModel(request = null) {
     return buildThinkingCardProgressViewModel(request);
 }
 
+export function __testOnly_buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
+    return buildRetainedThinkingCardRequestFromDebugData(turnId, debugData);
+}
+
 export function __testOnly_buildThinkingDiagnosticsPayload(request = null) {
     return buildThinkingDiagnosticsPayload(request);
 }
@@ -7844,7 +7859,17 @@ function normaliseThinkingProgressContract(value) {
     };
 }
 
-function normaliseThinkingCardLlmLifecycle(value) {
+function normaliseThinkingCredentialSource(...values) {
+    for (const value of values) {
+        const source = normaliseThinkingActivityString(value).toLowerCase();
+        if (source === 'primary' || source === 'backup') {
+            return source;
+        }
+    }
+    return null;
+}
+
+function normaliseThinkingCardLlmLifecycle(value, request = null) {
     if (!value || typeof value !== 'object') {
         return null;
     }
@@ -7873,6 +7898,14 @@ function normaliseThinkingCardLlmLifecycle(value) {
     const provider = normaliseThinkingActivityString(
         value.provider || value.selected_provider || value.llm_selected_provider
     ) || null;
+    const credentialSource = normaliseThinkingCredentialSource(
+        value.credential_source,
+        value.transport?.credential_source,
+        value.transport_metadata?.credential_source,
+        request?.thinkingCredentialSource,
+        request?.llmExecutionTelemetry?.credential_source,
+        request?.llm_execution_telemetry?.credential_source
+    );
     const fallbackAttemptNo = Number.isFinite(value.fallback_attempt_no)
         ? Number(value.fallback_attempt_no)
         : (Number.isFinite(value.llm_fallback_attempt_no) ? Number(value.llm_fallback_attempt_no) : null);
@@ -7887,6 +7920,7 @@ function normaliseThinkingCardLlmLifecycle(value) {
         && !contextSummary
         && !model
         && !provider
+        && !credentialSource
         && fallbackAttemptNo === null
         && fallbackCandidateCount === null
     ) {
@@ -7912,6 +7946,7 @@ function normaliseThinkingCardLlmLifecycle(value) {
                 : (Number.isFinite(llmRequest?.tool_count) ? Number(llmRequest.tool_count) : null)),
         model,
         provider,
+        credential_source: credentialSource,
         prepared_at_utc: normaliseThinkingActivityString(
             value.prepared_at_utc || value.llm_request_prepared_at_utc
         ) || null,
@@ -7977,6 +8012,9 @@ function buildThinkingCardLlmLifecycleText(llmLifecycle, options = {}) {
     }
     if (options.includeProvider && llmLifecycle.provider) {
         bits.push(`Provider: ${llmLifecycle.provider}`);
+    }
+    if (options.includeCredential && llmLifecycle.credential_source) {
+        bits.push(`Credential: ${llmLifecycle.credential_source} key`);
     }
     if (
         Number.isFinite(llmLifecycle.fallback_attempt_no)
@@ -8205,7 +8243,8 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         workflowDiscovery
     );
     const llmLifecycle = normaliseThinkingCardLlmLifecycle(
-        rawViewModel.llm_input_lifecycle || rawViewModel.llm_lifecycle || rawViewModel.latest_llm_exchange
+        rawViewModel.llm_input_lifecycle || rawViewModel.llm_lifecycle || rawViewModel.latest_llm_exchange,
+        request
     );
     const waitState = (rawViewModel.wait_state && typeof rawViewModel.wait_state === 'object')
         ? {
@@ -8557,7 +8596,8 @@ function buildThinkingCardProgressViewModel(request) {
     });
     const llmDiagnosticData = findLatestThinkingCardLlmDiagnosticData(request);
     const llmLifecycle = normaliseThinkingCardLlmLifecycle(
-        llmDiagnosticData || latestProgress
+        llmDiagnosticData || latestProgress,
+        request
     );
     const presentation = buildThinkingProgressPresentation(latestProgress, request);
     const selectedWorkflow = normaliseThinkingCardSelectedWorkflow({
@@ -8742,7 +8782,10 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
 
     const llmLifecycleText = buildThinkingCardLlmLifecycleText(
         viewModel.llm_input_lifecycle,
-        { includeProvider: renderMode === THINKING_CARD_MODE_DEBUG }
+        {
+            includeProvider: renderMode === THINKING_CARD_MODE_DEBUG,
+            includeCredential: renderMode === THINKING_CARD_MODE_DEBUG
+        }
     );
     const auxiliaryLlmLifecycle = isAuxiliaryThinkingCardLlmLifecycle(viewModel.llm_input_lifecycle);
     const showLlmLifecycle = !auxiliaryLlmLifecycle || renderMode === THINKING_CARD_MODE_DEBUG;
