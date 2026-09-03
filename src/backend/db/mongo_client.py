@@ -1563,6 +1563,28 @@ def _invalidate_real_client_for_recovery(
         return True
 
 
+def _health_probe_failure_is_driver_recovery_in_progress(exc: Exception) -> bool:
+    """Return whether PyMongo is already cancelling or repairing this pool.
+
+    ``_OperationCancelled`` is a private PyMongo control-flow error raised when
+    a topology or pool is being shut down. ``connection pool paused`` is the
+    driver's transient state while its monitor re-establishes the server. If a
+    periodic advisory ping treats either as a new route failure, dropping the
+    shared client can cancel every unrelated operation using that client and
+    start a repeated reconnect cycle. Let PyMongo finish its own recovery and
+    probe again at the normal interval instead.
+
+    Ordinary application operations still classify these errors as transient;
+    this narrow exception applies only to the periodic health probe deciding
+    whether to replace the process-wide client.
+    """
+
+    return (
+        type(exc).__name__ == "_OperationCancelled"
+        or "connection pool paused" in str(exc).lower()
+    )
+
+
 def _ensure_active_client_is_healthy() -> None:
     if _mongo_client_real is None or not _claim_due_health_check():
         return
@@ -1638,6 +1660,13 @@ def _ensure_active_client_is_healthy() -> None:
             else:
                 client.admin.command("ping", maxTimeMS=timeout_ms)
         except Exception as exc:
+            if _health_probe_failure_is_driver_recovery_in_progress(exc):
+                logger.warning(
+                    "[mongo_recovery] Periodic ping deferred while PyMongo "
+                    "recovers the active pool: %s",
+                    exc,
+                )
+                return
             with _CONNECTION_CONDITION:
                 still_current = (
                     _mongo_client_real is client
