@@ -946,6 +946,7 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
             actualProvider = provider;
         }
         const transportCandidates = [
+            call.transport,
             call.transport_metadata,
             call.candidate?.transport_metadata,
             call.candidate?.llm_transport,
