@@ -25,9 +25,10 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from bson import BSON, ObjectId
-from bson.json_util import CANONICAL_JSON_OPTIONS, dumps as bson_json_dumps
+from bson.json_util import CANONICAL_JSON_OPTIONS
+from bson.json_util import dumps as bson_json_dumps
 
-STARTUP_SEED_FRESHNESS_RECEIPT_SCHEMA_VERSION = "startup_seed_freshness_receipt.v2"
+STARTUP_SEED_FRESHNESS_RECEIPT_SCHEMA_VERSION = "startup_seed_freshness_receipt.v3"
 _RECEIPT_FILE_SCHEMA_VERSION = "startup_seed_freshness_receipts.v1"
 _DEFAULT_RECEIPT_PATH = (
     Path(__file__).resolve().parents[3]
@@ -38,6 +39,16 @@ _DEFAULT_RECEIPT_PATH = (
 _RECEIPT_LOCK = threading.Lock()
 _WATCHED_COLLECTIONS = ("concepts", "text_relations", "text_values")
 _DDL_OPERATION_TYPES = frozenset({"drop", "rename", "dropDatabase", "invalidate"})
+_CONCEPT_DERIVED_INDEX_FIELDS = frozenset(
+    {
+        "embedding_error",
+        "embedding_status",
+        "embedding_updated_at",
+        "inherited_salient_binary_predicates",
+        "inherited_salient_computed_at",
+        "inherited_salient_error",
+    }
+)
 
 
 def _text(value: Any) -> str:
@@ -87,9 +98,7 @@ def _max_events() -> int:
 
 def _max_snapshot_documents() -> int:
     try:
-        configured = int(
-            os.getenv("VON_STARTUP_SEED_SNAPSHOT_MAX_DOCUMENTS", "5000")
-        )
+        configured = int(os.getenv("VON_STARTUP_SEED_SNAPSHOT_MAX_DOCUMENTS", "5000"))
     except (TypeError, ValueError):
         configured = 5_000
     return max(100, min(configured, 100_000))
@@ -322,6 +331,27 @@ def _event_relevance(
     document = full_document if isinstance(full_document, Mapping) else {}
 
     if collection_name == "concepts":
+        if operation_type == "update":
+            update_description = event.get("updateDescription")
+            if isinstance(update_description, Mapping):
+                changed_paths = {
+                    _text(path)
+                    for path in (
+                        *(update_description.get("updatedFields") or {}).keys(),
+                        *(update_description.get("removedFields") or ()),
+                        *(
+                            entry.get("field")
+                            for entry in update_description.get("truncatedArrays") or ()
+                            if isinstance(entry, Mapping)
+                        ),
+                    )
+                    if _text(path)
+                }
+                if changed_paths and all(
+                    path.split(".", 1)[0] in _CONCEPT_DERIVED_INDEX_FIELDS
+                    for path in changed_paths
+                ):
+                    return False, True
         if document_id and document_id in set(
             tracked_ids.get("concept_document_ids") or ()
         ):
@@ -470,8 +500,12 @@ def _build_dependency_snapshot(
         digest.update(collection_name.encode("utf-8"))
         digest.update(b"\0")
         for document in sorted(documents, key=lambda item: _text(item.get("_id"))):
+            digest_document = dict(document)
+            if collection_name == "concepts":
+                for field_name in _CONCEPT_DERIVED_INDEX_FIELDS:
+                    digest_document.pop(field_name, None)
             encoded = bson_json_dumps(
-                document,
+                digest_document,
                 json_options=CANONICAL_JSON_OPTIONS,
                 sort_keys=True,
                 separators=(",", ":"),
