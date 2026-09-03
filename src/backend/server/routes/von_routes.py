@@ -10725,8 +10725,8 @@ def _resolve_generate_namespace_context(
     """Resolve generate-time namespace with provenance and mismatch diagnostics.
 
     Ordering strategy:
-    1. Preserve effective window/flask context namespace.
-    2. Prefer an org-scoped namespace when any org context is present.
+    1. Preserve an authoritative window context, including explicit Personal.
+    2. Otherwise prefer an org-scoped namespace when any org context is present.
     3. Fall back to user-only namespace derivation.
     """
 
@@ -10783,7 +10783,17 @@ def _resolve_generate_namespace_context(
     )
 
     org_candidates = [c for c in candidates if c.get("org_scoped")]
-    selected = (
+    authoritative_window_candidate = None
+    if effective_source == "window_session":
+        authoritative_window_candidate = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.get("source") == "effective_context.namespace"
+            ),
+            None,
+        )
+    selected = authoritative_window_candidate or (
         org_candidates[0] if org_candidates else (candidates[0] if candidates else None)
     )
 
@@ -10817,7 +10827,9 @@ def _resolve_generate_namespace_context(
         ),
         "candidates": candidates,
         "mismatch_detected": mismatch_detected,
-        "org_scope_preferred": bool(org_candidates),
+        "org_scope_preferred": bool(
+            isinstance(selected, dict) and selected.get("org_scoped")
+        ),
     }
     if mismatch_detected:
         report["mismatch_reason"] = "multiple_namespace_candidates"
@@ -20311,18 +20323,26 @@ def _resolve_history_request_scope_hints(
     effective_namespace = requested_namespace or _clean_optional_text(
         effective_context.get("namespace")
     )
-    effective_org = (
-        requested_org
-        or _normalise_concept_id(effective_context.get("organisation_id"))
-        or _normalise_concept_id(session.get("organisation_concept_id"))
+    authoritative_window_scope = bool(
+        effective_context.get("source") == "window_session"
+        and _clean_optional_text(effective_context.get("namespace"))
     )
+    effective_org = requested_org or _normalise_concept_id(
+        effective_context.get("organisation_id")
+    )
+    if not effective_org and not authoritative_window_scope:
+        effective_org = _normalise_concept_id(
+            session.get("organisation_concept_id")
+        )
 
     if not effective_org:
-        for namespace_candidate in (
+        namespace_candidates = [
             requested_namespace,
             effective_context.get("namespace"),
-            session.get("namespace"),
-        ):
+        ]
+        if not authoritative_window_scope:
+            namespace_candidates.append(session.get("namespace"))
+        for namespace_candidate in namespace_candidates:
             cleaned_candidate = _clean_optional_text(namespace_candidate)
             if not cleaned_candidate or "@" not in cleaned_candidate:
                 continue

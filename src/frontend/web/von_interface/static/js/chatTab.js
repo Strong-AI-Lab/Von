@@ -6553,6 +6553,7 @@ function updateSendButtonForCurrentChatState() {
     if (!sendButton) {
         return;
     }
+    const chatCreationInFlight = Boolean(newChatCreationInFlight);
     const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
     const queueSubmissionInFlight = !!getQueuedChatPromptSubmissionInFlight(
         activeChatSessionId
@@ -6577,13 +6578,22 @@ function updateSendButtonForCurrentChatState() {
         && conceptQaSession.lifecycle === 'active'
         && !conceptQaActionAllowed(conceptQaSession, 'submit_turn')
     );
-    sendButton.disabled = uploadInFlight
+    sendButton.disabled = chatCreationInFlight
+        || uploadInFlight
         || queueSubmissionInFlight
         || readOnly
         || conceptQaBusy
         || conceptQaTerminal
         || conceptQaAwaitingInitialQuestion;
-    sendButton.setAttribute('aria-busy', queueSubmissionInFlight || conceptQaBusy ? 'true' : 'false');
+    sendButton.setAttribute(
+        'aria-busy',
+        chatCreationInFlight || queueSubmissionInFlight || conceptQaBusy ? 'true' : 'false'
+    );
+    if (chatCreationInFlight) {
+        sendButton.textContent = 'Creating conversation…';
+        sendButton.title = 'Waiting for the new conversation to be ready.';
+        return;
+    }
     if (readOnly) {
         sendButton.textContent = 'Read-only import';
         sendButton.title = 'Continue this imported snapshot before sending a new message.';
@@ -27960,10 +27970,12 @@ function createNewChatSession() {
         } finally {
             if (newChatCreationInFlight === creation) {
                 newChatCreationInFlight = null;
+                updateSendButtonForCurrentChatState();
             }
         }
     })();
     newChatCreationInFlight = creation;
+    updateSendButtonForCurrentChatState();
     return creation;
 }
 
@@ -36921,6 +36933,17 @@ async function handleSendPrompt(options = {}) {
     const selectedQueueEntry = (!fromQueue && !hasPromptOverride)
         ? getSelectedChatPromptQueueEntryForSend()
         : null;
+    const directComposerSubmission = (
+        !fromQueue
+        && !hasPromptOverride
+        && !selectedQueueEntry
+    );
+    if (directComposerSubmission && newChatCreationInFlight) {
+        const createdSession = await newChatCreationInFlight;
+        if (!createdSession || pendingChatOrganisationSwitchId !== null) {
+            return;
+        }
+    }
     let targetSessionId = normaliseHistorySessionId(
         options?.sessionId
         ?? selectedQueueEntry?.sessionId
@@ -36959,12 +36982,6 @@ async function handleSendPrompt(options = {}) {
     const promptText = promptForSend.trim();
     const assistantOpening = options?.turnKind === 'assistant_opening';
     const allowEmptyPrompt = assistantOpening && options?.allowEmptyPrompt === true;
-    const directComposerSubmission = (
-        !fromQueue
-        && !hasPromptOverride
-        && !selectedQueueEntry
-    );
-
     if (
         directComposerSubmission
         && getInFlightUploadStateForSession(targetSessionId)

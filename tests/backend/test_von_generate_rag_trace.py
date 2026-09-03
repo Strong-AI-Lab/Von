@@ -275,6 +275,65 @@ def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
     assert all(ns == "#V#user@window_org" for ns in captured_namespaces if ns is not None)
 
 
+def test_generate_namespace_resolution_keeps_personal_window_over_stale_flask_org():
+    from src.backend.server.routes.von_routes import (
+        _resolve_generate_namespace_context,
+    )
+
+    namespace_report = _resolve_generate_namespace_context(
+        user_concept_id="#V#user",
+        effective_context={
+            "user_id": "#V#user",
+            "organisation_id": None,
+            "role": None,
+            "namespace": "#V#user",
+            "chat_session_id": "test-session",
+            "source": "window_session",
+        },
+        flask_session_snapshot={
+            "user_concept_id": "#V#user",
+            "namespace": "#V#user@stale_org",
+            "organisation_concept_id": "#V#stale_org",
+            "role_in_org": "member",
+            "session_id": "test-session",
+        },
+    )
+
+    assert namespace_report["mismatch_detected"] is True
+    assert namespace_report["effective_context_source"] == "window_session"
+    assert namespace_report["session_namespace"] == "#V#user@stale_org"
+    assert namespace_report["namespace"] == "#V#user"
+    assert namespace_report["namespace_source"] == "effective_context.namespace"
+    assert namespace_report["org_scope_preferred"] is False
+
+
+def test_history_scope_resolution_keeps_personal_window_over_stale_flask_org():
+    from flask import session
+    from src.backend.server.routes.von_routes import (
+        _resolve_history_request_scope_hints,
+    )
+
+    flask_app = Flask(__name__)
+    flask_app.secret_key = "test-secret"
+    with flask_app.test_request_context("/von/history"):
+        session["namespace"] = "#V#user@stale_org"
+        session["organisation_concept_id"] = "#V#stale_org"
+        namespace, organisation_concept_id = _resolve_history_request_scope_hints(
+            user_concept_id="#V#user",
+            effective_context={
+                "user_id": "#V#user",
+                "organisation_id": None,
+                "role": None,
+                "namespace": "#V#user",
+                "chat_session_id": "test-session",
+                "source": "window_session",
+            },
+        )
+
+    assert namespace == "#V#user"
+    assert organisation_concept_id is None
+
+
 def test_generate_rag_trace_marks_unauthenticated(app):
     client = app.test_client()
 

@@ -490,6 +490,62 @@ class TestCreateChatSessionUsesWindowContext:
         history_payload = history_resp.get_json()
         assert history_payload["active_session_id"] == payload["session_id"]
 
+    def test_create_session_keeps_explicit_personal_window_context(
+        self, monkeypatch, app_client
+    ):
+        """A Personal window must not inherit stale Flask organisation state."""
+        _, client = app_client
+        created_sessions: list[dict] = []
+
+        import src.backend.services.chat_history_service as chat_history_service
+        from src.backend.server.routes import von_routes
+
+        def capture_create(*args, **kwargs):
+            created_sessions.append(kwargs.copy())
+            return {
+                "session_id": kwargs.get("session_id", "new_session"),
+                "session_name": kwargs.get("session_name", "New Session"),
+            }
+
+        monkeypatch.setattr(chat_history_service, "create_chat_session", capture_create)
+        monkeypatch.setattr(
+            von_routes,
+            "get_effective_context",
+            lambda *_args, **_kwargs: {
+                "namespace": "#V#michael_witbrock",
+                "organisation_id": None,
+                "role": None,
+            },
+        )
+        monkeypatch.setattr(
+            von_routes,
+            "_set_active_chat_session_for_request",
+            lambda **_kwargs: None,
+        )
+
+        with client.session_transaction() as sess:
+            sess["user_id"] = "michael_witbrock"
+            sess["user_concept_id"] = "#V#michael_witbrock"
+            sess["namespace"] = (
+                "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+            )
+            sess["organisation_concept_id"] = (
+                "university_of_auckland_strong_ai_lab"
+            )
+            sess["role_in_org"] = "owner"
+
+        resp = client.post(
+            "/von/api/session/create_chat_session",
+            json={"session_name": "Personal Discussion"},
+            headers={"X-Von-Window-Session": "ws_create_personal_test"},
+        )
+
+        assert resp.status_code == 200
+        assert len(created_sessions) == 1
+        assert created_sessions[0]["namespace"] == "#V#michael_witbrock"
+        assert created_sessions[0]["organisation_concept_id"] is None
+        assert created_sessions[0]["role_in_org"] is None
+
     def test_create_session_marks_browser_test_fixture_sessions(
         self, monkeypatch, app_client
     ):

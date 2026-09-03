@@ -10404,6 +10404,127 @@ describe('chat session composer state', () => {
         expect(activeNewTab?.textContent).not.toContain('session-');
     });
 
+    test('send waits for an in-flight new chat and targets the created session once', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+        promptInput.value = 'Send only in the new conversation';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+        let created = false;
+        let resolveCreate;
+        const createResponse = new Promise((resolve) => {
+            resolveCreate = resolve;
+        });
+        const generateBodies = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                const sessions = [{
+                    session_id: 'session-current',
+                    session_name: 'Current chat',
+                    message_count: 2,
+                    last_message_at: '2026-04-13T05:00:00Z'
+                }];
+                if (created) {
+                    sessions.unshift({
+                        session_id: 'session-new',
+                        session_name: null,
+                        message_count: 0,
+                        last_message_at: '2026-04-13T18:30:00Z'
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: created ? 'session-new' : 'session-current',
+                        sessions
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                return createResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'completed',
+                        phase: 'tool_execute',
+                        phase_label: 'Executing tools',
+                        result_summary: 'Completed'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 1,
+                        session_count: 2,
+                        authenticated: true
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateBodies.push(JSON.parse(options.body || '{}'));
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'New conversation response',
+                        session_id: 'session-new',
+                        conversation_session_id: 'session-new',
+                        conversation_session_name: null,
+                        llm_debug: { model: 'gemma4:latest' }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        document.querySelector('.chat-session-tab-new').click();
+
+        const sendButton = document.getElementById('sendButton');
+        expect(sendButton.disabled).toBe(true);
+        expect(sendButton.textContent).toBe('Creating conversation…');
+        expect(sendButton.getAttribute('aria-busy')).toBe('true');
+
+        const sendPromise = sendMessage();
+        await Promise.resolve();
+        expect(generateBodies).toHaveLength(0);
+
+        created = true;
+        resolveCreate({
+            ok: true,
+            json: async () => ({
+                session_id: 'session-new',
+                session_name: null,
+                history: []
+            })
+        });
+        await expect(sendPromise).resolves.toBeUndefined();
+
+        expect(generateBodies).toHaveLength(1);
+        expect(generateBodies[0].conversation_session_id).toBe('session-new');
+        expect(generateBodies[0].prompt).toBe('Send only in the new conversation');
+        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
+            .toBe('session-new');
+        expect(sendButton.disabled).toBe(false);
+    });
+
     test('new chat reports creation failure without blocking the page', async () => {
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'Keep this draft';
@@ -10437,6 +10558,8 @@ describe('chat session composer state', () => {
         const alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => {});
 
         document.querySelector('.chat-session-tab-new').click();
+        const sendPromise = sendMessage();
+        await expect(sendPromise).resolves.toBeUndefined();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(promptSpy).not.toHaveBeenCalled();
@@ -10446,6 +10569,9 @@ describe('chat session composer state', () => {
         expect(promptInput.value).toBe('Keep this draft');
         expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
             .toBe('session-current');
+        expect(global.fetch.mock.calls.some(([url]) => (
+            typeof url === 'string' && url.startsWith('/von/generate')
+        ))).toBe(false);
     });
 
     test('first send without an active conversation creates a real session before generate', async () => {

@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 _DETERMINISTIC_RAG_DOC_NAMESPACE = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
 _SESSION_NAME_MAX_LEN = 80
+_SESSION_CONTEXT_UNSET = object()
 CONVERSATION_SITUATION_TEXT_MAX_CHARS = 12_000
 _CONVERSATION_SITUATION_SOURCE_MAX_CHARS = 120
 _CONVERSATION_SITUATION_UPDATER_MAX_CHARS = 160
@@ -6071,9 +6072,9 @@ def create_chat_session(
     user_id: str,
     session_id: str,
     session_name: Optional[str] = None,
-    namespace: Optional[str] = None,
-    organisation_concept_id: Optional[str] = None,
-    role_in_org: Optional[str] = None,
+    namespace: Any = _SESSION_CONTEXT_UNSET,
+    organisation_concept_id: Any = _SESSION_CONTEXT_UNSET,
+    role_in_org: Any = _SESSION_CONTEXT_UNSET,
     mode: Optional[str] = None,
     origin_kind: Optional[str] = None,
     created_by_actor_concept_id: Optional[str] = None,
@@ -6102,7 +6103,9 @@ def create_chat_session(
             It is inserted atomically with the session so its active key can be
             protected by the partial unique index.
 
-    If namespace/org/role not provided, falls back to Flask session context.
+    Omitted namespace/org/role values fall back to Flask session context.
+    Explicit ``None`` values remain authoritative so a Personal window cannot
+    inherit an organisation or role from another tab's Flask session.
     """
     if not isinstance(user_id, str) or not user_id:
         raise ChatHistoryServiceError("user_id is required.")
@@ -6117,11 +6120,21 @@ def create_chat_session(
 
     # JVNAUTOSCI-1011: Prefer explicit context params, fall back to Flask session
     session_context = get_session_context()
-    effective_namespace = namespace or session_context.get("namespace")
-    effective_org = organisation_concept_id or session_context.get(
-        "organisation_concept_id"
+    effective_namespace = (
+        session_context.get("namespace")
+        if namespace is _SESSION_CONTEXT_UNSET
+        else namespace
     )
-    effective_role = role_in_org or session_context.get("role_in_org")
+    effective_org = (
+        session_context.get("organisation_concept_id")
+        if organisation_concept_id is _SESSION_CONTEXT_UNSET
+        else organisation_concept_id
+    )
+    effective_role = (
+        session_context.get("role_in_org")
+        if role_in_org is _SESSION_CONTEXT_UNSET
+        else role_in_org
+    )
 
     # Derive namespace from context if not explicitly provided
     ns = effective_namespace
