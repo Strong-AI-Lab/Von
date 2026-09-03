@@ -24,7 +24,13 @@ from typing import (
 import openai
 import requests
 
-from ..services.llm_api_key_resolution import get_gemini_api_key, get_openrouter_api_key
+from ..services.llm_api_key_resolution import (
+    classify_api_key_failover_exception,
+    get_gemini_api_key,
+    get_gemini_backup_api_key,
+    get_openai_backup_api_key,
+    get_openrouter_api_key,
+)
 from ..services.settings_service import (
     get_openai_env_var,
     resolve_enabled_llm_settings,
@@ -1038,9 +1044,7 @@ class LLMInterface(ABC):
     ) -> Mapping[str, Any]:
         """Apply the external-model gate using any factory-bound actor scope."""
 
-        scope_bound = bool(
-            getattr(self, "_model_execution_actor_scope_bound", False)
-        )
+        scope_bound = bool(getattr(self, "_model_execution_actor_scope_bound", False))
         return assert_model_execution_allowed(
             provider=provider,
             model=model,
@@ -1116,13 +1120,24 @@ class LLMInterface(ABC):
         structured_options = dict(provider_options)
         if llm_params:
             structured_options["llm_params"] = dict(llm_params)
-        return client.generate_with_tools_sync(
+        response = client.generate_with_tools_sync(
             prompt=prompt,
             available_tools=available_tools,
             system_message=system_message,
             context=self._convert_context_for_structured_client(context),
             **structured_options,
         )
+        self.last_response_metadata = {
+            "provider": config.provider,
+            "api_surface": response.transport_metadata.get("effective_api_surface"),
+            "requested_model": config.model,
+            "effective_model": response.model or config.model,
+            "usage": dict(response.usage)
+            if isinstance(response.usage, Mapping)
+            else None,
+            "transport_metadata": dict(response.transport_metadata),
+        }
+        return response
 
     def _should_use_structured_calling(self) -> bool:
         """Check if structured tool calling is enabled via feature flag."""
@@ -1280,8 +1295,8 @@ class OllamaClient(LLMInterface):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        ollama_params, request_advisory_seconds = _split_request_timeout_from_llm_params(
-            llm_params
+        ollama_params, request_advisory_seconds = (
+            _split_request_timeout_from_llm_params(llm_params)
         )
         request_started = time.monotonic()
 
@@ -1298,10 +1313,7 @@ class OllamaClient(LLMInterface):
 
         response_cache_key: Optional[str] = None
         response_prompt_key: Optional[str] = None
-        if (
-            is_llm_response_cache_enabled()
-            and not _RAW_LLM_IO_LOGGING_SUPPRESSED.get()
-        ):
+        if is_llm_response_cache_enabled() and not _RAW_LLM_IO_LOGGING_SUPPRESSED.get():
             _cache_conv = build_conversation(prompt, context)
             _cache_messages = to_ollama_messages(_cache_conv)
             response_cache_key = build_llm_response_cache_key(
@@ -1356,9 +1368,7 @@ class OllamaClient(LLMInterface):
             )
         ):
             if ollama_think is not None:
-                logger.warning(
-                    "Ignoring invalid llm_param: think for Ollama client"
-                )
+                logger.warning("Ignoring invalid llm_param: think for Ollama client")
             ollama_think = None
         if ollama_params:
             # Only pass parameters that are valid for ollama.Client.chat options
@@ -1947,7 +1957,9 @@ class OllamaClient(LLMInterface):
                 "retry_outcome": (
                     "joined_single_flight"
                     if not owns_pull
-                    else "retried_after_pull" if pull_succeeded else "pull_failed"
+                    else "retried_after_pull"
+                    if pull_succeeded
+                    else "pull_failed"
                 ),
                 "joined_single_flight": not owns_pull,
                 "pull_elapsed_seconds": round(last_elapsed, 3),
@@ -1970,13 +1982,18 @@ class OpenAIClient(LLMInterface):
         self,
         api_key: Optional[str] = None,
         api_key_env_var: Optional[str] = "OPENAI_API_KEY",
+        backup_api_key: Optional[str] = None,
+        backup_api_key_env_var: Optional[str] = "OPENAI_API_BACKUP_KEY",
     ):
         """
         Initialize the OpenAI client.
 
         Args:
             api_key: Optional direct API key
-            api_key_env_var: Name of environment variable containing the API key
+            api_key_env_var: Name of environment variable containing the primary key
+            backup_api_key: Optional direct same-provider backup key
+            backup_api_key_env_var: Name of the environment variable containing
+                the optional backup key
         """
         env_val = _resolve_secret_env_value(api_key_env_var)
         if not env_val and api_key_env_var:
@@ -1998,7 +2015,15 @@ class OpenAIClient(LLMInterface):
             raise ValueError(
                 f"OpenAI API key not provided or found in environment variable {api_key_env_var}."
             )
+        backup_env_val = _resolve_secret_env_value(backup_api_key_env_var)
+        self.backup_api_key = (
+            backup_api_key or backup_env_val or get_openai_backup_api_key()
+        )
+        if self.backup_api_key == self.api_key:
+            self.backup_api_key = None
         self.client = openai.OpenAI(api_key=self.api_key)
+        self._backup_client: Any | None = None
+        self.last_response_metadata: Dict[str, Any] = {}
         logger.info("OpenAIClient initialized.")
 
     @staticmethod
@@ -2014,6 +2039,7 @@ class OpenAIClient(LLMInterface):
             model=resolved_model or self.DEFAULT_MODEL,
             provider="openai",
             api_key=self.api_key,
+            backup_api_key=self.backup_api_key,
             connection_id="#V#openai_provider",
             deployment_id=resolved_model or self.DEFAULT_MODEL,
             # The effective API surface is selected by the structured adapter.
@@ -2083,6 +2109,136 @@ class OpenAIClient(LLMInterface):
 
         return content.strip()
 
+    @staticmethod
+    def _openai_usage_mapping(usage: Any) -> Dict[str, Any] | None:
+        if usage is None:
+            return None
+
+        def _value(*names: str) -> Any:
+            for name in names:
+                value = (
+                    usage.get(name)
+                    if isinstance(usage, Mapping)
+                    else getattr(usage, name, None)
+                )
+                if value is not None:
+                    return value
+            return None
+
+        return {
+            "input_tokens": _value("input_tokens", "prompt_tokens"),
+            "output_tokens": _value("output_tokens", "completion_tokens"),
+            "total_tokens": _value("total_tokens"),
+        }
+
+    def _get_backup_client(self) -> Any | None:
+        if not self.backup_api_key:
+            return None
+        if self._backup_client is None:
+            self._backup_client = openai.OpenAI(api_key=self.backup_api_key)
+        return self._backup_client
+
+    def _generate_once(
+        self,
+        *,
+        request_client: Any,
+        prompt: str,
+        context: Optional[List[Dict[str, Any]]],
+        requested_model: Optional[str],
+        target_model: str,
+        llm_params_for_model: Dict[str, Any],
+    ) -> tuple[str, str, str, Dict[str, Any] | None]:
+        conv = build_conversation(prompt, context)
+        messages = to_openai_messages(conv)
+        responses_params = openai_responses_kwargs_from_model_parameters(
+            llm_params_for_model,
+            model=target_model,
+        )
+        if responses_params or _openai_model_defaults_to_responses(target_model):
+            responses_params.setdefault(
+                "max_output_tokens",
+                resolve_openai_responses_max_output_tokens(llm_params_for_model),
+            )
+            response = request_client.responses.create(  # type: ignore[attr-defined]
+                model=target_model,
+                input=messages,  # type: ignore[arg-type]
+                **responses_params,
+            )
+            if _should_log_llm_io():
+                logger.debug("OpenAI Responses raw response: %s", response)
+            actual_model = getattr(response, "model", None) or target_model
+            content = _extract_openai_responses_text(response)
+            if not content:
+                raise RuntimeError(
+                    f"OpenAI {target_model} Responses payload contained no text"
+                )
+            if (
+                requested_model is not None
+                and isinstance(actual_model, str)
+                and actual_model != target_model
+            ):
+                logger.warning(
+                    "Model mismatch - Requested: %s, Used: %s",
+                    target_model,
+                    actual_model,
+                )
+                warnings.warn(
+                    f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
+                )
+            return (
+                content,
+                str(actual_model),
+                "responses",
+                self._openai_usage_mapping(getattr(response, "usage", None)),
+            )
+
+        openai_params: Dict[str, Any] = {}
+        if "temperature" in llm_params_for_model:
+            safe_temperature = resolve_safe_temperature_for_model(
+                target_model,
+                llm_params_for_model["temperature"],
+            )
+            if safe_temperature is not None:
+                openai_params["temperature"] = safe_temperature
+        response = request_client.chat.completions.create(  # type: ignore[arg-type]
+            model=target_model,
+            messages=messages,  # type: ignore[arg-type]
+            **openai_params,
+        )
+        if _should_log_llm_io():
+            logger.debug("OpenAI raw response: %s", response)
+        actual_model = getattr(response, "model", None) or target_model
+        if (
+            requested_model is not None
+            and isinstance(actual_model, str)
+            and actual_model != target_model
+        ):
+
+            def _tier(name: str) -> int:
+                name_l = str(name or "").lower()
+                if "gpt-4" in name_l or name_l.startswith("o1-"):
+                    return 4
+                if "gpt-3.5" in name_l or "gpt-3" in name_l:
+                    return 3
+                return 1
+
+            if _tier(actual_model) < _tier(target_model):
+                logger.warning(
+                    "Model mismatch - Requested: %s, Used: %s",
+                    target_model,
+                    actual_model,
+                )
+                warnings.warn(
+                    f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
+                )
+        content = self.validate_model_response(response, str(actual_model))
+        return (
+            content,
+            str(actual_model),
+            "chat_completions",
+            self._openai_usage_mapping(getattr(response, "usage", None)),
+        )
+
     def generate(
         self,
         prompt: str,
@@ -2090,138 +2246,82 @@ class OpenAIClient(LLMInterface):
         model: Optional[str] = None,
         llm_params: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Generate a response using the OpenAI API. Raises RuntimeError on failure."""
-        # REFACTORING_NOTE: Model is now determined by the get_llm_client factory.
+        """Generate with one same-provider backup-key attempt when justified."""
+
         target_model = (
             resolve_openai_model_name(model or self.DEFAULT_MODEL) or self.DEFAULT_MODEL
         )
-        self._assert_model_execution_allowed(
-            provider="openai",
-            model=target_model,
-        )
-
-        logger.info(f"Generating response using OpenAI model: {target_model}")
+        self._assert_model_execution_allowed(provider="openai", model=target_model)
+        logger.info("Generating response using OpenAI model: %s", target_model)
         if _should_log_llm_io():
             logger.debug(
                 "[LLM PROMPT][OpenAI][%s]: %s", target_model, _truncate_for_log(prompt)
             )
         request_started_monotonic = time.monotonic()
+        llm_params_for_model, request_advisory_seconds = (
+            self._split_request_timeout_from_llm_params(llm_params)
+        )
+        credential_source = "primary"
+        primary_failure_kind: str | None = None
         try:
-            llm_params_for_model, request_advisory_seconds = (
-                self._split_request_timeout_from_llm_params(llm_params)
-            )
-            request_client = self.client
-            conv = build_conversation(prompt, context)
-            messages = to_openai_messages(conv)
-            responses_params = openai_responses_kwargs_from_model_parameters(
-                llm_params_for_model,
-                model=target_model,
-            )
-            if responses_params or _openai_model_defaults_to_responses(target_model):
-                responses_params.setdefault(
-                    "max_output_tokens",
-                    resolve_openai_responses_max_output_tokens(
-                        llm_params_for_model
-                    ),
+            try:
+                content, actual_model, api_surface, usage = self._generate_once(
+                    request_client=self.client,
+                    prompt=prompt,
+                    context=context,
+                    requested_model=model,
+                    target_model=target_model,
+                    llm_params_for_model=llm_params_for_model,
                 )
-                response = request_client.responses.create(  # type: ignore[attr-defined]
-                    model=target_model,
-                    input=messages,  # type: ignore[arg-type]
-                    **responses_params,
+            except Exception as primary_exc:
+                primary_failure_kind = classify_api_key_failover_exception(
+                    "openai", primary_exc
                 )
-                if _should_log_llm_io():
-                    logger.debug("OpenAI Responses raw response: %s", response)
-                actual_model = getattr(response, "model", None) or target_model
-                content = _extract_openai_responses_text(response)
-                if not content:
-                    raise RuntimeError(
-                        f"OpenAI {target_model} Responses payload contained no text"
-                    )
-                if (
-                    model is not None
-                    and isinstance(actual_model, str)
-                    and actual_model != target_model
-                ):
-                    logger.warning(
-                        f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
-                    )
-                    warnings.warn(
-                        f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
-                    )
-                if _should_log_llm_io():
-                    logger.debug(
-                        "[LLM RESPONSE][OpenAI][%s]: %s",
-                        actual_model,
-                        _truncate_for_log(content),
-                    )
-                _observe_request_advisory(
-                    provider="openai",
-                    advisory_seconds=request_advisory_seconds,
-                    started_monotonic=request_started_monotonic,
+                backup_client = (
+                    self._get_backup_client() if primary_failure_kind else None
                 )
-                return content
+                if backup_client is None:
+                    raise
+                logger.warning(
+                    "OpenAI primary credential rejected (%s); retrying once with backup credential.",
+                    primary_failure_kind,
+                )
+                content, actual_model, api_surface, usage = self._generate_once(
+                    request_client=backup_client,
+                    prompt=prompt,
+                    context=context,
+                    requested_model=model,
+                    target_model=target_model,
+                    llm_params_for_model=llm_params_for_model,
+                )
+                credential_source = "backup"
 
-            openai_params = {}
-            if llm_params_for_model:
-                if "temperature" in llm_params_for_model:
-                    safe_temperature = resolve_safe_temperature_for_model(
-                        target_model,
-                        llm_params_for_model["temperature"],
-                    )
-                    if safe_temperature is not None:
-                        openai_params["temperature"] = safe_temperature
-                # Add other OpenAI specific params like top_p, max_tokens, etc.
-
-            response = request_client.chat.completions.create(  # type: ignore[arg-type]
-                model=target_model,
-                messages=messages,  # type: ignore[arg-type]
-                **openai_params,
-            )
-            if _should_log_llm_io():
-                logger.debug("OpenAI raw response: %s", response)
-
-            # Track which model actually processed the request
-            actual_model = getattr(response, "model", None) or target_model
-            # Only warn about model mismatch if the caller explicitly requested a model
-            if (
-                model is not None
-                and isinstance(actual_model, str)
-                and actual_model != target_model
-            ):
-                # Warn only when the actual model appears less capable than requested
-                def _tier(name: str) -> int:
-                    if not isinstance(name, str):
-                        return -1
-                    name_l = name.lower()
-                    if "gpt-4" in name_l or name_l.startswith("o1-"):
-                        return 4
-                    if "gpt-3.5" in name_l or "gpt-3" in name_l:
-                        return 3
-                    # Fallback baseline
-                    return 1
-
-                if _tier(actual_model) < _tier(target_model):
-                    logger.warning(
-                        f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
-                    )
-                    warnings.warn(
-                        f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
-                    )
-
-            content = self.validate_model_response(response, actual_model)
+            transport_metadata: Dict[str, Any] = {
+                "provider": "openai",
+                "requested_model": target_model,
+                "effective_model": actual_model,
+                "effective_api_surface": api_surface,
+                "credential_source": credential_source,
+                "credential_failover_used": credential_source == "backup",
+            }
+            if primary_failure_kind:
+                transport_metadata["primary_credential_failure_kind"] = (
+                    primary_failure_kind
+                )
+            self.last_response_metadata = {
+                "provider": "openai",
+                "api_surface": api_surface,
+                "requested_model": target_model,
+                "effective_model": actual_model,
+                "usage": usage,
+                "transport_metadata": transport_metadata,
+            }
             if _should_log_llm_io():
                 logger.debug(
                     "[LLM RESPONSE][OpenAI][%s]: %s",
                     actual_model,
                     _truncate_for_log(content),
                 )
-
-            # Log token usage if available
-            if hasattr(response, "usage"):
-                logger.info(
-                    f"Token usage - Input: {response.usage.prompt_tokens}, Output: {response.usage.completion_tokens}"
-                )
-
             _observe_request_advisory(
                 provider="openai",
                 advisory_seconds=request_advisory_seconds,
@@ -2230,7 +2330,7 @@ class OpenAIClient(LLMInterface):
             return content
         except openai.APIConnectionError:
             msg = "Failed to connect to OpenAI API"
-            logger.error(msg, exc_info=True)
+            logger.error(msg)
             raise RuntimeError(msg)
         except openai.RateLimitError as e:
             _code = (
@@ -2239,27 +2339,33 @@ class OpenAIClient(LLMInterface):
                 else None
             )
             if _code == "insufficient_quota":
-                msg = f"OpenAI quota exhausted (insufficient_quota): {str(e)}"
+                msg = "OpenAI quota exhausted (insufficient_quota): " + (
+                    sanitise_transport_telemetry_text(str(e))
+                )
             else:
-                msg = f"OpenAI rate limit exceeded: {str(e)}"
-            logger.error(msg, exc_info=True)
+                msg = "OpenAI rate limit exceeded: " + (
+                    sanitise_transport_telemetry_text(str(e))
+                )
+            logger.error(msg)
             raise RuntimeError(msg)
         except openai.BadRequestError as e:
-            msg = f"Invalid request to OpenAI API: {str(e)}"
-            logger.error(msg, exc_info=True)
+            msg = "Invalid request to OpenAI API: " + sanitise_transport_telemetry_text(
+                str(e)
+            )
+            logger.error(msg)
             raise RuntimeError(msg)
         except openai.APIError as e:
-            msg = f"OpenAI API Error: {str(e)}"
-            logger.error(msg, exc_info=True)
+            msg = "OpenAI API Error: " + sanitise_transport_telemetry_text(str(e))
+            logger.error(msg)
             raise RuntimeError(msg)
         except Exception as e:
             # Handle errors without stack traces for non-API errors
-            msg = str(e)
+            msg = sanitise_transport_telemetry_text(str(e))
             if isinstance(e, (ValueError, RuntimeError)):
                 logger.error(msg)
             else:
                 msg = f"Unexpected error generating response with OpenAI model {target_model}: {msg}"
-                logger.error(msg, exc_info=True)
+                logger.error(msg)
             raise RuntimeError(msg)
 
     def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
@@ -2464,9 +2570,7 @@ class OpenRouterClient(OpenAIClient):
             **options,
         )
         response.transport_metadata["provider_routing_preferences"] = (
-            sanitise_transport_telemetry_value(
-                options["extra_body"]["provider"]
-            )
+            sanitise_transport_telemetry_value(options["extra_body"]["provider"])
         )
         response.transport_metadata["router_metadata_requested"] = True
         return response
@@ -2586,13 +2690,19 @@ class OpenRouterClient(OpenAIClient):
             raise RuntimeError(f"OpenRouter request failed: {safe_error}") from exc
 
     def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
-        raise NotImplementedError("OpenRouter embeddings are not enabled in this release.")
+        raise NotImplementedError(
+            "OpenRouter embeddings are not enabled in this release."
+        )
 
     def list_models(self) -> List[str]:
         cache_key = "openrouter:models"
         now = time.time()
         entry = _MODEL_CACHE.get(cache_key)
-        if entry and now - entry.get("fetched_at", 0) < _MODEL_CACHE_TTL and not entry.get("error"):
+        if (
+            entry
+            and now - entry.get("fetched_at", 0) < _MODEL_CACHE_TTL
+            and not entry.get("error")
+        ):
             return list(entry.get("models", []))
         try:
             response = self.client.models.list()
@@ -2627,6 +2737,7 @@ class GeminiClient(LLMInterface):
         api_key: Optional[str] = None,
         default_model: str = DEFAULT_GEMINI_MODEL,
         *,
+        backup_api_key: Optional[str] = None,
         model_execution_user_concept_id: Optional[str] = None,
         model_execution_org_concept_id: Optional[str] = None,
         model_execution_actor_scope_bound: bool = False,
@@ -2641,6 +2752,10 @@ class GeminiClient(LLMInterface):
                 "Gemini API key not provided or found in environment variables "
                 "(GEMINI_API_KEY or legacy GOOGLE_API_KEY)."
             )
+        self.backup_api_key = backup_api_key or get_gemini_backup_api_key()
+        if self.backup_api_key == self.api_key:
+            self.backup_api_key = None
+        self._backup_client: Any | None = None
         self.default_model = default_model
         self._model_execution_user_concept_id = model_execution_user_concept_id
         self._model_execution_org_concept_id = model_execution_org_concept_id
@@ -2666,6 +2781,7 @@ class GeminiClient(LLMInterface):
             model=target_model,
             provider="gemini",
             api_key=self.api_key,
+            backup_api_key=self.backup_api_key,
             connection_id="gemini_developer_api",
             deployment_id=target_model,
             requested_api_surface=(
@@ -2685,12 +2801,23 @@ class GeminiClient(LLMInterface):
             "gemini-3.7-flash-"
         )
 
-    def _require_interactions(self) -> None:
-        if getattr(self.client, "interactions", None) is None:
+    def _require_interactions(self, request_client: Any | None = None) -> None:
+        client = request_client or self.client
+        if getattr(client, "interactions", None) is None:
             raise ImportError(
                 "Gemini 3.7 requires a google-genai release whose Client "
                 "exposes client.interactions."
             )
+
+    def _get_backup_client(self) -> Any | None:
+        if not self.backup_api_key:
+            return None
+        if self._backup_client is None:
+            assert genai is not None
+            self._backup_client = genai.Client(  # type: ignore[attr-defined]
+                api_key=self.backup_api_key
+            )
+        return self._backup_client
 
     def generate(
         self,
@@ -2713,31 +2840,68 @@ class GeminiClient(LLMInterface):
                 _truncate_for_log(prompt),
             )
 
-        try:
-            coerced_context = _coerce_context(context or [])
-            system_parts = [
-                message["content"]
-                for message in coerced_context
-                if message["role"] == "system" and message["content"].strip()
-            ]
-            ordinary_context = [
-                message for message in coerced_context if message["role"] != "system"
-            ]
+        coerced_context = _coerce_context(context or [])
+        system_parts = [
+            message["content"]
+            for message in coerced_context
+            if message["role"] == "system" and message["content"].strip()
+        ]
+        ordinary_context = [
+            message for message in coerced_context if message["role"] != "system"
+        ]
+
+        def _generate_once(request_client: Any) -> str:
             if self._uses_interactions(target_model_name):
-                content = self._generate_interaction_text(
+                return self._generate_interaction_text(
+                    request_client=request_client,
                     prompt=prompt,
                     context=ordinary_context,
                     system_instruction="\n\n".join(system_parts) or None,
                     model=target_model_name,
                     llm_params=llm_params,
                 )
-            else:
-                content = self._generate_content_text(
-                    prompt=prompt,
-                    context=ordinary_context,
-                    system_instruction="\n\n".join(system_parts) or None,
-                    model=target_model_name,
-                    llm_params=llm_params,
+            return self._generate_content_text(
+                request_client=request_client,
+                prompt=prompt,
+                context=ordinary_context,
+                system_instruction="\n\n".join(system_parts) or None,
+                model=target_model_name,
+                llm_params=llm_params,
+            )
+
+        try:
+            credential_source = "primary"
+            primary_failure_kind: str | None = None
+            try:
+                content = _generate_once(self.client)
+            except Exception as primary_exc:
+                primary_failure_kind = classify_api_key_failover_exception(
+                    "gemini", primary_exc
+                )
+                backup_client = (
+                    self._get_backup_client() if primary_failure_kind else None
+                )
+                if backup_client is None:
+                    raise
+                logger.warning(
+                    "Gemini primary credential rejected (%s); retrying once with backup credential.",
+                    primary_failure_kind,
+                )
+                content = _generate_once(backup_client)
+                credential_source = "backup"
+
+            transport_metadata = self.last_response_metadata.setdefault(
+                "transport_metadata", {}
+            )
+            transport_metadata.update(
+                {
+                    "credential_source": credential_source,
+                    "credential_failover_used": credential_source == "backup",
+                }
+            )
+            if primary_failure_kind:
+                transport_metadata["primary_credential_failure_kind"] = (
+                    primary_failure_kind
                 )
             if _should_log_llm_io():
                 logger.debug(
@@ -2758,13 +2922,14 @@ class GeminiClient(LLMInterface):
     def _generate_interaction_text(
         self,
         *,
+        request_client: Any,
         prompt: str,
         context: Sequence[LLMMessage],
         system_instruction: str | None,
         model: str,
         llm_params: Mapping[str, Any] | None,
     ) -> str:
-        self._require_interactions()
+        self._require_interactions(request_client)
         steps: list[dict[str, Any]] = []
         for message in context:
             role = (
@@ -2802,7 +2967,7 @@ class GeminiClient(LLMInterface):
             request["generation_config"] = generation_config
         if system_instruction:
             request["system_instruction"] = system_instruction
-        response = self.client.interactions.create(**request)
+        response = request_client.interactions.create(**request)
         actual_model = getattr(response, "model", None)
         status_value = getattr(response, "status", None)
         status_text = getattr(status_value, "value", status_value)
@@ -2841,8 +3006,7 @@ class GeminiClient(LLMInterface):
         }
         if (status is not None and status != "completed") or provider_errors:
             raise RuntimeError(
-                "Gemini interaction failed with provider status "
-                f"{status or 'unknown'}."
+                f"Gemini interaction failed with provider status {status or 'unknown'}."
             )
         output_text = getattr(response, "output_text", None)
         if not isinstance(output_text, str) or not output_text.strip():
@@ -2854,6 +3018,7 @@ class GeminiClient(LLMInterface):
     def _generate_content_text(
         self,
         *,
+        request_client: Any,
         prompt: str,
         context: Sequence[LLMMessage],
         system_instruction: str | None,
@@ -2878,7 +3043,7 @@ class GeminiClient(LLMInterface):
         if system_instruction:
             config_values["system_instruction"] = system_instruction
         config = genai.types.GenerateContentConfig(**config_values)  # type: ignore[attr-defined]
-        response = self.client.models.generate_content(
+        response = request_client.models.generate_content(
             model=model,
             contents=contents,
             config=config,
@@ -3273,9 +3438,7 @@ def get_llm_client(
             openrouter_kwargs["model_execution_user_concept_id"] = (
                 trusted_user_concept_id
             )
-            openrouter_kwargs["model_execution_org_concept_id"] = (
-                trusted_org_concept_id
-            )
+            openrouter_kwargs["model_execution_org_concept_id"] = trusted_org_concept_id
             openrouter_kwargs["model_execution_actor_scope_bound"] = True
             return OpenRouterClient(**openrouter_kwargs)
         except Exception as e:
@@ -3295,12 +3458,8 @@ def get_llm_client(
                 )
             )
             gemini_kwargs = dict(kwargs)
-            gemini_kwargs["model_execution_user_concept_id"] = (
-                trusted_user_concept_id
-            )
-            gemini_kwargs["model_execution_org_concept_id"] = (
-                trusted_org_concept_id
-            )
+            gemini_kwargs["model_execution_user_concept_id"] = trusted_user_concept_id
+            gemini_kwargs["model_execution_org_concept_id"] = trusted_org_concept_id
             gemini_kwargs["model_execution_actor_scope_bound"] = True
             return GeminiClient(**gemini_kwargs)
         except Exception as e:

@@ -738,6 +738,16 @@ function readLatestLlmExecutionTelemetry(currentContext = {}) {
     const primaryFailureKind = (typeof raw.primary_failure_kind === 'string' && raw.primary_failure_kind.trim())
       ? raw.primary_failure_kind.trim()
       : null;
+    const credentialSource = (typeof raw.credential_source === 'string'
+      && ['primary', 'backup'].includes(raw.credential_source.trim().toLowerCase()))
+      ? raw.credential_source.trim().toLowerCase()
+      : null;
+    const credentialFailoverUsed = raw.credential_failover_used === true
+      || credentialSource === 'backup';
+    const primaryCredentialFailureKind = (typeof raw.primary_credential_failure_kind === 'string'
+      && raw.primary_credential_failure_kind.trim())
+      ? raw.primary_credential_failure_kind.trim()
+      : null;
     const primaryFailureReason = (typeof raw.primary_failure_reason === 'string' && raw.primary_failure_reason.trim())
       ? raw.primary_failure_reason.trim()
       : null;
@@ -771,6 +781,7 @@ function readLatestLlmExecutionTelemetry(currentContext = {}) {
       && !primaryFailureReason
       && !recoveredFailureReason
       && !error
+      && !credentialFailoverUsed
       && warnings.length === 0
     ) {
       return null;
@@ -783,6 +794,9 @@ function readLatestLlmExecutionTelemetry(currentContext = {}) {
       callProviders,
       executionSucceeded: raw.execution_succeeded === true,
       fallbackUsed: !!raw.fallback_used,
+      credentialSource,
+      credentialFailoverUsed,
+      primaryCredentialFailureKind,
       primaryFailureKind,
       primaryFailureReason,
       recoveredFailureKind,
@@ -1480,6 +1494,7 @@ export async function setModelInfoFooterText() {
       && actualProvider.trim().toLowerCase() !== configuredProvider.trim().toLowerCase();
     const failureReason = executionTelemetry?.primaryFailureReason || executionTelemetry?.error || '';
     const recoveredFailureReason = executionTelemetry?.recoveredFailureReason || '';
+    const credentialFailoverUsed = executionTelemetry?.credentialFailoverUsed === true;
     const explicitStageModelOverride = !!executionTelemetry?.explicitStageModelOverride;
     const activeLlmSelectionModes = new Set([
       'active_llm_default',
@@ -1519,6 +1534,7 @@ export async function setModelInfoFooterText() {
       || actualDiffersFromConfiguredProvider
       || explicitStageModelOverride
       || representedAlternateSelection
+      || credentialFailoverUsed
       || !!failureReason
       || !!recoveredFailureReason
       || probeDisagreesWithSuccessfulExecution
@@ -1527,6 +1543,8 @@ export async function setModelInfoFooterText() {
       ? 'Quota Exhausted'
       : failureReason
       ? 'Execution Error'
+      : credentialFailoverUsed
+      ? 'Backup Credential Used'
       : recoveredFailureReason
       ? 'Fallback Recovered'
       : probeDisagreesWithSuccessfulExecution
@@ -1553,6 +1571,12 @@ export async function setModelInfoFooterText() {
       if (requestedModel) titleParts.push(`Requested model: ${requestedModel}`);
       if (actualProvider) titleParts.push(`Executed provider: ${actualProvider}`);
       if (actualModel) titleParts.push(`Executed model: ${actualModel}`);
+      if (credentialFailoverUsed) {
+        titleParts.push('Credential: backup key');
+        if (executionTelemetry.primaryCredentialFailureKind) {
+          titleParts.push(`Primary credential failure: ${executionTelemetry.primaryCredentialFailureKind}`);
+        }
+      }
       if (explicitStageModelOverride) {
         titleParts.push('Stage model override: explicit policy override');
         if (executionTelemetry.executionStage) {
@@ -1590,17 +1614,23 @@ export async function setModelInfoFooterText() {
         titleParts.push(`Warnings: ${executionTelemetry.warnings.join(' | ')}`);
       }
     }
-    const displayModelText = localModelUnavailable
+    const baseDisplayModelText = localModelUnavailable
       ? 'unselected'
       : executionOverlayActive
       ? (actualModel || requestedModel || configuredModel || 'Not Set')
       : (configuredModel || 'Not Set');
+    const displayModelText = credentialFailoverUsed
+      ? `${baseDisplayModelText} · backup key`
+      : baseDisplayModelText;
     const accessibilityParts = [
       `Model ${displayModelText}`,
       `Configured status ${configuredStatusLabel}`,
     ];
     if (executionOverlayActive) {
       accessibilityParts.push(`Last execution status ${executionStatusLabel}`);
+    }
+    if (credentialFailoverUsed) {
+      accessibilityParts.push('Credential backup key');
     }
     if (failureReason) {
       accessibilityParts.push(`Failure reason ${failureReason}`);

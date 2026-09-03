@@ -1,7 +1,12 @@
 import sys
 import types
 
-from src.backend.services.llm_api_key_resolution import get_gemini_api_key
+from src.backend.services.llm_api_key_resolution import (
+    classify_api_key_failover_exception,
+    get_gemini_api_key,
+    get_gemini_backup_api_key,
+    get_openai_backup_api_key,
+)
 
 
 def test_get_gemini_api_key_prefers_primary_env_var(monkeypatch):
@@ -31,6 +36,69 @@ def test_get_gemini_api_key_prefers_primary_file_over_legacy_direct(
     monkeypatch.setenv("GOOGLE_API_KEY", "legacy-key")
 
     assert get_gemini_api_key() == "primary-file-key"
+
+
+def test_backup_key_resolvers_support_direct_file_and_legacy_names(
+    monkeypatch, tmp_path
+):
+    openai_file = tmp_path / "openai_backup"
+    openai_file.write_text("openai-file-backup\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_BACKUP_KEY_FILE", str(openai_file))
+    monkeypatch.setenv("GOOGLE_API_BACKUP_KEY", "legacy-gemini-backup")
+
+    assert get_openai_backup_api_key() == "openai-file-backup"
+    assert get_gemini_backup_api_key() == "legacy-gemini-backup"
+
+
+def test_gemini_backup_name_takes_precedence_over_legacy_alias(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_BACKUP_KEY", "gemini-backup")
+    monkeypatch.setenv("GOOGLE_API_BACKUP_KEY", "legacy-backup")
+
+    assert get_gemini_backup_api_key() == "gemini-backup"
+
+
+class _StructuredProviderError(RuntimeError):
+    def __init__(self, *, status_code=None, body=None):
+        super().__init__("free-form text is not classification evidence")
+        self.status_code = status_code
+        self.body = body
+
+
+def test_api_key_failover_classifier_accepts_exact_status_and_quota_codes():
+    assert (
+        classify_api_key_failover_exception(
+            "openai", _StructuredProviderError(status_code=401)
+        )
+        == "authentication_failed"
+    )
+    assert (
+        classify_api_key_failover_exception(
+            "gemini", _StructuredProviderError(status_code=429)
+        )
+        == "rate_limited"
+    )
+    assert (
+        classify_api_key_failover_exception(
+            "openai",
+            _StructuredProviderError(
+                status_code=400,
+                body={"error": {"code": "insufficient_quota"}},
+            ),
+        )
+        == "quota_exhausted"
+    )
+
+
+def test_api_key_failover_classifier_rejects_message_only_and_other_providers():
+    message_only = RuntimeError("401 insufficient_quota rate limit")
+
+    assert classify_api_key_failover_exception("openai", message_only) is None
+    assert (
+        classify_api_key_failover_exception(
+            "openrouter", _StructuredProviderError(status_code=429)
+        )
+        is None
+    )
 
 
 def test_gemini_client_accepts_legacy_google_api_key(monkeypatch):

@@ -24,6 +24,9 @@ from ....integrations.internal_mcp.tool_call_contracts import (
     strip_internal_schema_extensions,
     validation_diagnostic,
 )
+from ....services.llm_api_key_resolution import (
+    classify_api_key_failover_exception,
+)
 from ....services.model_parameter_service import gemini_kwargs_from_model_parameters
 from ..client import (
     LLMClient,
@@ -83,7 +86,8 @@ def _provider_error_evidence(value: Any) -> list[dict[str, Any]]:
         return []
     raw_items = (
         list(value)
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+        if isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
         else [value]
     )
     evidence: list[dict[str, Any]] = []
@@ -273,6 +277,10 @@ class GeminiClient(LLMClient):
         self._client_kwargs: dict[str, Any] = {}
         if config.api_key:
             self._client_kwargs["api_key"] = config.api_key
+        self._backup_client_kwargs = {
+            **self._client_kwargs,
+            **({"api_key": config.backup_api_key} if config.backup_api_key else {}),
+        }
         self._client = genai.Client(**self._client_kwargs)
         self._model_name = config.model
         self._temperature = config.temperature
@@ -290,6 +298,19 @@ class GeminiClient(LLMClient):
                 "whose Client exposes client.aio.interactions."
             )
 
+    @staticmethod
+    async def _close_request_client(client: Any) -> None:
+        if client is None:
+            return
+        close = getattr(getattr(client, "aio", None), "aclose", None)
+        if not callable(close):
+            close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
+
     async def generate_with_tools(
         self,
         prompt: str,
@@ -303,6 +324,7 @@ class GeminiClient(LLMClient):
 
         request_kwargs = dict(kwargs)
         request_client = request_kwargs.pop("_request_client", self._client)
+        injected_backup_client = request_kwargs.pop("_backup_request_client", None)
         request_model = str(request_kwargs.pop("model", None) or self._model_name)
         llm_params, advisory_seconds = split_request_advisory_from_llm_params(
             request_kwargs.pop("llm_params", None)
@@ -334,10 +356,12 @@ class GeminiClient(LLMClient):
             )
 
         started = monotonic()
-        try:
+        owned_backup_client: Any | None = None
+
+        async def _invoke(selected_client: Any) -> LLMResponse:
             if surface == GEMINI_INTERACTIONS_SURFACE:
-                self._assert_interactions_available(request_client, request_model)
-                response = await self._generate_interaction(
+                self._assert_interactions_available(selected_client, request_model)
+                return await self._generate_interaction(
                     prompt=prompt,
                     available_tools=available_tools,
                     context=context,
@@ -346,19 +370,56 @@ class GeminiClient(LLMClient):
                     llm_params=llm_params,
                     continuation=continuation,
                     tool_results=tool_results,
-                    request_client=request_client,
+                    request_client=selected_client,
                 )
-            else:
-                response = await self._generate_content(
-                    prompt=prompt,
-                    available_tools=available_tools,
-                    context=context,
-                    system_message=system_message,
-                    request_model=request_model,
-                    llm_params=llm_params,
-                    continuation=continuation,
-                    tool_results=tool_results,
-                    request_client=request_client,
+            return await self._generate_content(
+                prompt=prompt,
+                available_tools=available_tools,
+                context=context,
+                system_message=system_message,
+                request_model=request_model,
+                llm_params=llm_params,
+                continuation=continuation,
+                tool_results=tool_results,
+                request_client=selected_client,
+            )
+
+        try:
+            credential_source = "primary"
+            primary_failure_kind: str | None = None
+            try:
+                response = await _invoke(request_client)
+            except StructuredToolTransportError:
+                raise
+            except Exception as primary_exc:
+                primary_failure_kind = classify_api_key_failover_exception(
+                    "gemini", primary_exc
+                )
+                if not primary_failure_kind or not self.config.backup_api_key:
+                    raise
+                if injected_backup_client is not None:
+                    backup_client = injected_backup_client
+                else:
+                    owned_backup_client = self._genai.Client(
+                        **self._backup_client_kwargs
+                    )
+                    backup_client = owned_backup_client
+                self.logger.warning(
+                    "Gemini primary credential rejected (%s); retrying once with backup credential.",
+                    primary_failure_kind,
+                )
+                response = await _invoke(backup_client)
+                credential_source = "backup"
+
+            response.transport_metadata.update(
+                {
+                    "credential_source": credential_source,
+                    "credential_failover_used": credential_source == "backup",
+                }
+            )
+            if primary_failure_kind:
+                response.transport_metadata["primary_credential_failure_kind"] = (
+                    primary_failure_kind
                 )
             observe_request_advisory(
                 provider="gemini",
@@ -388,6 +449,8 @@ class GeminiClient(LLMClient):
             safe_error = sanitise_transport_telemetry_text(str(exc))
             self.logger.error("Gemini structured-tool API error: %s", safe_error)
             raise ToolCallError(f"Gemini call failed: {safe_error}") from exc
+        finally:
+            await self._close_request_client(owned_backup_client)
 
     def generate_with_tools_sync(
         self,
@@ -874,9 +937,7 @@ class GeminiClient(LLMClient):
             call_id = str(step.get("id") or "").strip()
             name = str(step.get("name") or "").strip()
             provider_item_id = call_id or None
-            if not name or (
-                not call_id and surface == GEMINI_INTERACTIONS_SURFACE
-            ):
+            if not name or (not call_id and surface == GEMINI_INTERACTIONS_SURFACE):
                 raise StructuredToolProtocolError(
                     "Gemini returned a function call without the required id and name.",
                     decision={

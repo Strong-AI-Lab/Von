@@ -266,6 +266,43 @@ describe('footer latest LLM execution status', () => {
         expect(modelButton.title).toContain('Recovered failure reason: OpenAI quota exhausted (insufficient_quota): exceeded your current quota.');
     });
 
+    test('shows an obvious backup-key warning without exposing either credential', async () => {
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+
+        window.__vonLatestLlmExecutionTelemetry = bindExecutionTelemetry({
+            requested_model: 'gpt-5.4-mini',
+            actual_model: 'gpt-5.4-mini',
+            actual_provider: 'openai',
+            call_models: ['gpt-5.4-mini'],
+            fallback_used: false,
+            credential_source: 'backup',
+            credential_failover_used: true,
+            primary_credential_failure_kind: 'quota_exhausted',
+        });
+        document.dispatchEvent(new CustomEvent('von:latestLlmExecutionTelemetryUpdated', {
+            detail: window.__vonLatestLlmExecutionTelemetry
+        }));
+        await flushUiTicks();
+
+        const modelSegment = await waitForModelSegment((seg) => (
+            seg.classList.contains('warning')
+            && seg.querySelector('.concept-footer-button')?.textContent?.includes('backup key')
+        ));
+        expect(modelSegment).toBeTruthy();
+        expect(modelSegment.classList.contains('fatal')).toBe(false);
+        expect(modelSegment.title).toContain('Last execution status: Backup Credential Used');
+        expect(modelSegment.title).toContain('Credential: backup key');
+        expect(modelSegment.title).toContain('Primary credential failure: quota_exhausted');
+
+        const modelButton = modelSegment.querySelector('.concept-footer-button');
+        expect(modelButton.textContent.trim()).toBe('gpt-5.4-mini · backup key');
+        expect(modelButton.getAttribute('aria-label')).toContain('Credential backup key');
+        expect(modelButton.title).not.toContain('OPENAI_API_BACKUP_KEY');
+        expect(modelButton.title).not.toContain('sk-');
+    });
+
     test('does not turn footer red for OpenAI alias resolution (dated snapshot)', async () => {
         const { setModelInfoFooterText } = require(domUtilsPath);
 

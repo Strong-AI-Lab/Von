@@ -56,6 +56,10 @@ class _Models:
         return self.responses.pop(0)
 
 
+class _RateLimited(RuntimeError):
+    status_code = 429
+
+
 def _tool() -> ToolDefinition:
     return ToolDefinition(
         name="lookup",
@@ -101,6 +105,47 @@ def _client(interactions: _Interactions) -> GeminiClient:
     client._temperature = None  # type: ignore[attr-defined]
     client._max_tokens = 2048  # type: ignore[attr-defined]
     return client
+
+
+def test_gemini_structured_generation_uses_backup_once_without_changing_model():
+    model = "gemini-3.7-flash"
+    primary_interactions = _Interactions([_RateLimited("limited")])
+    backup_interactions = _Interactions(
+        [
+            _Resource(
+                id="backup_interaction",
+                model=model,
+                status="completed",
+                output_text="backup ok",
+                steps=[],
+                usage=None,
+                errors=None,
+            )
+        ]
+    )
+    client = _client(primary_interactions)
+    client.config.backup_api_key = "backup-secret"
+    client._backup_client_kwargs = {"api_key": "backup-secret"}  # type: ignore[attr-defined]
+    backup_client = SimpleNamespace(
+        aio=SimpleNamespace(interactions=backup_interactions)
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            "Find evidence.",
+            [_tool()],
+            _backup_request_client=backup_client,
+        )
+    )
+
+    assert result.text_response == "backup ok"
+    assert [call["model"] for call in primary_interactions.requests] == [model]
+    assert [call["model"] for call in backup_interactions.requests] == [model]
+    assert result.transport_metadata["credential_source"] == "backup"
+    assert result.transport_metadata["credential_failover_used"] is True
+    assert (
+        result.transport_metadata["primary_credential_failure_kind"] == "rate_limited"
+    )
 
 
 def _legacy_client(models: _Models) -> GeminiClient:
@@ -267,7 +312,9 @@ def test_interactions_replays_exact_steps_and_correlated_function_result() -> No
     assert "sdk_http_response" not in completed.raw_response
 
 
-def test_interactions_requires_action_without_function_call_is_protocol_failure() -> None:
+def test_interactions_requires_action_without_function_call_is_protocol_failure() -> (
+    None
+):
     interaction = _Resource(
         id="interaction-missing-action",
         model="gemini-3.7-flash",
@@ -361,9 +408,7 @@ def test_generate_content_assigns_and_replays_id_when_sdk_call_id_is_missing() -
     assert call.call_id.startswith("von-gemini-")
     assert call.provider_item_id is None
     assert initial.continuation is not None
-    retained_call = initial.continuation.output_items[0]["parts"][0][
-        "function_call"
-    ]
+    retained_call = initial.continuation.output_items[0]["parts"][0]["function_call"]
     assert retained_call == {
         "args": {"queries": [{"term": "legacy evidence"}]},
         "name": "lookup",
@@ -386,16 +431,15 @@ def test_generate_content_assigns_and_replays_id_when_sdk_call_id_is_missing() -
     )
 
     replayed_contents = models.requests[1]["contents"]
-    assert replayed_contents[1].model_dump(mode="json", exclude_none=True) == (
-        initial.continuation.output_items[0]
+    assert (
+        replayed_contents[1].model_dump(mode="json", exclude_none=True)
+        == (initial.continuation.output_items[0])
     )
     assert replayed_contents[1].parts[0].function_call.id == call.call_id
     function_response = replayed_contents[2].parts[0].function_response
     assert function_response.id == call.call_id
     assert function_response.name == "lookup"
-    assert function_response.response == {
-        "output": {"source": "legacy-primary"}
-    }
+    assert function_response.response == {"output": {"source": "legacy-primary"}}
     assert completed.text_response == "Grounded legacy answer."
 
 
@@ -453,8 +497,7 @@ def test_interactions_rate_limit_retains_only_safe_retry_decision(
                 "code": "too_many_requests",
                 "status": "RESOURCE_EXHAUSTED",
                 "message": (
-                    "api_key=secret-provider-value. Please retry in "
-                    "43.424416244s."
+                    "api_key=secret-provider-value. Please retry in 43.424416244s."
                 ),
             }
         },
@@ -595,9 +638,7 @@ def test_interactions_incomplete_retains_only_visible_partial_response() -> None
 
     partial = error.partial_response
     assert partial is not None
-    assert partial.text_response == (
-        "| Student | End date |\n|---|---|\n| A | 2027 |"
-    )
+    assert partial.text_response == ("| Student | End date |\n|---|---|\n| A | 2027 |")
     assert partial.tool_calls == []
     assert partial.model == "gemini-3.7-flash-20260815"
     assert partial.usage == {

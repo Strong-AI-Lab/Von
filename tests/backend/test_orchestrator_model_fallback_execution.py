@@ -949,6 +949,12 @@ def test_gemini_structured_stage_receives_model_parameters_without_openai_option
                 "output_tokens": 12,
                 "thought_tokens": 7,
             },
+            transport_metadata={
+                "provider": "gemini",
+                "credential_source": "backup",
+                "credential_failover_used": True,
+                "primary_credential_failure_kind": "rate_limited",
+            },
         )
     )
     monkeypatch.setattr(
@@ -977,6 +983,8 @@ def test_gemini_structured_stage_receives_model_parameters_without_openai_option
     )
 
     progress_events: list[dict[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
     response, _, _ = orchestrator._run_llm_with_tools_fallbacks(
         stage="tool_call",
         prompt="Find evidence.",
@@ -1002,8 +1010,8 @@ def test_gemini_structured_stage_receives_model_parameters_without_openai_option
         user_concept_id=None,
         org_concept_id=None,
         llm_calls_log=[],
-        aux_log=[],
-        record_llm_call=lambda **_payload: None,
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
         emit_progress=lambda payload: progress_events.append(dict(payload)),
         method_catalogue={"fetch_concept": {"category": "read"}},
     )
@@ -1017,6 +1025,18 @@ def test_gemini_structured_stage_receives_model_parameters_without_openai_option
         event for event in progress_events if event.get("status") == "llm_call_chunk"
     )
     assert chunk["tokens_streamed"] == 5
+    assert recorded_calls[0]["candidate"]["transport_metadata"] == {
+        "provider": "gemini",
+        "credential_source": "backup",
+        "credential_failover_used": True,
+        "primary_credential_failure_kind": "rate_limited",
+    }
+    transport_event = next(
+        event
+        for event in aux_log
+        if event.get("type") == "structured_tool_transport_decision"
+    )
+    assert transport_event["credential_source"] == "backup"
 
 
 def test_failed_structured_stage_retains_requested_model_parameters(
@@ -4410,8 +4430,9 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
         "Tool-use limit reached: this turn reached "
         "`internal_mcp_max_tool_invocations=8` after 8 tool call(s)."
     )
-    assert "Partial final answer grounded in the completed tool results." in (
-        result.outputs["final_response"]
+    assert (
+        "Partial final answer grounded in the completed tool results."
+        in (result.outputs["final_response"])
     )
     assert len(prompts) == 2
     assert "internal_mcp_max_tool_invocations=8" in prompts[-1]

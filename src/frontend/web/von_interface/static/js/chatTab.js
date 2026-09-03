@@ -923,6 +923,9 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
     const callProviders = [];
     let actualModel = null;
     let actualProvider = null;
+    let credentialSource = null;
+    let credentialFailoverUsed = false;
+    let primaryCredentialFailureKind = null;
 
     for (const call of rawCalls) {
         if (!call || typeof call !== 'object') {
@@ -941,6 +944,32 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
         if (provider) {
             callProviders.push(provider);
             actualProvider = provider;
+        }
+        const transportCandidates = [
+            call.transport_metadata,
+            call.candidate?.transport_metadata,
+            call.candidate?.llm_transport,
+            call.metadata?.transport_metadata,
+        ];
+        for (const transport of transportCandidates) {
+            if (!transport || typeof transport !== 'object') {
+                continue;
+            }
+            const source = (typeof transport.credential_source === 'string')
+                ? transport.credential_source.trim().toLowerCase()
+                : '';
+            if (source === 'primary' || source === 'backup') {
+                credentialSource = source;
+            }
+            if (transport.credential_failover_used === true || source === 'backup') {
+                credentialFailoverUsed = true;
+            }
+            if (
+                typeof transport.primary_credential_failure_kind === 'string'
+                && transport.primary_credential_failure_kind.trim()
+            ) {
+                primaryCredentialFailureKind = transport.primary_credential_failure_kind.trim();
+            }
         }
     }
 
@@ -985,6 +1014,7 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
         && !effectiveActualProvider
         && !primaryFailureReason
         && !failure.recoveredFailureReason
+        && !credentialFailoverUsed
         && warnings.length === 0
     ) {
         return null;
@@ -1004,6 +1034,9 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionCon
         call_providers: uniqueCallProviders,
         execution_succeeded: failure.executionSucceeded === true,
         fallback_used: fallbackUsed,
+        credential_source: credentialSource,
+        credential_failover_used: credentialFailoverUsed,
+        primary_credential_failure_kind: primaryCredentialFailureKind,
         primary_failure_kind: primaryFailureKind,
         primary_failure_reason: primaryFailureReason,
         recovered_failure_kind: failure.recoveredFailureKind || null,

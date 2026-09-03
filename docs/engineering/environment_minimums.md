@@ -32,6 +32,14 @@ $env:GEMINI_API_KEY = '<YOUR-GEMINI-KEY>'
 $env:OLLAMA_HOST = 'http://<host>:11434'
 ```
 
+An optional same-provider backup credential can be configured as
+`OPENAI_API_BACKUP_KEY` or `GEMINI_API_BACKUP_KEY`. The corresponding
+`*_FILE` variables are also supported for service-managed secret files.
+Von tries the backup once, with the same provider and model, only after a
+structured authentication, quota, or rate-limit rejection from the primary
+credential. When that retry succeeds, the model footer displays `backup key`.
+Other provider failures do not cause a duplicate request.
+
 `GEMINI_API_KEY` is the primary Gemini variable. Von also accepts the legacy
 `GOOGLE_API_KEY` name for compatibility, but new setups should use
 `GEMINI_API_KEY`. Managed deployments can instead set
@@ -41,6 +49,10 @@ readable only by the Von service account. The default Gemini model is
 Gemini 3.7 premium-profile release input selects the stateless Interactions API
 with response storage disabled; it takes effect only after governed registry
 publication and canonical read-back.
+
+For legacy Gemini naming, `GOOGLE_API_BACKUP_KEY` and
+`GOOGLE_API_BACKUP_KEY_FILE` are accepted as aliases. New setups should use
+the `GEMINI_API_BACKUP_KEY` names.
 
 ## 2. How Von decides whether MongoDB is local or remote
 

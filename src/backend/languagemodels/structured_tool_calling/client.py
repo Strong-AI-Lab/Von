@@ -4,7 +4,7 @@ All LLM provider implementations (OpenAI, Gemini, Ollama) inherit from LLMClient
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 import logging
 import time
@@ -129,7 +129,9 @@ class LLMClientConfig:
 
     Attributes:
         model: Model identifier (e.g., 'gpt-4', 'gemini-pro', 'llama2')
-        api_key: Authentication token (if required)
+        api_key: Primary authentication token (if required)
+        backup_api_key: Optional same-provider credential used for one bounded
+            retry after an exact authentication, quota, or rate-limit rejection
         base_url: API endpoint URL (for self-hosted or proxy scenarios)
         temperature: Sampling temperature (0-2 typical range). None = use model default.
         max_tokens: Maximum tokens to generate
@@ -139,7 +141,8 @@ class LLMClientConfig:
 
     model: str
     provider: Optional[str] = None
-    api_key: Optional[str] = None
+    api_key: Optional[str] = field(default=None, repr=False)
+    backup_api_key: Optional[str] = field(default=None, repr=False)
     base_url: Optional[str] = None
     connection_id: Optional[str] = None
     deployment_id: Optional[str] = None

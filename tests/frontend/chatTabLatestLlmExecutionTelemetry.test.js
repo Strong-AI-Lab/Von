@@ -501,4 +501,41 @@ describe('chatTab latest execution telemetry publication', () => {
             ]
         }));
     });
+
+    test('publishes bounded backup-credential transport telemetry', () => {
+        const chatTab = require(chatTabModulePath);
+
+        chatTab.__testOnly_clearLlmDebugData();
+        chatTab.setLlmDebugDataForTurn('a-backup-key', {
+            timestamp: '2026-09-03T15:00:00.000Z',
+            model: 'gpt-5.4-mini',
+            llm_interaction: {
+                requested_model: 'gpt-5.4-mini',
+                calls: [
+                    {
+                        type: 'llm.generate_with_tools',
+                        model: 'gpt-5.4-mini',
+                        provider: 'openai',
+                        candidate: {
+                            transport_metadata: {
+                                credential_source: 'backup',
+                                credential_failover_used: true,
+                                primary_credential_failure_kind: 'quota_exhausted',
+                            },
+                        },
+                    },
+                ],
+            },
+        });
+
+        expect(chatTab.__testOnly_getLatestLlmExecutionTelemetry()).toEqual(
+            expect.objectContaining({
+                credential_source: 'backup',
+                credential_failover_used: true,
+                primary_credential_failure_kind: 'quota_exhausted',
+                actual_model: 'gpt-5.4-mini',
+                actual_provider: 'openai',
+            }),
+        );
+    });
 });
