@@ -43283,8 +43283,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="read",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             description=(
                 "List recent owned and accepted-shared conversations visible to the "
@@ -43305,8 +43307,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="read",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             description=(
                 "Search titles, actor-specific display names, and user-visible "
@@ -43329,8 +43333,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="read",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             description=(
                 "Read a bounded stored transcript, situation, and exact observations for "
@@ -43347,8 +43353,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="read",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             description=(
                 "Traverse the exact stored transcript of one owned or accepted-shared "
@@ -43366,8 +43374,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="read",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             description=(
                 "Inspect up to 50 owned or accepted-shared conversations with independent "
@@ -43388,9 +43398,11 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="write",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
                 "request_id": "turn_id",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             ordinary_turn_effect=True,
             description=(
@@ -43409,9 +43421,11 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             category="write",
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
-                "organisation_concept_id": "actor_organisation_concept_id",
                 "namespace": "turn_namespace",
                 "request_id": "turn_id",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
             },
             ordinary_turn_effect=True,
             description=(

@@ -2704,6 +2704,7 @@ def _capability_catalogue(
                 str(argument_name)
                 for bindings in (
                     definition.ordinary_turn_trusted_argument_bindings,
+                    definition.ordinary_turn_optional_trusted_argument_bindings,
                     definition.ordinary_turn_fixed_arguments,
                 )
                 if isinstance(bindings, Mapping)
@@ -3345,6 +3346,11 @@ def _model_visible_input_schema(
     bindings = definition.ordinary_turn_trusted_argument_bindings
     if isinstance(bindings, Mapping):
         hidden_arguments.update(str(argument_name) for argument_name in bindings)
+    optional_bindings = definition.ordinary_turn_optional_trusted_argument_bindings
+    if isinstance(optional_bindings, Mapping):
+        hidden_arguments.update(
+            str(argument_name) for argument_name in optional_bindings
+        )
     fixed_arguments = definition.ordinary_turn_fixed_arguments
     if isinstance(fixed_arguments, Mapping):
         hidden_arguments.update(str(argument_name) for argument_name in fixed_arguments)
@@ -3516,22 +3522,26 @@ def _trusted_tool_payload_with_diagnostics(
         return dict(model_payload), None
     schema = definition.input_schema
     payload: MutableMapping[str, Any] = dict(model_payload)
-    bindings = definition.ordinary_turn_trusted_argument_bindings
     trusted_values = trusted_argument_values or {}
-    if isinstance(bindings, Mapping):
+    for bindings in (
+        definition.ordinary_turn_trusted_argument_bindings,
+        definition.ordinary_turn_optional_trusted_argument_bindings,
+    ):
+        if not isinstance(bindings, Mapping):
+            continue
         for argument_name, binding_key in bindings.items():
             canonical_argument = str(argument_name)
             trusted_value = trusted_values.get(str(binding_key))
+            payload.pop(canonical_argument, None)
+            for alias, canonical in schema.aliases.items():
+                if canonical == canonical_argument:
+                    payload.pop(alias, None)
             if not (
                 isinstance(trusted_value, str)
                 and trusted_value.strip()
                 and not is_unresolved_tool_argument_placeholder(trusted_value)
             ):
                 continue
-            payload.pop(canonical_argument, None)
-            for alias, canonical in schema.aliases.items():
-                if canonical == canonical_argument:
-                    payload.pop(alias, None)
             payload[canonical_argument] = trusted_value.strip()
     binding_diagnostics: dict[str, Any] = {}
     choice_bindings = definition.ordinary_turn_trusted_argument_choice_bindings

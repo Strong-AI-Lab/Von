@@ -2474,6 +2474,98 @@ def test_server_bound_capability_argument_is_not_model_visible() -> None:
     assert "x-von-argument-aliases" not in input_schema
 
 
+def test_optional_trusted_binding_is_hidden_and_does_not_require_a_value() -> None:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="actor_resource_list",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(
+                optional={
+                    "query": str,
+                    "acting_user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                },
+                allow_unknown=False,
+            ),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+            },
+            ordinary_turn_optional_trusted_argument_bindings={
+                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    personal_trusted = {
+        "actor_user_concept_id": "#V#person",
+        "actor_organisation_concept_id": None,
+    }
+
+    delegated = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values=personal_trusted,
+    )
+    assert delegated == ("actor_resource_list",)
+    assert ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values={"actor_organisation_concept_id": "#V#org"},
+    ) == ()
+    assert ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id=None,
+        trusted_argument_values=personal_trusted,
+    ) == ()
+
+    capability = _capability_catalogue(
+        gateway,
+        delegated,
+        {"names": ["actor_resource_list"]},
+        trusted_argument_values=personal_trusted,
+    )["capabilities"][0]
+    assert capability["server_bound_arguments"] == [
+        "acting_user_concept_id",
+        "organisation_concept_id",
+    ]
+    assert set(capability["input_schema"]["properties"]) == {"query"}
+
+    personal_payload = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="actor_resource_list",
+        model_payload={
+            "query": "mine",
+            "acting_user_concept_id": "#V#attacker",
+            "organisation_concept_id": "#V#attacker_org",
+        },
+        trusted_argument_values=personal_trusted,
+    )
+    assert personal_payload == {
+        "query": "mine",
+        "acting_user_concept_id": "#V#person",
+    }
+
+    organisation_payload = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="actor_resource_list",
+        model_payload={"organisation_concept_id": "#V#attacker_org"},
+        trusted_argument_values={
+            **personal_trusted,
+            "actor_organisation_concept_id": "#V#trusted_org",
+        },
+    )
+    assert organisation_payload == {
+        "acting_user_concept_id": "#V#person",
+        "organisation_concept_id": "#V#trusted_org",
+    }
+
+
 def test_authorised_resource_choices_expose_only_stable_selectors() -> None:
     gateway = _gmail_choice_gateway(lambda **_kwargs: {"success": True})
     trusted = {"gmail_profile": _gmail_profile_choices(default=None)}
