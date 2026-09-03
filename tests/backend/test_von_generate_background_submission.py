@@ -313,6 +313,45 @@ def test_generate_requires_rebind_for_unknown_window_context(monkeypatch):
     assert adaptive_turn.calls == []
 
 
+def test_foreground_generate_returns_json_when_cancelled_during_context_setup(
+    monkeypatch,
+):
+    adaptive_turn = _StubAdaptiveTurn(
+        AdaptiveTurnResult(
+            response_text="must not run",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+        )
+    )
+    task_registry = _CapturingTaskRegistry()
+    task_registry.cancelled_task_ids.add("cancel-during-context")
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Stop before model work",
+            "background": False,
+            "background_task_id": "cancel-during-context",
+            "client_request_id": "cancel-during-context",
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 409
+    assert response.is_json
+    assert response.get_json() == {
+        "success": False,
+        "terminal_status": "cancelled",
+        "error": "generate_task_cancelled",
+        "detail": "Cancellation was acknowledged by the running turn.",
+        "request_id": "cancel-during-context",
+    }
+    assert adaptive_turn.calls == []
+
+
 def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
     monkeypatch,
 ):

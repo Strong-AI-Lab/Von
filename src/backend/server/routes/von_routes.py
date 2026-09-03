@@ -11858,6 +11858,42 @@ def _build_focal_conversation_runtime_envelope(
 
 @von_bp.route("/generate", methods=["POST"])
 def generate():  # pyright: ignore[reportGeneralTypeIssues]
+    """Return a typed cancellation response even during early request setup.
+
+    Most of the implementation has a cancellation boundary around model work,
+    but durable cancellation can now be observed during the earlier identity,
+    history, or client-setup phases.  Preserve the exception for an internal
+    background re-entry so its task registry remains the terminal owner; a
+    foreground browser request receives the same JSON contract regardless of
+    which safe cancellation point noticed the intent.
+    """
+
+    try:
+        return _generate_impl()
+    except CancellationRequested:
+        payload = request.get_json(silent=True)
+        payload = payload if isinstance(payload, Mapping) else {}
+        background_reentry = bool(payload.get("background_progress")) and bool(
+            _normalise_non_empty_text(payload.get("background_task_id"))
+        )
+        if background_reentry:
+            raise
+        request_id = _normalise_non_empty_text(payload.get("client_request_id"))
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "terminal_status": "cancelled",
+                    "error": "generate_task_cancelled",
+                    "detail": "Cancellation was acknowledged by the running turn.",
+                    "request_id": request_id,
+                }
+            ),
+            409,
+        )
+
+
+def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
     """Handle text generation requests."""
     data = request.get_json() or {}
     raw_turn_kind = data.get("turn_kind")
