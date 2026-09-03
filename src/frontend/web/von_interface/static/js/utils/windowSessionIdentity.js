@@ -140,26 +140,34 @@ export function createWindowSessionIdentityCoordinator(options = {}) {
         });
     };
 
+    const replaceWindowSessionId = async (expectedSessionId = null) => {
+        const previousSessionId = getOrCreateWindowSessionId();
+        if (expectedSessionId && previousSessionId !== expectedSessionId) {
+            return ensureUniqueWindowSessionId();
+        }
+        let replacementSessionId = createWindowSessionId();
+        while (replacementSessionId === previousSessionId) {
+            replacementSessionId = createWindowSessionId();
+        }
+        inMemorySessionId = replacementSessionId;
+        try {
+            storage?.setItem(storageKey, replacementSessionId);
+        } catch {
+            // Keep the in-memory replacement for this document.
+        }
+        established = false;
+        ensurePromise = null;
+        const settledSessionId = await ensureUniqueWindowSessionId();
+        dispatchIdentityChanged(previousSessionId, settledSessionId);
+        return settledSessionId;
+    };
+
     const rotateLateCollision = () => {
         if (lateRotationPromise || !established) {
             return;
         }
         lateRotationPromise = (async () => {
-            const previousSessionId = getOrCreateWindowSessionId();
-            let replacementSessionId = createWindowSessionId();
-            while (replacementSessionId === previousSessionId) {
-                replacementSessionId = createWindowSessionId();
-            }
-            inMemorySessionId = replacementSessionId;
-            try {
-                storage?.setItem(storageKey, replacementSessionId);
-            } catch {
-                // Keep the in-memory replacement for this document.
-            }
-            established = false;
-            ensurePromise = null;
-            const settledSessionId = await ensureUniqueWindowSessionId();
-            dispatchIdentityChanged(previousSessionId, settledSessionId);
+            await replaceWindowSessionId();
         })().finally(() => {
             lateRotationPromise = null;
         });
@@ -380,6 +388,7 @@ export function createWindowSessionIdentityCoordinator(options = {}) {
         close,
         ensureUniqueWindowSessionId,
         getWindowSessionId: getOrCreateWindowSessionId,
+        replaceWindowSessionId,
     };
 }
 
