@@ -57,6 +57,20 @@ def test_create_chat_session_preserves_explicit_name_and_leaves_unnamed_session_
     assert doc["history"] == []
     assert result["is_agent_created"] is False
 
+    personal_result = chat_history_service.create_chat_session(
+        user_id="#V#user",
+        session_id="s-personal",
+        namespace="#V#user",
+        organisation_concept_id=None,
+        role_in_org=None,
+    )
+
+    assert personal_result["session_id"] == "s-personal"
+    personal_doc = stored[("#V#user", "s-personal")]
+    assert personal_doc["namespace"] == "#V#user"
+    assert "organisation_concept_id" not in personal_doc
+    assert "role_in_org" not in personal_doc
+
     unnamed_result = chat_history_service.create_chat_session(
         user_id="#V#user",
         session_id="s-2",
