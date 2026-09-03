@@ -376,6 +376,100 @@ def test_requeue_releases_conversation_fence_and_request_correlation() -> None:
     assert rebound["server_instance_id"] == "server-b"
 
 
+def test_durable_cancellation_survives_restart_and_prevents_replay() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    queued = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Stop this exact turn",
+        session_id="session-a",
+    )
+    bound = queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        client_request_id="request-a",
+        attempt_id="attempt-a",
+        conversation_key="conversation-key-a",
+        server_instance_id="server-a",
+    )
+
+    requested = queue_service.request_prompt_cancellation(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        attempt_id="attempt-a",
+    )
+    replay = queue_service.request_prompt_cancellation(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        attempt_id="attempt-a",
+    )
+
+    assert requested["status"] == queue_service.STATUS_IN_PROGRESS
+    assert requested["cancellation_requested"] is True
+    assert replay["cancellation_requested_at"] == requested["cancellation_requested_at"]
+    assert queue_service.is_prompt_cancellation_requested(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        attempt_id="attempt-a",
+    )
+    with pytest.raises(queue_service.ChatPromptQueueReconciliationRequired):
+        queue_service.requeue_prompt_record(
+            scope=scope,
+            queue_id=queued["queue_id"],
+            current_server_instance_id="server-b",
+        )
+    assert (
+        queue_service.terminalise_one_interrupted_cancellation(
+            current_server_instance_id="server-a"
+        )
+        is None
+    )
+
+    terminal = queue_service.terminalise_one_interrupted_cancellation(
+        current_server_instance_id="server-b"
+    )
+
+    assert terminal is not None
+    assert terminal["status"] == queue_service.STATUS_CANCELLED
+    assert terminal["attempt_id"] == bound["attempt_id"]
+    assert queue_service.list_active_queue_records(scope=scope) == []
+
+
+def test_durable_cancellation_wins_over_late_provider_completion() -> None:
+    scope = queue_service.build_queue_scope(user_concept_id="#V#user")
+    queued = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Provider is still running",
+        session_id="session-a",
+    )
+    queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        client_request_id="request-a",
+        attempt_id="attempt-a",
+        conversation_key="conversation-key-a",
+        server_instance_id="server-a",
+    )
+    queue_service.request_prompt_cancellation(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        attempt_id="attempt-a",
+    )
+
+    terminal = queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+        attempt_id="attempt-a",
+    )
+
+    assert terminal["status"] == queue_service.STATUS_CANCELLED
+    assert terminal["last_error"] is None
+
+
 def test_queue_scope_isolation() -> None:
     first_scope = queue_service.build_queue_scope(
         user_concept_id="#V#user_a",

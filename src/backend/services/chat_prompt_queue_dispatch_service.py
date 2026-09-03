@@ -285,6 +285,7 @@ class ChatPromptQueueDispatcher:
         self._task_launch_reconciliation_failed_count = 0
         self._task_execution_reconciled_count = 0
         self._task_execution_reconciliation_retry_count = 0
+        self._interrupted_cancellation_reconciled_count = 0
         self._linked_terminal_backfilled_count = 0
         self._linked_terminal_backfill_complete = False
         self._terminal_retention_backfilled_count = 0
@@ -336,6 +337,8 @@ class ChatPromptQueueDispatcher:
             raise RuntimeError("chat prompt dispatcher is not configured")
 
         if self._reconcile_one_linked_terminal():
+            return True
+        if self._reconcile_one_interrupted_cancellation():
             return True
         if self._reconcile_one_task_launch():
             return True
@@ -430,6 +433,43 @@ class ChatPromptQueueDispatcher:
                 source="queue_dispatcher",
                 error=error,
             )
+        return True
+
+    def _reconcile_one_interrupted_cancellation(self) -> bool:
+        """Terminalise one cancellation left by a stopped server process."""
+
+        try:
+            record = (
+                chat_prompt_queue_service.terminalise_one_interrupted_cancellation(
+                    current_server_instance_id=SERVER_INSTANCE_ID,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - durable intent remains retryable
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+            _logger.warning(
+                "[chat_prompt_dispatch] Interrupted cancellation reconciliation "
+                "deferred: %s",
+                exc,
+            )
+            return False
+        if record is None:
+            return False
+        try:
+            reconcile_linked_task_execution_terminal(
+                record,
+                status=chat_prompt_queue_service.STATUS_CANCELLED,
+                source="interrupted_queue_cancellation",
+            )
+        except Exception as exc:  # noqa: BLE001 - terminal marker owns retry
+            _logger.warning(
+                "[chat_prompt_dispatch] Cancelled queue TaskExecution projection "
+                "deferred: %s",
+                exc,
+            )
+        with self._lock:
+            self._interrupted_cancellation_reconciled_count += 1
+            self._last_error = None
         return True
 
     def _reconcile_one_handoff(self) -> bool:
@@ -671,6 +711,9 @@ class ChatPromptQueueDispatcher:
                 ),
                 "task_execution_reconciliation_retry_count": (
                     self._task_execution_reconciliation_retry_count
+                ),
+                "interrupted_cancellation_reconciled_count": (
+                    self._interrupted_cancellation_reconciled_count
                 ),
                 "linked_terminal_backfilled_count": (
                     self._linked_terminal_backfilled_count

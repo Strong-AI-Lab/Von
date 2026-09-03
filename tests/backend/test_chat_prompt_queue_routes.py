@@ -529,7 +529,9 @@ def test_failed_task_retry_preserves_task_and_conversation_lineage(
     )
 
 
-def test_queue_routes_cannot_release_a_live_server_bound_turn(client) -> None:
+def test_queue_routes_preserve_cancellation_intent_without_releasing_live_turn(
+    client,
+) -> None:
     created = client.post(
         "/von/api/chat_prompt_queue",
         json={"prompt_raw": "Keep the durable fence", "session_id": "session-1"},
@@ -557,16 +559,18 @@ def test_queue_routes_cannot_release_a_live_server_bound_turn(client) -> None:
 
     assert requeue.status_code == 409
     assert requeue.get_json()["error_code"] == "conversation_turn_active"
-    assert cancel.status_code == 409
-    assert cancel.get_json()["error_code"] == "conversation_turn_active"
+    assert cancel.status_code == 200
+    assert cancel.get_json()["status"] == "cancelling"
+    assert cancel.get_json()["item"]["cancellation_requested"] is True
     assert finish.status_code == 404
 
-    chat_prompt_queue_service.finish_prompt_record(
+    terminal = chat_prompt_queue_service.finish_prompt_record(
         scope=scope,
         queue_id=created["queue_id"],
         status=chat_prompt_queue_service.STATUS_COMPLETED,
         attempt_id="attempt-live",
     )
+    assert terminal["status"] == chat_prompt_queue_service.STATUS_CANCELLED
 
 
 def test_legacy_routes_cannot_complete_or_replay_server_dispatch_rows(client) -> None:

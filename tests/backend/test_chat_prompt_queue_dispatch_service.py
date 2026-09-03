@@ -34,6 +34,11 @@ def isolate_dispatcher_queue_reconciliation(monkeypatch):
         "reconcile_next_server_dispatch_handoff",
         lambda: None,
     )
+    monkeypatch.setattr(
+        dispatch_service.chat_prompt_queue_service,
+        "terminalise_one_interrupted_cancellation",
+        lambda **_kwargs: None,
+    )
 
 
 def _reserved_record() -> dict[str, object]:
@@ -85,6 +90,40 @@ def test_dispatcher_leaves_accepted_reservation_for_admission(
     assert released == []
     assert failed == []
     assert dispatcher.snapshot()["accepted_count"] == 1
+
+
+def test_dispatcher_terminalises_requested_cancellation_before_new_work(
+    monkeypatch,
+) -> None:
+    cancelled = {
+        "queue_id": "queue-cancelled",
+        "status": "cancelled",
+    }
+    monkeypatch.setattr(
+        dispatch_service.chat_prompt_queue_service,
+        "terminalise_one_interrupted_cancellation",
+        lambda **_kwargs: dict(cancelled),
+    )
+    reconcile = MagicMock()
+    monkeypatch.setattr(
+        dispatch_service,
+        "reconcile_linked_task_execution_terminal",
+        reconcile,
+    )
+    submit = MagicMock()
+    dispatcher = dispatch_service.ChatPromptQueueDispatcher()
+    dispatcher.configure(app=object(), submit=submit)
+
+    assert dispatcher.run_once() is True
+    submit.assert_not_called()
+    reconcile.assert_called_once_with(
+        cancelled,
+        status=dispatch_service.chat_prompt_queue_service.STATUS_CANCELLED,
+        source="interrupted_queue_cancellation",
+    )
+    assert (
+        dispatcher.snapshot()["interrupted_cancellation_reconciled_count"] == 1
+    )
 
 
 def test_blocked_handoff_falls_through_to_unrelated_ready_dispatch(
@@ -849,3 +888,55 @@ def test_queue_cancellation_terminalises_linked_execution(monkeypatch) -> None:
         status="cancelled",
         source="queue_cancellation",
     )
+
+
+def test_queue_cancellation_requests_bound_turn_without_releasing_fence(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    app = Flask(__name__)
+    app.secret_key = "test"
+    scope = {
+        "user_concept_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+        "namespace": "#V#user@org",
+    }
+    requested = {
+        "queue_id": "queue-1",
+        "status": "in_progress",
+        "cancellation_requested": True,
+    }
+    monkeypatch.setattr(
+        von_routes,
+        "_get_current_chat_prompt_queue_scope",
+        lambda: dict(scope),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_prompt_queue_service,
+        "cancel_prompt_record",
+        MagicMock(
+            side_effect=(
+                von_routes.chat_prompt_queue_service.ConversationTurnAlreadyActive(
+                    "still executing",
+                    queue_id="queue-1",
+                )
+            )
+        ),
+    )
+    persist = MagicMock(return_value=dict(requested))
+    monkeypatch.setattr(
+        von_routes.chat_prompt_queue_service,
+        "request_prompt_cancellation",
+        persist,
+    )
+
+    with app.test_request_context("/von/api/chat_prompt_queue/queue-1"):
+        response = von_routes.cancel_chat_prompt_queue_route("queue-1")
+
+    assert response.get_json() == {
+        "success": True,
+        "item": requested,
+        "status": "cancelling",
+    }
+    persist.assert_called_once_with(scope=scope, queue_id="queue-1")

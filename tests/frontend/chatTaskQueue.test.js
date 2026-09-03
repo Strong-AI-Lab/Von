@@ -1832,6 +1832,7 @@ describe('chat task queue', () => {
     test('Stop cancels the exact server-owned retry without submitting another generation', async () => {
         const {
             __testOnly_refreshChatPromptQueueFromServer,
+            __testOnly_getLiveChatRequestForSession,
         } = require(chatTabModulePath);
         const fetchCalls = [];
 
@@ -1888,6 +1889,7 @@ describe('chat task queue', () => {
 
         await __testOnly_refreshChatPromptQueueFromServer();
         await Promise.resolve();
+        const observedRequest = __testOnly_getLiveChatRequestForSession('session-1');
         expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden'))
             .toBe('false');
 
@@ -1901,7 +1903,16 @@ describe('chat task queue', () => {
         expect(fetchCalls.some(({ url }) => String(url).startsWith('/von/generate')))
             .toBe(false);
         expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden'))
-            .toBe('true');
+            .toBe('false');
+        expect(observedRequest?.aborted).toBe(false);
+        expect(observedRequest?.backgroundCancellationRequested).toBe(true);
+        expect(observedRequest?.latestProgress).toMatchObject({
+            status: 'cancelling',
+            phase_label: 'Cancelling'
+        });
+        expect(document.getElementById('abortButton')?.disabled).toBe(true);
+        expect(document.getElementById('abortButton')?.getAttribute('aria-label'))
+            .toBe('Cancellation requested');
         expect(document.getElementById('promptInput')?.value).toBe('');
     }, 15000);
 

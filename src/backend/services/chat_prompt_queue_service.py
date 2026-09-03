@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from pymongo import ReturnDocument
+from pymongo import ASCENDING, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
@@ -1075,6 +1075,12 @@ def serialise_queue_record(doc: Mapping[str, Any] | None) -> dict[str, Any] | No
         "lease_acquired_at": _serialise_datetime(doc.get("lease_acquired_at")),
         "lease_heartbeat_at": _serialise_datetime(doc.get("lease_heartbeat_at")),
         "lease_expires_at": _serialise_datetime(doc.get("lease_expires_at")),
+        "cancellation_requested": isinstance(
+            doc.get("cancellation_requested_at"), datetime
+        ),
+        "cancellation_requested_at": _serialise_datetime(
+            doc.get("cancellation_requested_at")
+        ),
         "next_dispatch_at": _serialise_datetime(doc.get("next_dispatch_at")),
         "purge_after": _serialise_datetime(doc.get("purge_after")),
         "stale_advisory": bool(doc.get("stale_advisory")),
@@ -3587,6 +3593,10 @@ def requeue_prompt_record(
             "A server-dispatched attempt cannot be replayed without reconciling "
             "its exact turn and effect receipts"
         )
+    if isinstance(existing.get("cancellation_requested_at"), datetime):
+        raise ChatPromptQueueReconciliationRequired(
+            "This turn has a durable cancellation request and cannot be replayed"
+        )
 
     transition_guard: dict[str, Any] = {}
     if existing.get("active_conversation_key"):
@@ -3673,6 +3683,120 @@ def requeue_prompt_record(
     return record
 
 
+def request_prompt_cancellation(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+    attempt_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist cancellation intent without releasing a live conversation fence.
+
+    A provider call cannot always be interrupted.  The executing turn retains
+    its fence until it observes this request and terminalises, while a
+    replacement one-server runtime may safely complete the cancellation after
+    the former process has stopped.
+    """
+
+    queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
+    attempt_id_clean = _coerce_scope_value(
+        attempt_id,
+        field="attempt_id",
+        required=False,
+    )
+    query: dict[str, Any] = {
+        **_compatible_scope_query(scope),
+        "queue_id": queue_id_clean,
+        "status": STATUS_IN_PROGRESS,
+        "active_conversation_key": {"$exists": True},
+    }
+    if attempt_id_clean:
+        query["attempt_id"] = attempt_id_clean
+
+    coll = _collection()
+    now = _now()
+    doc = coll.find_one_and_update(
+        {**query, "cancellation_requested_at": {"$exists": False}},
+        {
+            "$set": {
+                **_scope_query(scope),
+                "cancellation_requested_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        # The exact same request is idempotent.  A terminal state is not
+        # rewritten: its first durable outcome remains authoritative.
+        doc = coll.find_one(
+            {**query, "cancellation_requested_at": {"$type": "date"}}
+        )
+    record = serialise_queue_record(doc)
+    if record is None:
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=[STATUS_IN_PROGRESS],
+            fallback_message="executing prompt was not available for cancellation",
+        )
+    return record
+
+
+def is_prompt_cancellation_requested(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+    attempt_id: str | None = None,
+) -> bool:
+    """Return whether the exact admitted attempt has durable cancellation intent."""
+
+    query: dict[str, Any] = {
+        **_compatible_scope_query(scope),
+        "queue_id": _coerce_scope_value(queue_id, field="queue_id"),
+        "status": STATUS_IN_PROGRESS,
+        "cancellation_requested_at": {"$type": "date"},
+    }
+    attempt_id_clean = _coerce_scope_value(
+        attempt_id,
+        field="attempt_id",
+        required=False,
+    )
+    if attempt_id_clean:
+        query["attempt_id"] = attempt_id_clean
+    return _collection().find_one(query, {"_id": 1}) is not None
+
+
+def terminalise_one_interrupted_cancellation(
+    *,
+    current_server_instance_id: str,
+) -> dict[str, Any] | None:
+    """Cancel one requested turn whose bound one-server runtime has stopped."""
+
+    current_instance = _coerce_scope_value(
+        current_server_instance_id,
+        field="current_server_instance_id",
+    )
+    coll = _collection()
+    existing = coll.find_one(
+        {
+            "status": STATUS_IN_PROGRESS,
+            "active_conversation_key": {"$exists": True},
+            "attempt_id": {"$type": "string", "$ne": ""},
+            "server_instance_id": {"$type": "string", "$ne": current_instance},
+            "cancellation_requested_at": {"$type": "date"},
+        },
+        sort=[("cancellation_requested_at", ASCENDING), ("_id", ASCENDING)],
+    )
+    if not isinstance(existing, Mapping):
+        return None
+    return finish_prompt_record(
+        scope=_queue_scope_values(existing),
+        queue_id=str(existing.get("queue_id") or ""),
+        status=STATUS_CANCELLED,
+        attempt_id=str(existing.get("attempt_id") or ""),
+    )
+
+
 def finish_prompt_record(
     *,
     scope: Mapping[str, Any],
@@ -3714,6 +3838,14 @@ def finish_prompt_record(
                 "A server-dispatched queue row can only be terminalised by its "
                 "exact admitted attempt"
             )
+    if (
+        isinstance(existing_for_terminal, Mapping)
+        and isinstance(existing_for_terminal.get("cancellation_requested_at"), datetime)
+    ):
+        # Once durable cancellation won the CAS, a late provider response may
+        # not publish completion or failure for the same exact attempt.
+        status = STATUS_CANCELLED
+        error = None
     error_clean = _coerce_text(
         error,
         field="error",

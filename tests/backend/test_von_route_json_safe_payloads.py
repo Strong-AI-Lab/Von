@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from flask import Flask, g, jsonify
 
@@ -211,3 +212,64 @@ def test_task_cancellation_terminalises_its_still_queued_prompt(monkeypatch) -> 
 
     assert response.status_code == 200
     assert cancelled == [(scope, "queue-1")]
+
+
+def test_task_cancellation_persists_intent_for_the_bound_attempt(monkeypatch) -> None:
+    app = Flask(__name__)
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    scope = {
+        "user_concept_id": "#V#test_user",
+        "organisation_concept_id": "#V#test_org",
+        "namespace": "#V#test_user@test_org",
+    }
+    status = SimpleNamespace(
+        status="running",
+        queue_id="queue-1",
+        attempt_id="attempt-1",
+    )
+    persisted: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        von_routes,
+        "_get_current_chat_prompt_queue_scope",
+        lambda: scope,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_get_background_task_status_for_scope",
+        lambda _task_id, _scope: status,
+    )
+    monkeypatch.setattr(
+        von_routes.background_task_registry,
+        "request_cancellation_for_scope",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_prompt_queue_service,
+        "cancel_prompt_record",
+        MagicMock(
+            side_effect=(
+                von_routes.chat_prompt_queue_service.ConversationTurnAlreadyActive(
+                    "still executing",
+                    queue_id="queue-1",
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_prompt_queue_service,
+        "request_prompt_cancellation",
+        lambda **kwargs: persisted.append(kwargs) or {
+            "queue_id": "queue-1",
+            "status": "in_progress",
+            "cancellation_requested": True,
+        },
+    )
+
+    response = app.test_client().post("/von/api/task/cancel/task-1")
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "cancelling"
+    assert persisted == [
+        {"scope": scope, "queue_id": "queue-1", "attempt_id": "attempt-1"}
+    ]
