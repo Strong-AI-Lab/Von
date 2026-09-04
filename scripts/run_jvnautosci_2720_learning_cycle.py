@@ -3045,18 +3045,23 @@ class LiveCycleBackend:
             suppress_raw_llm_io_logging,
         )
 
-        client = get_llm_client(
-            client_type=FIXED_PROVIDER,
-            user_concept_id=scope["actor_user_id"],
-            org_concept_id=scope["organisation_concept_id"],
-        )
         try:
-            with suppress_raw_llm_io_logging():
-                response = client.generate(
-                    prompt=prompt,
-                    model=FIXED_MODEL_ID,
-                    llm_params=copy.deepcopy(dict(parameters)),
+            # The shared OpenAI client applies its execution-eligibility check
+            # at request time. Keep the trusted actor scope active across both
+            # factory initialisation and generation; passing scope only to the
+            # factory is insufficient for this process-global client.
+            with self._actor_scope(scope):
+                client = get_llm_client(
+                    client_type=FIXED_PROVIDER,
+                    user_concept_id=scope["actor_user_id"],
+                    org_concept_id=scope["organisation_concept_id"],
                 )
+                with suppress_raw_llm_io_logging():
+                    response = client.generate(
+                        prompt=prompt,
+                        model=FIXED_MODEL_ID,
+                        llm_params=copy.deepcopy(dict(parameters)),
+                    )
         except Exception as exc:
             raise LearningCycleError(
                 f"jvnautosci_2720_{purpose}_model_call_failed",

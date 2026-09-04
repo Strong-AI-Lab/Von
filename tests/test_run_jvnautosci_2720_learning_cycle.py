@@ -1654,6 +1654,61 @@ def test_live_luna_call_rejects_an_unobserved_provider_model(
     assert exc_info.value.reason_code == "jvnautosci_2720_model_identity_mismatch"
 
 
+def test_live_luna_call_keeps_trusted_actor_scope_active_through_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.backend.languagemodels import llm_interface
+    from src.backend.security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+
+    observed: list[tuple[str | None, str | None]] = []
+
+    def current_scope() -> tuple[str | None, str | None]:
+        return (
+            get_effective_user_concept_id(),
+            get_effective_organisation_concept_id(),
+        )
+
+    class _Client:
+        last_response_metadata: ClassVar[dict[str, Any]] = {
+            "provider": FIXED_PROVIDER,
+            "requested_model": FIXED_MODEL_ID,
+            "effective_model": FIXED_MODEL_ID,
+            "transport_metadata": {
+                "provider": FIXED_PROVIDER,
+                "requested_model": FIXED_MODEL_ID,
+                "effective_model": FIXED_MODEL_ID,
+                "provider_observed_model": FIXED_MODEL_ID,
+            },
+        }
+
+        def generate(self, **_kwargs: Any) -> str:
+            observed.append(current_scope())
+            return "{}"
+
+    def get_client(**_kwargs: Any) -> _Client:
+        observed.append(current_scope())
+        return _Client()
+
+    monkeypatch.setattr(llm_interface, "get_llm_client", get_client)
+
+    generation = LiveCycleBackend(repo_root=tmp_path).generate_luna(
+        "source-only prompt",
+        scope=_FIXED_SCOPE,
+        parameters=FIXED_MODEL_PARAMETERS,
+        purpose="candidate_formation",
+    )
+
+    assert generation.receipt["provider_observed_model"] == FIXED_MODEL_ID
+    assert observed == [
+        (_FIXED_SCOPE["actor_user_id"], _FIXED_SCOPE["organisation_concept_id"]),
+        (_FIXED_SCOPE["actor_user_id"], _FIXED_SCOPE["organisation_concept_id"]),
+    ]
+
+
 def test_live_experiment_acquires_its_model_client_before_starting_the_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
