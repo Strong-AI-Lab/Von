@@ -77,7 +77,7 @@ LEARNING_ADVICE_EXPERIMENT_OBSERVATION_SCHEMA_VERSION = (
     "learning_advice_experiment_observation.v1"
 )
 LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION = (
-    "learning_advice_blind_evaluation_input.v1"
+    "capability_choice_trial_evaluation_input.v1"
 )
 LEARNING_ADVICE_BLIND_EVALUATION_RESULT_SCHEMA_VERSION = (
     "learning_advice_blind_evaluation_result.v1"
@@ -1080,7 +1080,14 @@ def _tool_trace(tool_invocations: Any) -> list[dict[str, Any]]:
 
 
 def _bounded_tool_results(tool_invocations: Any) -> list[dict[str, Any]]:
-    """Project outcome-bearing tool evidence for evaluation, not persistence."""
+    """Project model-visible outcome evidence for evaluation, not persistence.
+
+    In particular, ``turn_read_evidence`` returns the slice the acting model
+    saw in ``content``.  Omitting that field leaves the blind evaluator unable
+    to distinguish a grounded answer from a fabrication even though the
+    acting model had the evidence.  The projection remains bounded and is not
+    copied into the persisted experiment observation.
+    """
 
     results: list[dict[str, Any]] = []
     for invocation in _mapping_sequence(tool_invocations)[:40]:
@@ -1099,6 +1106,13 @@ def _bounded_tool_results(tool_invocations: Any) -> list[dict[str, Any]]:
             "preview",
             "preview_truncated",
             "sha256",
+            "source_sha256",
+            "content",
+            "content_format",
+            "selected_value_kind",
+            "returned_chars",
+            "total_chars",
+            "has_more",
             "count",
             "total",
         ):

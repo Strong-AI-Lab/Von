@@ -13,10 +13,12 @@ from typing import Any
 import pytest
 
 from scripts.run_learning_advice_experiment import (
+    LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION,
     LEARNING_ADVICE_BLIND_EVALUATION_RESULT_SCHEMA_VERSION,
     LEARNING_ADVICE_EVALUATOR_MODEL_CALL_RECEIPT_SCHEMA_VERSION,
     LearningAdviceExperimentReadOnlyViolation,
     LearningAdviceExperimentRunnerError,
+    _bounded_tool_results,
     build_learning_advice_acting_support_identity,
     build_learning_advice_evaluator_model_config,
     build_learning_advice_experiment_run_binding,
@@ -72,6 +74,54 @@ _REPLAY_WORLD_SHA256 = "6" * 64
 _REPLAY_VISIBLE_TEXTS = [
     "A synthetic held-out message that is independent of the learning source."
 ]
+_MODEL_VISIBLE_RESULT_SLICE = "private evaluator-only model-visible result slice"
+
+
+def test_blind_input_identity_is_neutral_and_evaluator_keeps_model_visible_slice() -> None:
+    assert (
+        LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION
+        == "capability_choice_trial_evaluation_input.v1"
+    )
+    assert "advice" not in LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION
+    assert "experiment" not in LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION
+
+    projected = _bounded_tool_results(
+        [
+            {
+                "tool": "turn_read_evidence",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "status": "ok",
+                    "source_sha256": "a" * 64,
+                    "content": "the exact bounded slice shown to the acting model",
+                    "content_format": "json",
+                    "selected_value_kind": "object",
+                    "returned_chars": 49,
+                    "total_chars": 49,
+                    "has_more": False,
+                },
+            }
+        ]
+    )
+
+    assert projected == [
+        {
+            "tool_name": "turn_read_evidence",
+            "status": "ok",
+            "evidence": {
+                "success": True,
+                "status": "ok",
+                "source_sha256": "a" * 64,
+                "content": "the exact bounded slice shown to the acting model",
+                "content_format": "json",
+                "selected_value_kind": "object",
+                "returned_chars": 49,
+                "total_chars": 49,
+                "has_more": False,
+            },
+        }
+    ]
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -448,6 +498,7 @@ class _Harness:
                     "evidence": {
                         "success": successful,
                         "summary": response,
+                        "content": _MODEL_VISIBLE_RESULT_SLICE,
                         "count": 1 if successful else 0,
                     },
                 },
@@ -747,6 +798,13 @@ def test_runner_executes_persists_blindly_evaluates_and_pairs_all_24_trials() ->
     assert len(harness.ter_records) == 24
     assert len(harness.ter_persist_calls) == 24
     assert len(harness.evaluator_inputs) == 24
+    assert all(
+        any(
+            item["evidence"].get("content") == _MODEL_VISIBLE_RESULT_SLICE
+            for item in evaluator_input["bounded_tool_results"]
+        )
+        for evaluator_input in harness.evaluator_inputs
+    )
     assert len(harness.evaluator_executor_configs) == 24
     assert len(harness.authority_reads) == 50
     assert len(harness.provider_requests) == 24
@@ -813,6 +871,8 @@ def test_runner_executes_persists_blindly_evaluates_and_pairs_all_24_trials() ->
     assert _EVALUATOR_CONTENT not in encoded_result
     assert _RUBRIC_CONTENT not in encoded_result
     assert '"body"' not in encoded_result
+    assert _MODEL_VISIBLE_RESULT_SLICE not in encoded_result
+    assert _MODEL_VISIBLE_RESULT_SLICE not in json.dumps(harness.observations)
     assert all(
         observation["execution"]["runtime_attestation"]["status"]
         == "canonically_attested"

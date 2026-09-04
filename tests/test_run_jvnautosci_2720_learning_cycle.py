@@ -2654,7 +2654,7 @@ def test_rejected_resume_refuses_an_aborted_run_even_with_old_negative_evidence(
 def test_blind_evaluator_prompt_has_authority_and_no_trusted_receipt() -> None:
     prompt = build_blind_evaluator_prompt(
         blind_input={
-            "schema_version": "learning_advice_blind_evaluation_input.v1",
+            "schema_version": "capability_choice_trial_evaluation_input.v1",
             "prompt": "Summarise my messages.",
             "response": "A grounded summary.",
         },
