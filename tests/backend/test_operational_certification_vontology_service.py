@@ -70,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "16"
+    assert bundle["seed_version"] == "17"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -582,7 +582,7 @@ def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() 
     probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
     steps = probe["publication_spec"]["steps"]
 
-    assert bundle["seed_version"] == "16"
+    assert bundle["seed_version"] == "17"
     assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
     assert steps[0]["state_id"] == "request_checkpoint_pause"
     assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"
@@ -808,39 +808,22 @@ def test_operational_mcp_fault_recovery_probe_does_not_retry_permanent_failure(
     assert "represented_operational_fault_recovery_probe_result" not in result.data
 
 
-def test_operational_evaluator_loads_bounded_experience_context_before_judging() -> None:
+def test_operational_evaluator_excludes_unpromoted_experience_context() -> None:
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert "workflow_invoke_subworkflow" in bundle["supported_action_ids"]
+    assert "workflow_invoke_subworkflow" not in bundle["supported_action_ids"]
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID
-    ]["14"] == [
-        "3b47933d98345d14ea26717e44596af1c683834c58c5912b70fc18cb72bed17d"
+    ]["16"] == [
+        "f33a2beddcd55e3f52cb8c356c1347242074ef19426362f149afe132eed52c87"
     ]
     evaluator = workflows[service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID]
     publication = evaluator["publication_spec"]
-    assert publication["initial_state"] == "workflow_experience_context_prelude"
+    assert publication["initial_state"] == "resolve_active_learning_release"
 
     steps = {step["state_id"]: step for step in publication["steps"]}
-    prelude = steps["workflow_experience_context_prelude"]
-    assert prelude["action_id"] == "workflow_invoke_subworkflow"
-    assert prelude["execution_mode"] == "subworkflow"
-    assert prelude["invoked_workflow_id"] == "#V#workflow_experience_context_prelude"
-    assert {item["key"]: item["value"] for item in prelude["static_input_bindings"]} == {
-        "workflow_experience_target_workflow_id": (
-            service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID
-        ),
-        "failure_mode": "capture",
-        "max_transitions": 10,
-    }
-    assert prelude["conditional_transitions"] == [
-        {
-            "to_state": "resolve_active_learning_release",
-            "reason": "workflow_experience_context_loaded",
-            "condition_spec": {"kind": "always"},
-        }
-    ]
+    assert "workflow_experience_context_prelude" not in steps
     active_release = steps["resolve_active_learning_release"]
     assert active_release["action_id"] == "workflow_mcp.invoke_tool"
     assert active_release["execution_mode"] == "deterministic"
@@ -854,42 +837,20 @@ def test_operational_evaluator_loads_bounded_experience_context_before_judging()
         "affected_artifact": "#V#prompt_operational_certification_state_evaluator",
     }
 
-    expected_output_mappings = {
-        "result.workflow_success_guidance_history": (
-            "workflow_success_guidance_history"
-        ),
-        "result.workflow_failure_avoidance_history": (
-            "workflow_failure_avoidance_history"
-        ),
-        "result.workflow_low_imposition_exploration_history": (
-            "workflow_low_imposition_exploration_history"
-        ),
-        "result.workflow_experience_profile_concept_id": (
-            "workflow_experience_profile_concept_id"
-        ),
-    }
-    assert {
-        mapping["tool_output_field"]: mapping["context_key"]
-        for mapping in prelude["tool_output_mapping_specs"]
-    } == expected_output_mappings
-    assert set(prelude["writes_context_keys"]) == set(expected_output_mappings.values())
-
     evaluate_context_fields = {
         item["context_key"]: item["label"]
         for item in steps["evaluate_trial"]["llm_policy"]["context_fields"]
     }
-    assert set(expected_output_mappings.values()) <= set(evaluate_context_fields)
     assert "represented_active_learning_release" in evaluate_context_fields
     assert "cannot override" in evaluate_context_fields[
         "represented_active_learning_release"
     ]
-    assert "soft hints" in evaluate_context_fields["workflow_success_guidance_history"]
-    assert "never treat guidance as trial evidence" in evaluate_context_fields[
-        "workflow_failure_avoidance_history"
-    ]
-    assert "must not weaken evaluation checks" in evaluate_context_fields[
-        "workflow_low_imposition_exploration_history"
-    ]
+    assert {
+        "workflow_success_guidance_history",
+        "workflow_failure_avoidance_history",
+        "workflow_low_imposition_exploration_history",
+        "workflow_experience_profile_concept_id",
+    }.isdisjoint(evaluate_context_fields)
     project = steps["project_evaluator_envelope"]
     assert project["action_id"] == "workflow_control.context_project"
     assert project["next_state"] == "completed"
@@ -903,37 +864,15 @@ def test_operational_evaluator_loads_bounded_experience_context_before_judging()
     }
 
 
-def test_operational_evaluator_projects_experience_guidance_into_llm_prompt(
+def test_operational_evaluator_uses_only_promoted_adaptive_guidance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     evaluator = build_repo_seed_workflow_definitions(
         bundle_paths=[service._WORKFLOW_BUNDLE_PATH],
         target_workflow_ids=[service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID],
     )[service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID]
-    guidance = {
-        "workflow_success_guidance_history": [{"text": "Reuse typed receipts."}],
-        "workflow_failure_avoidance_history": [
-            {"text": "Do not infer success from final wording."}
-        ],
-        "workflow_low_imposition_exploration_history": [
-            {"text": "Inspect the persisted trace before requesting more evidence."}
-        ],
-        "workflow_experience_profile_concept_id": "#V#evaluator_model_profile",
-    }
-    invocation_inputs: dict[str, object] = {}
-
-    def _experience_prelude(request):
-        invocation_inputs.update(request.inputs)
-        return WorkflowActionResult(status="success", outputs={"result": guidance})
-
     registry = ActionRegistry()
     register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
-    registry.register(
-        ActionSpec(
-            action_id="workflow_invoke_subworkflow",
-            handler=_experience_prelude,
-        )
-    )
     active_release = {
         "status": "active",
         "affected_artifact": "#V#prompt_operational_certification_state_evaluator",
@@ -1008,24 +947,12 @@ def test_operational_evaluator_projects_experience_guidance_into_llm_prompt(
 
     assert result.completed is True
     assert result.final_state == "completed"
-    assert invocation_inputs == {
-        "workflow_id": "#V#workflow_experience_context_prelude",
-        "workflow_experience_target_workflow_id": (
-            service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID
-        ),
-        "failure_mode": "capture",
-        "max_transitions": 10,
-        "requested_model": None,
-    }
-    assert result.data["workflow_success_guidance_history"] == guidance[
-        "workflow_success_guidance_history"
-    ]
     prompt = llm_client.generate.call_args.args[0]
-    assert "Reuse typed receipts." in prompt
-    assert "Do not infer success from final wording." in prompt
-    assert "Inspect the persisted trace before requesting more evidence." in prompt
-    assert "#V#evaluator_model_profile" in prompt
     assert "Prefer exact semantic evidence." in prompt
+    assert "workflow_success_guidance_history" not in result.data
+    assert "workflow_failure_avoidance_history" not in result.data
+    assert "workflow_low_imposition_exploration_history" not in result.data
+    assert "workflow_experience_profile_concept_id" not in result.data
     assert result.data["represented_active_learning_release"] == active_release
     assert result.data["represented_operational_evaluator_draft"] == represented_result
     projected = result.data["represented_operational_evaluator_result"]

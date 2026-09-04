@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 
-_RETIRED_WORKFLOW_IDS = {
+_RETIRED_CONTROLLER_IDS = {
     "#V#conversation_turn_execution_workflow",
     "#V#turn_completion_gate_workflow",
     "#V#turn_prompt_context_adjudication_workflow",
 }
-_RETAINED_EXPLICIT_SUPPORT_WORKFLOW_ID = "#V#workflow_experience_context_prelude"
+_RETIRED_PRELUDE_ID = "#V#workflow_experience_context_prelude"
 _RETIRED_PROMPT_IDS = {
     "#V#prompt_turn_execution_expected_outcome_inference",
     "#V#turn_prompt_context_adjudication_prompt",
@@ -50,9 +50,7 @@ def test_support_prompt_bootstrap_excludes_universal_controller_prompts(
 
     report = service._ensure_conversation_turn_prompt_support()
 
-    retained_prompt_ids = {
-        prompt_spec.concept_id for prompt_spec in captured_specs
-    }
+    retained_prompt_ids = {prompt_spec.concept_id for prompt_spec in captured_specs}
     assert retained_prompt_ids
     assert retained_prompt_ids.isdisjoint(_RETIRED_PROMPT_IDS)
     assert report["success"] is True
@@ -87,9 +85,7 @@ def test_forced_support_seed_publishes_only_independently_useful_prompts(
         lambda **kwargs: seeded_ids.append(kwargs["subject_concept_id"]),
     )
 
-    report = service._ensure_conversation_turn_prompt_support(
-        force_prompt_seed=True
-    )
+    report = service._ensure_conversation_turn_prompt_support(force_prompt_seed=True)
 
     assert seeded_ids
     assert set(seeded_ids).isdisjoint(_RETIRED_PROMPT_IDS)
@@ -122,18 +118,24 @@ def test_bootstrap_targets_explicit_workflows_not_the_master_controller(
         "bootstrap_repo_seed_workflow_bundle",
         bootstrap_repo_seed_workflow_bundle,
     )
+    monkeypatch.setattr(
+        service,
+        "_ensure_retired_workflow_tombstones",
+        lambda: {"success": True, "workflow_id": _RETIRED_PRELUDE_ID},
+    )
 
     report = service.bootstrap_canonical_conversation_turn_workflows()
 
     target_ids = set(captured["target_workflow_ids"])
     assert target_ids
-    assert target_ids.isdisjoint(_RETIRED_WORKFLOW_IDS)
-    assert _RETAINED_EXPLICIT_SUPPORT_WORKFLOW_ID in target_ids
+    assert target_ids.isdisjoint(_RETIRED_CONTROLLER_IDS)
+    assert _RETIRED_PRELUDE_ID in target_ids
     assert set(report["workflow_ids"]) == target_ids
+    assert report["retirement"]["workflow_id"] == _RETIRED_PRELUDE_ID
     assert report["success"] is True
 
 
-def test_seed_bundle_no_longer_contains_the_controller_tower() -> None:
+def test_seed_bundle_replaces_experience_prelude_with_terminal_tombstone() -> None:
     import src.backend.services.conversation_turn_workflow_vontology_service as service
 
     raw_text = service._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8")
@@ -144,45 +146,159 @@ def test_seed_bundle_no_longer_contains_the_controller_tower() -> None:
         if isinstance(item, dict) and isinstance(item.get("workflow_id"), str)
     }
 
-    assert workflow_ids.isdisjoint(_RETIRED_WORKFLOW_IDS)
-    assert _RETAINED_EXPLICIT_SUPPORT_WORKFLOW_ID in workflow_ids
+    assert workflow_ids.isdisjoint(_RETIRED_CONTROLLER_IDS)
+    assert _RETIRED_PRELUDE_ID in workflow_ids
+    tombstone = next(
+        item
+        for item in bundle["workflows"]
+        if item.get("workflow_id") == _RETIRED_PRELUDE_ID
+    )
+    assert tombstone["publication_spec"] == {
+        "initial_state": "retired",
+        "steps": [{"state_id": "retired", "terminal": True}],
+    }
+    assert "get_text_relations" not in json.dumps(tombstone)
     for retired_prompt_id in _RETIRED_PROMPT_IDS:
         assert retired_prompt_id not in raw_text
 
 
-def test_retained_experience_prelude_is_an_explicit_bounded_read_workflow() -> None:
+def test_retired_prelude_lifecycle_is_idempotent(monkeypatch) -> None:
+    import src.backend.services.conversation_turn_workflow_vontology_service as service
+    import src.backend.services.workflow_discovery_service as discovery_service
+
+    expected = dict(service._RETIRED_WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_LIFECYCLE)
+    invalidations: list[bool] = []
+    monkeypatch.setattr(
+        service,
+        "resolve_workflow_publication_lifecycle",
+        lambda _workflow_id: (expected, "concept_data"),
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_workflow_publication_lifecycle",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected write")),
+    )
+    monkeypatch.setattr(
+        discovery_service,
+        "invalidate_workflow_discovery_executability_caches",
+        lambda: invalidations.append(True),
+    )
+
+    report = service._ensure_retired_workflow_tombstones()
+
+    assert report["success"] is True
+    assert report["updated"] is False
+    assert report["lifecycle"] == expected
+    assert invalidations == [True]
+
+
+def test_retired_prelude_lifecycle_is_written_and_read_back(monkeypatch) -> None:
+    import src.backend.services.conversation_turn_workflow_vontology_service as service
+    import src.backend.services.workflow_discovery_service as discovery_service
+
+    expected = dict(service._RETIRED_WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_LIFECYCLE)
+    resolved = iter(
+        [
+            ({"phase": "published", "published": True}, "concept_data"),
+            (expected, "concept_data"),
+        ]
+    )
+    writes: list[dict[str, object]] = []
+    invalidations: list[bool] = []
+    monkeypatch.setattr(
+        service,
+        "resolve_workflow_publication_lifecycle",
+        lambda _workflow_id: next(resolved),
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_workflow_publication_lifecycle",
+        lambda **kwargs: writes.append(kwargs) or expected,
+    )
+    monkeypatch.setattr(
+        discovery_service,
+        "invalidate_workflow_discovery_executability_caches",
+        lambda: invalidations.append(True),
+    )
+
+    report = service._ensure_retired_workflow_tombstones()
+
+    assert report["success"] is True
+    assert report["updated"] is True
+    assert writes == [{"workflow_id": _RETIRED_PRELUDE_ID, **expected}]
+    assert invalidations == [True]
+    assert report["lifecycle"] == expected
+
+
+def test_bootstrap_fails_closed_when_retirement_readback_fails(monkeypatch) -> None:
     import src.backend.services.conversation_turn_workflow_vontology_service as service
 
-    bundle = json.loads(service._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
-    prelude = next(
-        item
-        for item in bundle["workflows"]
-        if item.get("workflow_id") == _RETAINED_EXPLICIT_SUPPORT_WORKFLOW_ID
+    monkeypatch.setattr(
+        service,
+        "_ensure_conversation_turn_prompt_support",
+        lambda **_kwargs: {"success": True},
     )
-    spec = prelude["publication_spec"]
-    steps = {
-        step["state_id"]: step
-        for step in spec["steps"]
-        if isinstance(step, dict) and isinstance(step.get("state_id"), str)
-    }
+    monkeypatch.setattr(
+        service,
+        "bootstrap_repo_seed_workflow_bundle",
+        lambda **_kwargs: {
+            "publication": {"counts": {"errors": 0}},
+            "typed_workflow_ids": [],
+            "typed_step_ids": [],
+            "validation_by_workflow_id": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_retired_workflow_tombstones",
+        lambda: {"success": False, "error": "readback mismatch"},
+    )
 
-    assert spec["initial_state"] == "prepare_profile"
-    assert {
-        steps[state_id]["action_id"]
-        for state_id in (
-            "read_success_guidance",
-            "read_failure_guidance",
-            "read_exploration_guidance",
-        )
-    } == {"get_text_relations"}
-    assert all(
-        steps[state_id]["static_input_bindings"][1] == {
-            "key": "limit",
-            "value": 5,
-        }
-        for state_id in (
-            "read_success_guidance",
-            "read_failure_guidance",
-            "read_exploration_guidance",
-        )
+    report = service.bootstrap_canonical_conversation_turn_workflows()
+
+    assert report["success"] is False
+    assert report["retirement"]["error"] == "readback mismatch"
+
+
+def test_bootstrap_does_not_retire_unknown_live_prelude_drift(monkeypatch) -> None:
+    import src.backend.services.conversation_turn_workflow_vontology_service as service
+
+    monkeypatch.setattr(
+        service,
+        "_ensure_conversation_turn_prompt_support",
+        lambda **_kwargs: {"success": True},
     )
+    monkeypatch.setattr(
+        service,
+        "bootstrap_repo_seed_workflow_bundle",
+        lambda **_kwargs: {
+            "publication": {
+                "counts": {"errors": 1},
+                "errors_by_workflow_id": {
+                    _RETIRED_PRELUDE_ID: (
+                        "live_authority_requires_explicit_migration"
+                    )
+                },
+            },
+            "typed_workflow_ids": [],
+            "typed_step_ids": [],
+            "validation_by_workflow_id": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_retired_workflow_tombstones",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected lifecycle write")),
+    )
+
+    report = service.bootstrap_canonical_conversation_turn_workflows()
+
+    assert report["success"] is False
+    assert report["retirement"] == {
+        "success": False,
+        "workflow_id": _RETIRED_PRELUDE_ID,
+        "updated": False,
+        "skipped": True,
+        "error": "retired_workflow_tombstone_not_materialised",
+        "publication_error": "live_authority_requires_explicit_migration",
+    }

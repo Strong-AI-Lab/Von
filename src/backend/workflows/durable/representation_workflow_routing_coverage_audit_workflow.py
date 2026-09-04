@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from ...services.concept_service import ConceptNotFoundError, get_concept_by_concept_id
@@ -764,18 +764,6 @@ def build_representation_workflow_routing_coverage_audit_test_definition() -> (
                                 {
                                     "context_key": "representation_routing_audit_report",
                                     "label": "Audit evidence report",
-                                },
-                                {
-                                    "context_key": "workflow_success_guidance_history",
-                                    "label": "Historical successful-run guidance",
-                                },
-                                {
-                                    "context_key": "workflow_failure_avoidance_history",
-                                    "label": "Historical failure-avoidance guidance",
-                                },
-                                {
-                                    "context_key": "workflow_low_imposition_exploration_history",
-                                    "label": "Low-imposition exploration guidance",
                                 },
                             ],
                         },

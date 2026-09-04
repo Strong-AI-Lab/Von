@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ..workflows.durable.startup import get_instance_manager
 from .episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
     EPISODE_EVALUATION_PROMPT_LINK_PREDICATE,
@@ -14,8 +15,6 @@ from .episode_evaluation_workflow_contracts import (
     EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
     EPISODE_GROUNDED_HELPFULNESS_PROMPT_LINK_PREDICATE,
     EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID,
-    EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID,
-    EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_LINK_PREDICATE,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_LINK_PREDICATE,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
@@ -40,7 +39,6 @@ from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 from .workflow_vontology_materialisation_helpers import (
     suspend_event_workflow_integration,
 )
-from ..workflows.durable.startup import get_instance_manager
 
 _MANAGED_BY = "episode_evaluation_workflow_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-1605"
@@ -67,12 +65,6 @@ _GROUNDED_HELPFULNESS_PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "episode_grounded_helpfulness_prompt_seed.md"
-)
-_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "episode_workflow_experience_guidance_prompt_seed.md"
 )
 _SELF_IMPROVEMENT_PROPOSAL_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -109,17 +101,6 @@ _PROMPT_CONCEPT_SPECS = (
             "Canonical LLM prompt for scoring grounded helpfulness and "
             "evidence-answer consistency from the shared episode evidence "
             "bundle."
-        ),
-    },
-    {
-        "concept_id": EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID,
-        "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
-        "predicate": EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_LINK_PREDICATE,
-        "asset_path": _WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_SEED_ASSET_PATH,
-        "name": "Episode workflow experience guidance prompt",
-        "description": (
-            "Canonical LLM prompt for inducing bounded workflow experience "
-            "guidance from post-run critic evidence."
         ),
     },
     {
@@ -237,22 +218,27 @@ def _ensure_episode_evaluation_prompt_support(
 
 
 def _ensure_episode_evaluation_event_bindings() -> dict[str, Any]:
+    from .workflow_event_integration_service import (
+        episode_evaluation_autotrigger_enabled,
+    )
+
     manager = get_instance_manager()
     created_count = 0
     updated_count = 0
     bindings: list[dict[str, Any]] = []
 
-    # JVNAUTOSCI-2507: the workflow.instance_terminal trigger is a recursive
-    # firehose — every workflow instance terminal (including episode_evaluation's
-    # OWN terminals) re-fires episode evaluation, so a single event self-sustains
-    # into an unbounded backlog (138k instances observed live, amplified by
-    # foreign workers on the shared cluster). It is bootstrapped DISABLED until a
-    # self-exclusion condition + throttling exist; the per-turn completion-gate
-    # trigger remains the supported entry point. replace_existing keeps the
-    # disabled state self-healing across restarts (otherwise bootstrap would
-    # re-enable it and the storm would return).
+    # Both broad automatic entry points remain represented but default off. The
+    # terminal trigger can recursively amplify evaluation, while the live
+    # evaluation cohort has not established a useful successful baseline or a
+    # production completion-gate caller.
+    # Explicit critic invocation remains available. Deliberate environment
+    # opt-in enables only the bounded completion-gate route; the recursive
+    # terminal route remains off. replace_existing keeps this conservative
+    # default self-healing across restarts.
     binding_enablement = {
-        EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED: True,
+        EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED: (
+            episode_evaluation_autotrigger_enabled()
+        ),
         EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL: False,
     }
     for event_type, binding_enabled in binding_enablement.items():

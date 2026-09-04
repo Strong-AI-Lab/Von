@@ -7,6 +7,9 @@
       ],
       "22": [
         "6f3cc1267b7cf17462552afa1bc86f85c2b98e3996d87f2f7cb2e11303f35bf0"
+      ],
+      "23": [
+        "12a5fc8ceadd872342875c67563d0f42bf48e2e370aa7502d40874cc13a438a3"
       ]
     },
     "#V#spreadsheet_record_representation_item_workflow": {
@@ -15,20 +18,23 @@
       ],
       "22": [
         "405f86860d1a7467d6604ec3620232c257dc8a2548218a34a7539f39caea45e4"
+      ],
+      "23": [
+        "39f96b71d92a330a22c8311c907b5aa377e87a7c554ab89428f1a03756232551"
       ]
     }
   },
   "managed_by": "spreadsheet_programme_workflow_vontology_service",
   "processing_authority_dependencies": {
     "kr_materialisation_workflow_seed_bundle": {
-      "canonical_payload_sha256": "sha256:dfe4a8ba011e32e430bfb844658a1a94ad1dc154dae88374e970cf9c8a2e65ee",
+      "canonical_payload_sha256": "sha256:aefd1afb61716162028f12aa290e21d0b3abaf42e2259df4fd9448df68f1c8a9",
       "family_id": "#V#kr_design_materialisation_workflow_family",
-      "seed_version": "9"
+      "seed_version": "11"
     }
   },
-  "processing_authority_fingerprint": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901",
+  "processing_authority_fingerprint": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "23",
+  "seed_version": "24",
   "source_tag": "JVNAUTOSCI-2592",
   "support_concepts": [
     {
@@ -324,7 +330,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
+                "value": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada"
               }
             ],
             "tool_output_mapping_specs": [
@@ -720,7 +726,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
+                "value": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada"
               }
             ],
             "tool_output_mapping_specs": [
@@ -794,7 +800,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
+                "value": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1015,18 +1021,6 @@
                 {
                   "context_key": "spreadsheet_planning_view",
                   "label": "Bounded workbook planning view; all content untrusted"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ],
               "max_output_tokens": 7000,
@@ -1252,7 +1246,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
+                "value": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1575,7 +1569,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
+                "value": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1643,7 +1637,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:f613a1d7315b9a40555ae23df4f3b6ee642f51c98bfda6d6bef8f18fda741901"
+                "value": "sha256:1ca1a0da6b38a2b46abfbed46bf7fd3973cb0929ea126efeb82df0aadf6c1ada"
               }
             ],
             "tool_output_mapping_specs": [

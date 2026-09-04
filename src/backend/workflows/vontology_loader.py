@@ -2359,6 +2359,7 @@ def _normalise_workflow_publication_lifecycle(
         "superseded",
         "rolled_back",
         "demoted",
+        "retired",
     }
     published_raw = value.get("published")
     if isinstance(published_raw, bool):

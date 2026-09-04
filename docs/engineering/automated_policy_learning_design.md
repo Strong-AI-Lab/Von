@@ -2,7 +2,7 @@
 
 **Status**: Proposed design guidance
 **Date**: 2026-04-04
-**Updated**: 2026-04-25
+**Updated**: 2026-09-04
 
 ## 1. Purpose
 
@@ -33,24 +33,46 @@ The automated policy learning framework consists of three primary phases:
 
 1. **Collection & Telemetry**: Gathering high-fidelity TERs and explicit validation signals (user feedback, test results, execution success).
 2. **Analysis & Induction**: Parsing TERs offline or asynchronously to identify patterns of failure, successful workarounds, and capability gaps.
-3. **Policy Update**: Automatically generating and applying updates to authoritative policy surfaces (guidelines, prompts, routers).
+3. **Policy Proposal and Release**: Generate evidence-backed candidates, test
+   them independently, and update an authoritative policy surface only through
+   its scoped promotion and read-back path.
 
 ## 3. Mechanisms for Policy Update
 
 ### 3.1 Guideline Induction
 
-Instead of humans manually writing new rules in `AGENTS.md` for every edge case, the system will induce guidelines from experience.
+Instead of humans manually writing new rules in `AGENTS.md` for every edge
+case, the system may induce candidate guidelines from experience.
 
 - **Pattern Recognition**: An offline evaluator agent analyzes TERs to find recurring failure modes.
 - **Guideline Proposal**: The evaluator proposes a new, concise guideline to prevent the failure.
 - **Vontology Integration**: Approved guidelines are materialised into Vontology as contextual policy objects, retrieved dynamically when relevant context is encountered.
 
+For textual guidance, “approved” is not implied by induction. The
+[represented-advice design](represented_advice_design.md) owns the proposed
+semantics, applicability, projection, retraction, and ratchet test: an induced
+item remains a defeasible candidate until evidence proportionate to its scope
+supports activation.
+
+The September 2026 Phase 0 audit found the existing per-episode
+workflow-experience guidance path dormant and its only direct prelude callers
+on proposal, evaluation, or release paths. That repository substrate was retired
+rather than promoted into this architecture; the old prelude identity remains
+only as an unpublished, actionless terminal tombstone so bootstrap can replace
+an older live graph safely. This design therefore does not claim a current
+textual-guidance producer or active advice loop.
+
 ### 3.2 Retrieval Strategy Updates
 
-Retrieval policies will be dynamically adjusted based on usage patterns.
+Retrieval policies may be adjusted from measured usage and outcome patterns.
 
-- **Relevance Feedback**: Track which retrieved memory fragments were actually utilised in the agent's final reasoning.
-- **Weight Adjustment**: Automatically down-weight or archive noise, and boost the retrieval scores of high-utility structures (e.g., specific graph traversals or Vontology predicates).
+- **Relevance Evidence**: Record which fragments were projected or explicitly
+  referenced and the resulting outcome. Do not claim actual model use or causal
+  benefit without an independent comparison.
+- **Weight Adjustment**: Propose down-weighting or archiving noise and boosting
+  useful structures for evaluation. Numeric retrieval/routing adaptation is a
+  specialised policy surface, not represented textual advice merely because it
+  uses the same evidence or release machinery.
 
 ### 3.3 Dynamic Routing Adjustment
 
@@ -195,6 +217,11 @@ Policy updates should move through a promotion pipeline:
 6. record expiry or retest requirements for each certification;
 7. retain rollback to the previous actor policy version.
 
+This is the full path for a consequential learned policy release, not a
+mandatory ceremony for every narrow soft hint. Represented advice should use
+the lightest lifecycle that preserves its actual scope, provenance, evaluation,
+and retraction needs.
+
 High-impact changes, such as replacing GPT-5.5 with a cheaper model for an
 important workflow stage, should require human review until the evaluation
 programme has strong calibration. Low-impact changes, such as demoting a model
@@ -246,9 +273,14 @@ can safely update represented model-use policy.
 
 ## 11. Safety and Governance
 
-Automated policy learning requires strict governance to prevent catastrophic forgetting or policy degradation.
+Automated policy learning requires governance proportionate to the policy's
+scope and consequence to prevent catastrophic forgetting or policy
+degradation.
 
-- **Evaluation Gates**: All induced guidelines and policy updates must pass a regression suite before being promoted to production.
+- **Evaluation Gates**: Induced guidelines and policy updates need evidence
+  proportionate to the claim before production promotion. A broad or
+  consequential policy warrants regression evidence; a narrow reversible hint
+  may use a smaller comparison and direct rollback.
 - **Human-in-the-Loop Thresholds**: High-impact policy changes require explicit human review and approval.
 - **Rollback Capabilities**: Every policy update must be versioned, allowing the system to instantly revert to a previous state if performance degrades.
 
@@ -258,9 +290,14 @@ Automated policy learning requires strict governance to prevent catastrophic for
 - `docs/engineering/prompt_programs_and_model_routing_playbook.md`
 - `docs/engineering/agent_evaluation_and_research_uptake.md`
 - `docs/engineering/agent_memory_and_enduring_knowledge.md`
+- `docs/engineering/represented_advice_design.md`
 - `docs/engineering/real_path_server_replay_and_telemetry_loop.md`
 - `docs/engineering/jvnautosci_1964_evaluator_architecture_2026-04-23.md`
 
 ## 13. Conclusion
 
-Transitioning to automated policy learning ensures that Von's capabilities compound over time. By systematically learning from its own execution history, Von will evolve from a statically prompted system into a continuously improving, self-optimising neuro-symbolic assistant.
+Automated policy learning could let Von's capabilities compound, but only when
+candidate changes improve real tasks over simpler baselines, remain independent
+of their own evaluation and authority, and are cheap to revise, retract, or
+remove. Without that evidence and subtraction path, the same loop would compound
+policy debt rather than capability.

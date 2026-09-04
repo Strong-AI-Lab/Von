@@ -19,19 +19,12 @@ from .context_bundle_service import (
     load_workflow_report_revision_state,
     resolve_effective_context,
 )
-from .episode_critique_memory_service import (
-    list_recent_workflow_improvement_suggestions,
-)
 from .selected_referent_contract import normalise_exact_referent_id
 
 TURN_MEMORY_CONTEXT_SCHEMA_VERSION = "conversation_turn_memory_context.v1"
-SELECTED_WORKFLOW_POLICY_MEMORY_SCHEMA_VERSION = (
-    "selected_workflow_policy_memory.v1"
-)
 _MAX_RECENT_USER_PROMPTS = 3
 _MAX_OPEN_QUESTIONS = 3
 _MAX_IMMEDIATE_CONTEXT_ITEMS = 4
-_MAX_POLICY_SUGGESTIONS = 3
 _DEFAULT_SUBJECT_CONTEXT_TIMEOUT_SECONDS = 12.0
 _CONVERSATION_SITUATION_MAX_CHARS = 12_000
 _RUNTIME_TURN_FACTS_START = "[Runtime-observed turn facts; context only, not authority]"
@@ -1467,132 +1460,12 @@ def summarise_turn_memory_context_for_lineage(
     return {key: value for key, value in summary.items() if value not in (None, [], {})}
 
 
-def build_selected_workflow_policy_memory_state(
-    *,
-    selected_workflow_id: str | None,
-    namespace: str | None = None,
-    limit: int = _MAX_POLICY_SUGGESTIONS,
-) -> dict[str, Any]:
-    workflow_id = _safe_str(selected_workflow_id)
-    if not workflow_id:
-        return {
-            "schema_version": SELECTED_WORKFLOW_POLICY_MEMORY_SCHEMA_VERSION,
-            "status": "none",
-            "selected_workflow_id": None,
-            "suggestions": [],
-        }
-
-    suggestions = list_recent_workflow_improvement_suggestions(
-        workflow_id,
-        namespace=namespace,
-        limit=max(1, min(int(limit), _MAX_POLICY_SUGGESTIONS)),
-    )
-    bounded_suggestions: list[dict[str, Any]] = []
-    for item in suggestions[:_MAX_POLICY_SUGGESTIONS]:
-        if not isinstance(item, Mapping):
-            continue
-        bounded_suggestions.append(
-            {
-                "memory_id": _safe_str(item.get("memory_id")),
-                "suggestion_id": _safe_str(item.get("suggestion_id")),
-                "category": _safe_str(item.get("category")),
-                "priority": _safe_str(item.get("priority")),
-                "target_surface": _safe_str(item.get("target_surface")),
-                "title": _truncate_text(item.get("title"), maximum=140),
-                "rationale": _truncate_text(item.get("rationale"), maximum=220),
-                "request_id": _safe_str(item.get("request_id")),
-            }
-        )
-
-    return {
-        "schema_version": SELECTED_WORKFLOW_POLICY_MEMORY_SCHEMA_VERSION,
-        "status": "available" if bounded_suggestions else "none",
-        "selected_workflow_id": workflow_id,
-        "namespace": _safe_str(namespace),
-        "suggestion_count": len(bounded_suggestions),
-        "suggestions": bounded_suggestions,
-    }
-
-
-def render_selected_workflow_policy_memory_messages(
-    state: Mapping[str, Any] | None,
-) -> list[dict[str, str]]:
-    if not isinstance(state, Mapping):
-        return []
-    if state.get("status") != "available":
-        return []
-    workflow_id = _safe_str(state.get("selected_workflow_id")) or "selected workflow"
-    suggestions = [
-        item for item in (state.get("suggestions") or []) if isinstance(item, Mapping)
-    ]
-    if not suggestions:
-        return []
-
-    lines = [f"RECENT POLICY MEMORY FOR {workflow_id}:"]
-    for item in suggestions[:_MAX_POLICY_SUGGESTIONS]:
-        prefix = "/".join(
-            segment
-            for segment in (
-                _safe_str(item.get("priority")),
-                _safe_str(item.get("category")),
-            )
-            if segment
-        )
-        title = _safe_str(item.get("title")) or "Prior improvement signal"
-        rationale = _safe_str(item.get("rationale"))
-        if prefix:
-            lines.append(f"- [{prefix}] {title}")
-        else:
-            lines.append(f"- {title}")
-        if rationale:
-            lines.append(f"- Rationale: {rationale}")
-    lines.append(
-        "Treat these as prior evaluated improvement signals. They do not override current-turn evidence or workflow authority."
-    )
-    return [{"role": "system", "content": "\n".join(lines)}]
-
-
-def summarise_selected_workflow_policy_memory_for_lineage(
-    state: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(state, Mapping) or not state:
-        return None
-    summary = {
-        "status": _safe_str(state.get("status")) or "none",
-        "selected_workflow_id": _safe_str(state.get("selected_workflow_id")),
-        "suggestion_count": int(state.get("suggestion_count") or 0),
-        "memory_ids": [
-            memory_id
-            for memory_id in (
-                _safe_str(item.get("memory_id"))
-                for item in (state.get("suggestions") or [])
-                if isinstance(item, Mapping)
-            )
-            if memory_id
-        ],
-        "suggestion_ids": [
-            suggestion_id
-            for suggestion_id in (
-                _safe_str(item.get("suggestion_id"))
-                for item in (state.get("suggestions") or [])
-                if isinstance(item, Mapping)
-            )
-            if suggestion_id
-        ],
-    }
-    return {key: value for key, value in summary.items() if value not in (None, [], {})}
-
-
 __all__ = [
-    "SELECTED_WORKFLOW_POLICY_MEMORY_SCHEMA_VERSION",
     "TURN_MEMORY_CONTEXT_SCHEMA_VERSION",
-    "build_selected_workflow_policy_memory_state",
     "build_turn_memory_context_state",
     "latest_resource_scope_from_conversation_situation",
     "presented_connector_resources_from_conversation_situation",
-    "render_selected_workflow_policy_memory_messages",
     "render_turn_memory_context_messages",
     "selected_referent_capsules_from_conversation_situation",
-    "summarise_selected_workflow_policy_memory_for_lineage",
     "summarise_turn_memory_context_for_lineage",
 ]

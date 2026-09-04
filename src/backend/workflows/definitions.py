@@ -28,9 +28,6 @@ TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID = (
     "#V#turn_prompt_context_adjudication_workflow"
 )
 CONVERSATION_TURN_EXECUTION_WORKFLOW_ID = "#V#conversation_turn_execution_workflow"
-WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID = (
-    "#V#workflow_experience_context_prelude"
-)
 WORKFLOW_MODEL_SELECTION_WORKFLOW_ID = "#V#workflow_model_selection_workflow"
 
 ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#arxiv_paper_representation_workflow"

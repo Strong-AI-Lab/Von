@@ -175,6 +175,10 @@ def test_lifecycle_allows_published_workflow_with_pending_review_proposal() -> N
             "routing_eligible": True,
             "rollout_state": "superseded",
         },
+        {
+            "schema_version": "workflow_publication_lifecycle.v1",
+            "phase": "retired",
+        },
     ],
 )
 def test_lifecycle_blocks_explicitly_disabled_or_non_current_workflow(

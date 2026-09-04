@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -12,7 +13,6 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_WORKFLOW_ID,
     EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
     EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID,
-    EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
     EPISODE_SELF_IMPROVEMENT_PROPOSAL_PROMPT_CONCEPT_ID,
@@ -22,37 +22,19 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
     EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
 )
 from src.backend.services.episode_evaluation_workflow_vontology_service import (
+    _EPISODE_REPO_SEED_ASSET_PATH,
     _ensure_episode_evaluation_prompt_support,
     bootstrap_canonical_episode_evaluation_workflow,
 )
-from src.backend.services import concept_service
 from src.backend.services.episode_self_improvement_profile_vontology_service import (
     DEFAULT_EPISODE_SELF_IMPROVEMENT_PROFILE_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROFILE_LINK_PREDICATE,
 )
 from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.workflows.durable.startup import get_instance_manager
-from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
-from src.backend.integrations.internal_mcp import (
-    InternalMCPGateway,
-    InternalMCPTransport,
-    build_default_catalogue,
+from src.backend.workflows.vontology_loader import (
+    load_workflow_definition_from_vontology,
 )
-
-
-_WORKFLOW_EXPERIENCE_GUIDANCE_PREDICATES = {
-    "#V#hasWorkflowSuccessfulRunGuidanceText",
-    "#V#hasWorkflowFailureAvoidanceGuidanceText",
-    "#V#hasWorkflowNextRunExplorationGuidanceText",
-}
-
-
-def _build_gateway() -> InternalMCPGateway:
-    return InternalMCPGateway(
-        catalogue=build_default_catalogue(),
-        transport=InternalMCPTransport(),
-        enabled=True,
-    )
 
 
 def _state_with_suffix(definition: Any, suffix: str) -> Any:
@@ -66,13 +48,38 @@ def _state_with_suffix(definition: Any, suffix: str) -> Any:
     )
 
 
+def test_episode_bundle_declares_reviewed_seed_3_migration() -> None:
+    bundle = json.loads(_EPISODE_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+
+    assert bundle["seed_version"] == "4"
+    assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
+        "#V#episode_evaluation_workflow": {
+            "3": [
+                "4a793a8207aa3345fde93a0315ab6cfae12c3fe0b709f6801795a9cc282a6117"
+            ]
+        },
+        "#V#episode_grounded_helpfulness_critic_workflow": {
+            "3": [
+                "e2c09afc711c675a7238e02f1537e38ae59fb33a2fe2b6e37aaffb312567f8e3"
+            ]
+        },
+    }
+
+
 @pytest.fixture
 def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.delenv("VON_EPISODE_EVALUATION_AUTOTRIGGER_ENABLE", raising=False)
+    monkeypatch.delenv(
+        "VON_WORKFLOW_INTROSPECTION_AUTOTRIGGER_ENABLE",
+        raising=False,
+    )
 
     from src.backend.db.mongo_client import get_db
+    from src.backend.workflows import (
+        workflow_concept_authority_service as authority_service,
+    )
     from src.backend.workflows.durable import instance_manager
-    from src.backend.workflows import workflow_concept_authority_service as authority_service
 
     db = get_db()
     if db is not None:
@@ -142,20 +149,30 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         }
     )
     assert grounded_action_ids == ["llm.action"]
-    assert _state_with_suffix(definition, "prepare_workflow_experience_profile") is not None
-    guidance_state = _state_with_suffix(definition, "induce_workflow_experience_guidance")
-    assert guidance_state is not None
-    assert _state_with_suffix(definition, "write_exploration_guidance_relation") is not None
-    guidance_action = guidance_state.actions[0]
-    assert guidance_action.action_id == "llm.action"
-    assert guidance_action.prompt_contract is not None
-    assert guidance_action.prompt_contract.get("requested_prompt_concept_ids") == [
-        EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID
-    ]
-    guidance_policy = guidance_action.llm_policy or {}
-    assert "no more than 280 characters" in str(
-        guidance_policy.get("response_contract_text") or ""
+    persist_state = _state_with_suffix(definition, "persist_assessment")
+    assert persist_state is not None
+    assert any(
+        str(transition.to_state).endswith("_decide_maintenance_follow_up")
+        for transition in persist_state.transitions
     )
+    for retired_state in (
+        "prepare_workflow_experience_profile",
+        "induce_workflow_experience_guidance",
+        "write_exploration_guidance_relation",
+    ):
+        assert _state_with_suffix(definition, retired_state) is None
+    for state in (definition, grounded_definition):
+        context_keys = {
+            str(field.get("context_key") or "")
+            for workflow_state in state.states.values()
+            for action in workflow_state.actions
+            for field in ((action.llm_policy or {}).get("context_fields") or [])
+        }
+        assert not {
+            "workflow_success_guidance_history",
+            "workflow_failure_avoidance_history",
+            "workflow_low_imposition_exploration_history",
+        } & context_keys
     proposal_action_ids = sorted(
         {
             action.action_id
@@ -209,21 +226,6 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert isinstance(grounded_prompt_text, str)
     assert "grounded helpfulness" in grounded_prompt_text.lower()
     assert "answer-support evidence" in grounded_prompt_text.lower()
-    guidance_prompt_rows = get_texts_for_concept(
-        EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID,
-        predicate="hasContent",
-        limit=5,
-    )
-    guidance_prompt_text = next(
-        ((row or {}).get("text") for row in guidance_prompt_rows if (row or {}).get("text")),
-        "",
-    )
-    assert "low-imposition probe" in guidance_prompt_text
-    assert "workflow_experience_guidance_induction.v1" in guidance_prompt_text
-    assert "no more than 280 characters" in guidance_prompt_text
-    assert "Do not quote, copy, or summarise the full historical guidance entries" in (
-        guidance_prompt_text
-    )
     promotion_prompt_rows = get_texts_for_concept(
         EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -241,15 +243,15 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     )
 
     manager = get_instance_manager()
-    turn_bindings = manager.list_event_bindings(
+    enabled_turn_bindings = manager.list_event_bindings(
         event_type=EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
         enabled_only=True,
         limit=10,
     )
-    # JVNAUTOSCI-2507: the completion-gate trigger stays enabled, but the
-    # recursive workflow.instance_terminal trigger is bootstrapped DISABLED, so
-    # it must NOT appear among enabled bindings — while still existing (disabled)
-    # so it remains discoverable/re-enableable once properly gated.
+    all_turn_bindings = manager.list_event_bindings(
+        event_type=EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
+        limit=10,
+    )
     enabled_terminal_bindings = manager.list_event_bindings(
         event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
         enabled_only=True,
@@ -259,8 +261,9 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
         limit=10,
     )
-    assert any(
-        binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID for binding in turn_bindings
+    assert not any(
+        binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
+        for binding in enabled_turn_bindings
     )
     assert not any(
         binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
@@ -273,13 +276,43 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     ]
     assert episode_terminal_bindings
     assert episode_terminal_bindings[0].enabled is False
+    episode_turn_bindings = [
+        binding
+        for binding in all_turn_bindings
+        if binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
+    ]
+    assert episode_turn_bindings
+    assert episode_turn_bindings[0].enabled is False
 
-    for predicate_id in _WORKFLOW_EXPERIENCE_GUIDANCE_PREDICATES:
-        doc = concept_service.get_concept_by_concept_id(predicate_id)
-        assert doc is not None
-        assert not (doc.get("metadata") or {}).get("virtual")
-        relationships = doc.get("relationships") or {}
-        assert "#V#predicate" in relationships.get("is_an_instance_of", [])
+
+def test_completion_gate_binding_honours_explicit_autotrigger_opt_in(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_AUTOTRIGGER_ENABLE", "1")
+
+    report = bootstrap_canonical_episode_evaluation_workflow()
+
+    assert report.get("success") is True
+    manager = get_instance_manager()
+    turn_bindings = manager.list_event_bindings(
+        event_type=EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
+        enabled_only=True,
+        limit=10,
+    )
+    terminal_bindings = manager.list_event_bindings(
+        event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+        enabled_only=True,
+        limit=10,
+    )
+    assert any(
+        binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
+        for binding in turn_bindings
+    )
+    assert not any(
+        binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
+        for binding in terminal_bindings
+    )
 
 
 def test_episode_prompt_support_seeds_content_from_repo_asset(
@@ -288,7 +321,7 @@ def test_episode_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_episode_evaluation_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 5
+    assert report.get("seeded_prompt_count") == 4
     prompt_content_rows = get_texts_for_concept(
         EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -351,64 +384,3 @@ def test_episode_prompt_support_force_prompt_seed_refreshes_existing_content(
     assert isinstance(prompt_text, str)
     assert prompt_text != "stale prompt text"
     assert "improvement_suggestions" in prompt_text
-
-
-def test_workflow_experience_guidance_predicates_write_via_gateway(
-    _reset_mock_db: Any,
-) -> None:
-    bootstrap_canonical_episode_evaluation_workflow()
-    concept_service.create_concept(
-        name="Workflow experience profile test fixture",
-        concept_id="#V#workflow_experience_profile_test_fixture",
-        parent_concept_ids=["#V#workflow_llm_experience_profile"],
-        create_as_instance=True,
-    )
-    gateway = _build_gateway()
-
-    for index, predicate_id in enumerate(
-        sorted(_WORKFLOW_EXPERIENCE_GUIDANCE_PREDICATES),
-        start=1,
-    ):
-        payload = gateway.invoke(
-            "upsert_text_relation",
-            {
-                "concept_id": "#V#workflow_experience_profile_test_fixture",
-                "predicate": predicate_id,
-                "text": (
-                    "workflow_experience_guidance.v1\n"
-                    f"request_id: request-{index}\n"
-                    "body:\n"
-                    "Keep the guidance body stable."
-                ),
-                "language": "en-NZ",
-                "context": {"schema_version": "workflow_experience_guidance_write.v1"},
-            },
-        ).payload
-
-        assert payload["success"] is True
-        assert payload["predicate"] == predicate_id
-        assert payload["relation_created"] is True
-
-    repeat_payload = gateway.invoke(
-        "upsert_text_relation",
-        {
-            "concept_id": "#V#workflow_experience_profile_test_fixture",
-            "predicate": "#V#hasWorkflowSuccessfulRunGuidanceText",
-            "text": (
-                "workflow_experience_guidance.v1\n"
-                "request_id: request-repeat\n"
-                "body:\n"
-                "Keep the guidance body stable."
-            ),
-            "language": "en-NZ",
-        },
-    ).payload
-
-    assert repeat_payload["success"] is True
-    assert repeat_payload["relation_created"] is True
-    rows = get_texts_for_concept(
-        "#V#workflow_experience_profile_test_fixture",
-        predicate="#V#hasWorkflowSuccessfulRunGuidanceText",
-        limit=5,
-    )
-    assert len(rows) == 2

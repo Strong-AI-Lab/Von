@@ -36,6 +36,9 @@ from src.backend.services.text_value_service import (
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
+from src.backend.services.workflow_repo_seed_bootstrap import (
+    bootstrap_repo_seed_workflow_bundle,
+)
 from src.backend.workflows import (
     workflow_concept_authority_service as authority_service,
 )
@@ -103,6 +106,29 @@ _PAPER_MOCK_COLLECTION_NAMES: tuple[str, ...] = (
     "scoped_knowledge_assertions",
     "ontology_mutation_receipts",
 )
+_RETIRED_HISTORY_CONTEXT_FIELDS = [
+    {
+        "context_key": "workflow_success_guidance_history",
+        "label": (
+            "Historical successful-run guidance: soft hints from prior "
+            "successful executions."
+        ),
+    },
+    {
+        "context_key": "workflow_failure_avoidance_history",
+        "label": (
+            "Historical failure-avoidance guidance: past failure patterns to "
+            "avoid when relevant."
+        ),
+    },
+    {
+        "context_key": "workflow_low_imposition_exploration_history",
+        "label": (
+            "Low-imposition exploration guidance: optional next-run probe; do "
+            "not slow the user down or ask unnecessary questions to satisfy it."
+        ),
+    },
+]
 _canonical_seed_snapshot: dict[str, dict[str, Any]] | None = None
 _canonical_seed_snapshot_fingerprint: str | None = None
 _canonical_seed_fixture_bootstrap_count = 0
@@ -185,6 +211,51 @@ def _delete_workflow_text_relations(
         relation_id = str((row or {}).get("relation_id") or "").strip()
         assert relation_id, {"workflow_id": workflow_id, "predicate": predicate}
         delete_text_relation(workflow_id, relation_id, garbage_collect=True)
+
+
+def _publish_exact_reviewed_v35_metadata_authority(tmp_path: Path) -> None:
+    legacy_bundle = json.loads(_PAPER_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    legacy_bundle["seed_version"] = "35"
+    workflow = next(
+        item
+        for item in legacy_bundle["workflows"]
+        if item["workflow_id"]
+        == SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    workflow["text_relations"] = [
+        item
+        for item in workflow["text_relations"]
+        if item["predicate"] != "#V#hasWorkflowOutcomeExplanationPromptMapJson"
+    ]
+    for state in workflow["publication_spec"]["steps"]:
+        if state.get("state_id") not in {
+            "extract_metadata_from_prompt",
+            "summarise_representation_evidence",
+        }:
+            continue
+        state["llm_policy"]["context_fields"].extend(
+            dict(field) for field in _RETIRED_HISTORY_CONTEXT_FIELDS
+        )
+
+    legacy_path = tmp_path / "paper_representation_v35.json"
+    legacy_path.write_text(
+        json.dumps(legacy_bundle, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report = bootstrap_repo_seed_workflow_bundle(
+        asset_path=legacy_path,
+        force_republish=True,
+        target_workflow_ids=(SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,),
+    )
+    adjudication = (
+        ((report.get("publication") or {}).get("repo_seed_version_gate") or {}).get(
+            "authority_adjudication_by_workflow"
+        )
+        or {}
+    ).get(SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID) or {}
+    assert adjudication["target_authority_payload_sha256"] == (
+        "ee4466476050ae4d69bad80fdedd658e299d5734aaa28ccf937be0426a7a3c0a"
+    )
 
 
 def _snapshot_concept_text_relations(
@@ -2397,9 +2468,10 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
 
 def test_bootstrap_migrates_reviewed_v35_outcome_prompt_map_gap(
     _reset_mock_db: Any,
+    tmp_path: Path,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
-
+    _publish_exact_reviewed_v35_metadata_authority(tmp_path)
     _delete_workflow_text_relations(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         predicate="#V#hasWorkflowOutcomeExplanationPromptMapJson",
@@ -2436,7 +2508,7 @@ def test_bootstrap_migrates_reviewed_v35_outcome_prompt_map_gap(
     ).get(SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID) or {}
 
     assert repair_report.get("success") is True
-    assert publication.get("materialisation_status") == "repo_seed_version_refresh"
+    assert publication.get("materialisation_status") == "repaired_from_repo_seed"
     assert (publication.get("counts") or {}).get("errors") == 0
     assert adjudication.get("observed_authority_payload_sha256") == (
         "103f9fe684d88329878358645945b21eaf502676067ae39d233be432d1e743ed"
@@ -2456,7 +2528,7 @@ def test_bootstrap_migrates_reviewed_v35_outcome_prompt_map_gap(
         limit=2,
     )
     assert any(
-        json.loads(row.get("text") or "{}").get("seed_version") == "36"
+        json.loads(row.get("text") or "{}").get("seed_version") == "37"
         for row in marker_rows
         if isinstance(row.get("text"), str)
     )
@@ -2586,7 +2658,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "36" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "37" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID

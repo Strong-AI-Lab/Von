@@ -4356,11 +4356,6 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
     )
     monkeypatch.setattr(
         orchestrator,
-        "_build_selected_workflow_policy_memory_stage_messages",
-        lambda **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        orchestrator,
         "_build_stage_llm_context",
         lambda **kwargs: (
             list(kwargs.get("base_context") or []),
@@ -4467,11 +4462,6 @@ def test_tool_calling_backfill_names_cap_when_follow_up_contract_is_blocked(
     monkeypatch.setattr(
         orchestrator,
         "_build_tool_follow_up_stage_messages",
-        lambda **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_build_selected_workflow_policy_memory_stage_messages",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -4610,11 +4600,6 @@ def test_tool_calling_backfill_finalises_when_required_tool_is_missing_at_cap(
     monkeypatch.setattr(
         orchestrator,
         "_build_tool_follow_up_stage_messages",
-        lambda **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_build_selected_workflow_policy_memory_stage_messages",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -4832,11 +4817,6 @@ def _install_parent_forced_required_tool_backfill_stubs(
     monkeypatch.setattr(
         orchestrator,
         "_build_tool_follow_up_stage_messages",
-        lambda **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_build_selected_workflow_policy_memory_stage_messages",
         lambda **_kwargs: [],
     )
     monkeypatch.setattr(

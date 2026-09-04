@@ -110,6 +110,163 @@ def test_workflow_seed_bundle_declares_seed_version(bundle_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("bundle_name", "workflow_id", "source_version", "source_sha256"),
+    (
+        (
+            "canonical_workflow_publication_seed_bundle.json",
+            "#V#kb_mutation_postcondition_critic_workflow",
+            "52",
+            "0bafa459bf051afd5d45abce323d741f4e409105a5a63711ef988cf7f723c2e1",
+        ),
+        (
+            "canonical_workflow_publication_seed_bundle.json",
+            "#V#workflow_experience_context_prelude",
+            "52",
+            "5b778833750a4af71724dd776b5d8d2292691ef15a2b71c4d2e8b6a6bc4dafb9",
+        ),
+        (
+            "canonical_workflow_publication_seed_bundle.json",
+            "#V#entity_identity_resolution_workflow",
+            "unversioned",
+            "2a5ea94216401bd6bc959c46e66fa9d79793703e1f0f747011673e3c6ee11992",
+        ),
+        (
+            "concept_search_instance_retrieval_workflow_seed_bundle.json",
+            "#V#concept_search_instance_retrieval_workflow",
+            "5",
+            "6dbf14de9fea20afcef978cedf5a5df3f01485bbb89004a8c6cf0fb344b06aab",
+        ),
+        (
+            "entity_information_retrieval_workflow_seed_bundle.json",
+            "#V#entity_information_retrieval_workflow",
+            "14",
+            "3b6006e650c4d03ad0229f7af2376a1872e99fcd4daa5d7c905e3c7b8ac69475",
+        ),
+        (
+            "entity_representation_workflow_seed_bundle.json",
+            "#V#entity_representation_workflow",
+            "6",
+            "e5469e9280e94567c3d2431181d274e7ee3eb642d5f0bd14f7161f238f2e40e1",
+        ),
+        (
+            "episode_evaluation_workflow_seed_bundle.json",
+            "#V#episode_evaluation_workflow",
+            "3",
+            "4a793a8207aa3345fde93a0315ab6cfae12c3fe0b709f6801795a9cc282a6117",
+        ),
+        (
+            "episode_evaluation_workflow_seed_bundle.json",
+            "#V#episode_grounded_helpfulness_critic_workflow",
+            "3",
+            "e2c09afc711c675a7238e02f1537e38ae59fb33a2fe2b6e37aaffb312567f8e3",
+        ),
+        (
+            "episode_self_improvement_workflow_seed_bundle.json",
+            "#V#episode_self_improvement_proposal_workflow",
+            "2",
+            "2da22cbe87387698d0341928ec11711f6ffba043a14cc10ecdf709cf85521681",
+        ),
+        (
+            "episode_self_improvement_workflow_seed_bundle.json",
+            "#V#episode_self_improvement_promotion_workflow",
+            "2",
+            "16e00ae09debb5400c3d4b9e42bd615842352fa7ca5738383bb4bf955dff1b53",
+        ),
+        (
+            "kr_materialisation_workflow_seed_bundle.json",
+            "#V#kr_design_materialisation_workflow",
+            "10",
+            "cb2c14cdb915aa417c20a41f168f344933eea79540761b0033243ce4727c82ef",
+        ),
+        (
+            "paper_representation_workflow_seed_bundle.json",
+            "#V#scholarly_article_metadata_representation_workflow",
+            "36",
+            "d784237c43ca0b9e0e08e90c1cde570fc4212c76179566c29dc837b554e2010b",
+        ),
+        (
+            "operational_certification_evaluator_workflow_seed_bundle.json",
+            "#V#operational_state_evidence_evaluator",
+            "16",
+            "f33a2beddcd55e3f52cb8c356c1347242074ef19426362f149afe132eed52c87",
+        ),
+        (
+            "operational_learning_candidate_behaviour_workflow_seed_bundle.json",
+            "#V#operational_learning_candidate_behaviour_evaluation_workflow",
+            "3",
+            "031f2cffb2bf5eabeaf5a4ad0c614629e2f57ae91ab7cd07ef2dcf426a5917ea",
+        ),
+        (
+            "operational_learning_release_authority_workflow_seed_bundle.json",
+            "#V#operational_learning_release_evaluator_workflow",
+            "9",
+            "db13d6e6b85e519a66058a55c8436f11ab3a0874d3cc66735ce28d4e8306a4a0",
+        ),
+        (
+            "operational_learning_release_authority_workflow_seed_bundle.json",
+            "#V#operational_learning_candidate_proposal_workflow",
+            "9",
+            "5204bd0bab0cfe4c804695c106f67ca97192fb056442ccc9f330c68c4cc7a34a",
+        ),
+        (
+            "represented_artefact_creation_workflow_seed_bundle.json",
+            "#V#represented_artefact_creation_workflow",
+            "9",
+            "348106cdb429c836422d262dbb734daef102950ea552b3917c826c923c9a56bc",
+        ),
+        (
+            "represented_artefact_creation_workflow_seed_bundle.json",
+            "#V#represented_artefact_item_creation_workflow",
+            "9",
+            "3c0894a6fc35d0e7905dff0c2b331c0c6b6d9e968952b307e45164015bbec90b",
+        ),
+        (
+            "spreadsheet_programme_representation_workflow_seed_bundle.json",
+            "#V#spreadsheet_phd_programme_representation_workflow",
+            "23",
+            "12a5fc8ceadd872342875c67563d0f42bf48e2e370aa7502d40874cc13a438a3",
+        ),
+        (
+            "spreadsheet_programme_representation_workflow_seed_bundle.json",
+            "#V#spreadsheet_record_representation_item_workflow",
+            "23",
+            "39f96b71d92a330a22c8311c907b5aa377e87a7c554ab89428f1a03756232551",
+        ),
+        (
+            "representation_workflow_routing_coverage_audit_workflow_seed_bundle.json",
+            "#V#representation_workflow_routing_coverage_audit_workflow",
+            "1",
+            "345e10d4efb0d4deb9b205bb3a6c1e4fef569c40312627dd200d2b1f8ff9a491",
+        ),
+        (
+            "testing_workflow_seed_bundle.json",
+            "#V#meeting_invitation_candidate_workflow",
+            "2",
+            "2178afdfec98d4768fa2145ace42caf6ebcc8ada0425c7f451fe48612359ede1",
+        ),
+        (
+            "testing_workflow_seed_bundle.json",
+            "#V#meeting_invitation_testing_workflow",
+            "2",
+            "bc22785da2f77bd622ca667b8913888de55a5c2f03460cb980a709905fcc2601",
+        ),
+    ),
+)
+def test_advice_subtraction_seed_bumps_can_resume_reviewed_migrations(
+    bundle_name: str,
+    workflow_id: str,
+    source_version: str,
+    source_sha256: str,
+) -> None:
+    """Pending migration receipts retain an independently reviewed source hash."""
+
+    payload = json.loads((SEED_BUNDLE_DIR / bundle_name).read_text(encoding="utf-8"))
+    declared = payload["known_legacy_authority_payload_sha256_by_seed_version"]
+
+    assert source_sha256 in declared[workflow_id][source_version]
+
+
 @pytest.mark.parametrize("bundle_path", _workflow_bundles(), ids=lambda p: p.name)
 def test_workflow_state_transitions_reference_existing_states(
     bundle_path: Path,
@@ -302,10 +459,8 @@ def test_repo_seeded_gmail_list_steps_use_semantic_mailbox_scope() -> None:
     assert "bypass_profile_query_prefix" not in tool_arguments
 
 
-def test_explicit_workflow_experience_prelude_callers_keep_their_seed_definition() -> (
-    None
-):
-    """Retain the shared prelude while repo-seeded explicit workflows invoke it."""
+def test_unpromoted_workflow_experience_history_cannot_reenter_evaluators() -> None:
+    """Keep raw episode history out of proposal and independent-evaluation paths."""
 
     prelude_id = "#V#workflow_experience_context_prelude"
     canonical = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
@@ -323,25 +478,82 @@ def test_explicit_workflow_experience_prelude_callers_keep_their_seed_definition
         SEED_BUNDLE_DIR
         / "operational_learning_release_authority_workflow_seed_bundle.json",
     )
-    callers: list[str] = []
+    expected_initial_states = {
+        "#V#operational_state_evidence_evaluator": ("resolve_active_learning_release"),
+        "#V#operational_learning_candidate_behaviour_evaluation_workflow": (
+            "resolve_candidate_context"
+        ),
+        "#V#operational_learning_release_evaluator_workflow": "evaluate_release",
+        "#V#operational_learning_candidate_proposal_workflow": (
+            "author_candidate_proposal"
+        ),
+    }
+    raw_history_context_keys = {
+        "workflow_success_guidance_history",
+        "workflow_failure_avoidance_history",
+        "workflow_low_imposition_exploration_history",
+        "workflow_experience_profile_concept_id",
+    }
+    observed_initial_states: dict[str, str] = {}
+    invoked_workflow_ids: set[str] = set()
+    projected_context_keys: set[str] = set()
     for path in caller_paths:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
+        payload = json.loads(raw_text)
+        assert prelude_id not in raw_text
+        assert all(
+            context_key not in raw_text for context_key in raw_history_context_keys
+        )
         for workflow in payload.get("workflows", []):
             if not isinstance(workflow, dict):
                 continue
-            for step in (
-                (workflow.get("publication_spec") or {}).get("steps", [])
-            ):
-                if (
-                    isinstance(step, dict)
-                    and step.get("invoked_workflow_id") == prelude_id
+            workflow_id = workflow.get("workflow_id")
+            publication_spec = workflow.get("publication_spec") or {}
+            if workflow_id in expected_initial_states:
+                observed_initial_states[workflow_id] = publication_spec.get(
+                    "initial_state"
+                )
+            for step in publication_spec.get("steps", []):
+                if not isinstance(step, dict):
+                    continue
+                invoked_workflow_id = step.get("invoked_workflow_id")
+                if isinstance(invoked_workflow_id, str):
+                    invoked_workflow_ids.add(invoked_workflow_id)
+                for context_field in (step.get("llm_policy") or {}).get(
+                    "context_fields", []
                 ):
-                    callers.append(
-                        f"{workflow.get('workflow_id')}:{step.get('state_id')}"
-                    )
+                    if isinstance(context_field, dict):
+                        context_key = context_field.get("context_key")
+                        if isinstance(context_key, str):
+                            projected_context_keys.add(context_key)
 
-    assert callers
     assert prelude_id in canonical_workflow_ids
+    prelude_tombstone = next(
+        workflow
+        for workflow in canonical["workflows"]
+        if workflow.get("workflow_id") == prelude_id
+    )
+    assert prelude_tombstone["publication_spec"] == {
+        "initial_state": "retired",
+        "steps": [{"state_id": "retired", "terminal": True}],
+    }
+    assert "get_text_relations" not in json.dumps(prelude_tombstone)
+    assert prelude_id not in invoked_workflow_ids
+    assert observed_initial_states == expected_initial_states
+    assert raw_history_context_keys.isdisjoint(projected_context_keys)
+
+    all_projected_context_keys: set[str] = set()
+    for path in _workflow_bundles():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for step in _iter_workflow_steps(payload):
+            for context_field in (step.get("llm_policy") or {}).get(
+                "context_fields", []
+            ):
+                if isinstance(context_field, dict):
+                    context_key = context_field.get("context_key")
+                    if isinstance(context_key, str):
+                        all_projected_context_keys.add(context_key)
+    assert raw_history_context_keys.isdisjoint(all_projected_context_keys)
 
 
 def test_canonical_bundle_declares_reviewed_seed_43_migrations_without_claiming_shared_support_authority() -> (
@@ -356,7 +568,7 @@ def test_canonical_bundle_declares_reviewed_seed_43_migrations_without_claiming_
     """
 
     payload = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert payload["seed_version"] == "52"
+    assert payload["seed_version"] == "53"
     reviewed_seed_43 = {
         "#V#tool_calling_workflow": (
             "696cdf1616304c533a448cf740cb97a94af7828be473de41c91793e627d52592"
@@ -373,6 +585,9 @@ def test_canonical_bundle_declares_reviewed_seed_43_migrations_without_claiming_
     ]
     for workflow_id, digest in reviewed_seed_43.items():
         assert digest in declared[workflow_id]["43"]
+    assert declared["#V#workflow_experience_context_prelude"]["52"] == [
+        "5b778833750a4af71724dd776b5d8d2292691ef15a2b71c4d2e8b6a6bc4dafb9"
+    ]
 
     support_concepts = payload["support_concepts"]
     assert support_concepts

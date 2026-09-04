@@ -164,7 +164,7 @@ def episode_evaluation_autotrigger_enabled() -> bool:
             return True
         if lowered in {"0", "false", "no", "off"}:
             return False
-    return True
+    return False
 
 
 def _episode_evaluation_max_depth() -> int:

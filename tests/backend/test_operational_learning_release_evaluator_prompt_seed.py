@@ -37,8 +37,19 @@ def _release_evaluator_workflow() -> dict:
 
 def test_release_evaluator_seed_authority_uses_canonical_launch_contract() -> None:
     raw_bundle = json.loads(_WORKFLOW_SEED_PATH.read_text(encoding="utf-8"))
-    assert raw_bundle["seed_version"] == "9"
-    assert "known_legacy_authority_payload_sha256_by_seed_version" not in raw_bundle
+    assert raw_bundle["seed_version"] == "10"
+    assert raw_bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
+        "#V#operational_learning_release_evaluator_workflow": {
+            "9": [
+                "db13d6e6b85e519a66058a55c8436f11ab3a0874d3cc66735ce28d4e8306a4a0"
+            ]
+        },
+        "#V#operational_learning_candidate_proposal_workflow": {
+            "9": [
+                "5204bd0bab0cfe4c804695c106f67ca97192fb056442ccc9f330c68c4cc7a34a"
+            ]
+        },
+    }
 
     workflow_id = "#V#operational_learning_release_evaluator_workflow"
     raw_workflow = next(
@@ -95,7 +106,7 @@ def test_release_evaluator_seed_authority_uses_canonical_launch_contract() -> No
         "bound_certification_evidence_sha256",
     } <= set(authority_payload["launch_input_contract"]["required_inputs"])
     assert seed_bootstrap._stable_payload_sha256(authority_payload) == (
-        "db13d6e6b85e519a66058a55c8436f11ab3a0874d3cc66735ce28d4e8306a4a0"
+        "12312c4804bdf9684805f86e48b82935845469b55f4954dd053b61c1f8e13a9b"
     )
 
 

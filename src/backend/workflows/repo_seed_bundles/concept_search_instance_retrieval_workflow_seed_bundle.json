@@ -2,7 +2,7 @@
   "family_id": "concept_search_instance_retrieval_workflow_seed_bundle",
   "managed_by": "concept_search_instance_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
+  "seed_version": "6",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#concept_search_instance_retrieval_workflow": {
       "2": [
@@ -13,6 +13,9 @@
       ],
       "4": [
         "26b0bae36b7cb1ddf8b0b0a53e87c6b93bcb35e8d2ce6677a1b0784cdafbbffb"
+      ],
+      "5": [
+        "6dbf14de9fea20afcef978cedf5a5df3f01485bbb89004a8c6cf0fb344b06aab"
       ]
     }
   },
@@ -140,18 +143,6 @@
                 {
                   "context_key": "turn_expected_outcome_contract_state",
                   "label": "Expected answer contract"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

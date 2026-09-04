@@ -169,55 +169,19 @@ def test_build_turn_memory_context_state_retains_slow_subject_resolution(
     assert subject_context["advisory_exceeded"] is True
 
 
-def test_build_selected_workflow_policy_memory_state_renders_recent_suggestions(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
+def test_unpromoted_workflow_policy_memory_is_not_a_turn_context_api() -> None:
+    from inspect import getsource
+
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
+
+    assert not hasattr(memory_service, "build_selected_workflow_policy_memory_state")
+    assert not hasattr(memory_service, "render_selected_workflow_policy_memory_messages")
+    assert not hasattr(
         memory_service,
-        "list_recent_workflow_improvement_suggestions",
-        lambda *_args, **_kwargs: [
-            {
-                "memory_id": "#V#policy_memory_1",
-                "suggestion_id": "#V#workflow_suggestion_1",
-                "category": "grounding",
-                "priority": "high",
-                "target_surface": "workflow",
-                "title": "Prefer grounded identity evidence before answering",
-                "rationale": "Recent evaluated turns regressed into stale identity claims.",
-                "request_id": "request-1",
-            }
-        ],
+        "summarise_selected_workflow_policy_memory_for_lineage",
     )
-
-    state = memory_service.build_selected_workflow_policy_memory_state(
-        selected_workflow_id="#V#chat_assistant_workflow",
-        namespace="#V#test_user",
+    assert "selected_workflow_policy_memory_state" not in getsource(
+        InternalMCPChatOrchestrator
     )
-
-    assert state["status"] == "available"
-    assert state["suggestion_count"] == 1
-    rendered_messages = memory_service.render_selected_workflow_policy_memory_messages(
-        state
-    )
-    assert len(rendered_messages) == 1
-    assert (
-        "RECENT POLICY MEMORY FOR #V#chat_assistant_workflow:"
-        in rendered_messages[0]["content"]
-    )
-    assert "Prefer grounded identity evidence before answering" in rendered_messages[0][
-        "content"
-    ]
-    assert "Recent evaluated turns regressed into stale identity claims." in (
-        rendered_messages[0]["content"]
-    )
-
-    lineage_summary = (
-        memory_service.summarise_selected_workflow_policy_memory_for_lineage(state)
-    )
-    assert lineage_summary == {
-        "status": "available",
-        "selected_workflow_id": "#V#chat_assistant_workflow",
-        "suggestion_count": 1,
-        "memory_ids": ["#V#policy_memory_1"],
-        "suggestion_ids": ["#V#workflow_suggestion_1"],
-    }

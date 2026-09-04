@@ -1580,10 +1580,17 @@ def _lifecycle_allows_routing(
         "superseded",
         "rolled_back",
         "demoted",
+        "retired",
     }:
         return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
     rollout_state = str(lifecycle.get("rollout_state") or "").strip().lower()
-    if rollout_state in {"disabled", "superseded", "rolled_back", "demoted"}:
+    if rollout_state in {
+        "disabled",
+        "superseded",
+        "rolled_back",
+        "demoted",
+        "retired",
+    }:
         return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
     # Review state describes the active authoring proposal. A pending proposal
     # must not disable the currently published workflow version.

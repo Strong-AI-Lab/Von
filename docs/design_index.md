@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 18 August 2026
+- **Last reviewed:** 4 September 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -85,6 +85,7 @@ live.
 | Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
 | Retrieval, memory, RAG, KB growth, or long-horizon state | [agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) |
+| Represented, experience-derived advice for role, capability, workflow, tool, acquisition, introspection, message, or task decisions | Draft [represented advice design](engineering/represented_advice_design.md), then the applicable prompt, memory, evaluation, workflow, or security guidance |
 | Importing external human/agent transcripts into conversation carriers | [External conversation import](engineering/external_conversation_import.md) |
 | Durable assertions, text/logical assertion typing, propositions, context-sensitive retrieval, hypotheses, publication or promotion, or user-, organisation-, project-, source-, theory-, or time-relative knowledge | [Assertion and propositional-sentence ontology](engineering/assertion_and_propositional_sentence_ontology.md), then [contextual knowledge evolution](engineering/contextual_knowledge_evolution.md); for canonical ontology publication or scope change, the active [ontology publication authority boundary](engineering/ontology_publication_authority.md) |
 | Evaluation, benchmarks, or research-sensitive architecture | [agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) |
@@ -135,6 +136,7 @@ human acceptance and promotion into a current public authority surface.
 |---|---|---|
 | [Von for Agentic AI](engineering/Von_for_AgenticAI.md) | Advisory long-horizon programme design with an April 2026 state snapshot | Use the durable target direction; revalidate every present-state, file-size, gap, and priority claim |
 | Private research syntheses | Advisory material retained outside the public repository | Public coding agents must not depend on private notes; promote approved decisions into the applicable public canonical guide |
+| [Represented advice](engineering/represented_advice_design.md) | Draft design proposal with a completed Phase 0 audit and dormant workflow-experience substrate subtracted from the repository execution surface; only an unpublished terminal retirement tombstone remains there | Use for soft-guidance semantics, possible federated projection/lifecycle convergence, bounded autonomous maintenance, ratchet tests, and distinguishing evaluation; it does not establish a general runtime layer or live activation, and any pilot must be re-earned by a concrete user-job failure |
 | [Automated policy learning](engineering/automated_policy_learning_design.md) | Design with partial substrate | Use as a proposed learning architecture, not proof of a closed operational loop |
 | [Testing workflows and ephemeral theories](engineering/testing_workflows_ephemeral_theories_design.md) | Research/design proposal with partial substrate | Use for design intent and explicit hypotheses; verify implemented surfaces |
 | [Reliability Ratchet articles and case log](engineering/reliability_ratchet_articles_and_cases.md) | Active advisory source copy and evidence log | Use as a revisable diagnostic lens and dated case record; not as standing policy, repair authority, or proof of current behaviour |

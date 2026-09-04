@@ -16,9 +16,6 @@ from src.backend.services.represented_artefact_creation_workflow_vontology_servi
     _ensure_represented_artefact_creation_prompt_support,
     bootstrap_canonical_represented_artefact_creation_workflow,
 )
-from src.backend.services.workflow_repo_seed_bootstrap import (
-    bootstrap_repo_seed_workflow_bundle,
-)
 from src.backend.services.text_value_service import (
     get_texts_for_concept,
     upsert_singleton_text_relation,
@@ -30,6 +27,9 @@ from src.backend.services.workflow_discovery_service import (
     _filter_routing_candidates,
     assess_workflow_routing_authority,
     invalidate_workflow_discovery_executability_caches,
+)
+from src.backend.services.workflow_repo_seed_bootstrap import (
+    bootstrap_repo_seed_workflow_bundle,
 )
 from src.backend.workflows import (
     workflow_concept_authority_service as authority_service,
@@ -61,6 +61,26 @@ _REVIEWED_V7_PARENT_AUTHORITY_SHA256 = (
 _REVIEWED_V7_ITEM_AUTHORITY_SHA256 = (
     "39d510b47d947bcb5d6f77697fa68a770d6c8ed64b579d8f004f382d6d87e532"
 )
+_REVIEWED_V9_PARENT_AUTHORITY_SHA256 = (
+    "348106cdb429c836422d262dbb734daef102950ea552b3917c826c923c9a56bc"
+)
+_REVIEWED_V9_ITEM_AUTHORITY_SHA256 = (
+    "3c0894a6fc35d0e7905dff0c2b331c0c6b6d9e968952b307e45164015bbec90b"
+)
+_RETIRED_HISTORY_CONTEXT_FIELDS = [
+    {
+        "context_key": "workflow_success_guidance_history",
+        "label": "Historical successful-run guidance",
+    },
+    {
+        "context_key": "workflow_failure_avoidance_history",
+        "label": "Historical failure-avoidance guidance",
+    },
+    {
+        "context_key": "workflow_low_imposition_exploration_history",
+        "label": "Historical minimal-imposition exploration guidance",
+    },
+]
 
 
 class _QueuedLLM:
@@ -117,10 +137,43 @@ def _workflow_step_id(workflow_id: str, state_id: str) -> str:
     )
 
 
+def _restore_retired_history_context_fields(workflow: dict[str, Any]) -> None:
+    for state in workflow["publication_spec"]["steps"]:
+        llm_policy = state.get("llm_policy")
+        if not isinstance(llm_policy, dict):
+            continue
+        context_fields = list(llm_policy.get("context_fields") or [])
+        current_request_index = next(
+            (
+                index
+                for index, field in enumerate(context_fields)
+                if field.get("context_key") == "current_represented_artefact_request"
+            ),
+            len(context_fields),
+        )
+        grounding_index = next(
+            (
+                index
+                for index, field in enumerate(context_fields)
+                if field.get("context_key") == "turn_expected_grounding_requirement"
+            ),
+            -1,
+        )
+        insertion_index = (
+            current_request_index
+            if current_request_index > grounding_index
+            else len(context_fields)
+        )
+        context_fields[insertion_index:insertion_index] = [
+            dict(field) for field in _RETIRED_HISTORY_CONTEXT_FIELDS
+        ]
+        llm_policy["context_fields"] = context_fields
+
+
 def _publish_exact_reviewed_v8_parent_authority(tmp_path: Path) -> None:
     """Recreate the released v8 parent before exercising its v6 migration.
 
-    The current v9 seed adds launch/context fields.  Mutating only its lifecycle
+    The later seed adds launch/context fields. Mutating only its lifecycle
     and routing profile would produce a hybrid authority that was never reviewed
     and must correctly be refused by the migration gate.
     """
@@ -137,6 +190,7 @@ def _publish_exact_reviewed_v8_parent_authority(tmp_path: Path) -> None:
         for row in legacy_bundle["workflows"]
         if row["workflow_id"] == REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID
     )
+    _restore_retired_history_context_fields(parent)
     parent["launch_input_contract"]["input_mappings"] = [
         mapping
         for mapping in parent["launch_input_contract"]["input_mappings"]
@@ -172,6 +226,42 @@ def _publish_exact_reviewed_v8_parent_authority(tmp_path: Path) -> None:
     ).get(REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID) or {}
     assert adjudication["target_authority_payload_sha256"] == (
         _REVIEWED_V7_PARENT_AUTHORITY_SHA256
+    )
+
+
+def _publish_exact_reviewed_v9_item_authority(tmp_path: Path) -> None:
+    legacy_bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    legacy_bundle["seed_version"] = "9"
+    legacy_versions = legacy_bundle[
+        "known_legacy_authority_payload_sha256_by_seed_version"
+    ][REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID]
+    legacy_versions.pop("9", None)
+
+    item = next(
+        row
+        for row in legacy_bundle["workflows"]
+        if row["workflow_id"] == REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID
+    )
+    _restore_retired_history_context_fields(item)
+
+    legacy_path = tmp_path / "represented_artefact_item_creation_v9.json"
+    legacy_path.write_text(
+        json.dumps(legacy_bundle, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report = bootstrap_repo_seed_workflow_bundle(
+        asset_path=legacy_path,
+        force_republish=True,
+        target_workflow_ids=(REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,),
+    )
+    adjudication = (
+        ((report.get("publication") or {}).get("repo_seed_version_gate") or {}).get(
+            "authority_adjudication_by_workflow"
+        )
+        or {}
+    ).get(REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID) or {}
+    assert adjudication["target_authority_payload_sha256"] == (
+        _REVIEWED_V9_ITEM_AUTHORITY_SHA256
     )
 
 
@@ -226,17 +316,19 @@ def test_represented_artefact_workflow_family_has_reviewed_parent_only_routing()
 ):
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
 
-    assert bundle["seed_version"] == "9"
+    assert bundle["seed_version"] == "10"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
         REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID: {
             "5": ["2061801c8da0d8437f021ef49dd3af40d405f98fdc5388752d0b831ce689bb48"],
             "6": [_REVIEWED_V6_PARENT_AUTHORITY_SHA256],
             "7": [_REVIEWED_V7_PARENT_AUTHORITY_SHA256],
             "8": [_REVIEWED_V7_PARENT_AUTHORITY_SHA256],
+            "9": [_REVIEWED_V9_PARENT_AUTHORITY_SHA256],
         },
         REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID: {
             "5": ["cc17479ee5df029a7baed2b1d21a1f0c098979afcda730c91a2e7acce624771e"],
             "7": [_REVIEWED_V7_ITEM_AUTHORITY_SHA256],
+            "9": [_REVIEWED_V9_ITEM_AUTHORITY_SHA256],
         },
     }
 
@@ -366,8 +458,39 @@ def test_normal_bootstrap_migrates_exact_reviewed_v6_parent_authority(
     assert routing_profile["explicit_workflow_context_required"] is True
 
 
-def test_normal_bootstrap_migrates_exact_reviewed_v7_item_authority() -> None:
+def test_normal_bootstrap_migrates_exact_reviewed_v9_item_authority(
+    tmp_path: Path,
+) -> None:
     bootstrap_canonical_represented_artefact_creation_workflow()
+    _publish_exact_reviewed_v9_item_authority(tmp_path)
+    invalidate_workflow_discovery_executability_caches()
+
+    report = bootstrap_canonical_represented_artefact_creation_workflow()
+    publication = report.get("publication") or {}
+    gate = publication.get("repo_seed_version_gate") or {}
+    adjudication = (gate.get("authority_adjudication_by_workflow") or {}).get(
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID
+    ) or {}
+
+    assert adjudication["reason"] == "exact_reviewed_legacy_migration"
+    assert adjudication["observed_authority_payload_sha256"] == (
+        _REVIEWED_V9_ITEM_AUTHORITY_SHA256
+    )
+    assert publication["counts"]["workflows_published"] == 1
+    assert publication["counts"]["errors"] == 0
+
+    routing_profile, _ = resolve_workflow_routing_profile(
+        REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID
+    )
+    assert routing_profile["routing_eligible"] is False
+    assert routing_profile["explicit_workflow_context_required"] is True
+
+
+def test_normal_bootstrap_migrates_exact_reviewed_v7_item_authority(
+    tmp_path: Path,
+) -> None:
+    bootstrap_canonical_represented_artefact_creation_workflow()
+    _publish_exact_reviewed_v9_item_authority(tmp_path)
 
     upsert_singleton_text_relation(
         subject_concept_id=REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,

@@ -340,9 +340,11 @@ def test_bootstrap_materialises_represented_audit_workflow_authority(
     }
     assert "representation_routing_audit_profile" in llm_context_keys
     assert "representation_routing_audit_report" in llm_context_keys
-    assert "workflow_success_guidance_history" in llm_context_keys
-    assert "workflow_failure_avoidance_history" in llm_context_keys
-    assert "workflow_low_imposition_exploration_history" in llm_context_keys
+    assert {
+        "workflow_success_guidance_history",
+        "workflow_failure_avoidance_history",
+        "workflow_low_imposition_exploration_history",
+    }.isdisjoint(llm_context_keys)
 
     prompt_links = get_texts_for_concept(
         REPRESENTATION_WORKFLOW_ROUTING_COVERAGE_AUDIT_WORKFLOW_ID,
