@@ -16,9 +16,10 @@
   `dc84fc1a850890b32b89bdc8b3e0da96cfce4264`, a read-only audit of the
   configured Vontology and workflow-instance store on 4 September 2026, and
   the repository subtraction, non-active candidate implementation, and isolated
-  experiment support described below. The JVNAUTOSCI-2720 read-only preflight
-  succeeded, but no live experiment result, production activation, or
-  deployment is claimed yet
+  experiment support described below. JVNAUTOSCI-2720 formed one live
+  non-active candidate and completed two 24-trial comparisons, but both were
+  evaluator-contaminated and inconclusive. No advice efficacy, learning
+  outcome, production activation, or deployment is claimed
 - **Supersedes / superseded by:** Nothing. This proposal owns represented-advice
   semantics, applicability, retrieval/projection, lifecycle, and retraction;
   the broader
@@ -1301,6 +1302,54 @@ independently recomputed evidence, followed by trigger and neighbouring turn
 read-back proving the rejected bytes were absent. Drift, contamination,
 unblindable evidence, or incomplete pairs remain inconclusive.
 
+#### Phase 1 live result — 4 September 2026
+
+The implementation formed and canonically read back one source-grounded,
+Von-authored candidate while keeping it non-active. Its contributor,
+organisation, semantic target, audience, beneficiary, and purpose remained
+distinct; capture did not create an authority grant or an ordinary consumer.
+The frozen comparison then exercised 24 balanced A/B trials, persisted every
+trial Turn Execution Record, completed every blind evaluation, and read back
+the bound manifest, plan, result, and request identities. An earlier run that
+lost persistence during an Atlas DNS failure was explicitly aborted and remains
+inspectable as an operational non-result.
+
+The first complete comparison was nevertheless inconclusive: only 2 of 12
+pairs were comparable. Eleven evaluations rejected themselves because the
+model-visible input schema identified an advice experiment, while the
+represented evaluator treated any experiment identity as a blinding failure;
+five more lacked the exact bounded read-evidence content that the acting model
+had seen. A single, predeclared harness repair replaced the treatment-labelled
+input schema with a neutral one and supplied that exact bounded content only to
+the evaluator. It did not change the candidate, cases, acting or evaluator
+model, randomisation, rubric, decision thresholds, or stored observations, and
+tests prove the private evaluator projection is not persisted.
+
+The one justified replacement run again completed all 24 trials, TER writes,
+and evaluations with valid execution integrity. It was still inconclusive:
+only 1 of 12 pairs was comparable and 18 evaluations returned
+`evaluator_blinding_failed` (8 in A and 10 in B). The remaining fixed evaluator
+and rubric metadata expose common study context, not treatment assignment, but
+the represented evaluator's broader wording currently rejects that context.
+This is demonstrated evaluator contamination. It is not evidence that the
+candidate helps, does not help, or should be activated or rejected.
+
+The stopping rule therefore applies. No Arm C, ordinary consumer, activation,
+rejection, or prospective later-use claim follows from these runs. The exact
+candidate remains non-active with an undecided disposition, and both complete
+runs remain immutable evidence rather than being rescored. JVNAUTOSCI-2720
+records their exact run identifiers and digests without exposing private source
+or candidate text.
+
+**Merge decision changes —** the Phase 1 branch is provisional because the
+live comparison hit the issue's evaluator-contamination stop-ship condition.
+The minimum evidence that could change this decision is a separately
+pre-registered protocol correction that distinguishes treatment-correlated
+trial material from fixed common evaluation context, followed by one fresh
+comparison whose evidence supports either the existing positive path or the
+existing canonical negative-disposition path. Repeated evaluator tuning or
+additional runs in this tranche would not supply independent evidence.
+
 ### Phase 2 — one bounded consumer
 
 Only if the comparison favours represented advice:
@@ -1544,8 +1593,12 @@ revision. Phase 1 now has an isolated, task-specific A/B implementation under
 JVNAUTOSCI-2720. It can form one Von-authored candidate from the frozen source,
 project the exact bytes only in experimental Arm B, persist and blindly evaluate
 24 read-only trials, recompute the result, update the exact revision's
-disposition, and read the terminal state back. A successful read-only preflight
-is recorded; no live outcome is claimed yet.
+disposition when warranted, and read the terminal state back. Live execution
+proved candidate formation, exact experimental exposure, trial persistence,
+evaluation persistence, and terminal read-back, but both complete comparisons
+were evaluator-contaminated and inconclusive. The candidate therefore remains
+non-active and undecided; no learning-outcome or advice-efficacy result is
+claimed.
 
 No ordinary configured advice consumer, active binding, resolver, represented
 Arm C, maintenance worker, or general advice layer is selected. Workflow Studio
@@ -1554,16 +1607,19 @@ the MCP surface remains a human/AI deliberation and maintenance consumer for
 non-active candidates. The experiment-only sidecar does not turn either surface
 into automatic production projection.
 
-The next decision is empirical. If B does not beat A, record and preserve the
-negative result, reject or revise the exact candidate as warranted, prove its
-absence in subsequent eligible decisions, and do not build C merely to save the
-architecture. If B beats A, implement represented Arm C and a prospective later
-use before claiming represented retrieval or production value. Represented C
-must preserve the measured content benefit and improve a named maintenance,
-scope, provenance, inspection, revision, or retract-to-empty outcome over the
-same versioned sidecar. A shared protocol still requires a second independently
-motivated consumer and measured removal of duplicated lifecycle or scope work.
-Autonomous activation remains a later, separately earned decision.
+The next decision is first methodological, then empirical. A later tranche may
+make one pre-registered correction to the demonstrated evaluator contradiction
+and run a fresh immutable comparison. If valid evidence then shows that B does
+not beat A, record and preserve the negative result, reject or revise the exact
+candidate as warranted, prove its absence in subsequent eligible decisions,
+and do not build C merely to save the architecture. If B beats A, implement
+represented Arm C and a prospective later use before claiming represented
+retrieval or production value. Represented C must preserve the measured content
+benefit and improve a named maintenance, scope, provenance, inspection,
+revision, or retract-to-empty outcome over the same versioned sidecar. A shared
+protocol still requires a second independently motivated consumer and measured
+removal of duplicated lifecycle or scope work. Autonomous activation remains a
+later, separately earned decision.
 
 Related guidance:
 
