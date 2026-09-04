@@ -733,14 +733,10 @@ main() {
     echo -e "${CYAN}Updating pip in virtual environment...${NC}"
     $VENV_PYTHON -m pip install --upgrade pip
 
-    # Install PDM if not present
-    if ! $VENV_PYTHON -m pip show pdm >/dev/null 2>&1; then
-        echo -e "${CYAN}Installing PDM in virtual environment...${NC}"
-        $VENV_PYTHON -m pip install pdm
-        echo -e "${GREEN}✓ PDM installed${NC}"
-    else
-        echo -e "${YELLOW}PDM is already installed in the virtual environment. Skipping installation.${NC}"
-    fi
+    # PDM owns project dependency resolution. Keep the bootstrap version new
+    # enough to read the committed canonical-input lock format.
+    echo -e "${CYAN}Ensuring a compatible PDM is installed...${NC}"
+    $VENV_PYTHON -m pip install --upgrade 'pdm==2.29.0'
 
     # Initialize PDM project if pyproject.toml doesn't exist
     if [[ ! -f "pyproject.toml" ]]; then
@@ -751,26 +747,24 @@ main() {
         echo -e "${YELLOW}pyproject.toml already exists. Skipping PDM project initialisation.${NC}"
     fi
 
-    # Install dependencies with PDM
-    echo -e "${CYAN}Installing dependencies with PDM...${NC}"
-    if $VENV_PDM install --verbose; then
-        echo -e "${GREEN}✓ PDM successfully installed packages${NC}"
+    if [[ ! -f "pdm.lock" ]]; then
+        echo -e "${RED}Error: committed pdm.lock is missing.${NC}"
+        exit 1
+    fi
+    if ! $VENV_PDM lock --check; then
+        echo -e "${RED}Error: pdm.lock does not match pyproject.toml.${NC}"
+        exit 1
+    fi
+
+    # Install exclusively from the reviewed lockfile. Unlike `pdm install`,
+    # `pdm sync` never rewrites it. Do not use --clean here because PDM itself
+    # is deliberately bootstrapped inside this environment.
+    echo -e "${CYAN}Synchronising dependencies from pdm.lock...${NC}"
+    if $VENV_PDM sync --verbose; then
+        echo -e "${GREEN}✓ PDM successfully synchronised packages${NC}"
     else
-        echo -e "${YELLOW}⚠ PDM install encountered issues${NC}"
-        echo -e "${YELLOW}  Trying alternative installation method...${NC}"
-
-        # Fallback: install critical packages with pip
-        CRITICAL_PACKAGES="flask pymongo python-dotenv requests pytest pytest-mock pytest-cov mongomock"
-        echo -e "${CYAN}Installing critical packages with pip...${NC}"
-        $VENV_PYTHON -m pip install $CRITICAL_PACKAGES
-
-        # Try PDM again with --no-sync
-        echo -e "${CYAN}Retrying PDM install...${NC}"
-        if $VENV_PDM install --verbose --no-sync; then
-            echo -e "${GREEN}✓ Python dependencies installed via fallback${NC}"
-        else
-            echo -e "${YELLOW}⚠ Some Python packages may not be installed correctly${NC}"
-        fi
+        echo -e "${RED}PDM sync failed; the environment was not accepted as ready.${NC}"
+        exit 1
     fi
 
     if ! verify_tesseract_runtime; then

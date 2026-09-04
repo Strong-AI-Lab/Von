@@ -62,16 +62,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
+
+      - name: Setup PDM
+        uses: pdm-project/setup-pdm@v4
+        with:
+          version: "2.29.0"
+          cache: true
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          # pytest and friends live in [dependency-groups] dev, which
-          # `pip install -e .` does not install.
-          pip install --group dev || pip install \
-            pytest pytest-mock pytest-cov pytest-asyncio mongomock blinker anyio
+          pdm lock --check
+          pdm sync --clean -G dev
 
       # Without this the notification path is only exercised the night something
       # actually breaks, which is when you least want to discover a bad secret.
@@ -82,7 +83,7 @@ jobs:
           NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
         run: |
           echo "Test notification requested; the suite is not run." > /tmp/drift.txt
-          python scripts/notify_backend_test_drift.py test /tmp/drift.txt
+          pdm run python scripts/notify_backend_test_drift.py test /tmp/drift.txt
 
       - name: Report drift against the recorded backlog
         if: ${{ !inputs.test_notification }}
@@ -95,7 +96,7 @@ jobs:
           if [[ -n "$BACKEND_TEST_PATH" ]]; then
             path_args+=("$BACKEND_TEST_PATH")
           fi
-          python scripts/report_backend_test_drift.py \
+          pdm run python scripts/report_backend_test_drift.py \
             --json-output /tmp/backend-test-drift.json \
             "${path_args[@]}" | tee /tmp/drift.txt
           echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
@@ -117,7 +118,7 @@ jobs:
           NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
           NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
           NIGHTLY_DRIFT_ARTIFACT_AVAILABLE: ${{ steps.evidence.outcome == 'success' }}
-        run: python scripts/notify_backend_test_drift.py new_failures /tmp/drift.txt
+        run: pdm run python scripts/notify_backend_test_drift.py new_failures /tmp/drift.txt
 
       - name: Notify when the run itself broke
         if: ${{ always() && inputs.pytest_path == '' && steps.drift.outputs.status == '2' }}
@@ -125,7 +126,7 @@ jobs:
           NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
           NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
           NIGHTLY_DRIFT_ARTIFACT_AVAILABLE: ${{ steps.evidence.outcome == 'success' }}
-        run: python scripts/notify_backend_test_drift.py broken /tmp/drift.txt
+        run: pdm run python scripts/notify_backend_test_drift.py broken /tmp/drift.txt
 
       - name: Fail the run when there is drift
         if: ${{ always() && !inputs.test_notification && (steps.drift.outputs.status != '0' || steps.evidence.outcome != 'success') }}

@@ -5,8 +5,8 @@
 - **Authority:** Canonical for recurring local engineering procedures; subordinate
   to `AGENTS.md` and the scoped design guides
 - **Created:** 2026-04-04
-- **Last substantive content update:** 2026-08-01
-- **Last reviewed:** 2026-08-01
+- **Last substantive content update:** 2026-09-04
+- **Last reviewed:** 2026-09-04
 - **Freshness boundary:** Revalidate host-, credential-, launcher-, and
   connector-specific facts before relying on them
 
@@ -46,7 +46,29 @@ Authority order:
 
 ## 3. Shell, Host, and Process Hygiene
 
-### 3.1 Use the host-native shell
+### 3.1 Manage the Python project with PDM
+
+`pdm.lock` is the committed dependency-resolution authority for Von. Setup and
+CI must check that it still matches `pyproject.toml` and synchronise from it;
+they must not silently replace it. Use:
+
+```sh
+pdm lock --check
+pdm sync
+pdm run pytest <targeted-test-path-or-node-id> -q
+```
+
+For an intentional dependency change, update `pyproject.toml`, run `pdm lock`,
+validate the affected paths, and commit both files. The local setup scripts
+bootstrap PDM inside `.venv`, so they intentionally avoid `pdm sync --clean`,
+which would remove that bootstrap executable as an unlisted extra package.
+
+Von retains `uv` only as an isolated external-tool runner, currently including
+`uv tool run arxiv-mcp-server`. `[tool.uv] managed = false` prevents project
+commands such as `uv run` from creating `uv.lock` or synchronising `.venv`.
+Do not add `uv.lock`; use `pdm run` for commands that need Von dependencies.
+
+### 3.2 Use the host-native shell
 
 On macOS and Linux, use the native POSIX shell for normal probes and the
 repository's `run.sh`. On Windows, use PowerShell and `run.ps1`. Use
@@ -63,7 +85,7 @@ Prefer:
 If a simple read stalls, retry a smaller probe. If that also stalls, inspect the
 tool host or transport before blaming repository code.
 
-### 3.2 Deploy and start Von through the repository launcher
+### 3.3 Deploy and start Von through the repository launcher
 
 For the normal local deployed instance, run this from the clean primary
 checkout on `main`:
@@ -131,7 +153,7 @@ unchanged verification when needed, and published a current dependency
 receipt. This command is not a startup workaround and must not be scheduled on
 every restart.
 
-### 3.3 Clean up repeated local helpers
+### 3.4 Clean up repeated local helpers
 
 Before starting another server, browser replay, or MCP-heavy batch after
 several retries, inspect for:

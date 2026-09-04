@@ -22,5 +22,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup PDM
+        uses: pdm-project/setup-pdm@v4
+        with:
+          version: "2.29.0"
+          cache: false
+
+      - name: Check dependency lock
+        run: pdm lock --check
+
       - name: Check minimum grammar compatibility
         run: python scripts/check_python_min_syntax.py

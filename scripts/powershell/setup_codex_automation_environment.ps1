@@ -33,8 +33,8 @@
     network upgrade unless this switch is passed.
 
 .PARAMETER SyncClean
-    Use 'pdm sync --clean' instead of 'pdm install'. This may remove extra
-    packages from the repo-local venv, so it is opt-in.
+    Retained for caller compatibility. The project now always uses `pdm sync`
+    from the committed lockfile; PDM itself is an intentional bootstrap extra.
 
 .PARAMETER InstallNode
     Also install JavaScript dependencies with npm ci/install.
@@ -634,14 +634,14 @@ else {
 
 $pdmProbe = Invoke-ExternalWithRetry `
     -FilePath $venvPython `
-    -Arguments @("-m", "pip", "show", "pdm") `
-    -Description "Checking PDM inside selected virtualenv" `
+    -Arguments @("-c", "from importlib.metadata import version; raise SystemExit(0 if version('pdm') == '2.29.0' else 1)") `
+    -Description "Checking for PDM 2.29.0 inside selected virtualenv" `
     -Attempts 1
-if (-not $pdmProbe.Succeeded -or -not $pdmProbe.Output) {
-    Invoke-PipInstall -Description "Installing PDM inside selected virtualenv" -Packages @("pdm")
+if (-not $pdmProbe.Succeeded) {
+    Invoke-PipInstall -Description "Installing PDM 2.29.0 inside selected virtualenv" -Packages @("pdm==2.29.0")
 }
 else {
-    Write-Ok "PDM is already installed inside selected virtualenv"
+    Write-Ok "Compatible PDM is already installed inside selected virtualenv"
 }
 
 if (-not (Test-Path -LiteralPath $venvPdm)) {
@@ -728,6 +728,15 @@ print("Verified imports: " + ", ".join(sys.argv[1:]))
     }
 }
 
+if (-not (Test-Path -LiteralPath (Join-Path $root "pdm.lock"))) {
+    throw "Committed pdm.lock is missing from $root"
+}
+Invoke-CheckedExternalWithTimeout `
+    -Description "Checking pdm.lock against pyproject.toml" `
+    -FilePath $venvPdm `
+    -Arguments (@($pdmPrefixArgs) + @("lock", "--check")) `
+    -TimeoutSeconds $DependencyInstallTimeoutSeconds
+
 $importsAlreadySatisfied = $false
 if (-not $venvCreated -and -not $ForceDependencyInstall -and -not $SkipDependencyInstall) {
     $importsAlreadySatisfied = Test-VerifiedImports
@@ -739,25 +748,20 @@ if (-not $venvCreated -and -not $ForceDependencyInstall -and -not $SkipDependenc
 $shouldInstallDependencies = -not $SkipDependencyInstall -and ($ForceDependencyInstall -or $venvCreated -or -not $importsAlreadySatisfied)
 
 if ($shouldInstallDependencies) {
-    if ($SyncClean) {
-        $pdmArgs = @("sync", "--clean")
-    }
-    else {
-        $pdmArgs = @("install")
-    }
+    $pdmArgs = @("sync")
 
     if ($VerbosePdm) {
         $pdmArgs += "--verbose"
     }
 
     Invoke-CheckedExternalWithTimeout `
-        -Description "Installing Python dependencies with PDM" `
+        -Description "Synchronising Python dependencies from pdm.lock" `
         -FilePath $venvPdm `
         -Arguments (@($pdmPrefixArgs) + @($pdmArgs)) `
         -TimeoutSeconds $DependencyInstallTimeoutSeconds
 }
 elseif ($SkipDependencyInstall) {
-    Write-Warn "Skipping PDM dependency installation by request"
+    Write-Warn "Skipping PDM dependency synchronisation by request"
 }
 
 if ($InstallNode) {

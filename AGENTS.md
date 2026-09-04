@@ -402,6 +402,11 @@ mechanism, or grant of merge authority.
 - Use New Zealand English spelling by default.
 - Use the native shell for the host: PowerShell on Windows; `zsh`/`sh` on
   macOS and Linux, except when deliberately invoking or testing another shell.
+- PDM is the canonical project dependency and environment manager. Commit and
+  preserve `pdm.lock`; use `pdm sync`/`pdm install` and `pdm run` for project
+  work. `uv` is retained only for isolated external tools such as
+  `uv tool run arxiv-mcp-server`; it must not lock or synchronise the Von
+  project, and `uv.lock` is not a repository artefact.
 - Search before adding helpers, tools, concepts, predicates, workflows, or
   parallel pathways.
 - Treat Atlas inefficiency on the affected path as a material reliability and

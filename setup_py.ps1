@@ -411,15 +411,10 @@ function Initialize-Windows {
     Write-Host "Updating pip in virtual environment..." -ForegroundColor Green
     & .venv\Scripts\python -m pip install --upgrade pip
 
-    # Install PDM in the virtual environment if not already installed
-    $pdmInstalled = & .venv\Scripts\python -m pip show pdm 2>$null
-    if (-not $pdmInstalled) {
-        Write-Host "Installing PDM in virtual environment..." -ForegroundColor Cyan
-        & .venv\Scripts\python -m pip install pdm
-    }
-    else {
-        Write-Host "PDM is already installed in the virtual environment. Skipping installation." -ForegroundColor Yellow
-    }
+    # PDM owns project dependency resolution. Keep the bootstrap version new
+    # enough to read the committed canonical-input lock format.
+    Write-Host "Ensuring a compatible PDM is installed..." -ForegroundColor Cyan
+    & .venv\Scripts\python -m pip install --upgrade "pdm==2.29.0"
 
     # Initialize PDM project if needed
     if (-not (Test-Path "pyproject.toml")) {
@@ -430,9 +425,21 @@ function Initialize-Windows {
         Write-Host "pyproject.toml already exists. Skipping PDM project initialization." -ForegroundColor Yellow
     }
 
-    # Install dependencies with PDM
-    Write-Host "Installing dependencies with PDM..." -ForegroundColor Cyan
-    & .venv\Scripts\pdm install --verbose
+    if (-not (Test-Path "pdm.lock")) {
+        throw "Committed pdm.lock is missing."
+    }
+    & .venv\Scripts\pdm lock --check
+    if ($LASTEXITCODE -ne 0) {
+        throw "pdm.lock does not match pyproject.toml."
+    }
+
+    # Install exclusively from the reviewed lockfile. Do not use --clean here
+    # because PDM itself is deliberately bootstrapped inside this environment.
+    Write-Host "Synchronising dependencies from pdm.lock..." -ForegroundColor Cyan
+    & .venv\Scripts\pdm sync --verbose
+    if ($LASTEXITCODE -ne 0) {
+        throw "PDM sync failed; the environment was not accepted as ready."
+    }
 
     # Verify installation and attempt repair if needed
     Write-Host "Verifying installation..." -ForegroundColor Cyan
@@ -455,10 +462,10 @@ except ImportError as e:
         Write-Host "Verification failed: $verificationResult" -ForegroundColor Red
         Write-Host "Attempting auto-repair of dependencies..." -ForegroundColor Yellow
 
-        # Attempt 1: Force reinstall PDM and sync
+        # Attempt 1: refresh the PDM bootstrap and sync from the same lockfile
         Write-Host "Reinstalling PDM and syncing..." -ForegroundColor Cyan
-        & .venv\Scripts\python.exe -m pip install --upgrade pdm
-        & .venv\Scripts\pdm sync --clean --verbose
+        & .venv\Scripts\python.exe -m pip install --upgrade "pdm==2.29.0"
+        & .venv\Scripts\pdm sync --verbose
 
         # Verify again
         $verificationResult = & .venv\Scripts\python.exe -c $verificationScript 2>&1

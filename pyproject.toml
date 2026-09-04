@@ -129,6 +129,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "mcp>=1.23.1,<2",
     "tavily-python>=0.7.12",
+    # Runtime CLI for isolated MCP tools; project management is disabled below.
     "uv>=0.9.5",
     "llama-index>=0.9.48",
     "python-dateutil>=2.9.0.post0",
@@ -193,16 +194,14 @@ venv = ".venv"
 [tool.pdm]
 distribution = false
 
-[tool.pdm.dependencies]
-test = [
-    "pytest>=8.3.3",
-]
-dev = [
-    "pytest>=8.3.3",
-]
+[tool.pdm.resolution]
+lock_inputs = true
 
 [tool.pdm.python]
 use_venv = true
+
+[tool.uv]
+managed = false
 
 [tool.pytest.ini_options]
 pythonpath = [
