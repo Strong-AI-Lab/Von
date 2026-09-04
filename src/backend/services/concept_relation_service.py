@@ -44,6 +44,10 @@ from .relationship_extent_index_service import (
     incoming_dynamic_extent_rows_page_for_target,
     query_relationship_extent_index,
 )
+from .text_relation_read_policy import (
+    generic_text_read_predicate_filter,
+    is_hidden_from_generic_text_reads,
+)
 from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 RelationValue = Dict[str, Any]
@@ -974,13 +978,18 @@ def find_relations_with_argument(
             text_by_id[text_id] = str(doc.get("text") or "")
         if text_ids:
             for rel in TextRelationsRepository.find(
-                {"object_text_id": {"$in": text_ids}}
+                {
+                    "object_text_id": {"$in": text_ids},
+                    "predicate": generic_text_read_predicate_filter(),
+                }
             ):
                 source_id = rel.get("subject_concept_id")
                 if not isinstance(source_id, str) or not source_id.strip():
                     continue
                 source_id = source_id.strip()
                 predicate_id = rel.get("predicate")
+                if is_hidden_from_generic_text_reads(predicate_id):
+                    continue
                 if not _predicate_matches_terms(predicate_id, predicate_terms):
                     continue
                 if not _argument_indexes_match(

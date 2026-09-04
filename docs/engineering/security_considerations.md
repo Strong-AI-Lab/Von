@@ -110,8 +110,8 @@ Google OAuth email addresses must resolve only through the dedicated
 `#V#hasVonLoginEmail` predicate. The ordinary `#V#has_email` predicate is
 descriptive contact information: adding it to a person must never let that
 address authenticate as the person. Login-email bindings are an explicit
-operator-reviewed allow-list, are unique across user concepts, and fail closed
-when absent, stale, or ambiguous. An unbound OAuth identity must not inherit a
+governed allow-list, are unique across user concepts, and fail closed when
+absent, stale, or ambiguous. An unbound OAuth identity must not inherit a
 browser-supplied or prior-session concept and must not auto-create a user.
 For a database upgraded from the pre-cutover reader, an explicitly approved
 one-time migration may preserve the unambiguous `#V#has_email` bindings that
@@ -124,6 +124,22 @@ predicate so only the dedicated identity-binding lifecycle can change it.
 Newly resolved Google sessions carry a versioned login-assurance marker at the
 trusted session boundary. Pre-cutover email sessions lack that evidence and
 must fail closed rather than retaining an actor or organisation scope.
+
+The internal conversational lifecycle separates inspection from mutation.
+`get_von_login_email_bindings` reads only the narrow predicate for a represented
+member of the actor's server-bound current organisation and requires the
+actor's live `MANAGE_MEMBERS` permission there. `manage_von_login_email_binding`
+uses the same exact-organisation check, actor-bound idempotency, a durable
+receipt, conflict-safe serialisation, and canonical read-back. Because a login
+binding authenticates the global person, a real bind or removal additionally
+requires the actor to administer every organisation the target can enter, or
+to hold the separate Von operational-administrator role. A bind request also
+requires that authority before certifying an existing address as globally
+unambiguous; the dedicated read can still report the target's current bindings
+without making that stronger claim. An absent removal is a target-local no-op.
+Generic KB visibility remains unchanged, and a conflict does not disclose the
+other bound identity. Removing a binding prevents future OAuth resolution but
+does not terminate an already active session.
 
 ### 1a. Narrow endpoint safeguard implemented in December 2024
 

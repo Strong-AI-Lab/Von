@@ -39,6 +39,7 @@ from ..db.repositories.text_value_repository import (
     TextValuesRepository,
 )
 from .text_value_service import get_preferred_texts_for_concepts
+from .text_relation_read_policy import text_contains_hidden_generic_predicate
 from ..vontology.utils_vontology import (
     get_vontology_node_and_descendant_ids,
     get_concept_display_name_with_names_fallback,
@@ -666,6 +667,12 @@ def _semantic_search(
         concept_ids = []
         score_map = {}
         for result in rag_results:
+            result_text = result.get("text") if isinstance(result, dict) else None
+            if text_contains_hidden_generic_predicate(result_text):
+                # Legacy concept embeddings could contain arbitrary relation
+                # text.  Drop such rows until the stale embedding is rebuilt
+                # under the current generic-read policy.
+                continue
             metadata = result.get("metadata", {})
             concept_id = metadata.get("concept_id")
             score = result.get("score", 0.0)
@@ -685,7 +692,7 @@ def _semantic_search(
         # Post-filter and build results
         for concept_doc in _consume_search_cursor(concepts_cursor):
             concept_id = concept_doc.get("concept_id")
-            if not concept_id:
+            if not concept_id or concept_id not in score_map:
                 continue
 
             # Apply kind filter

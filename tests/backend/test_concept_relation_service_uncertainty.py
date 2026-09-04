@@ -149,6 +149,117 @@ def test_find_relations_with_argument_uncertain_only_returns_uncertain_hits() ->
     assert payload["uncertainty_diagnostics"]["mode"] == "uncertain_only"
 
 
+def test_generic_subject_text_reads_and_incidence_hide_login_email_binding() -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.security.access_control import bypass_access_control
+    from src.backend.services.concept_relation_service import (
+        find_relations_with_argument,
+        get_predicate_incidence,
+    )
+    from src.backend.services.text_value_service import upsert_text_for_concept
+
+    concept_id = "#V#generic_relation_login_email_guard"
+    ConceptsRepository.insert_one({"concept_id": concept_id, "relationships": {}})
+    with bypass_access_control():
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            text="Visible person name",
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="#V#hasVonLoginEmail",
+            text="private-login@example.test",
+            lang="en-NZ",
+        )
+
+        unfiltered = find_relations_with_argument(
+            concept_id,
+            argument_index="subject",
+            relation_kind="text",
+            include_concept_preview=False,
+        )
+        explicit = find_relations_with_argument(
+            concept_id,
+            argument_index="subject",
+            predicate_filter=["#V#hasVonLoginEmail"],
+            relation_kind="text",
+            include_concept_preview=False,
+        )
+        incidence = get_predicate_incidence(
+            concept_id=concept_id,
+            argument_index="subject",
+            relation_kind="text",
+            include_concept_preview=False,
+        )
+
+    assert [hit["predicate_concept_id"] for hit in unfiltered["hits"]] == [
+        "hasName"
+    ]
+    assert explicit["hits"] == []
+    assert explicit["total_hits"] == 0
+    assert [
+        row["predicate_concept_id"] for row in incidence["predicates"]
+    ] == ["hasName"]
+    assert "private-login@example.test" not in repr(
+        {"unfiltered": unfiltered, "explicit": explicit, "incidence": incidence}
+    )
+
+
+def test_generic_text_object_lookup_filters_hidden_predicate_at_query_and_output(
+    monkeypatch,
+) -> None:
+    from bson import ObjectId
+
+    from src.backend.services import concept_relation_service as service
+
+    text_value_id = ObjectId()
+    captured_query = {}
+
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service.TextValuesRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"_id": text_value_id, "text": "private-login@example.test"}
+        ],
+    )
+
+    def find_relations(query, **_kwargs):
+        captured_query.update(query)
+        # Returning a forbidden row despite the query exercises the output-side
+        # defence as well as asserting the repository constraint below.
+        return [
+            {
+                "subject_concept_id": "#V#target_user",
+                "predicate": "#V#hasVonLoginEmail",
+                "object_text_id": str(text_value_id),
+            }
+        ]
+
+    monkeypatch.setattr(service.TextRelationsRepository, "find", find_relations)
+
+    payload = service.find_relations_with_argument(
+        "private-login@example.test",
+        argument_index="object",
+        predicate_filter=["#V#hasVonLoginEmail"],
+        relation_kind="text",
+        include_concept_preview=False,
+    )
+
+    assert captured_query == {
+        "object_text_id": {"$in": [str(text_value_id)]},
+        "predicate": {"$nin": ["#V#hasVonLoginEmail", "hasVonLoginEmail"]},
+    }
+    assert payload["hits"] == []
+    assert payload["total_hits"] == 0
+
+
 def test_get_predicate_incidence_entity_mode_groups_distinct_predicates() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence

@@ -108,6 +108,62 @@ def test_stats_snapshot_counts_types_and_predicate_extent(monkeypatch):
     assert predicate["direct_pure_instance_count"] == 1
 
 
+def test_stats_snapshot_conceals_login_identity_predicate_extent(monkeypatch):
+    stats_service._reset_vontology_concept_stats_cache_for_tests()
+    docs = [
+        *_seed_docs(),
+        _concept_doc(
+            "#V#hasVonLoginEmail",
+            is_an_instance_of=["#V#predicate"],
+        ),
+        _concept_doc(
+            "#V#target",
+            extra_relationships={"#V#hasVonLoginEmail": "#V#email_value"},
+        ),
+    ]
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        stats_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: docs,
+    )
+    monkeypatch.setattr(
+        stats_service.TextRelationsRepository,
+        "collection",
+        lambda: object(),
+    )
+
+    def aggregate(pipeline):
+        captured["pipeline"] = pipeline
+        # Defence in depth: even a backend returning an out-of-policy row must
+        # not let its real count reach the generic stats snapshot.
+        return [{"_id": "#V#hasVonLoginEmail", "count": 7}]
+
+    monkeypatch.setattr(
+        stats_service.TextRelationsRepository,
+        "aggregate",
+        aggregate,
+    )
+
+    rebuilt = stats_service.rebuild_vontology_concept_stats_snapshot(
+        scope_key="hidden-predicate-scope",
+        reason="unit-test",
+    )
+    payload = stats_service.get_vontology_concept_stats(
+        ["#V#hasVonLoginEmail"],
+        scope_key="hidden-predicate-scope",
+    )
+
+    assert rebuilt["success"] is True
+    hidden_stats = payload["concept_stats"]["#V#hasVonLoginEmail"]
+    assert hidden_stats["kind"] == "predicate"
+    assert hidden_stats["extent_count"] == 0
+    assert hidden_stats["extent_count_is_exact"] is True
+    assert hidden_stats["extent_count_unavailable"] is False
+    match = captured["pipeline"][0]["$match"]["predicate"]
+    assert match["$nin"] == ["#V#hasVonLoginEmail", "hasVonLoginEmail"]
+
+
 def test_stats_invalidation_marks_snapshot_stale_until_rebuilt(monkeypatch):
     stats_service._reset_vontology_concept_stats_cache_for_tests()
     monkeypatch.setattr(
@@ -134,9 +190,7 @@ def test_stats_invalidation_marks_snapshot_stale_until_rebuilt(monkeypatch):
     )
     assert stale_payload["stats_status"] == stats_service.STATS_STATUS_STALE
     assert stale_payload["concept_stats"]["#V#mammal"]["stats_unavailable"] is True
-    assert (
-        stale_payload["concept_stats"]["#V#mammal"]["stats_reason"] == "cache_stale"
-    )
+    assert stale_payload["concept_stats"]["#V#mammal"]["stats_reason"] == "cache_stale"
 
     refreshed_payload = stats_service.get_vontology_concept_stats(
         ["#V#mammal"],

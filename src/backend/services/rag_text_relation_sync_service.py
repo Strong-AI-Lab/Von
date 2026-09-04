@@ -37,6 +37,9 @@ from src.backend.services.namespace_service import (
 from src.backend.services.text_relation_predicate_validation_service import (
     predicate_concept_id_for_storage,
 )
+from src.backend.services.text_relation_read_policy import (
+    is_hidden_from_generic_text_reads,
+)
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,8 @@ def get_text_relation_preview(
         )
         if not isinstance(assertion, dict):
             return None
+        if is_hidden_from_generic_text_reads(assertion.get("predicate")):
+            return None
         concept_visibility: Dict[str, bool] = {}
         _populate_concept_visibility(
             [
@@ -188,6 +193,8 @@ def get_text_relation_preview(
     object_text_id = rel.get("object_text_id")
 
     if not isinstance(subject_concept_id, str) or not predicate or not object_text_id:
+        return None
+    if is_hidden_from_generic_text_reads(predicate):
         return None
 
     predicate_concept_id = predicate_concept_id_for_storage(predicate)
@@ -394,6 +401,8 @@ def _base_relation_to_rag_doc(
         or not predicate
     ):
         return None
+    if is_hidden_from_generic_text_reads(predicate):
+        return None
     if concept_allow is not None and subject_concept_id not in concept_allow:
         return None
 
@@ -474,6 +483,8 @@ def _scoped_assertion_to_rag_doc(
     concept_visibility: Dict[str, bool],
 ) -> TextRelationRagDoc | None:
     if not isinstance(assertion, dict):
+        return None
+    if is_hidden_from_generic_text_reads(assertion.get("predicate")):
         return None
     if assertion.get("assertion_form") == "standalone_text":
         try:
@@ -618,6 +629,8 @@ def _base_relation_should_prune(
     subject_id = str(relation.get("subject_concept_id") or "")
     if concept_allow is not None and subject_id not in concept_allow:
         return False
+    if is_hidden_from_generic_text_reads(relation.get("predicate")):
+        return True
     predicate_id = predicate_concept_id_for_storage(relation.get("predicate"))
     if (
         not subject_id

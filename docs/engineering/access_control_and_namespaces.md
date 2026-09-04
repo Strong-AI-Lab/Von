@@ -46,6 +46,17 @@ The authoritative identity is derived by the backend.
   - The reverse inference is forbidden: `#V#has_email` never grants login.
   - One user may have several explicit login-email values, but an address bound
     to more than one user is rejected as ambiguous.
+  - Organisation admins and owners can inspect a current member's narrow login
+    bindings through the dedicated internal capability. Binding and removal are
+    idempotent, receipted, and canonically read back. A bind request, including
+    certification that an existing binding is globally unambiguous, and any
+    removal that would change a multi-organisation person's global login
+    identity require management authority across all of that person's
+    represented organisations (or the separate Von operational-administrator
+    role).
+  - This capability does not widen generic concept visibility, promote a
+    descriptive `#V#has_email` value, disclose a conflicting person's identity,
+    or revoke an existing browser session when a binding is removed.
   - An unbound address does not inherit the browser's prior user concept and
     does not auto-create a new Von user.
   - Sessions issued through the old email-resolution path do not carry the

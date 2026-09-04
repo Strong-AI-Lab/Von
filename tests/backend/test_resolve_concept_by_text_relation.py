@@ -78,6 +78,28 @@ def test_exact_predicate_and_text_resolve_one_visible_existing_concept(
     }
 
 
+def test_login_email_predicate_is_not_available_to_generic_text_resolution(
+    monkeypatch,
+) -> None:
+    def unexpected_query(*_args: Any, **_kwargs: Any):
+        raise AssertionError("hidden predicates must fail before repository lookup")
+
+    monkeypatch.setattr(service.TextValuesRepository, "find", unexpected_query)
+    monkeypatch.setattr(service.TextRelationsRepository, "find", unexpected_query)
+
+    result = service.resolve_concept_by_text_relation(
+        predicate="#V#hasVonLoginEmail",
+        text="private-login@example.test",
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "not_found"
+    assert result["resolved_concept_id"] is None
+    assert result["candidate_count"] == 0
+    assert result["candidates"] == []
+    assert result["resolution_complete"] is True
+
+
 def test_multiple_visible_matches_are_ambiguous_and_deterministic(
     monkeypatch,
 ) -> None:

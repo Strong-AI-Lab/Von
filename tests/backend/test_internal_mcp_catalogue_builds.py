@@ -398,6 +398,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "conversation_inspect_batch",
         "conversation_manage",
         "conversation_manage_batch",
+        "get_von_login_email_management_receipt",
     } <= actor_without_org
 
     # Capabilities that can persist state remain write-category even when
@@ -426,6 +427,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "conversation_manage",
         "conversation_manage_batch",
         "manage_organisation_membership",
+        "manage_von_login_email_binding",
         "task_create",
         "task_update_status",
         "task_add_comment",
@@ -439,6 +441,8 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "conversation_transcript_page",
         "conversation_inspect_batch",
         "conversation_manage",
+        "get_von_login_email_bindings",
+        "get_von_login_email_management_receipt",
     } <= actor_mail_reads
 
     message_send_definition = catalogue.get("message_send_direct")

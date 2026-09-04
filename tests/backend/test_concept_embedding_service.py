@@ -116,6 +116,59 @@ class TestBuildConceptSearchableText:
         # The ID is always included
         assert "test concept" in text.lower()
 
+    def test_individual_relation_sample_excludes_login_identity(self, monkeypatch):
+        from src.backend.services import concept_embedding_service as service
+
+        captured = {}
+
+        def find_relations(query, **_kwargs):
+            captured["query"] = query
+            # Return a hidden row despite the query so output filtering is also
+            # exercised against imperfect repository doubles/backends.
+            return [
+                {
+                    "predicate": "#V#hasVonLoginEmail",
+                    "object_text_id": "secret-text",
+                },
+                {
+                    "predicate": "#V#hasNote",
+                    "object_text_id": "public-text",
+                },
+            ]
+
+        monkeypatch.setattr(service.TextRelationsRepository, "find", find_relations)
+        monkeypatch.setattr(
+            service.TextValuesRepository,
+            "find_one",
+            lambda query: {
+                "text": (
+                    "private@example.org"
+                    if query["_id"] == "secret-text"
+                    else "Visible note"
+                )
+            },
+        )
+
+        rows = service._get_individual_relations_sample("#V#person")
+
+        assert rows == [{"predicate": "#V#hasNote", "object_text": "Visible note"}]
+        assert "#V#hasVonLoginEmail" in captured["query"]["predicate"]["$nin"]
+
+    def test_login_identity_predicate_embedding_has_no_extent_sample(
+        self, monkeypatch
+    ):
+        from src.backend.services import concept_embedding_service as service
+
+        monkeypatch.setattr(
+            service.TextRelationsRepository,
+            "find",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("hidden predicate extent must not be queried")
+            ),
+        )
+
+        assert service._get_predicate_extent_sample("#V#hasVonLoginEmail") == []
+
     def test_includes_normalized_id(self):
         """Searchable text should include the normalized concept_id."""
         concept_doc = {

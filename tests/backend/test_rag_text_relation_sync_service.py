@@ -65,6 +65,89 @@ def test_text_relation_sync_requires_a_canonical_actor_namespace():
         svc._parse_namespace("user@org")
 
 
+def test_login_identity_relation_is_not_projected_or_previewed(monkeypatch):
+    from src.backend.services import rag_text_relation_sync_service as svc
+
+    relation_id = ObjectId()
+    hidden_relation = {
+        "_id": relation_id,
+        "subject_concept_id": "#V#person",
+        "predicate": "#V#hasVonLoginEmail",
+        "object_text_id": ObjectId(),
+    }
+    monkeypatch.setattr(
+        svc.TextRelationsRepository,
+        "find_one",
+        lambda *_args, **_kwargs: hidden_relation,
+    )
+    monkeypatch.setattr(
+        svc.TextValuesRepository,
+        "find_one",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hidden relation text must not be hydrated")
+        ),
+    )
+
+    assert (
+        svc._base_relation_to_rag_doc(
+            hidden_relation,
+            user_id="#V#user",
+            org_id="#V#org",
+            concept_allow=None,
+            language_allow=set(),
+            concept_visibility={},
+        )
+        is None
+    )
+    assert (
+        svc.get_text_relation_preview(
+            namespace="#V#user@org",
+            relation_id=str(relation_id),
+        )
+        is None
+    )
+
+
+def test_login_identity_relation_is_pruned_from_existing_rag_index(monkeypatch):
+    from src.backend.services import rag_text_relation_sync_service as svc
+
+    relation_id = ObjectId()
+    hidden_relation = {
+        "_id": relation_id,
+        "subject_concept_id": "#V#person",
+        "predicate": "#V#hasVonLoginEmail",
+        "object_text_id": ObjectId(),
+    }
+    monkeypatch.setattr(
+        svc.TextRelationsRepository,
+        "find",
+        lambda *_args, **_kwargs: iter([hidden_relation]),
+    )
+    monkeypatch.setattr(
+        svc.TextValuesRepository,
+        "find",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_visible_concept_ids_in_namespace",
+        lambda concept_ids, **_kwargs: set(concept_ids),
+    )
+    rag = _StubRAG()
+    monkeypatch.setattr(svc, "get_rag_service", lambda: rag)
+
+    result = svc.sync_text_relations_to_rag(namespace="#V#user@org")
+
+    assert result["success"] is True
+    assert rag.upserts == []
+    assert rag.deletes == [f"text_relation:{relation_id}"]
+
+
 def test_one_pass_iterator_opens_each_store_once_and_batches_visibility(
     monkeypatch,
 ):

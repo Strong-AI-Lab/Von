@@ -177,6 +177,74 @@ def test_search_knowledge_base_derives_permissions_context_from_namespace(monkey
     }
 
 
+def test_search_knowledge_base_filters_legacy_login_identity_projections(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    stub = _StubRAG(
+        results=[
+            {
+                "id": "text_relation:secret",
+                "score": 0.99,
+                "text": "private@example.org",
+                "metadata": {
+                    "type": "text_relation",
+                    "predicate": "#V#hasVonLoginEmail",
+                },
+            },
+            {
+                "id": "concept:#V#person",
+                "score": 0.98,
+                "text": (
+                    "Relations:\n"
+                    "  #V#hasVonLoginEmail: private@example.org"
+                ),
+                "metadata": {"type": "concept"},
+            },
+            {
+                "id": "concept:#V#public",
+                "score": 0.5,
+                "text": "Public represented knowledge",
+                "metadata": {"type": "concept"},
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        lambda *_args, **_kwargs: stub,
+    )
+
+    result = cat._search_knowledge_base(
+        query="private@example.org",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert [row["id"] for row in result["results"]] == ["concept:#V#public"]
+    assert "private@example.org" not in str(result["results"])
+
+
+def test_search_knowledge_base_does_not_query_hidden_predicate(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    def unexpected_backend_access(*_args, **_kwargs):
+        raise AssertionError("hidden generic predicate must not reach RAG")
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        unexpected_backend_access,
+    )
+
+    result = cat._search_knowledge_base(
+        query="private@example.org",
+        predicate="#V#hasVonLoginEmail",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert result["results"] == []
+    assert result["count"] == 0
+
+
 def test_search_knowledge_base_rejects_conflicting_flask_actor(monkeypatch):
     from flask import Flask, session
 

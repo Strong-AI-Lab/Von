@@ -6825,6 +6825,139 @@ def test_possible_duplicate_review_intent_discovers_uncertain_assertion_lifecycl
         tool_metadata_service.invalidate_cache()
 
 
+def test_login_email_admin_intent_discovers_canonical_read_and_effect(
+    monkeypatch,
+) -> None:
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.services import tool_metadata_service
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    trusted = {
+        "actor_user_concept_id": "#V#actor",
+        "actor_organisation_concept_id": "#V#organisation",
+        "turn_id": "login-email-turn",
+    }
+    monkeypatch.setattr(tool_metadata_service, "_load_from_vontology", dict)
+    tool_metadata_service.invalidate_cache()
+    try:
+        delegated = ordinary_turn_capability_delegation(
+            gateway,
+            user_concept_id="#V#actor",
+            trusted_argument_values=trusted,
+        )
+        assert "get_von_login_email_bindings" in delegated
+        assert "manage_von_login_email_binding" in delegated
+        assert "get_von_login_email_management_receipt" in delegated
+
+        without_organisation = ordinary_turn_capability_delegation(
+            gateway,
+            user_concept_id="#V#actor",
+            trusted_argument_values={
+                "actor_user_concept_id": "#V#actor",
+                "actor_organisation_concept_id": None,
+                "turn_id": "login-email-turn",
+            },
+        )
+        assert "get_von_login_email_bindings" not in without_organisation
+        assert "manage_von_login_email_binding" not in without_organisation
+
+        write_discovery = _capability_catalogue(
+            gateway,
+            delegated,
+            {"query": "set that as his Von login address", "limit": 50},
+        )
+        write_by_name = {
+            item["name"]: item for item in write_discovery["capabilities"]
+        }
+        assert write_by_name["manage_von_login_email_binding"]["query_match"] is True
+
+        read_discovery = _capability_catalogue(
+            gateway,
+            delegated,
+            {"query": "what is his Von login email address", "limit": 50},
+        )
+        read_by_name = {
+            item["name"]: item for item in read_discovery["capabilities"]
+        }
+        assert read_by_name["get_von_login_email_bindings"]["query_match"] is True
+
+        exact = _capability_catalogue(
+            gateway,
+            delegated,
+            {
+                "names": [
+                    "get_von_login_email_bindings",
+                    "manage_von_login_email_binding",
+                ]
+            },
+        )
+        exact_by_name = {item["name"]: item for item in exact["capabilities"]}
+        read = exact_by_name["get_von_login_email_bindings"]
+        mutation = exact_by_name["manage_von_login_email_binding"]
+        assert read["semantic_effect"] is False
+        assert mutation["semantic_effect"] is True
+        assert read["server_bound_arguments"] == [
+            "acting_actor_concept_id",
+            "organisation_concept_id",
+        ]
+        assert mutation["server_bound_arguments"] == [
+            "acting_actor_concept_id",
+            "organisation_concept_id",
+            "request_id",
+        ]
+        assert set(read["input_schema"]["properties"]) == {"user_concept_id"}
+        assert set(mutation["input_schema"]["properties"]) == {
+            "action",
+            "email",
+            "reason",
+            "user_concept_id",
+        }
+
+        read_payload = _trusted_tool_payload(
+            gateway=gateway,
+            tool_name="get_von_login_email_bindings",
+            model_payload={
+                "acting_actor_concept_id": "#V#attacker",
+                "organisation_concept_id": "#V#attacker_organisation",
+                "user_concept_id": "#V#target",
+            },
+            trusted_argument_values=trusted,
+        )
+        assert read_payload == {
+            "acting_actor_concept_id": "#V#actor",
+            "organisation_concept_id": "#V#organisation",
+            "user_concept_id": "#V#target",
+        }
+
+        mutation_payload = _trusted_tool_payload(
+            gateway=gateway,
+            tool_name="manage_von_login_email_binding",
+            model_payload={
+                "action": "bind",
+                "acting_actor_concept_id": "#V#attacker",
+                "email": "target@example.com",
+                "organisation_concept_id": "#V#attacker_organisation",
+                "request_id": "attacker-controlled-request",
+                "user_concept_id": "#V#target",
+            },
+            trusted_argument_values=trusted,
+        )
+        assert mutation_payload == {
+            "action": "bind",
+            "acting_actor_concept_id": "#V#actor",
+            "email": "target@example.com",
+            "organisation_concept_id": "#V#organisation",
+            "request_id": "login-email-turn",
+            "user_concept_id": "#V#target",
+        }
+    finally:
+        tool_metadata_service.invalidate_cache()
+
+
 def test_capability_metadata_failure_does_not_remove_delegated_reads(
     monkeypatch,
 ) -> None:

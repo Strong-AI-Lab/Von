@@ -488,6 +488,34 @@ def test_merge_plan_rejects_authority_role_transfer(merge_store) -> None:
     assert result["error_code"] == "identity_consolidation_authority_lifecycle_required"
 
 
+def test_server_merge_plan_does_not_embed_target_login_email_value(
+    merge_store,
+) -> None:
+    concepts, text_relations, text_values = merge_store
+    source_id = "#V#duplicate_person"
+    target_id = "#V#canonical_person"
+    concepts.insert_many([_concept(source_id), _concept(target_id)])
+    _insert_text_relation(
+        text_relations,
+        text_values,
+        relation_id="login-binding",
+        subject_id=target_id,
+        predicate="#V#hasVonLoginEmail",
+        text_id="login-text",
+        text="private-login@example.test",
+    )
+
+    plan = merge_service.build_concept_merge_plan(source_id, target_id)
+
+    assert "private-login@example.test" not in repr(plan)
+    assert len(plan["target_text_relation_preconditions"]) == 1
+    precondition = plan["target_text_relation_preconditions"][0]
+    assert precondition["relation_id"] == "login-binding"
+    assert precondition["relation"]["predicate"] == "#V#hasVonLoginEmail"
+    assert "text_value" not in precondition
+    assert precondition["text_value_sha256"]
+
+
 def test_merge_plan_fails_non_disclosing_when_hidden_reference_would_change(
     merge_store,
     monkeypatch: pytest.MonkeyPatch,
