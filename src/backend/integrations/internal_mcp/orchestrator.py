@@ -19893,29 +19893,44 @@ class InternalMCPChatOrchestrator:
         if namespace_binding is not None:
             bindings.append(namespace_binding)
 
-        # A learning candidate may be captured directly from the current chat
-        # even when that chat has not been materialised as a conversation
-        # concept.  Bind only an explicitly supplied, locator-empty
-        # conversation source; source choice itself remains model-owned.
-        if tool_name == "learning_candidate_capture" and conversation_session_id:
-            source_value = payload.get("source")
-            if (
-                isinstance(source_value, Mapping)
-                and source_value.get("kind") == "conversation"
-                and "conversation_concept_id" not in source_value
-                and "concept_id" not in source_value
-                and "session_id" not in source_value
-            ):
-                source = dict(source_value)
-                source["session_id"] = conversation_session_id
-                payload["source"] = source
+        # Bind capture-attempt provenance to the current turn.  A candidate may
+        # also cite the current chat before it has been materialised as a
+        # conversation concept; in that case bind only an explicitly supplied,
+        # locator-empty conversation source.  Source choice remains model-owned.
+        if tool_name == "learning_candidate_capture":
+            # Capture provenance belongs to the executing turn, not to an
+            # identifier proposed by model output.  An explicit idempotency key
+            # may still group a deliberate cross-turn retry, while request_id
+            # remains an honest server-bound record of this capture attempt.
+            if isinstance(turn_id, str) and turn_id.strip():
+                payload["request_id"] = turn_id.strip()
                 bindings.append(
                     {
-                        "field": "source.session_id",
-                        "source": "conversation_session_id",
+                        "field": "request_id",
+                        "source": "turn_id",
                         "value_present": True,
                     }
                 )
+
+            if conversation_session_id:
+                source_value = payload.get("source")
+                if (
+                    isinstance(source_value, Mapping)
+                    and source_value.get("kind") == "conversation"
+                    and "conversation_concept_id" not in source_value
+                    and "concept_id" not in source_value
+                    and "session_id" not in source_value
+                ):
+                    source = dict(source_value)
+                    source["session_id"] = conversation_session_id
+                    payload["source"] = source
+                    bindings.append(
+                        {
+                            "field": "source.session_id",
+                            "source": "conversation_session_id",
+                            "value_present": True,
+                        }
+                    )
 
         # Preserve user-attribution for auto-created concepts so namespace
         # isolation has a deterministic provenance trail (JVNAUTOSCI-925).

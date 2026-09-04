@@ -104,6 +104,38 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
             },
             "aux_llm_calls": [
                 {
+                    "type": "adaptive_turn_learning_advice_exposure",
+                    "schema_version": (
+                        "adaptive_capability_learning_advice_exposure.v1"
+                    ),
+                    "consumer": "direct_adaptive_turn",
+                    "decision_kind": "capability_choice",
+                    "arm": "B",
+                    "source": "simple_sidecar",
+                    "status": "exposed",
+                    "experiment_id": "experiment-one",
+                    "case_id": "case-one",
+                    "candidate_id": "#V#candidate_one",
+                    "candidate_revision": 2,
+                    "candidate_body_sha256": "body-digest",
+                    "candidate_revision_identity_sha256": "revision-digest",
+                    "candidate_source_locator_sha256": "source-digest",
+                    "projection_sha256": "projection-digest",
+                    "model_visible": True,
+                    "model_visible_call_ids": [
+                        "req-adaptive-observation:llm:1"
+                    ],
+                    "dispositions": [
+                        {
+                            "capability_call_id": "tool-call-one",
+                            "capability_name": "general_read",
+                            "disposition": "adapted",
+                        }
+                    ],
+                    "terminal_status": "completed",
+                    "private_body": "must not enter the turn record",
+                },
+                {
                     "type": "adaptive_turn_evidence_index",
                     "evidence": [evidence],
                 }
@@ -133,6 +165,7 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
     assert record["response"]["present"] is True
     assert record["applied_prompt_snapshot"] == applied_prompt_snapshot
     assert record["evidence_index"] == [evidence]
+    assert "learning_advice_exposures" not in record
     summary = result["llm_usage_cost_summary"]
     assert summary["usage"]["total_tokens"] == 120
     assert summary["estimated_cost"]["status"] == "estimated"

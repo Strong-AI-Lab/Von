@@ -13,6 +13,13 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
+from ..security.visibility_predicates import (
+    get_specific_to_org_values,
+    get_specific_to_user_values,
+)
+from ..workflows.workflow_concept_authority_service import (
+    upsert_workflow_publication_lifecycle,
+)
 from . import concept_service
 from .concept_service import (
     ConceptNotFoundError,
@@ -25,13 +32,13 @@ from .testing_workflow_contracts import (
     BELONGS_TO_EXPERIMENT_SUITE_PREDICATE_ID,
     EXPERIMENT_CREATE_SPEC_ACTION_ID,
     EXPERIMENT_RUN_SCHEMA_VERSION,
-    EXPERIMENT_RUN_STATUSES,
     EXPERIMENT_RUN_STATUS_COMPLETED,
     EXPERIMENT_RUN_STATUS_FAILED,
     EXPERIMENT_RUN_STATUS_PENDING,
     EXPERIMENT_RUN_STATUS_RUNNING,
-    EXPERIMENT_RUNS_COLLECTION,
+    EXPERIMENT_RUN_STATUSES,
     EXPERIMENT_RUN_TYPE_ID,
+    EXPERIMENT_RUNS_COLLECTION,
     EXPERIMENT_SPEC_SCHEMA_VERSION,
     EXPERIMENT_SPEC_TYPE_ID,
     EXPERIMENT_START_RUN_ACTION_ID,
@@ -40,8 +47,8 @@ from .testing_workflow_contracts import (
     EXPERIMENT_VERDICT_PARTIAL,
     EXPERIMENT_VERDICT_PASS,
     EXPERIMENT_VERDICTS,
-    HAS_EXPERIMENT_VERDICT_PREDICATE_ID,
     HAS_EXPECTED_OUTCOME_PREDICATE_ID,
+    HAS_EXPERIMENT_VERDICT_PREDICATE_ID,
     HAS_OBSERVED_OUTCOME_PREDICATE_ID,
     INCLUDES_THEORY_PREDICATE_ID,
     TESTING_EXPERIMENT_SCENARIO_TEMPLATE_SCHEMA_VERSION,
@@ -53,14 +60,23 @@ from .text_value_service import upsert_singleton_text_relation, upsert_text_for_
 from .workflow_prediction_service import build_workflow_prediction_envelope
 from .workflow_selection_experience import finalise_selection_experience
 from .workflow_vontology_materialisation_helpers import stable_named_instance_concept_id
-from ..workflows.workflow_concept_authority_service import (
-    upsert_workflow_publication_lifecycle,
-)
 
 logger = logging.getLogger(__name__)
 
 _RUN_INDEXES_READY = False
 _SCENARIO_TEMPLATE_OMIT = object()
+
+
+class ExperimentVisibilityScopeError(ValueError):
+    """Raised before experiment state is written into a wider concept scope."""
+
+    def __init__(self, concept_id: str) -> None:
+        self.concept_id = concept_id
+        super().__init__(
+            f"Experiment concept {concept_id} is not restricted to the exact actor."
+        )
+
+
 _DEFAULT_REGRESSION_SUITE_POLICY: dict[str, Any] = {
     "schema_version": TESTING_REGRESSION_SUITE_POLICY_SCHEMA_VERSION,
     "default_execution_tier": "tier1",
@@ -555,6 +571,24 @@ def _get_concept_or_none(concept_id: str) -> Mapping[str, Any] | None:
     return concept if isinstance(concept, Mapping) else None
 
 
+def _assert_actor_only_concept_visibility(
+    concept: Mapping[str, Any] | None,
+    *,
+    concept_id: str,
+    user_id: str | None,
+) -> None:
+    """Require the canonical concept to be visible only to one exact actor."""
+
+    if not isinstance(concept, Mapping) or not user_id:
+        raise ExperimentVisibilityScopeError(concept_id)
+    relationships = concept.get("relationships")
+    relationships = dict(relationships) if isinstance(relationships, Mapping) else {}
+    user_scopes = get_specific_to_user_values(relationships)
+    org_scopes = get_specific_to_org_values(relationships)
+    if user_scopes != [user_id] or org_scopes:
+        raise ExperimentVisibilityScopeError(concept_id)
+
+
 def _ensure_experiment_spec_concept(
     *,
     experiment_spec_id: str,
@@ -563,9 +597,16 @@ def _ensure_experiment_spec_concept(
     user_id: str | None,
     org_id: str | None,
     namespace: str | None,
+    require_actor_only_visibility: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     existing = _get_concept_or_none(experiment_spec_id)
     if isinstance(existing, Mapping):
+        if require_actor_only_visibility:
+            _assert_actor_only_concept_visibility(
+                existing,
+                concept_id=experiment_spec_id,
+                user_id=user_id,
+            )
         return dict(existing), False
 
     created = concept_service.create_concept(
@@ -577,7 +618,21 @@ def _ensure_experiment_spec_concept(
         created_by_concept_id=user_id,
         organisation_concept_id=org_id,
         event_namespace=namespace,
+        visibility_scope_mode=(
+            "user_only_default" if require_actor_only_visibility else None
+        ),
     )
+    canonical = (
+        _get_concept_or_none(experiment_spec_id)
+        if require_actor_only_visibility
+        else None
+    )
+    if require_actor_only_visibility:
+        _assert_actor_only_concept_visibility(
+            canonical,
+            concept_id=experiment_spec_id,
+            user_id=user_id,
+        )
     upsert_singleton_text_relation(
         subject_concept_id=experiment_spec_id,
         predicate="hasDescription",
@@ -589,7 +644,7 @@ def _ensure_experiment_spec_concept(
         },
         garbage_collect=True,
     )
-    return created, True
+    return dict(canonical) if isinstance(canonical, Mapping) else created, True
 
 
 def _ensure_experiment_run_concept(
@@ -600,9 +655,16 @@ def _ensure_experiment_run_concept(
     user_id: str | None,
     org_id: str | None,
     namespace: str | None,
+    require_actor_only_visibility: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     existing = _get_concept_or_none(run_id)
     if isinstance(existing, Mapping):
+        if require_actor_only_visibility:
+            _assert_actor_only_concept_visibility(
+                existing,
+                concept_id=run_id,
+                user_id=user_id,
+            )
         return dict(existing), False
 
     created = concept_service.create_concept(
@@ -614,7 +676,17 @@ def _ensure_experiment_run_concept(
         created_by_concept_id=user_id,
         organisation_concept_id=org_id,
         event_namespace=namespace,
+        visibility_scope_mode=(
+            "user_only_default" if require_actor_only_visibility else None
+        ),
     )
+    canonical = _get_concept_or_none(run_id) if require_actor_only_visibility else None
+    if require_actor_only_visibility:
+        _assert_actor_only_concept_visibility(
+            canonical,
+            concept_id=run_id,
+            user_id=user_id,
+        )
     upsert_singleton_text_relation(
         subject_concept_id=run_id,
         predicate="hasDescription",
@@ -626,7 +698,7 @@ def _ensure_experiment_run_concept(
         },
         garbage_collect=True,
     )
-    return created, True
+    return dict(canonical) if isinstance(canonical, Mapping) else created, True
 
 
 def _normalise_spec_state(
@@ -1088,6 +1160,7 @@ def create_experiment_spec(
     replay_policy: Mapping[str, Any] | None = None,
     promotion_policy: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    require_actor_only_visibility: bool = False,
 ) -> dict[str, Any]:
     try:
         from .testing_workflow_vontology_service import (
@@ -1122,6 +1195,7 @@ def create_experiment_spec(
         user_id=resolved_user_id,
         org_id=resolved_org_id,
         namespace=resolved_namespace,
+        require_actor_only_visibility=require_actor_only_visibility,
     )
 
     state = {
@@ -1220,6 +1294,7 @@ def start_experiment_run(
     selection_experience_id: str | None = None,
     turn_execution_request_ids: Sequence[str] = (),
     metadata: Mapping[str, Any] | None = None,
+    require_actor_only_visibility: bool = False,
 ) -> dict[str, Any]:
     try:
         from .testing_workflow_vontology_service import (
@@ -1243,6 +1318,12 @@ def start_experiment_run(
         user_id=user_id or spec_state.get("user_id"),
         org_id=org_id or spec_state.get("org_id"),
     )
+    if require_actor_only_visibility:
+        _assert_actor_only_concept_visibility(
+            _get_concept_or_none(resolved_spec_id),
+            concept_id=resolved_spec_id,
+            user_id=resolved_user_id,
+        )
     resolved_run_id = _safe_str(run_id) or _build_run_id()
     label = _safe_str(spec_state.get("label")) or resolved_spec_id
     description = f"Experiment run for {label}."
@@ -1255,6 +1336,7 @@ def start_experiment_run(
         user_id=resolved_user_id,
         org_id=resolved_org_id,
         namespace=resolved_namespace,
+        require_actor_only_visibility=require_actor_only_visibility,
     )
 
     state = {
@@ -1489,6 +1571,139 @@ def record_experiment_observation(
         "success": True,
         "run_id": resolved_run_id,
         "recorded_observations": appended,
+        "experiment_run": persisted,
+        "projection": projection,
+    }
+
+
+def abort_experiment_run(
+    *,
+    run_id: str,
+    reason_code: str,
+    binding_metadata_key: str,
+    expected_binding_sha256: str,
+) -> dict[str, Any]:
+    """Terminalise an invalidated run without treating it as a content failure.
+
+    The caller must name the exact frozen metadata binding already attached to
+    the run.  Only typed identifiers and counts are persisted: exception text,
+    prompts, candidate bodies, and evaluator content are deliberately outside
+    this mutation boundary.
+    """
+
+    resolved_run_id = _safe_str(run_id)
+    resolved_reason_code = _safe_str(reason_code, limit=200).lower()
+    resolved_binding_key = _safe_str(binding_metadata_key, limit=200)
+    resolved_binding_sha256 = _safe_str(expected_binding_sha256, limit=64).lower()
+    allowed_code_chars = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_.:-")
+    if not resolved_run_id:
+        return {"success": False, "error": "run_id_required"}
+    if not resolved_reason_code or any(
+        char not in allowed_code_chars for char in resolved_reason_code
+    ):
+        return {"success": False, "error": "abort_reason_code_invalid"}
+    if not resolved_binding_key or any(
+        char not in allowed_code_chars for char in resolved_binding_key.casefold()
+    ):
+        return {"success": False, "error": "binding_metadata_key_invalid"}
+    if len(resolved_binding_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in resolved_binding_sha256
+    ):
+        return {"success": False, "error": "expected_binding_sha256_invalid"}
+
+    state = get_experiment_run_state(resolved_run_id)
+    if state is None:
+        return {"success": False, "error": "experiment_run_not_found"}
+    metadata = state.get("metadata")
+    observed_binding = (
+        metadata.get(resolved_binding_key) if isinstance(metadata, Mapping) else None
+    )
+    if (
+        not isinstance(observed_binding, Mapping)
+        or observed_binding.get("binding_sha256") != resolved_binding_sha256
+    ):
+        return {"success": False, "error": "experiment_run_binding_mismatch"}
+
+    existing_abort = state.get("abort_summary")
+    if state.get("status") != EXPERIMENT_RUN_STATUS_RUNNING:
+        if (
+            state.get("status") == EXPERIMENT_RUN_STATUS_FAILED
+            and state.get("verdict") == EXPERIMENT_VERDICT_INCONCLUSIVE
+            and isinstance(existing_abort, Mapping)
+            and existing_abort.get("reason_code") == resolved_reason_code
+            and existing_abort.get("binding_sha256") == resolved_binding_sha256
+        ):
+            return {
+                "success": True,
+                "idempotent": True,
+                "run_id": resolved_run_id,
+                "status": state.get("status"),
+                "verdict": state.get("verdict"),
+                "abort_summary": copy.deepcopy(dict(existing_abort)),
+                "experiment_run": state,
+            }
+        return {"success": False, "error": "experiment_run_not_running"}
+
+    now_iso = _utcnow_iso()
+    abort_summary = {
+        "schema_version": "experiment_run_abort.v1",
+        "reason_code": resolved_reason_code,
+        "binding_metadata_key": resolved_binding_key,
+        "binding_sha256": resolved_binding_sha256,
+        "preserved_observation_count": len(state.get("observations") or []),
+        "preserved_turn_execution_request_count": len(
+            state.get("turn_execution_request_ids") or []
+        ),
+        "aborted_at_utc": now_iso,
+    }
+    state["status"] = EXPERIMENT_RUN_STATUS_FAILED
+    state["verdict"] = EXPERIMENT_VERDICT_INCONCLUSIVE
+    state["abort_summary"] = abort_summary
+    state["verdict_summary"] = {
+        "reason": "experiment_run_aborted",
+        "abort_reason_code": resolved_reason_code,
+        "binding_sha256": resolved_binding_sha256,
+    }
+    state["promotion_recommendation"] = {
+        "recommended": False,
+        "requires_promotion_gate": True,
+        "reason": "experiment_run_aborted",
+    }
+    evidence = _clone_mapping(state.get("evidence"))
+    evidence["experiment_run_abort"] = copy.deepcopy(abort_summary)
+    state["evidence"] = evidence
+    state["completed_at_utc"] = now_iso
+    state["updated_at_utc"] = now_iso
+
+    persisted = _persist_experiment_run_state(run_id=resolved_run_id, state=state)
+    projection = upsert_experiment_run_projection(
+        record=persisted,
+        namespace=_safe_str(persisted.get("namespace")) or None,
+        user_id=_safe_str(persisted.get("user_id")) or None,
+        org_id=_safe_str(persisted.get("org_id")) or None,
+    )
+    try:
+        upsert_singleton_text_relation(
+            subject_concept_id=resolved_run_id,
+            predicate=HAS_EXPERIMENT_VERDICT_PREDICATE_ID,
+            text=EXPERIMENT_VERDICT_INCONCLUSIVE,
+            lang="en-NZ",
+            context={"source": "experiment_run_service", "reason": "abort_run"},
+            garbage_collect=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal state is already durable
+        logger.warning(
+            "[experiment_run] could not write aborted verdict text for %s: %s",
+            resolved_run_id,
+            exc,
+        )
+    return {
+        "success": True,
+        "idempotent": False,
+        "run_id": resolved_run_id,
+        "status": persisted.get("status"),
+        "verdict": persisted.get("verdict"),
+        "abort_summary": copy.deepcopy(abort_summary),
         "experiment_run": persisted,
         "projection": projection,
     }
@@ -2436,6 +2651,8 @@ def _maybe_record_suite_observation(
 
 
 __all__ = [
+    "ExperimentVisibilityScopeError",
+    "abort_experiment_run",
     "compute_experiment_verdict",
     "create_experiment_spec",
     "emit_experiment_learning_signal",

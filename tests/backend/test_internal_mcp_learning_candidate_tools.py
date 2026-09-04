@@ -35,6 +35,7 @@ def _apply_learning_candidate_payload_defaults(
     *,
     tool_name: str = "learning_candidate_capture",
     conversation_session_id: str | None = "current-session",
+    turn_id: str | None = None,
 ) -> list[dict[str, Any]]:
     from src.backend.integrations.internal_mcp.orchestrator import (
         InternalMCPChatOrchestrator,
@@ -48,6 +49,7 @@ def _apply_learning_candidate_payload_defaults(
         user_namespace=None,
         selected_gmail_profile=None,
         conversation_session_id=conversation_session_id,
+        turn_id=turn_id,
     )
 
 
@@ -75,6 +77,39 @@ def test_capture_defaults_locator_empty_conversation_source() -> None:
             "source": "conversation_session_id",
             "value_present": True,
         }
+    ]
+
+
+def test_capture_request_id_is_bound_to_the_current_turn() -> None:
+    payload = {
+        "request_id": "model-proposed-request",
+        "source": {"kind": "conversation"},
+    }
+
+    bindings = _apply_learning_candidate_payload_defaults(
+        payload,
+        conversation_session_id="current-session",
+        turn_id="trusted-turn-id",
+    )
+
+    assert payload == {
+        "request_id": "trusted-turn-id",
+        "source": {
+            "kind": "conversation",
+            "session_id": "current-session",
+        },
+    }
+    assert bindings == [
+        {
+            "field": "request_id",
+            "source": "turn_id",
+            "value_present": True,
+        },
+        {
+            "field": "source.session_id",
+            "source": "conversation_session_id",
+            "value_present": True,
+        },
     ]
 
 

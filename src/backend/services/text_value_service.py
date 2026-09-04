@@ -6,6 +6,7 @@ text_relations repositories, with simple normalization and validation.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 from typing import (
@@ -52,6 +53,8 @@ _EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 
 TextContextView = Literal["base_publication", "actor_effective"]
 _TEXT_CONTEXT_VIEWS = frozenset({"base_publication", "actor_effective"})
+TextValueIdentityMode = Literal["normalised", "exact"]
+_TEXT_VALUE_IDENTITY_MODES = frozenset({"normalised", "exact"})
 
 
 def _now() -> datetime:
@@ -255,22 +258,39 @@ def _prepare_persisted_text(raw: str) -> str:
     return raw.strip()
 
 
-def _compute_fingerprint(text: str, lang: str) -> str:
-    # Normalize: collapse whitespace, lowercase, include lang to avoid cross-lang collisions
+def _compute_fingerprint(
+    text: str,
+    lang: str,
+    *,
+    identity_mode: TextValueIdentityMode = "normalised",
+) -> str:
+    if identity_mode not in _TEXT_VALUE_IDENTITY_MODES:
+        raise ValueError("identity_mode must be 'normalised' or 'exact'")
+    if identity_mode == "exact":
+        # Keep the indexed key bounded while giving byte-sensitive callers a
+        # namespace distinct from the long-standing normalised fingerprints.
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return f"exact-text-v1:sha256:{digest}||{lang.lower()}"
+    # Normalise: collapse whitespace, lowercase, include lang to avoid
+    # cross-language collisions. This remains the default for existing callers.
     normalized = _normalize_text(text).lower()
     return f"{normalized}||{lang.lower()}"
 
 
 def create_text_value(
-    text: str, lang: str = "en", provenance: Optional[Dict[str, Any]] = None
+    text: str,
+    lang: str = "en",
+    provenance: Optional[Dict[str, Any]] = None,
+    *,
+    identity_mode: TextValueIdentityMode = "normalised",
 ) -> str:
-    """Create or return an existing TextValue document based on (fingerprint, lang).
+    """Create or return a TextValue using normalised or exact-byte identity.
 
     Returns the inserted/existing ObjectId as a hex string.
     """
     provenance = provenance or {}
     stored_text = _prepare_persisted_text(text)
-    fp = _compute_fingerprint(stored_text, lang)
+    fp = _compute_fingerprint(stored_text, lang, identity_mode=identity_mode)
 
     # Validate input via Pydantic (stores the preserved formatting)
     tv = TextValueModel(text=stored_text, lang=lang, provenance=provenance)
@@ -278,6 +298,8 @@ def create_text_value(
     # Try to find by fingerprint+lang
     existing = TextValuesRepository.find_one({"fingerprint": fp, "lang": tv.lang})
     if existing and existing.get("_id"):
+        if identity_mode == "exact" and existing.get("text") != tv.text:
+            raise ValueError("Exact TextValue fingerprint resolved to different bytes")
         return str(existing["_id"])
 
     doc = {
@@ -297,6 +319,10 @@ def create_text_value(
         # upsert.
         existing = TextValuesRepository.find_one({"fingerprint": fp, "lang": tv.lang})
         if existing and existing.get("_id"):
+            if identity_mode == "exact" and existing.get("text") != tv.text:
+                raise ValueError(
+                    "Exact TextValue fingerprint resolved to different bytes"
+                )
             return str(existing["_id"])
         raise
     return str(res.inserted_id)
@@ -371,6 +397,8 @@ def upsert_text_for_concept(
     lang: str = "en",
     provenance: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    *,
+    identity_mode: TextValueIdentityMode = "normalised",
 ) -> Dict[str, Any]:
     """Convenience: ensure a TextValue exists and is linked to the concept.
 
@@ -378,7 +406,10 @@ def upsert_text_for_concept(
     """
     stored_text = _prepare_persisted_text(text)
     text_value_id = create_text_value(
-        text=stored_text, lang=lang, provenance=provenance
+        text=stored_text,
+        lang=lang,
+        provenance=provenance,
+        identity_mode=identity_mode,
     )
     relation_id, relation_created, context_updated = link_text_to_concept(
         subject_concept_id=subject_concept_id,
@@ -1458,6 +1489,7 @@ def upsert_singleton_text_relation(
     provenance: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
     garbage_collect: bool = True,
+    identity_mode: TextValueIdentityMode = "normalised",
 ) -> Dict[str, Any]:
     """Upsert text and enforce singleton semantics for (concept, predicate, language).
 
@@ -1475,6 +1507,7 @@ def upsert_singleton_text_relation(
         lang=lang,
         provenance=provenance,
         context=context,
+        identity_mode=identity_mode,
     )
     kept_relation_id = str(result.get("relation_id") or "")
 

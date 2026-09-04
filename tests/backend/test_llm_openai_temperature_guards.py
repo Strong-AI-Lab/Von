@@ -461,6 +461,49 @@ def test_llm_interface_openai_generate_defaults_luna_to_responses(
     assert result == "ok"
     assert captured_responses_kwargs["model"] == "gpt-5.6-luna"
     assert captured_responses_kwargs["max_output_tokens"] == 4096
+    assert client.last_response_metadata["provider_observed_model"] == "gpt-5.6-luna"
+    assert (
+        client.last_response_metadata["transport_metadata"][
+            "provider_observed_model"
+        ]
+        == "gpt-5.6-luna"
+    )
+
+
+def test_llm_interface_does_not_fabricate_missing_provider_model(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    def _responses_create(**_kwargs):
+        return types.SimpleNamespace(output_text="ok")
+
+    monkeypatch.setattr(
+        mod.openai,
+        "OpenAI",
+        lambda **_kwargs: types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=_responses_create),
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(
+                    create=lambda **_kwargs: (_ for _ in ()).throw(
+                        AssertionError("Luna must use the Responses API")
+                    )
+                )
+            ),
+        ),
+    )
+
+    client = mod.OpenAIClient(api_key="test-key")
+
+    assert client.generate(prompt="hello", model="gpt-5.6-luna") == "ok"
+    assert client.last_response_metadata["effective_model"] == "gpt-5.6-luna"
+    assert client.last_response_metadata["provider_observed_model"] is None
+    assert (
+        client.last_response_metadata["transport_metadata"][
+            "provider_observed_model"
+        ]
+        is None
+    )
 
 
 def test_openai_embedding_does_not_impose_fixed_request_timeout(monkeypatch) -> None:
