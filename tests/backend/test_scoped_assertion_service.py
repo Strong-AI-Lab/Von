@@ -404,6 +404,72 @@ def test_visible_global_subject_accepts_user_scoped_text_assertion(monkeypatch):
     assert read_back["provenance"]["turn_id"] == "turn-1"
 
 
+def test_scoped_assertion_generic_write_rejects_login_identity_predicate(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from src.backend.services import scoped_assertion_service as service
+
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    monkeypatch.setattr(
+        service,
+        "resolve_text_relation_predicate_for_write",
+        lambda _predicate: SimpleNamespace(
+            storage_predicate="#V#hasVonLoginEmail",
+            predicate_concept_id="#V#hasVonLoginEmail",
+        ),
+    )
+
+    with pytest.raises(PermissionError, match="dedicated Von login-email"):
+        service.upsert_scoped_assertion(
+            subject_concept_id="#V#person",
+            predicate="#V#hasVonLoginEmail",
+            target_text="private@example.test",
+            scope_mode="organisation",
+            acting_user_concept_id="#V#owner",
+            organisation_concept_id="#V#org",
+            namespace="#V#owner@org",
+        )
+
+
+def test_scoped_assertion_generic_reads_hide_stored_login_identity(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    hidden = _stored_text_assertion(
+        assertion_id="ska_hidden_login",
+        subject_concept_id="#V#person",
+    )
+    hidden["predicate"] = "#V#hasVonLoginEmail"
+    hidden["object_text"]["text"] = "private@example.test"
+    collection.insert_one(hidden)
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+
+    assert service.list_visible_scoped_assertions(
+        user_concept_id="#V#author",
+        organisation_concept_id="#V#trusted_org",
+    ) == []
+    assert (
+        service.get_visible_scoped_assertion_by_id(
+            "ska_hidden_login",
+            user_concept_id="#V#author",
+            organisation_concept_id="#V#trusted_org",
+        )
+        is None
+    )
+    assert service.scoped_text_assertion_to_relation_row(hidden) is None
+
+
 def test_scoped_assertion_mutations_emit_actor_bound_content_free_events(monkeypatch):
     from src.backend.services import scoped_assertion_service as service
     from src.backend.services import workflow_event_integration_service as events

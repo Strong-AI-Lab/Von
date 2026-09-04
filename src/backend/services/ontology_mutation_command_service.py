@@ -62,6 +62,10 @@ from .text_relation_predicate_validation_service import (
     TextRelationPredicateResolutionError,
     resolve_text_relation_predicate_for_write,
 )
+from .text_relation_read_policy import (
+    generic_text_read_predicate_filter,
+    is_hidden_from_generic_text_reads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1927,8 +1931,15 @@ def _concept_read_back(concept_id: str) -> dict[str, Any]:
         if values:
             scope_edges[predicate_name] = values
     text_relations: list[dict[str, Any]] = []
-    for relation in TextRelationsRepository.find({"subject_concept_id": concept_id}):
+    for relation in TextRelationsRepository.find(
+        {
+            "subject_concept_id": concept_id,
+            "predicate": generic_text_read_predicate_filter(),
+        }
+    ):
         if not isinstance(relation, Mapping):
+            continue
+        if is_hidden_from_generic_text_reads(relation.get("predicate")):
             continue
         text_value = TextValuesRepository.find_one_by_id(
             relation.get("object_text_id")

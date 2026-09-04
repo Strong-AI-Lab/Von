@@ -92,6 +92,39 @@ def test_search_concepts_exact_match_normalises_internal_whitespace():
     assert _has_concept(result["results"], concept_id)
 
 
+def test_search_concepts_does_not_treat_login_email_as_a_name_relation():
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concept_id = "#V#login_email_search_guard"
+    login_email = "private-login-search@example.test"
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+    concepts.insert_one({"concept_id": concept_id, "relationships": {}})
+    with bypass_access_control():
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            text="Visible Search Name",
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="#V#hasVonLoginEmail",
+            text=login_email,
+            lang="en-NZ",
+        )
+        email_result = search_concepts(query=login_email, match_type="exact")
+        name_result = search_concepts(
+            query="Visible Search Name",
+            match_type="exact",
+        )
+
+    assert _has_concept(email_result["results"], concept_id) is False
+    assert _has_concept(name_result["results"], concept_id) is True
+
+
 def test_search_concepts_substring_match_finds_has_description_relation():
     if TextValuesRepository.db() is None:
         pytest.skip("MongoDB not configured for this test run")

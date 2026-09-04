@@ -18,6 +18,9 @@ from ...services.concept_predicate_metadata_service import (
 from ...services.relationship_extent_index_service import (
     query_relationship_extent_index,
 )
+from ...services.text_relation_read_policy import (
+    is_hidden_from_generic_text_reads,
+)
 
 
 predicate_bp = Blueprint("predicates", __name__, url_prefix="/api/predicates")
@@ -115,6 +118,25 @@ def get_predicate_extent_data(
     concept_id = concept_id.strip()
     if sample_size is not None:
         sample_size = max(1, min(int(sample_size), 1000))
+
+    # Authentication identifiers are governed through the dedicated Von login
+    # lifecycle.  Predicate extent is a generic knowledge projection and must
+    # not reveal whether, where, or how often those bindings exist.
+    if is_hidden_from_generic_text_reads(concept_id):
+        return {
+            "concept_id": concept_id,
+            "extent": [],
+            "total_count": 0,
+            "limit": sample_size if sample_size is not None else limit,
+            "offset": 0 if sample_size is not None else offset,
+            "has_more": False,
+            "sampled": sample_size is not None,
+            **(
+                {"sample_size": sample_size}
+                if sample_size is not None
+                else {}
+            ),
+        }
 
     extent_items: List[Dict[str, Any]] = []
     total_count = 0
@@ -294,6 +316,8 @@ def _query_text_relations_extent(
     sort_order: str,
 ) -> tuple[List[Dict[str, Any]], int]:
     """Query text_relations collection for predicate extent."""
+    if is_hidden_from_generic_text_reads(predicate_concept_id):
+        return [], 0
     try:
         text_rel_coll = get_text_relations_collection()
         if text_rel_coll is None:
@@ -481,6 +505,8 @@ def _sample_text_relations_extent(
     sample_size: int,
 ) -> tuple[List[Dict[str, Any]], int]:
     """Sample text_relations extent for a predicate."""
+    if is_hidden_from_generic_text_reads(predicate_concept_id):
+        return [], 0
     try:
         text_rel_coll = get_text_relations_collection()
         if text_rel_coll is None:
@@ -873,6 +899,8 @@ def _find_custom_meta_properties(
 
 def _calculate_extent_statistics(predicate_id: str) -> Dict[str, int]:
     """Calculate statistics about predicate extent."""
+    if is_hidden_from_generic_text_reads(predicate_id):
+        return {"total_uses": 0, "unique_subjects": 0, "unique_objects": 0}
     try:
         text_rel_coll = get_text_relations_collection()
         concepts_coll = get_concepts_collection()

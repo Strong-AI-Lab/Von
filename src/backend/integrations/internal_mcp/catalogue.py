@@ -771,6 +771,91 @@ def _manage_organisation_membership(**kwargs):
     return result
 
 
+def _get_von_login_email_bindings(**kwargs):
+    from ...services.von_login_email_governance_service import (
+        get_von_login_email_bindings,
+    )
+
+    try:
+        return get_von_login_email_bindings(
+            user_concept_id=kwargs.get("user_concept_id"),
+            organisation_concept_id=kwargs.get("organisation_concept_id"),
+            acting_actor_concept_id=kwargs.get("acting_actor_concept_id"),
+        )
+    except RuntimeError:
+        return make_error_response(
+            "von_login_email_governance_unavailable",
+            "Login-email authority verification is unavailable.",
+        )
+
+
+def _manage_von_login_email_binding(**kwargs):
+    from ...services.von_login_email_governance_service import manage_von_login_email
+    from .transport import record_internal_mcp_effect_receipt
+
+    try:
+        result = manage_von_login_email(
+            action=kwargs.get("action"),
+            user_concept_id=kwargs.get("user_concept_id"),
+            organisation_concept_id=kwargs.get("organisation_concept_id"),
+            email=kwargs.get("email"),
+            request_id=kwargs.get("request_id"),
+            reason=kwargs.get("reason"),
+            acting_actor_concept_id=kwargs.get("acting_actor_concept_id"),
+        )
+    except RuntimeError:
+        return make_error_response(
+            "von_login_email_governance_unavailable",
+            "Login-email authority verification or durable receipts are unavailable.",
+        )
+    receipt = result.get("governance_receipt") if isinstance(result, dict) else None
+    if isinstance(receipt, Mapping) and receipt.get("receipt_id"):
+        record_internal_mcp_effect_receipt(
+            {
+                "schema_version": "internal_mcp_von_login_email_effect.v1",
+                "success": bool(result.get("success")),
+                "effect_status": result.get("effect_status"),
+                "mutation_outcome": result.get("mutation_outcome"),
+                "changed": result.get("changed"),
+                "receipt_id": receipt.get("receipt_id"),
+                "request_id": receipt.get("request_id"),
+                "action": receipt.get("action"),
+                "user_concept_id": receipt.get("user_concept_id"),
+                "organisation_concept_id": receipt.get("organisation_concept_id"),
+                "governance_receipt_status": receipt.get("status"),
+                "canonical_read_back": result.get("canonical_read_back"),
+                "error_code": result.get("error_code"),
+                "outcome_finality": (
+                    result.get("outcome_finality")
+                    or (
+                        "terminal"
+                        if result.get("effect_status")
+                        in {"succeeded", "not_started"}
+                        else "requires_canonical_reconciliation"
+                    )
+                ),
+            }
+        )
+    return result
+
+
+def _get_von_login_email_management_receipt(**kwargs):
+    from ...services.von_login_email_governance_service import (
+        get_von_login_email_management_receipt,
+    )
+
+    try:
+        return get_von_login_email_management_receipt(
+            receipt_id=kwargs.get("receipt_id"),
+            acting_actor_concept_id=kwargs.get("acting_actor_concept_id"),
+        )
+    except RuntimeError:
+        return make_error_response(
+            "von_login_email_governance_unavailable",
+            "Login-email receipts are unavailable.",
+        )
+
+
 def _get_organisation_membership_receipt(**kwargs):
     from ...services.organisation_membership_governance_service import (
         get_organisation_membership_receipt,
@@ -10522,6 +10607,114 @@ def _manage_organisation_membership_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="Governed membership effect, receipt, and canonical read-back.",
+    )
+
+
+def _von_login_email_bindings_input_schema() -> Schema:
+    return Schema(
+        required={
+            "user_concept_id": str,
+            "organisation_concept_id": str,
+        },
+        optional={
+            "acting_actor_concept_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Read the canonical Von login-email bindings for one member of the "
+            "trusted actor's selected organisation."
+        ),
+    )
+
+
+def _von_login_email_bindings_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "actor_concept_id": str,
+            "user_concept_id": str,
+            "organisation_concept_id": str,
+            "login_emails": list,
+            "total_count": int,
+            "authority_decision": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "error_code": str,
+            "error": str,
+        },
+        allow_unknown=True,
+        description="Admin-scoped canonical Von login-email binding read-back.",
+    )
+
+
+def _manage_von_login_email_binding_input_schema() -> Schema:
+    return Schema(
+        required={
+            "action": str,
+            "user_concept_id": str,
+            "organisation_concept_id": str,
+            "email": str,
+            "request_id": str,
+        },
+        optional={
+            "reason": (str, type(None)),
+            "acting_actor_concept_id": (str, type(None)),
+        },
+        enum_values={"action": ["bind", "remove"]},
+        allow_unknown=True,
+        description=(
+            "Bind or remove one exact canonical Von login email. request_id is "
+            "actor-bound and idempotent."
+        ),
+    )
+
+
+def _manage_von_login_email_binding_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "effect_status": str,
+            "mutation_outcome": str,
+            "outcome_finality": str,
+            "changed": (bool, type(None)),
+            "postcondition_preexisting": bool,
+            "action": str,
+            "actor_concept_id": str,
+            "user_concept_id": str,
+            "organisation_concept_id": str,
+            "email": str,
+            "authority_decision": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "governance_receipt": dict,
+            "error_code": str,
+            "error": str,
+        },
+        allow_unknown=True,
+        description="Governed login-email effect, receipt, and canonical read-back.",
+    )
+
+
+def _von_login_email_management_receipt_input_schema() -> Schema:
+    return Schema(
+        required={"receipt_id": str},
+        optional={
+            "acting_actor_concept_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="Read one actor-owned Von login-email management receipt.",
+    )
+
+
+def _von_login_email_management_receipt_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "governance_receipt": dict,
+            "response_projection": (dict, type(None)),
+            "error_code": str,
+            "error": str,
+        },
+        allow_unknown=True,
+        description="Actor-bound Von login-email management receipt read-back.",
     )
 
 
@@ -20867,6 +21060,40 @@ _RAG_DEGRADED_EXCEPTION_TOKENS = (
 )
 
 
+def _rag_row_contains_hidden_generic_text(row: Any) -> bool:
+    """Reject legacy index rows containing dedicated authentication identity."""
+
+    from ...services.text_relation_read_policy import (
+        is_hidden_from_generic_text_reads,
+        text_contains_hidden_generic_predicate,
+    )
+
+    if not isinstance(row, Mapping):
+        return False
+    metadata = row.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    if any(
+        is_hidden_from_generic_text_reads(metadata.get(key))
+        for key in ("predicate", "predicate_concept_id")
+    ):
+        return True
+
+    # Older concept embeddings aggregated arbitrary text relations into their
+    # searchable body without retaining per-relation metadata.  Until they are
+    # re-indexed, reject only Vontology-derived rows that visibly carry one of
+    # the dedicated predicate tokens; ordinary chat/file content is unaffected.
+    is_vontology_projection = (
+        metadata.get("type") in {"concept", "text_relation"}
+        or metadata.get("source") == "vontology_text_relation"
+        or str(row.get("id") or "").startswith(("concept:", "text_relation:"))
+    )
+    text = row.get("text")
+    return bool(
+        is_vontology_projection
+        and text_contains_hidden_generic_predicate(text)
+    )
+
+
 def _parse_namespace_actor_context(
     namespace: Any,
 ) -> tuple[str | None, str | None]:
@@ -21219,6 +21446,55 @@ def _search_knowledge_base(**kwargs):
 
     start = time.perf_counter()
 
+    from ...services.text_relation_read_policy import (
+        is_hidden_from_generic_text_reads,
+    )
+
+    requested_predicate = kwargs.get("predicate")
+    if is_hidden_from_generic_text_reads(requested_predicate):
+        retrieval_state = build_rag_retrieval_state(
+            "valid_empty",
+            result_count=0,
+            cause="generic_text_predicate_hidden",
+        )
+        return {
+            "results": [],
+            "count": 0,
+            "elapsed_ms": int((time.perf_counter() - start) * 1000),
+            "query": query_text,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            "retrieval_state": retrieval_state,
+            **ns_report,
+            "success": True,
+        }
+
+    requested_predicates = kwargs.get("predicates")
+    visible_requested_predicates = requested_predicates
+    if isinstance(requested_predicates, list):
+        visible_requested_predicates = [
+            predicate
+            for predicate in requested_predicates
+            if not is_hidden_from_generic_text_reads(predicate)
+        ]
+        if requested_predicates and not visible_requested_predicates:
+            retrieval_state = build_rag_retrieval_state(
+                "valid_empty",
+                result_count=0,
+                cause="generic_text_predicates_hidden",
+            )
+            return {
+                "results": [],
+                "count": 0,
+                "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                "query": query_text,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                "retrieval_state": retrieval_state,
+                **ns_report,
+                "success": True,
+            }
+
     try:
         # The namespace resolver is the authority boundary for actor-private
         # RAG access.  Build row-level permissions from its accepted trusted
@@ -21303,13 +21579,12 @@ def _search_knowledge_base(**kwargs):
         if isinstance(requested_type, str) and requested_type.strip():
             permissions_context["type"] = requested_type.strip()
 
-        predicate = kwargs.get("predicate")
+        predicate = requested_predicate
         if isinstance(predicate, str) and predicate.strip():
             permissions_context["predicate"] = predicate.strip()
 
-        predicates = kwargs.get("predicates")
-        if isinstance(predicates, list):
-            permissions_context["predicates"] = predicates
+        if isinstance(visible_requested_predicates, list):
+            permissions_context["predicates"] = visible_requested_predicates
 
         service = get_rag_service()  # Default backend
         results = service.query(
@@ -21318,6 +21593,15 @@ def _search_knowledge_base(**kwargs):
             namespace=ns,
             permissions_context=permissions_context if permissions_context else None,
         )
+        hidden_result_count = 0
+        if isinstance(results, list):
+            visible_results = []
+            for row in results:
+                if _rag_row_contains_hidden_generic_text(row):
+                    hidden_result_count += 1
+                    continue
+                visible_results.append(row)
+            results = visible_results
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         raw_retrieval_state = getattr(results, "retrieval_state", None)
@@ -21342,9 +21626,15 @@ def _search_knowledge_base(**kwargs):
                 result_count=result_count,
                 cause=(str(raw_retrieval_state.get("cause") or "").strip() or None),
                 detail=(str(raw_retrieval_state.get("detail") or "").strip() or None),
-                candidate_count=raw_retrieval_state.get("candidate_count"),
-                filtered_candidate_count=raw_retrieval_state.get(
-                    "filtered_candidate_count"
+                candidate_count=(
+                    result_count
+                    if hidden_result_count
+                    else raw_retrieval_state.get("candidate_count")
+                ),
+                filtered_candidate_count=(
+                    result_count
+                    if hidden_result_count
+                    else raw_retrieval_state.get("filtered_candidate_count")
                 ),
                 candidate_limit=raw_retrieval_state.get("candidate_limit"),
                 candidate_limit_reached=raw_retrieval_state.get(
@@ -24681,6 +24971,8 @@ def _get_related_concepts(**kwargs):
     filtered = []
     for row in results or []:
         if not isinstance(row, dict):
+            continue
+        if _rag_row_contains_hidden_generic_text(row):
             continue
         meta = row.get("metadata")
         if not isinstance(meta, dict):
@@ -39086,6 +39378,70 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "membership-management authority. Generic relationship tools remain "
                 "ineligible for memberOfVonOrg or hasVonOrgRole. Generic "
                 "memberOf and hasRole assertions are descriptive only."
+            ),
+        ),
+        MethodDefinition(
+            name="get_von_login_email_bindings",
+            handler=_get_von_login_email_bindings,
+            input_schema=_von_login_email_bindings_input_schema(),
+            output_schema=_von_login_email_bindings_output_schema(),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_actor_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+            hard_timeout_enabled=False,
+            description=(
+                "Read the canonical KB bindings used as one organisation member's "
+                "Von login email addresses. Use this admin-scoped identity tool "
+                "before email or generic concept search when asked what login "
+                "address a member has, or before trying to set one, so an already "
+                "bound address can be reported without a mutation. The server binds "
+                "the trusted actor and selected organisation, requires live "
+                "MANAGE_MEMBERS permission and exact target membership, and reads "
+                "only hasVonLoginEmail—not descriptive has_email facts."
+            ),
+        ),
+        MethodDefinition(
+            name="manage_von_login_email_binding",
+            handler=_manage_von_login_email_binding,
+            input_schema=_manage_von_login_email_binding_input_schema(),
+            output_schema=_manage_von_login_email_binding_output_schema(),
+            category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_actor_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "request_id": "turn_id",
+            },
+            ordinary_turn_effect=True,
+            write_guardrail={"ordinary_turn_explicit_request": True},
+            hard_timeout_enabled=False,
+            description=(
+                "Bind or remove one exact canonical Von login email address for a "
+                "member when the user explicitly requests that authentication "
+                "change. The server binds the trusted actor, current organisation, "
+                "and idempotency request; requires live organisation-admin or owner "
+                "authority plus exact target membership; treats an already bound "
+                "address as successful with changed=false; protects multi-organisation "
+                "identities; and returns a durable receipt with canonical KB "
+                "read-back. It never promotes a generic has_email contact fact. "
+                "Removing a binding prevents future OAuth resolution but does not "
+                "terminate an already active session."
+            ),
+        ),
+        MethodDefinition(
+            name="get_von_login_email_management_receipt",
+            handler=_get_von_login_email_management_receipt,
+            input_schema=_von_login_email_management_receipt_input_schema(),
+            output_schema=_von_login_email_management_receipt_output_schema(),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_actor_concept_id": "actor_user_concept_id",
+            },
+            hard_timeout_enabled=False,
+            description=(
+                "Read one durable Von login-email management receipt owned by the "
+                "trusted actor, including terminal outcome and canonical read-back."
             ),
         ),
         MethodDefinition(

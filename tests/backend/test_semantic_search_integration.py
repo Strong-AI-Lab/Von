@@ -63,6 +63,54 @@ class TestSemanticSearchFunction:
         )
         assert isinstance(results, list)
 
+    def test_semantic_search_ignores_legacy_login_identity_embedding(
+        self, monkeypatch
+    ):
+        from src.backend.services import concept_search_service as service
+        from src.backend.services.rag_backends import llamaindex_backend
+
+        class StubRAG:
+            def query(self, **_kwargs):
+                return [
+                    {
+                        "text": (
+                            "Relations:\n"
+                            "  hasVonLoginEmail: private@example.test"
+                        ),
+                        "score": 1.0,
+                        "metadata": {"concept_id": "#V#private_person"},
+                    },
+                    {
+                        "text": "Visible concept text",
+                        "score": 0.5,
+                        "metadata": {"concept_id": "#V#visible_person"},
+                    },
+                ]
+
+        monkeypatch.setattr(
+            llamaindex_backend,
+            "LlamaIndexRAGService",
+            StubRAG,
+        )
+        monkeypatch.setattr(
+            service.ConceptsRepository,
+            "find",
+            lambda *_args, **_kwargs: [
+                {
+                    "concept_id": "#V#private_person",
+                    "relationships": {},
+                },
+                {
+                    "concept_id": "#V#visible_person",
+                    "relationships": {},
+                },
+            ],
+        )
+
+        results = service._semantic_search("private@example.test", limit=10)
+
+        assert [row[0] for row in results] == ["#V#visible_person"]
+
 
 class TestSearchConceptsSemanticMatchType:
     """Tests for search_concepts with match_type='semantic'."""

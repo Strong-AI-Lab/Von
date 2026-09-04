@@ -461,7 +461,11 @@ def _raw_text_value(object_text_id: Any) -> dict[str, Any] | None:
     return dict(text_value) if isinstance(text_value, Mapping) else None
 
 
-def _text_assertion_precondition(relation: Mapping[str, Any]) -> dict[str, Any]:
+def _text_assertion_precondition(
+    relation: Mapping[str, Any],
+    *,
+    include_text_value: bool = True,
+) -> dict[str, Any]:
     relation_id = _relation_id(relation.get("_id"))
     text_value = _raw_text_value(relation.get("object_text_id"))
     if not relation_id or text_value is None:
@@ -471,13 +475,15 @@ def _text_assertion_precondition(relation: Mapping[str, Any]) -> dict[str, Any]:
         )
     relation_snapshot = _relation_snapshot(relation)
     text_value_snapshot = deepcopy(text_value)
-    return {
+    result = {
         "relation_id": relation_id,
         "relation": relation_snapshot,
         "relation_sha256": _sha256(relation_snapshot),
-        "text_value": text_value_snapshot,
         "text_value_sha256": _sha256(text_value_snapshot),
     }
+    if include_text_value:
+        result["text_value"] = text_value_snapshot
+    return result
 
 
 def _relation_id(value: Any) -> str:
@@ -640,7 +646,7 @@ def build_concept_merge_plan(source_id: str, target_id: str) -> dict[str, Any]:
             )
 
     target_preconditions = [
-        _text_assertion_precondition(relation)
+        _text_assertion_precondition(relation, include_text_value=False)
         for relation in sorted(
             target_relations,
             key=lambda row: _relation_id(row.get("_id")),

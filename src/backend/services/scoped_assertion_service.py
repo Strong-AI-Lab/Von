@@ -32,6 +32,10 @@ from .text_relation_predicate_validation_service import (
     predicate_concept_id_for_storage,
     resolve_text_relation_predicate_for_write,
 )
+from .text_relation_read_policy import (
+    generic_text_read_predicate_filter,
+    is_hidden_from_generic_text_reads,
+)
 
 SCHEMA_VERSION = "scoped_knowledge_assertion.v1"
 TEXT_ASSERTION_SCHEMA_VERSION = "scoped_knowledge_assertion.v2"
@@ -923,6 +927,11 @@ def upsert_scoped_assertion(
                 )
             identity_object = {"concept_id": object_concept_id}
 
+        if is_hidden_from_generic_text_reads(storage_predicate):
+            raise PermissionError(
+                "dedicated Von login-email governance operation required"
+            )
+
     identity = {
         "scope_mode": scope["mode"],
         "audience_keys": scope["audience_keys"],
@@ -1166,6 +1175,7 @@ def promote_scoped_assertion_epistemic_status(
         "assertion_id": assertion_token,
         "provenance.asserted_by_user_concept_id": user_id,
         "status": "asserted",
+        "predicate": generic_text_read_predicate_filter(),
         "$or": scope_clauses,
     }
     collection = get_scoped_knowledge_assertions_collection()
@@ -1279,6 +1289,7 @@ def retract_scoped_assertion(
     authority_filter: dict[str, Any] = {
         "assertion_id": assertion_token,
         "provenance.asserted_by_user_concept_id": user_id,
+        "predicate": generic_text_read_predicate_filter(),
         "$or": scope_clauses,
     }
     now = datetime.now(timezone.utc)
@@ -1525,6 +1536,8 @@ def _visible_assertion_documents(
     required_concept_ids: set[str] = set()
     optional_link_concept_ids: set[str] = set()
     for document in documents:
+        if is_hidden_from_generic_text_reads(document.get("predicate")):
+            continue
         required_ids = _assertion_visibility_concept_ids(document)
         if required_ids is None:
             continue
@@ -1656,8 +1669,8 @@ def _build_assertion_query(
             query["assertion_form"] = STANDALONE_TEXT_ASSERTION_FORM
     if context_id:
         query["assertion_context.context_id"] = str(context_id).strip()
+    predicate_values: set[str] = set()
     if predicates:
-        predicate_values: set[str] = set()
         for item in predicates:
             if not isinstance(item, str) or not item.strip():
                 continue
@@ -1675,8 +1688,9 @@ def _build_assertion_query(
                     == predicate_value
                 ):
                     predicate_values.add(storage_candidate)
-        if predicate_values:
-            query["predicate"] = {"$in": sorted(predicate_values)}
+    query["predicate"] = generic_text_read_predicate_filter(
+        predicates=sorted(predicate_values) if predicates else None
+    )
     if object_kind is not None:
         if object_kind not in OBJECT_KINDS:
             raise ValueError("object_kind must be 'text' or 'concept'")
@@ -2091,6 +2105,7 @@ def get_visible_scoped_assertion_by_id(
         document = collection.find_one(
             {
                 "assertion_id": assertion_token,
+                "predicate": generic_text_read_predicate_filter(),
                 **audience_query,
             }
         )
@@ -2138,6 +2153,8 @@ def scoped_text_assertion_to_relation_row(
 ) -> dict[str, Any] | None:
     """Project a scoped text assertion into the generic text-read row shape."""
 
+    if is_hidden_from_generic_text_reads(assertion.get("predicate")):
+        return None
     if assertion.get("assertion_form") == STANDALONE_TEXT_ASSERTION_FORM:
         return None
     object_text = assertion.get("object_text")

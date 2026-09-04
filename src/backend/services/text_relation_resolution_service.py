@@ -13,6 +13,7 @@ from ..db.repositories.text_value_repository import (
 from ..security.access_control import filter_accessible_concept_ids
 from ..vontology.code_concepts_registry import is_code_concept_id
 from ..vontology.utils_vontology import get_vontology_node_and_descendant_ids
+from .text_relation_read_policy import is_hidden_from_generic_text_reads
 
 _MAX_RESULTS = 20
 _DEFAULT_MAX_RESULTS = 5
@@ -140,6 +141,18 @@ def resolve_concept_by_text_relation(
                 f"must be an integer from 1 to {_MAX_RESULTS}. Invalid: "
                 f"{', '.join(invalid_fields)}"
             ),
+        )
+
+    if is_hidden_from_generic_text_reads(exact_predicate):
+        return _result(
+            predicate=exact_predicate,
+            text=exact_text,
+            instance_of=type_filter,
+            status="not_found",
+            resolved_concept_id=None,
+            candidate_ids=[],
+            max_results=max_results,
+            resolution_complete=True,
         )
 
     text_rows_with_sentinel = _rows(

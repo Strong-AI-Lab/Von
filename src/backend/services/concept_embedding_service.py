@@ -29,6 +29,10 @@ from ..vontology.utils_vontology import (
     is_type,
     is_predicate,
 )
+from .text_relation_read_policy import (
+    generic_text_read_predicate_filter,
+    is_hidden_from_generic_text_reads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +283,10 @@ def _get_individual_relations_sample(
     try:
         # Get text relations where this concept is the subject
         cursor = TextRelationsRepository.find(
-            {"subject_concept_id": concept_id},
+            {
+                "subject_concept_id": concept_id,
+                "predicate": generic_text_read_predicate_filter(),
+            },
             limit=limit,
         )
 
@@ -288,6 +295,8 @@ def _get_individual_relations_sample(
                 continue
 
             predicate = rel.get("predicate", "")
+            if is_hidden_from_generic_text_reads(predicate):
+                continue
             text_id = rel.get("object_text_id")
 
             if text_id:
@@ -321,6 +330,9 @@ def _get_predicate_extent_sample(
         List of dicts with subject_name, predicate, object_text
     """
     extent: List[Dict[str, str]] = []
+
+    if is_hidden_from_generic_text_reads(predicate_id):
+        return extent
 
     try:
         # Get text relations using this predicate

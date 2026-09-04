@@ -7,6 +7,7 @@ text_relations repositories, with simple normalization and validation.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import (
     Any,
     Dict,
@@ -18,27 +19,31 @@ from typing import (
     Tuple,
     cast,
 )
-from datetime import datetime, timezone
+
 from bson import ObjectId
 from bson.errors import InvalidId
 from pymongo.errors import DuplicateKeyError
 
 from ..db.repositories.text_value_repository import (
-    TextValuesRepository,
     TextRelationsRepository,
+    TextValuesRepository,
 )
 from ..models.text_value_models import (
     RelationPredicate,
-    TextValueModel,
     TextRelationModel,
+    TextValueModel,
+)
+from ..security.access_control import (
+    can_access_concept,
+    filter_accessible_concept_ids,
 )
 from .feature_flags import (
     get_event_workflow_integration_enabled,
     get_workflow_discovery_cache_invalidation_enabled,
 )
-from ..security.access_control import (
-    can_access_concept,
-    filter_accessible_concept_ids,
+from .text_relation_read_policy import (
+    generic_text_read_predicate_filter,
+    is_hidden_from_generic_text_reads,
 )
 
 _EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
@@ -184,6 +189,13 @@ def _emit_text_relation_mutation_event(
     extra_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Best-effort workflow event emission for text-relation mutations."""
+
+    # Authentication identifiers have a dedicated, actor-scoped governance
+    # lifecycle.  Generic workflow events persist their inputs for broader
+    # inspection, so neither the predicate nor its plaintext value belongs on
+    # that channel.
+    if is_hidden_from_generic_text_reads(predicate):
+        return
 
     if not get_event_workflow_integration_enabled(default=True):
         return
@@ -523,17 +535,13 @@ def get_texts_for_concepts(
             )
         return {}
 
-    rel_filter: Dict[str, Any] = {"subject_concept_id": {"$in": ordered_subject_ids}}
-    if predicate:
-        rel_filter["predicate"] = predicate
-    elif predicates:
-        predicate_values = [
-            str(item).strip()
-            for item in predicates
-            if isinstance(item, str) and str(item).strip()
-        ]
-        if predicate_values:
-            rel_filter["predicate"] = {"$in": predicate_values}
+    rel_filter: Dict[str, Any] = {
+        "subject_concept_id": {"$in": ordered_subject_ids},
+        "predicate": generic_text_read_predicate_filter(
+            predicate=predicate,
+            predicates=predicates,
+        ),
+    }
 
     sort = [("updated_at", -1), ("created_at", -1)] if recent_first else None
     per_concept_relation_limit = max(limit_per_concept, 1)
@@ -602,30 +610,37 @@ def get_texts_for_concepts(
                 MAX_PAGE_CANDIDATES // (scoped_per_concept_limit + 1),
             ),
         )
-        scoped_predicates = (
+        requested_scoped_predicates = (
             [predicate]
-            if predicate
+            if isinstance(predicate, str) and predicate.strip()
             else [
                 str(item).strip()
                 for item in predicates or ()
                 if isinstance(item, str) and str(item).strip()
             ]
-            or None
+        )
+        scoped_predicates = [
+            item
+            for item in requested_scoped_predicates
+            if not is_hidden_from_generic_text_reads(item)
+        ]
+        scoped_predicate_request_filtered_out = bool(
+            requested_scoped_predicates and not scoped_predicates
         )
         if requested_per_concept > scoped_per_concept_limit:
             scoped_query_truncated = True
             scoped_counts_are_lower_bounds = True
-        for batch_start in range(
-            0,
-            len(ordered_subject_ids),
-            max_subjects_per_query,
+        for batch_start in (
+            range(0, len(ordered_subject_ids), max_subjects_per_query)
+            if not scoped_predicate_request_filtered_out
+            else ()
         ):
             subject_batch = ordered_subject_ids[
                 batch_start : batch_start + max_subjects_per_query
             ]
             scoped_page = list_visible_scoped_assertions_page(
                 subject_concept_ids=subject_batch,
-                predicates=scoped_predicates,
+                predicates=scoped_predicates or None,
                 object_kind="text",
                 languages=[lang] if lang else None,
                 limit=min(
@@ -665,6 +680,8 @@ def get_texts_for_concepts(
                         ),
                     }
             for assertion in scoped_page.get("items") or ():
+                if is_hidden_from_generic_text_reads(assertion.get("predicate")):
+                    continue
                 scoped_row = scoped_text_assertion_to_relation_row(assertion)
                 if scoped_row is None:
                     continue
@@ -722,6 +739,8 @@ def _resolve_text_rows_from_relations(
     object_id_values: List[ObjectId] = []
     string_id_values: List[str] = []
     for relation in relations:
+        if is_hidden_from_generic_text_reads(relation.get("predicate")):
+            continue
         raw_id = relation.get("object_text_id")
         if not raw_id:
             continue
@@ -754,6 +773,8 @@ def _resolve_text_rows_from_relations(
 
     results: List[Dict[str, Any]] = []
     for r in relations:
+        if is_hidden_from_generic_text_reads(r.get("predicate")):
+            continue
         key = r.get("object_text_id")
         if isinstance(key, ObjectId):
             lookup_key = str(key)
@@ -1237,11 +1258,10 @@ def get_text_relations_summary(
     if not can_access_concept(subject_concept_id):
         raise PermissionError("User cannot view text for an inaccessible concept")
 
-    pred_filter: Dict[str, Any] = {"subject_concept_id": subject_concept_id}
-    if predicates:
-        pred_filter["predicate"] = {
-            "$in": [p for p in predicates if isinstance(p, str)]
-        }
+    pred_filter: Dict[str, Any] = {
+        "subject_concept_id": subject_concept_id,
+        "predicate": generic_text_read_predicate_filter(predicates=predicates),
+    }
 
     rels = list(
         TextRelationsRepository.find(
@@ -1339,21 +1359,38 @@ def get_text_relations_summary(
             list_visible_scoped_assertions_page,
         )
 
-        scoped_page = list_visible_scoped_assertions_page(
-            subject_concept_ids=[subject_concept_id],
-            predicates=predicates,
-            object_kind="text",
-            languages=languages,
-            limit=1000,
-        )
-        scoped_assertions = list(scoped_page.get("items") or ())
-        scoped_query_truncated = bool(scoped_page.get("truncated"))
-        scoped_visibility_filtered = bool(
-            scoped_page.get("visibility_filtered")
-        )
-        scoped_counts_are_lower_bounds = bool(
-            scoped_page.get("counts_are_lower_bounds")
-        )
+        requested_scoped_predicates = [
+            str(item).strip()
+            for item in predicates or ()
+            if isinstance(item, str) and str(item).strip()
+        ]
+        scoped_predicates = [
+            item
+            for item in requested_scoped_predicates
+            if not is_hidden_from_generic_text_reads(item)
+        ]
+        if not requested_scoped_predicates or scoped_predicates:
+            scoped_page = list_visible_scoped_assertions_page(
+                subject_concept_ids=[subject_concept_id],
+                predicates=scoped_predicates or None,
+                object_kind="text",
+                languages=languages,
+                limit=1000,
+            )
+            scoped_assertions = [
+                assertion
+                for assertion in scoped_page.get("items") or ()
+                if not is_hidden_from_generic_text_reads(
+                    assertion.get("predicate")
+                )
+            ]
+            scoped_query_truncated = bool(scoped_page.get("truncated"))
+            scoped_visibility_filtered = bool(
+                scoped_page.get("visibility_filtered")
+            )
+            scoped_counts_are_lower_bounds = bool(
+                scoped_page.get("counts_are_lower_bounds")
+            )
     for assertion in scoped_assertions:
         object_text = assertion.get("object_text")
         if not isinstance(object_text, dict):
@@ -1538,10 +1575,18 @@ def audit_concept_text_relations(
     # Query all text relations directly, bypassing normal access control
     rels = list(
         TextRelationsRepository.find(
-            {"subject_concept_id": concept_id},
+            {
+                "subject_concept_id": concept_id,
+                "predicate": generic_text_read_predicate_filter(),
+            },
             limit=1000,
         )
     )
+    rels = [
+        rel
+        for rel in rels
+        if not is_hidden_from_generic_text_reads(rel.get("predicate"))
+    ]
 
     if not rels:
         return {

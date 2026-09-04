@@ -9,7 +9,11 @@ from src.backend.db.repositories.text_value_repository import (
     TextValuesRepository,
 )
 from src.backend.security.access_control import bypass_access_control
+from src.backend.services.text_relation_read_policy import (
+    GENERIC_TEXT_READ_HIDDEN_PREDICATES,
+)
 from src.backend.services.text_value_service import (
+    audit_concept_text_relations,
     get_text_relations_summary,
     get_texts_for_concept,
     get_texts_for_concepts,
@@ -92,6 +96,74 @@ def test_get_text_relations_summary_groups_and_caps_relation_ids():
 
     assert len(en_group["relation_ids"]) <= 1
     assert len(fr_group["relation_ids"]) <= 1
+
+
+def test_generic_text_reads_and_summaries_hide_login_email_bindings():
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concept_id = "#V#generic_text_read_login_email_guard"
+    login_predicate = next(iter(GENERIC_TEXT_READ_HIDDEN_PREDICATES))
+    login_email = "private-login@example.test"
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts.insert_one({"concept_id": concept_id, "relationships": {}})
+    with bypass_access_control():
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            text="Visible account name",
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=login_predicate,
+            text=login_email,
+            lang="en-NZ",
+        )
+
+        explicit_rows = get_texts_for_concept(
+            concept_id,
+            predicate=login_predicate,
+        )
+        query_metadata: dict[str, object] = {}
+        unfiltered_rows = get_texts_for_concepts(
+            [concept_id],
+            query_metadata=query_metadata,
+        )[concept_id]
+        unfiltered_summary = get_text_relations_summary(concept_id)
+        explicit_summary = get_text_relations_summary(
+            concept_id,
+            predicates=[login_predicate],
+        )
+        audit = audit_concept_text_relations(concept_id)
+
+    assert explicit_rows == []
+    assert [(row["predicate"], row["text"]) for row in unfiltered_rows] == [
+        ("hasName", "Visible account name")
+    ]
+    assert query_metadata["raw_relation_count"] == 1
+    assert query_metadata["relation_query_truncated"] is False
+    assert unfiltered_summary["groups_found"] == 1
+    assert unfiltered_summary["total_relations_scanned"] == 1
+    assert [group["predicate"] for group in unfiltered_summary["groups"]] == [
+        "hasName"
+    ]
+    assert explicit_summary["groups"] == []
+    assert explicit_summary["groups_found"] == 0
+    assert explicit_summary["total_relations_scanned"] == 0
+    assert [row["predicate"] for row in audit["relations"]] == ["hasName"]
+    assert audit["total_relations"] == 1
+    assert login_email not in repr(
+        {
+            "rows": unfiltered_rows,
+            "summary": unfiltered_summary,
+            "explicit_summary": explicit_summary,
+            "audit": audit,
+        }
+    )
 
 
 def test_upsert_singleton_text_relation_replaces_others_for_language():

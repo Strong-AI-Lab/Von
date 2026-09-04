@@ -19,13 +19,18 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import TextRelationsRepository
 from ..security.access_control import cache_scope_key
 from ..utils.time_utils import utc_iso_now
 from ..vontology.utils_vontology import is_predicate, is_pure_instance, is_type
+from .text_relation_read_policy import (
+    generic_text_read_predicate_filter,
+    is_hidden_from_generic_text_reads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +79,11 @@ def _scope_status(state: Mapping[str, Any], current_version: int) -> str:
         return STATS_STATUS_AVAILABLE
     if bool(state.get("is_rebuilding")):
         return STATS_STATUS_REBUILDING
-    if has_snapshot and isinstance(snapshot_version, int) and snapshot_version < current_version:
+    if (
+        has_snapshot
+        and isinstance(snapshot_version, int)
+        and snapshot_version < current_version
+    ):
         return STATS_STATUS_STALE
     return STATS_STATUS_FAILED
 
@@ -99,9 +108,7 @@ def _relationship_value_cardinality(raw: Any) -> int:
     if isinstance(raw, str):
         return 1 if raw.strip() else 0
     if isinstance(raw, list):
-        return sum(
-            1 for item in raw if isinstance(item, str) and bool(item.strip())
-        )
+        return sum(1 for item in raw if isinstance(item, str) and bool(item.strip()))
     return 0
 
 
@@ -153,9 +160,13 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
     for concept_id, relationships in relationships_by_id.items():
         # Predicate extents from concept->concept relationship payloads.
         for predicate, value in relationships.items():
-            if isinstance(predicate, str) and predicate.startswith("#V#"):
-                relationship_extent_counts[predicate] += _relationship_value_cardinality(
-                    value
+            if (
+                isinstance(predicate, str)
+                and predicate.startswith("#V#")
+                and not is_hidden_from_generic_text_reads(predicate)
+            ):
+                relationship_extent_counts[predicate] += (
+                    _relationship_value_cardinality(value)
                 )
 
         # Type hierarchy for subtype/ancestor computations.
@@ -253,7 +264,14 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
     else:
         try:
             pipeline = [
-                {"$match": {"predicate": {"$regex": r"^#V#"}}},
+                {
+                    "$match": {
+                        "predicate": {
+                            "$regex": r"^#V#",
+                            **generic_text_read_predicate_filter(),
+                        }
+                    }
+                },
                 {"$group": {"_id": "$predicate", "count": {"$sum": 1}}},
             ]
             for row in TextRelationsRepository.aggregate(pipeline):
@@ -261,7 +279,11 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
                     continue
                 predicate = row.get("_id")
                 count_raw = row.get("count")
-                if isinstance(predicate, str) and isinstance(count_raw, (int, float)):
+                if (
+                    isinstance(predicate, str)
+                    and isinstance(count_raw, (int, float))
+                    and not is_hidden_from_generic_text_reads(predicate)
+                ):
                     text_extent_counts[predicate] = int(count_raw)
         except Exception as exc:  # pragma: no cover - defensive
             text_extent_available = False
@@ -272,7 +294,9 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
         entry: dict[str, Any] = {"kind": kind}
 
         if kind == "type":
-            direct_instance_count = int(direct_instance_count_by_type.get(concept_id, 0))
+            direct_instance_count = int(
+                direct_instance_count_by_type.get(concept_id, 0)
+            )
             direct_pure_instance_count = int(
                 direct_pure_instance_count_by_type.get(concept_id, 0)
             )
@@ -452,7 +476,9 @@ def get_vontology_concept_stats(
             current_version = _MUTATION_VERSION
             status = _scope_status(state, current_version)
         if status != STATS_STATUS_AVAILABLE:
-            rebuild_vontology_concept_stats_snapshot(scope_key=scope, reason="on_demand")
+            rebuild_vontology_concept_stats_snapshot(
+                scope_key=scope, reason="on_demand"
+            )
 
     with _STATE_LOCK:
         state = _SCOPE_STATE.setdefault(scope, _new_scope_state())
@@ -569,4 +595,3 @@ def _reset_vontology_concept_stats_cache_for_tests() -> None:
     with _STATE_LOCK:
         _SCOPE_STATE.clear()
         _MUTATION_VERSION = 0
-
