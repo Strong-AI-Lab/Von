@@ -114,8 +114,6 @@ from src.backend.services.write_tool_request_evidence_vontology_service import (
     infer_write_tool_request_evidence,
 )
 from src.backend.services.conversation_turn_memory_context_service import (
-    render_selected_workflow_policy_memory_messages,
-    summarise_selected_workflow_policy_memory_for_lineage,
     summarise_turn_memory_context_for_lineage,
 )
 from src.backend.services.python_decision_authority_service import (
@@ -5899,9 +5897,6 @@ class InternalMCPChatOrchestrator:
             data=data,
             stage="tool_call",
         )
-        tool_plan_stage_messages.extend(
-            self._build_selected_workflow_policy_memory_stage_messages(data=data)
-        )
         tool_plan_context, tool_plan_context_telemetry = self._build_stage_llm_context(
             base_context=augmented_context,
             stage="tool_call",
@@ -5912,9 +5907,6 @@ class InternalMCPChatOrchestrator:
             tool_plan_context_telemetry,
             turn_memory_context_state=self._copy_string_key_mapping(
                 data.get("turn_memory_context_state")
-            ),
-            selected_workflow_policy_memory_state=self._copy_string_key_mapping(
-                data.get("selected_workflow_policy_memory_state")
             ),
         )
 
@@ -9152,7 +9144,6 @@ class InternalMCPChatOrchestrator:
                 stage="summariser",
             ),
             *self._build_tool_follow_up_stage_messages(data=data),
-            *self._build_selected_workflow_policy_memory_stage_messages(data=data),
         ]
         follow_up_context, follow_up_context_telemetry = self._build_stage_llm_context(
             base_context=follow_up_context,
@@ -9164,9 +9155,6 @@ class InternalMCPChatOrchestrator:
             follow_up_context_telemetry,
             turn_memory_context_state=self._copy_string_key_mapping(
                 data.get("turn_memory_context_state")
-            ),
-            selected_workflow_policy_memory_state=self._copy_string_key_mapping(
-                data.get("selected_workflow_policy_memory_state")
             ),
         )
         data["tool_follow_up_context_lineage"] = dict(follow_up_context_telemetry)
@@ -11708,7 +11696,6 @@ class InternalMCPChatOrchestrator:
         context_lineage: MutableMapping[str, Any] | None,
         *,
         turn_memory_context_state: Mapping[str, Any] | None = None,
-        selected_workflow_policy_memory_state: Mapping[str, Any] | None = None,
     ) -> None:
         if not isinstance(context_lineage, MutableMapping):
             return
@@ -11717,13 +11704,6 @@ class InternalMCPChatOrchestrator:
         )
         if isinstance(turn_memory_summary, Mapping) and turn_memory_summary:
             context_lineage["turn_memory_context"] = dict(turn_memory_summary)
-        policy_memory_summary = summarise_selected_workflow_policy_memory_for_lineage(
-            selected_workflow_policy_memory_state
-        )
-        if isinstance(policy_memory_summary, Mapping) and policy_memory_summary:
-            context_lineage["selected_workflow_policy_memory"] = dict(
-                policy_memory_summary
-            )
 
     def _truncate_nested_for_llm(
         self, value: Any, *, max_string_chars: int, max_list_items: int = 50
@@ -19912,6 +19892,30 @@ class InternalMCPChatOrchestrator:
         )
         if namespace_binding is not None:
             bindings.append(namespace_binding)
+
+        # A learning candidate may be captured directly from the current chat
+        # even when that chat has not been materialised as a conversation
+        # concept.  Bind only an explicitly supplied, locator-empty
+        # conversation source; source choice itself remains model-owned.
+        if tool_name == "learning_candidate_capture" and conversation_session_id:
+            source_value = payload.get("source")
+            if (
+                isinstance(source_value, Mapping)
+                and source_value.get("kind") == "conversation"
+                and "conversation_concept_id" not in source_value
+                and "concept_id" not in source_value
+                and "session_id" not in source_value
+            ):
+                source = dict(source_value)
+                source["session_id"] = conversation_session_id
+                payload["source"] = source
+                bindings.append(
+                    {
+                        "field": "source.session_id",
+                        "source": "conversation_session_id",
+                        "value_present": True,
+                    }
+                )
 
         # Preserve user-attribution for auto-created concepts so namespace
         # isolation has a deterministic provenance trail (JVNAUTOSCI-925).
@@ -28676,17 +28680,6 @@ class InternalMCPChatOrchestrator:
             lines.append(f"- Why this matters: {reasoning}")
 
         return [{"role": "system", "content": "\n".join(lines)}]
-
-    @classmethod
-    def _build_selected_workflow_policy_memory_stage_messages(
-        cls,
-        *,
-        data: Mapping[str, Any],
-    ) -> list[dict[str, str]]:
-        policy_memory_state = cls._copy_string_key_mapping(
-            data.get("selected_workflow_policy_memory_state")
-        )
-        return render_selected_workflow_policy_memory_messages(policy_memory_state)
 
     @staticmethod
     def _tool_invocation_completed_successfully(

@@ -92,6 +92,10 @@ if TYPE_CHECKING:
         _jira_search,
         _jira_transition_issue,
         _jira_update_issue,
+        _learning_candidate_capture,
+        _learning_candidate_get,
+        _learning_candidate_list,
+        _learning_candidate_revise,
         _list_recent_screenshots,
         _preview_remove_relationship,
         _remove_relationship,
@@ -337,6 +341,10 @@ _bind_imports(
         "_jira_search",
         "_jira_transition_issue",
         "_jira_update_issue",
+        "_learning_candidate_capture",
+        "_learning_candidate_get",
+        "_learning_candidate_list",
+        "_learning_candidate_revise",
         "_list_recent_screenshots",
         "_remove_relationship",
         "_preview_remove_relationship",
@@ -4161,6 +4169,42 @@ async def _handle_episode_critique_memory_get(
     )
 
 
+async def _handle_learning_candidate_capture(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_untrusted_workflow_proxy_handler(
+        _learning_candidate_capture,
+        arguments,
+    )
+
+
+async def _handle_learning_candidate_get(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_untrusted_workflow_proxy_handler(
+        _learning_candidate_get,
+        arguments,
+    )
+
+
+async def _handle_learning_candidate_list(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_untrusted_workflow_proxy_handler(
+        _learning_candidate_list,
+        arguments,
+    )
+
+
+async def _handle_learning_candidate_revise(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_untrusted_workflow_proxy_handler(
+        _learning_candidate_revise,
+        arguments,
+    )
+
+
 async def _handle_repo_dossier_file_snapshot(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4624,6 +4668,10 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "episode_critique_build_benchmark": _handle_episode_critique_build_benchmark,
     "episode_critique_memory_list": _handle_episode_critique_memory_list,
     "episode_critique_memory_get": _handle_episode_critique_memory_get,
+    "learning_candidate_capture": _handle_learning_candidate_capture,
+    "learning_candidate_get": _handle_learning_candidate_get,
+    "learning_candidate_list": _handle_learning_candidate_list,
+    "learning_candidate_revise": _handle_learning_candidate_revise,
     "repo_dossier_file_snapshot": _handle_repo_dossier_file_snapshot,
     "repo_dossier_search": _handle_repo_dossier_search,
     "repo_dossier_workflow_definition_get": _handle_repo_dossier_workflow_definition_get,

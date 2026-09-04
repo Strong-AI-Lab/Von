@@ -20379,6 +20379,232 @@ def _episode_critique_memory_get(**kwargs):
     return _rag_get_item(**forwarded)
 
 
+def _learning_candidate_error_response(exc: Exception) -> dict[str, Any]:
+    """Project source-neutral learning-candidate failures without widening scope."""
+
+    from ...services.learning_candidate_vontology_service import (
+        InvalidLearningCandidateData,
+        LearningCandidateAccessError,
+        LearningCandidateConflictError,
+        LearningCandidateError,
+        LearningCandidateNotFoundError,
+    )
+
+    if isinstance(exc, LearningCandidateAccessError):
+        return make_error_response(
+            str(getattr(exc, "reason_code", None) or "learning_candidate_unavailable"),
+            str(
+                getattr(exc, "safe_message", None)
+                or "The learning candidate or its source is unavailable to the trusted actor."
+            ),
+            details={"exception_type": type(exc).__name__},
+        )
+    if isinstance(exc, LearningCandidateNotFoundError):
+        return make_error_response(
+            "learning_candidate_not_found",
+            "The requested learning candidate is unavailable.",
+            details={"exception_type": type(exc).__name__},
+        )
+    if isinstance(exc, LearningCandidateConflictError):
+        return make_error_response(
+            "learning_candidate_conflict",
+            str(exc),
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Read the current candidate before deciding whether to revise it again."
+            ],
+        )
+    if isinstance(exc, InvalidLearningCandidateData):
+        return make_error_response(
+            "invalid_learning_candidate",
+            str(exc),
+            details={"exception_type": type(exc).__name__},
+        )
+    if isinstance(exc, LearningCandidateError):
+        return make_error_response(
+            "learning_candidate_failed",
+            str(exc),
+            details={"exception_type": type(exc).__name__},
+        )
+    logger.exception("Learning-candidate MCP operation failed", exc_info=exc)
+    return make_error_response(
+        "learning_candidate_internal_error",
+        "Learning-candidate persistence failed.",
+        details={"exception_type": type(exc).__name__},
+    )
+
+
+def _resolve_learning_candidate_actor_scope(
+    kwargs: Mapping[str, Any],
+    *,
+    surface: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Require actor provenance independently of candidate semantic references."""
+
+    return _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface=surface,
+        require_actor=True,
+    )
+
+
+def _learning_candidate_capture(**kwargs):
+    from ...services.learning_candidate_vontology_service import (
+        LearningCandidateError,
+        capture_learning_candidate,
+    )
+
+    actor_scope, denial = _resolve_learning_candidate_actor_scope(
+        kwargs,
+        surface="learning-candidate capture",
+    )
+    if denial is not None:
+        return denial
+    assert actor_scope is not None
+
+    mutation_dispatched = False
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            mutation_dispatched = True
+            candidate = capture_learning_candidate(
+                body=kwargs.get("body"),
+                source=kwargs.get("source"),
+                contributor_concept_ids=kwargs.get("contributor_concept_ids"),
+                target_concept_ids=kwargs.get("target_concept_ids"),
+                actor_user_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+                audience_concept_ids=kwargs.get("audience_concept_ids"),
+                beneficiary_concept_ids=kwargs.get("beneficiary_concept_ids"),
+                purpose_concept_ids=kwargs.get("purpose_concept_ids"),
+                idempotency_key=kwargs.get("idempotency_key"),
+                request_id=kwargs.get("request_id"),
+                visibility_scope=(
+                    (
+                        "actor"
+                        if actor_scope.user_concept_id is not None
+                        else "organisation"
+                    )
+                    if kwargs.get("visibility_scope") is None
+                    else kwargs.get("visibility_scope")
+                ),
+            )
+        return {"success": True, **candidate}
+    except LearningCandidateError as exc:
+        return _learning_candidate_error_response(exc)
+    except Exception as exc:  # noqa: BLE001 - preserve unknown write finality
+        if mutation_dispatched:
+            return _indeterminate_effect_error(
+                "Learning-candidate capture raised unexpectedly; canonical state "
+                "may already have changed.",
+                details={"exception_type": type(exc).__name__},
+            )
+        return _learning_candidate_error_response(exc)
+
+
+def _learning_candidate_get(**kwargs):
+    from ...services.learning_candidate_vontology_service import (
+        get_learning_candidate,
+    )
+
+    actor_scope, denial = _resolve_learning_candidate_actor_scope(
+        kwargs,
+        surface="learning-candidate read",
+    )
+    if denial is not None:
+        return denial
+    assert actor_scope is not None
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            candidate = get_learning_candidate(
+                kwargs.get("candidate_id"),
+                actor_user_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+            )
+        return {"success": True, **candidate}
+    except Exception as exc:  # noqa: BLE001 - return a stable MCP failure
+        return _learning_candidate_error_response(exc)
+
+
+def _learning_candidate_list(**kwargs):
+    from ...services.learning_candidate_vontology_service import (
+        list_learning_candidates,
+    )
+
+    actor_scope, denial = _resolve_learning_candidate_actor_scope(
+        kwargs,
+        surface="learning-candidate listing",
+    )
+    if denial is not None:
+        return denial
+    assert actor_scope is not None
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            candidates = list_learning_candidates(
+                actor_user_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+                target_concept_id=kwargs.get("target_concept_id"),
+                source_kind=kwargs.get("source_kind"),
+                limit=50 if kwargs.get("limit") is None else kwargs.get("limit"),
+            )
+        return {
+            "success": True,
+            "candidates": candidates,
+            "count": len(candidates),
+        }
+    except Exception as exc:  # noqa: BLE001 - return a stable MCP failure
+        return _learning_candidate_error_response(exc)
+
+
+def _learning_candidate_revise(**kwargs):
+    from ...services.learning_candidate_vontology_service import (
+        LearningCandidateError,
+        revise_learning_candidate,
+    )
+
+    actor_scope, denial = _resolve_learning_candidate_actor_scope(
+        kwargs,
+        surface="learning-candidate revision",
+    )
+    if denial is not None:
+        return denial
+    assert actor_scope is not None
+
+    mutation_dispatched = False
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            mutation_dispatched = True
+            candidate = revise_learning_candidate(
+                kwargs.get("candidate_id"),
+                body=kwargs.get("body"),
+                revision_request_id=kwargs.get("revision_request_id"),
+                actor_user_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+                contributor_concept_ids=kwargs.get("contributor_concept_ids"),
+                target_concept_ids=kwargs.get("target_concept_ids"),
+                audience_concept_ids=kwargs.get("audience_concept_ids"),
+                beneficiary_concept_ids=kwargs.get("beneficiary_concept_ids"),
+                purpose_concept_ids=kwargs.get("purpose_concept_ids"),
+            )
+        return {"success": True, **candidate}
+    except LearningCandidateError as exc:
+        return _learning_candidate_error_response(exc)
+    except Exception as exc:  # noqa: BLE001 - preserve unknown write finality
+        if mutation_dispatched:
+            return _indeterminate_effect_error(
+                "Learning-candidate revision raised unexpectedly; canonical state "
+                "may already have changed.",
+                details={
+                    "exception_type": type(exc).__name__,
+                    "candidate_id": kwargs.get("candidate_id"),
+                },
+            )
+        return _learning_candidate_error_response(exc)
+
+
 def _repo_dossier_file_snapshot(**kwargs):
     from ...services.repo_dossier_service import repo_dossier_file_snapshot
 
@@ -42520,6 +42746,155 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             category="read",
             description=(
                 "Fetch a single episode-critic memory artefact with verdict, implicated entities, evidence receipt hash, and remediation links."
+            ),
+        ),
+        MethodDefinition(
+            name="learning_candidate_capture",
+            handler=_learning_candidate_capture,
+            input_schema=Schema(
+                required={
+                    "body": str,
+                    "source": dict,
+                    "contributor_concept_ids": list,
+                    "target_concept_ids": list,
+                },
+                optional={
+                    "audience_concept_ids": (list, type(None)),
+                    "beneficiary_concept_ids": (list, type(None)),
+                    "purpose_concept_ids": (list, type(None)),
+                    "idempotency_key": (str, type(None)),
+                    "request_id": (str, type(None)),
+                    "visibility_scope": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                enum_values={
+                    "visibility_scope": ("actor", "organisation", None)
+                },
+                array_length_constraints={
+                    "contributor_concept_ids": (1, None),
+                    "target_concept_ids": (1, None),
+                    "audience_concept_ids": (0, None),
+                    "beneficiary_concept_ids": (0, None),
+                    "purpose_concept_ids": (0, None),
+                },
+                description=(
+                    "Capture one material, potentially reusable lesson with an "
+                    "actor- or organisation-visible source. Source accepts a "
+                    "conversation_concept_id with an optional matching session_id, an "
+                    "actor-owned session_id with an optional exact trusted namespace, "
+                    "or an episode_critique_memory memory_id. Org-only capture "
+                    "requires an organisation-visible source and organisation "
+                    "visibility. Trusted actor context determines capture provenance "
+                    "and visibility; payload identity cannot grant access."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Capture a material, potentially reusable lesson as a source-linked, "
+                "non-active learning candidate. It is not a fact, instruction, or "
+                "authority grant, and zero candidates is normal. Contributor, target, "
+                "audience, purpose, and beneficiary references do not confer "
+                "visibility or authority."
+            ),
+        ),
+        MethodDefinition(
+            name="learning_candidate_get",
+            handler=_learning_candidate_get,
+            input_schema=Schema(
+                required={"candidate_id": str},
+                optional={"namespace": (str, type(None))},
+                allow_unknown=True,
+                description=(
+                    "Read one learning candidate visible to the trusted actor or "
+                    "organisation. Payload identity cannot grant access."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Read one actor- or organisation-visible, source-linked, non-active "
+                "learning candidate. It is not a fact, instruction, or authority "
+                "grant; zero available candidates is normal. Contributor, target, "
+                "audience, purpose, and beneficiary references do not confer "
+                "visibility or authority."
+            ),
+        ),
+        MethodDefinition(
+            name="learning_candidate_list",
+            handler=_learning_candidate_list,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "target_concept_id": (str, type(None)),
+                    "source_kind": (str, type(None)),
+                    "limit": (int, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                enum_values={
+                    "source_kind": (
+                        "conversation",
+                        "episode_critique_memory",
+                        None,
+                    )
+                },
+                description=(
+                    "List learning candidates visible to the trusted actor or "
+                    "organisation, optionally filtered by semantic target or source "
+                    "kind."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List actor- or organisation-visible, source-linked, non-active "
+                "learning candidates; zero candidates is a normal result. Candidates "
+                "are not facts, instructions, or authority grants. Contributor, "
+                "target, audience, purpose, and beneficiary references do not confer "
+                "visibility or authority."
+            ),
+        ),
+        MethodDefinition(
+            name="learning_candidate_revise",
+            handler=_learning_candidate_revise,
+            input_schema=Schema(
+                required={
+                    "candidate_id": str,
+                    "body": str,
+                    "revision_request_id": str,
+                },
+                optional={
+                    "contributor_concept_ids": (list, type(None)),
+                    "target_concept_ids": (list, type(None)),
+                    "audience_concept_ids": (list, type(None)),
+                    "beneficiary_concept_ids": (list, type(None)),
+                    "purpose_concept_ids": (list, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                array_length_constraints={
+                    "contributor_concept_ids": (1, None),
+                    "target_concept_ids": (1, None),
+                    "audience_concept_ids": (0, None),
+                    "beneficiary_concept_ids": (0, None),
+                    "purpose_concept_ids": (0, None),
+                },
+                description=(
+                    "Revise the text or semantic references of one actor- or "
+                    "organisation-visible learning candidate while retaining its "
+                    "immutable source and revision provenance."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Revise a material, reusable lesson while it remains a source-linked, "
+                "non-active learning candidate. It is not a fact, instruction, or "
+                "authority grant, and retaining zero candidates is normal. "
+                "Contributor, target, audience, purpose, and beneficiary references "
+                "do not confer visibility or authority."
             ),
         ),
         MethodDefinition(

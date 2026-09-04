@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "52",
+  "seed_version": "53",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#tool_calling_workflow": {
       "42": [
@@ -22,6 +22,21 @@
     "#V#gmail_message_detail_fetch_workflow": {
       "43": [
         "09970a529b9734e8ec989658157de51bb57d00484bf7a52bf8e18a8d7d23d770"
+      ]
+    },
+    "#V#kb_mutation_postcondition_critic_workflow": {
+      "52": [
+        "0bafa459bf051afd5d45abce323d741f4e409105a5a63711ef988cf7f723c2e1"
+      ]
+    },
+    "#V#workflow_experience_context_prelude": {
+      "52": [
+        "5b778833750a4af71724dd776b5d8d2292691ef15a2b71c4d2e8b6a6bc4dafb9"
+      ]
+    },
+    "#V#entity_identity_resolution_workflow": {
+      "unversioned": [
+        "2a5ea94216401bd6bc959c46e66fa9d79793703e1f0f747011673e3c6ee11992"
       ]
     }
   },
@@ -3730,18 +3745,6 @@
                 {
                   "context_key": "turn_execution_critic_evidence_bundle",
                   "label": "Turn execution critic evidence bundle"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -3909,7 +3912,7 @@
                 "critic_verdict",
                 {
                   "verdict": "inconclusive",
-              "confidence": 0.0,
+                  "confidence": 0.0,
                   "assessment_summary": "The represented postcondition critic did not produce a valid judgement, so completion remains inconclusive.",
                   "required_evidence_answer_consistency_blocker": null,
                   "recommendations": [
@@ -6527,18 +6530,6 @@
                 {
                   "context_key": "identity_resolution_scan_summary",
                   "label": "Identity resolution scan summary"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -7719,9 +7710,9 @@
     },
     {
       "workflow_id": "#V#workflow_experience_context_prelude",
-      "display_name": "Workflow Experience Context Prelude",
-      "description": "Resolve bounded workflow and LLM experience guidance text relations for prompt-bearing workflow steps.",
-      "content": "Reusable VWL prelude that computes the workflow+model experience profile concept id and reads the latest bounded successful-run, failure-avoidance, and low-imposition exploration guidance text relations.",
+      "display_name": "Retired Workflow Experience Context Prelude",
+      "description": "Retirement tombstone for the former workflow-experience guidance reader.",
+      "content": "This terminal, actionless graph replaces the former recency-based guidance prelude. It is retained only so repository bootstrap can make the reviewed seed-52 graph inert and mark its lifecycle retired.",
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
@@ -7729,225 +7720,15 @@
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"support\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true}",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":true,\"routing_eligible\":false,\"retired\":true}",
           "lang": "en-NZ"
         }
       ],
       "publication_spec": {
-        "initial_state": "prepare_profile",
+        "initial_state": "retired",
         "steps": [
           {
-            "state_id": "prepare_profile",
-            "action_id": "workflow_control.context_template",
-            "execution_mode": "deterministic",
-            "static_input_bindings": [
-              {
-                "key": "assignments",
-                "value": [
-                  {
-                    "key": "workflow_experience_effective_workflow_id",
-                    "template": "{workflow_id}",
-                    "variables": {
-                      "workflow_id": {
-                        "value_from_context_options": [
-                          "workflow_experience_target_workflow_id",
-                          "selected_workflow_id",
-                          "__parent_workflow_id"
-                        ],
-                        "value_from_request": "workflow_id",
-                        "default": "unknown_workflow"
-                      }
-                    }
-                  },
-                  {
-                    "key": "workflow_experience_effective_model_ref",
-                    "template": "{model_ref}",
-                    "variables": {
-                      "model_ref": {
-                        "value_from_context_options": [
-                          "workflow_experience_model_ref",
-                          "requested_model"
-                        ],
-                        "value_from_environment": "model",
-                        "default": "unknown_model"
-                      }
-                    }
-                  },
-                  {
-                    "key": "workflow_experience_profile_concept_id",
-                    "template": "Workflow LLM experience profile: {workflow_id} / {model_ref}",
-                    "transform": "concept_id",
-                    "variables": {
-                      "workflow_id": {
-                        "value_from_context_options": [
-                          "workflow_experience_target_workflow_id",
-                          "selected_workflow_id",
-                          "__parent_workflow_id"
-                        ],
-                        "value_from_request": "workflow_id",
-                        "default": "unknown_workflow"
-                      },
-                      "model_ref": {
-                        "value_from_context_options": [
-                          "workflow_experience_model_ref",
-                          "requested_model"
-                        ],
-                        "value_from_environment": "model",
-                        "default": "unknown_model"
-                      }
-                    }
-                  }
-                ]
-              }
-            ],
-            "tool_output_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_prepare_profile_effective_workflow_to_workflow_experience_effective_workflow_id",
-                "context_key": "workflow_experience_effective_workflow_id",
-                "tool_output_field": "workflow_experience_effective_workflow_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_prepare_profile_effective_model_to_workflow_experience_effective_model_ref",
-                "context_key": "workflow_experience_effective_model_ref",
-                "tool_output_field": "workflow_experience_effective_model_ref"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_prepare_profile_profile_to_workflow_experience_profile_concept_id",
-                "context_key": "workflow_experience_profile_concept_id",
-                "tool_output_field": "workflow_experience_profile_concept_id"
-              }
-            ],
-            "writes_context_keys": [
-              "workflow_experience_effective_workflow_id",
-              "workflow_experience_effective_model_ref",
-              "workflow_experience_profile_concept_id"
-            ],
-            "next_state": "read_success_guidance",
-            "on_failure_state": "failed"
-          },
-          {
-            "state_id": "read_success_guidance",
-            "action_id": "get_text_relations",
-            "execution_mode": "deterministic",
-            "static_input_bindings": [
-              {
-                "key": "predicate",
-                "value": "#V#hasWorkflowSuccessfulRunGuidanceText"
-              },
-              {
-                "key": "limit",
-                "value": 5
-              },
-              {
-                "key": "sort_recent_first",
-                "value": true
-              }
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_read_success_profile_to_concept_id_parameter",
-                "context_key": "workflow_experience_profile_concept_id",
-                "required": true,
-                "tool_param": "concept_id"
-              }
-            ],
-            "tool_output_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_read_success_relations_to_workflow_success_guidance_history",
-                "context_key": "workflow_success_guidance_history",
-                "tool_output_field": "result.relations"
-              }
-            ],
-            "writes_context_keys": [
-              "workflow_success_guidance_history"
-            ],
-            "next_state": "read_failure_guidance",
-            "on_failure_state": "failed"
-          },
-          {
-            "state_id": "read_failure_guidance",
-            "action_id": "get_text_relations",
-            "execution_mode": "deterministic",
-            "static_input_bindings": [
-              {
-                "key": "predicate",
-                "value": "#V#hasWorkflowFailureAvoidanceGuidanceText"
-              },
-              {
-                "key": "limit",
-                "value": 5
-              },
-              {
-                "key": "sort_recent_first",
-                "value": true
-              }
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_read_failure_profile_to_concept_id_parameter",
-                "context_key": "workflow_experience_profile_concept_id",
-                "required": true,
-                "tool_param": "concept_id"
-              }
-            ],
-            "tool_output_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_read_failure_relations_to_workflow_failure_avoidance_history",
-                "context_key": "workflow_failure_avoidance_history",
-                "tool_output_field": "result.relations"
-              }
-            ],
-            "writes_context_keys": [
-              "workflow_failure_avoidance_history"
-            ],
-            "next_state": "read_exploration_guidance",
-            "on_failure_state": "failed"
-          },
-          {
-            "state_id": "read_exploration_guidance",
-            "action_id": "get_text_relations",
-            "execution_mode": "deterministic",
-            "static_input_bindings": [
-              {
-                "key": "predicate",
-                "value": "#V#hasWorkflowNextRunExplorationGuidanceText"
-              },
-              {
-                "key": "limit",
-                "value": 5
-              },
-              {
-                "key": "sort_recent_first",
-                "value": true
-              }
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_read_exploration_profile_to_concept_id_parameter",
-                "context_key": "workflow_experience_profile_concept_id",
-                "required": true,
-                "tool_param": "concept_id"
-              }
-            ],
-            "tool_output_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_workflow_experience_context_prelude_read_exploration_relations_to_workflow_low_imposition_exploration_history",
-                "context_key": "workflow_low_imposition_exploration_history",
-                "tool_output_field": "result.relations"
-              }
-            ],
-            "writes_context_keys": [
-              "workflow_low_imposition_exploration_history"
-            ],
-            "next_state": "complete",
-            "on_failure_state": "failed"
-          },
-          {
-            "state_id": "complete",
-            "terminal": true
-          },
-          {
-            "state_id": "failed",
+            "state_id": "retired",
             "terminal": true
           }
         ]

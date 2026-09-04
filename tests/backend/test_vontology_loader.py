@@ -257,6 +257,22 @@ class TestWorkflowPublicationLifecycleResolution:
         assert lifecycle["published"] is False
         assert source == "concept_data"
 
+    def test_retired_phase_defaults_to_unpublished(self):
+        lifecycle, source = resolve_workflow_publication_lifecycle(
+            "#V#retired_workflow",
+            {
+                "concept_id": "#V#retired_workflow",
+                "concept_data": {
+                    "workflow_publication_lifecycle": {"phase": "retired"}
+                },
+            },
+        )
+
+        assert lifecycle is not None
+        assert lifecycle["phase"] == "retired"
+        assert lifecycle["published"] is False
+        assert source == "concept_data"
+
 
 class TestWorkflowActionContractGraphLoading:
     def test_build_graph_preserves_action_contract_metadata(self):

@@ -2,11 +2,14 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "14",
+  "seed_version": "15",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#entity_information_retrieval_workflow": {
       "13": [
         "ed294d72e1e295fb61abb2b6c58053699a35448973224a6d8d9ed5f97352b84e"
+      ],
+      "14": [
+        "3b6006e650c4d03ad0229f7af2376a1872e99fcd4daa5d7c905e3c7b8ac69475"
       ]
     }
   },
@@ -61,7 +64,7 @@
         },
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-      "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"broad multi-source entity profile\",\"bounded entity dossier\",\"multi-faceted represented self profile\",\"reconcile concept text and relationship evidence\",\"cross-check asserted and uncertain relationships\",\"separate represented facts from likely inferences\"],\"examples\":[\"Build a bounded multilingual concept dossier for #V#person from its names, descriptions and incoming/outgoing relationships. Keep it read-only and summarise the evidence.\",\"Give me a multi-faceted profile of this researcher, including descriptions, affiliations, works, and uncertainty-bearing assertions.\",\"Separate established represented facts about this person from uncertain or proposed relationships and cite the evidence.\",\"Tell me who I am, list my papers and affiliations, and distinguish asserted facts from uncertain relationships.\"]}",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"broad multi-source entity profile\",\"bounded entity dossier\",\"multi-faceted represented self profile\",\"reconcile concept text and relationship evidence\",\"cross-check asserted and uncertain relationships\",\"separate represented facts from likely inferences\"],\"examples\":[\"Build a bounded multilingual concept dossier for #V#person from its names, descriptions and incoming/outgoing relationships. Keep it read-only and summarise the evidence.\",\"Give me a multi-faceted profile of this researcher, including descriptions, affiliations, works, and uncertainty-bearing assertions.\",\"Separate established represented facts about this person from uncertain or proposed relationships and cite the evidence.\",\"Tell me who I am, list my papers and affiliations, and distinguish asserted facts from uncertain relationships.\"]}",
           "lang": "en-NZ"
         },
         {
@@ -172,18 +175,6 @@
                 {
                   "context_key": "org_concept_id",
                   "label": "Authenticated organisation concept"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

@@ -2,7 +2,7 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "10",
+  "seed_version": "11",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#kr_design_concept_materialisation_item_workflow": {
       "6": [
@@ -23,6 +23,9 @@
       ],
       "9": [
         "bfef3ce141b2850906079c8126602e4886817e0e6ef03b71b62b3ccf5e81622f"
+      ],
+      "10": [
+        "cb2c14cdb915aa417c20a41f168f344933eea79540761b0033243ce4727c82ef"
       ]
     }
   },
@@ -1633,18 +1636,6 @@
                 {
                   "context_key": "turn_expected_grounding_requirement",
                   "label": "Expected grounding requirement"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance"
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance"
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance"
                 }
               ],
               "max_tool_invocations": 12,

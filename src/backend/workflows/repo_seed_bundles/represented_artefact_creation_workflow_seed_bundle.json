@@ -2,7 +2,7 @@
   "family_id": "represented_artefact_creation_workflow_seed_bundle",
   "managed_by": "represented_artefact_creation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "9",
+  "seed_version": "10",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#represented_artefact_creation_workflow": {
       "5": [
@@ -16,6 +16,9 @@
       ],
       "8": [
         "76a561b09bf0e4ae165ffb25e775373ef8afb1d79a7cee0859aac2212a28d0f9"
+      ],
+      "9": [
+        "348106cdb429c836422d262dbb734daef102950ea552b3917c826c923c9a56bc"
       ]
     },
     "#V#represented_artefact_item_creation_workflow": {
@@ -24,6 +27,9 @@
       ],
       "7": [
         "39d510b47d947bcb5d6f77697fa68a770d6c8ed64b579d8f004f382d6d87e532"
+      ],
+      "9": [
+        "3c0894a6fc35d0e7905dff0c2b331c0c6b6d9e968952b307e45164015bbec90b"
       ]
     }
   },
@@ -152,18 +158,6 @@
                 {
                   "context_key": "turn_expected_grounding_requirement",
                   "label": "Expected grounding requirement"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance"
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance"
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Historical minimal-imposition exploration guidance"
                 }
               ],
               "response_contract_text": "Return JSON only. Decide whether the request is single, set, or escalate. Do not call write tools in this step. For set mode, emit 2 to 16 self-contained artefact_specs, each with a child prompt for exactly one artefact.",
@@ -293,18 +287,6 @@
                 {
                   "context_key": "turn_expected_grounding_requirement",
                   "label": "Expected grounding requirement"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance"
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance"
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Historical minimal-imposition exploration guidance"
                 },
                 {
                   "context_key": "current_represented_artefact_request",
@@ -1218,18 +1200,6 @@
                 {
                   "context_key": "turn_expected_grounding_requirement",
                   "label": "Expected grounding requirement"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance"
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance"
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Historical minimal-imposition exploration guidance"
                 },
                 {
                   "context_key": "current_represented_artefact_request",

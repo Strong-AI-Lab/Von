@@ -2,8 +2,20 @@
   "family_id": "episode_self_improvement_workflow_seed_bundle",
   "managed_by": "episode_evaluation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
-  "source_tag": "JVNAUTOSCI-2192",
+  "seed_version": "3",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#episode_self_improvement_proposal_workflow": {
+      "2": [
+        "2da22cbe87387698d0341928ec11711f6ffba043a14cc10ecdf709cf85521681"
+      ]
+    },
+    "#V#episode_self_improvement_promotion_workflow": {
+      "2": [
+        "16e00ae09debb5400c3d4b9e42bd615842352fa7ca5738383bb4bf955dff1b53"
+      ]
+    }
+  },
+  "source_tag": "JVNAUTOSCI-1987",
   "supported_action_ids": [
     "episode_critic.load_workflow_improvement_context",
     "episode_critic.submit_workflow_improvement_proposal",
@@ -160,18 +172,6 @@
                 {
                   "context_key": "workflow_authoring_prompt_health",
                   "label": "Workflow authoring prompt health"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -550,18 +550,6 @@
                 {
                   "context_key": "episode_self_improvement_benchmark_summary",
                   "label": "Benchmark summary"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

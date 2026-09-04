@@ -210,7 +210,7 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "10"
+    assert bundle["seed_version"] == "11"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
         mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID: {
             "6": [
@@ -229,11 +229,14 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
             "8": [
                 "032a62452010744f5988f1e66e8781ff05032b1a0e537db62e7f3864489a16b5"
             ],
-            "9": [
-                "bfef3ce141b2850906079c8126602e4886817e0e6ef03b71b62b3ccf5e81622f"
-            ]
+                "9": [
+                    "bfef3ce141b2850906079c8126602e4886817e0e6ef03b71b62b3ccf5e81622f"
+                ],
+                "10": [
+                    "cb2c14cdb915aa417c20a41f168f344933eea79540761b0033243ce4727c82ef"
+                ]
+            }
         }
-    }
     assert (
         mod._REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION
         == {

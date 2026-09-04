@@ -47,6 +47,18 @@ def test_bootstrap_seeds_missing_entity_duplicate_reasoning_prompt(monkeypatch) 
         "upsert_singleton_text_relation",
         _fake_upsert_singleton_text_relation,
     )
+    publication_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "bootstrap_repo_seed_workflow_bundle",
+        lambda **kwargs: publication_calls.append(kwargs)
+        or {
+            "publication": {"counts": {"errors": 0}},
+            "typed_workflow_ids": [],
+            "typed_step_ids": [],
+            "validation_by_workflow_id": {},
+        },
+    )
 
     report = service.bootstrap_canonical_entity_identity_resolution_workflow()
 
@@ -63,6 +75,9 @@ def test_bootstrap_seeds_missing_entity_duplicate_reasoning_prompt(monkeypatch) 
     )
     assert seeded[0]["predicate"] == "hasContent"
     assert seeded[0]["lang"] == "en-NZ"
+    assert publication_calls[0]["target_workflow_ids"] == (
+        service.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+    )
 
 
 def test_bootstrap_does_not_reseed_existing_prompt(monkeypatch) -> None:
@@ -88,6 +103,16 @@ def test_bootstrap_does_not_reseed_existing_prompt(monkeypatch) -> None:
         service,
         "upsert_singleton_text_relation",
         lambda **kwargs: seeded.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        service,
+        "bootstrap_repo_seed_workflow_bundle",
+        lambda **_kwargs: {
+            "publication": {"counts": {"errors": 0}},
+            "typed_workflow_ids": [],
+            "typed_step_ids": [],
+            "validation_by_workflow_id": {},
+        },
     )
 
     report = service.bootstrap_canonical_entity_identity_resolution_workflow()

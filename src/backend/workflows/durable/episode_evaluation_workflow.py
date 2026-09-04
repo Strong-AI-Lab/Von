@@ -423,11 +423,11 @@ def _build_persist_memory_handler():
             memory_state=_mapping_or_empty(outcome.get("state")),
             actor_concept_id=_clean_text(request.data.get("user_id")),
         )
-        maintenance_follow_up_requested = bool(
-            assessment.get("maintenance_follow_up_recommended")
+        maintenance_follow_up_requested = (
+            assessment.get("maintenance_follow_up_recommended") is True
         )
-        self_improvement_result = (
-            launch_episode_self_improvement_workflows(
+        if maintenance_follow_up_requested and memory_id:
+            self_improvement_result = launch_episode_self_improvement_workflows(
                 memory_id=memory_id,
                 memory_state=_mapping_or_empty(outcome.get("state")),
                 user_id=_clean_text(request.data.get("user_id")),
@@ -435,9 +435,19 @@ def _build_persist_memory_handler():
                 namespace=_clean_text(request.data.get("namespace")),
                 current_depth=int(request.data.get("episode_evaluation_depth") or 0),
             )
-            if memory_id
-            else {"success": False, "launches": []}
-        )
+        else:
+            self_improvement_result = {
+                "success": bool(memory_id),
+                "skipped": True,
+                "reason": (
+                    "maintenance_follow_up_not_recommended"
+                    if memory_id
+                    else "episode_critique_memory_id_missing"
+                ),
+                "launches": [],
+                "launched_count": 0,
+                "suppressed_count": 0,
+            }
         self_improvement_launches = list(self_improvement_result.get("launches") or [])
         maintenance_payload = (
             _build_maintenance_launch_payload(

@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "36",
+  "seed_version": "37",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -45,6 +45,9 @@
       ],
       "35": [
         "103f9fe684d88329878358645945b21eaf502676067ae39d233be432d1e743ed"
+      ],
+      "36": [
+        "d784237c43ca0b9e0e08e90c1cde570fc4212c76179566c29dc837b554e2010b"
       ]
     }
   },
@@ -304,18 +307,6 @@
                 {
                   "context_key": "turn_expected_grounding_requirement",
                   "label": "Grounding requirement"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -1917,18 +1908,6 @@
                 {
                   "context_key": "source_uri_identity_write_result",
                   "label": "Source URI text-relation write result"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

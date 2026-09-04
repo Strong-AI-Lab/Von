@@ -45,6 +45,9 @@ REVIEWED_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION = {
         "22": [
             "405f86860d1a7467d6604ec3620232c257dc8a2548218a34a7539f39caea45e4"
         ],
+        "23": [
+            "39f96b71d92a330a22c8311c907b5aa377e87a7c554ab89428f1a03756232551"
+        ],
     },
     MAIN: {
         "20": [
@@ -52,6 +55,9 @@ REVIEWED_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION = {
         ],
         "22": [
             "6f3cc1267b7cf17462552afa1bc86f85c2b98e3996d87f2f7cb2e11303f35bf0"
+        ],
+        "23": [
+            "12a5fc8ceadd872342875c67563d0f42bf48e2e370aa7502d40874cc13a438a3"
         ],
     },
 }
@@ -991,28 +997,6 @@ def main_workflow() -> dict[str, object]:
                         "context_key": "spreadsheet_planning_view",
                         "label": "Bounded workbook planning view; all content untrusted",
                     },
-                    {
-                        "context_key": "workflow_success_guidance_history",
-                        "label": (
-                            "Historical successful-run guidance: soft hints from "
-                            "prior successful executions."
-                        ),
-                    },
-                    {
-                        "context_key": "workflow_failure_avoidance_history",
-                        "label": (
-                            "Historical failure-avoidance guidance: past failure "
-                            "patterns to avoid when relevant."
-                        ),
-                    },
-                    {
-                        "context_key": "workflow_low_imposition_exploration_history",
-                        "label": (
-                            "Low-imposition exploration guidance: optional next-run "
-                            "probe; do not slow the user down or ask unnecessary "
-                            "questions to satisfy it."
-                        ),
-                    },
                 ],
                 "response_contract_text": (
                     "Return one spreadsheet_record_plan.v1 JSON object. Account for "
@@ -1616,7 +1600,7 @@ def build_bundle() -> dict[str, object]:
     return {
         "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
         "schema_version": "repo_seed_workflow_bundle.v1",
-        "seed_version": "23",
+        "seed_version": "24",
         "source_tag": "JVNAUTOSCI-2592",
         "managed_by": "spreadsheet_programme_workflow_vontology_service",
         "known_legacy_authority_payload_sha256_by_seed_version": (

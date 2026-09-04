@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
-from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
+from src.backend.workflows.action_registry import (
+    WorkflowActionRequest,
+    WorkflowEnvironment,
+)
 
 
 def _request(data: dict) -> WorkflowActionRequest:
@@ -14,13 +18,13 @@ def _request(data: dict) -> WorkflowActionRequest:
     )
 
 
-def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
+def test_persist_memory_handler_preserves_critique_without_unrecommended_fanout(
+    monkeypatch,
+):
     from src.backend.workflows.durable import episode_evaluation_workflow as mod
 
-    monkeypatch.setattr(
-        mod,
-        "upsert_episode_critique_memory_from_episode_assessment",
-        lambda **kwargs: {
+    persist_memory = MagicMock(
+        return_value={
             "success": True,
             "memory_id": "#V#episode_critique_memory_abc",
             "state": {
@@ -41,7 +45,12 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
                     }
                 ],
             },
-        },
+        }
+    )
+    monkeypatch.setattr(
+        mod,
+        "upsert_episode_critique_memory_from_episode_assessment",
+        persist_memory,
     )
     monkeypatch.setattr(
         mod,
@@ -60,29 +69,20 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
             "jira_action": "created_new",
         },
     )
+    self_improvement_launcher = MagicMock()
     monkeypatch.setattr(
         mod,
         "launch_episode_self_improvement_workflows",
-        lambda **kwargs: {
-            "success": True,
-            "launches": [
-                {
-                    "suggestion_id": "workflow_change_alpha",
-                    "target_workflow_id": "#V#alpha_workflow",
-                    "launch_workflow_id": "#V#episode_self_improvement_proposal_workflow",
-                    "instance_id": "#V#wf_instance_alpha",
-                    "success": True,
-                    "status": "created",
-                }
-            ],
-        },
+        self_improvement_launcher,
     )
 
     handler = mod._build_persist_memory_handler()
     result = handler(
         _request(
             {
-                "episode_evidence_bundle": {"episode_locator": {"request_id": "req-1610"}},
+                "episode_evidence_bundle": {
+                    "episode_locator": {"request_id": "req-1610"}
+                },
                 "critic_assessment": {
                     "summary": "Repeated remediation-worthy finding",
                     "maintenance_follow_up_recommended": False,
@@ -95,7 +95,9 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
     )
 
     assert result.ok
-    assert result.outputs["episode_critique_memory_id"] == "#V#episode_critique_memory_abc"
+    assert (
+        result.outputs["episode_critique_memory_id"] == "#V#episode_critique_memory_abc"
+    )
     assert result.outputs["remediation_routing_decision"] == "task_and_jira"
     assert result.outputs["remediation_routing_fingerprint"] == "fp-1610"
     assert result.outputs["remediation_repeat_count"] == 3
@@ -106,11 +108,19 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
     assert result.outputs["improvement_suggestions"][0]["target_workflow_id"] == (
         "#V#alpha_workflow"
     )
-    assert result.outputs["self_improvement_workflow_count"] == 1
-    assert result.outputs["self_improvement_target_workflow_ids"] == [
-        "#V#alpha_workflow"
-    ]
+    assert result.outputs["self_improvement"] == {
+        "success": True,
+        "skipped": True,
+        "reason": "maintenance_follow_up_not_recommended",
+        "launches": [],
+        "launched_count": 0,
+        "suppressed_count": 0,
+    }
+    assert result.outputs["self_improvement_workflow_count"] == 0
+    assert result.outputs["self_improvement_target_workflow_ids"] == []
     assert result.outputs["maintenance_follow_up_requested"] is False
+    persist_memory.assert_called_once()
+    self_improvement_launcher.assert_not_called()
 
 
 def test_evidence_bundle_handler_surfaces_format_over_content_diagnostic(monkeypatch):
@@ -273,7 +283,9 @@ def test_persist_memory_handler_merges_grounded_helpfulness_assessment(monkeypat
     )
 
 
-def test_persist_memory_handler_emits_maintenance_launch_payload(monkeypatch):
+def test_persist_memory_handler_emits_recommended_maintenance_and_self_improvement_launches(
+    monkeypatch,
+):
     from src.backend.workflows.durable import episode_evaluation_workflow as mod
 
     monkeypatch.setattr(
@@ -293,10 +305,25 @@ def test_persist_memory_handler_emits_maintenance_launch_payload(monkeypatch):
         "route_episode_critique_memory",
         lambda **kwargs: {"success": True, "decision": "maintenance_follow_up"},
     )
+    self_improvement_launcher = MagicMock(
+        return_value={
+            "success": True,
+            "launches": [
+                {
+                    "suggestion_id": "workflow_change_student_supervision",
+                    "target_workflow_id": "#V#student_supervision_lookup_workflow",
+                    "launch_workflow_id": "#V#episode_self_improvement_proposal_workflow",
+                    "instance_id": "#V#wf_instance_student_supervision",
+                    "success": True,
+                    "status": "created",
+                }
+            ],
+        }
+    )
     monkeypatch.setattr(
         mod,
         "launch_episode_self_improvement_workflows",
-        lambda **kwargs: {"success": True, "launches": []},
+        self_improvement_launcher,
     )
 
     handler = mod._build_persist_memory_handler()
@@ -329,6 +356,21 @@ def test_persist_memory_handler_emits_maintenance_launch_payload(monkeypatch):
         "#V#episode_critique_memory_req_1837"
     )
     assert result.outputs["maintenance_follow_up_requested"] is True
+    assert result.outputs["self_improvement_workflow_count"] == 1
+    assert result.outputs["self_improvement_target_workflow_ids"] == [
+        "#V#student_supervision_lookup_workflow"
+    ]
+    self_improvement_launcher.assert_called_once_with(
+        memory_id="#V#episode_critique_memory_req_1837",
+        memory_state={
+            "memory_id": "#V#episode_critique_memory_req_1837",
+            "namespace": "#V#user@org",
+        },
+        user_id="#V#user",
+        org_id="#V#org",
+        namespace="#V#user@org",
+        current_depth=0,
+    )
     launch_inputs = result.outputs["maintenance_launch_inputs"]
     assert launch_inputs["episode_critique_memory_id"] == (
         "#V#episode_critique_memory_req_1837"

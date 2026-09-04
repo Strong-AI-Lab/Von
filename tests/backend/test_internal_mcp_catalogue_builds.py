@@ -125,6 +125,10 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "episode_critique_build_benchmark" in methods
     assert "episode_critique_memory_list" in methods
     assert "episode_critique_memory_get" in methods
+    assert "learning_candidate_capture" in methods
+    assert "learning_candidate_get" in methods
+    assert "learning_candidate_list" in methods
+    assert "learning_candidate_revise" in methods
     assert "context_bundle_resolve_effective_context" in methods
     assert "context_bundle_assemble_context_dossier" in methods
     assert "context_bundle_update_report_revision" in methods
@@ -881,6 +885,27 @@ def test_actor_scoped_private_reads_reject_payload_only_identity(monkeypatch):
         "episode_critique_memory_get": {
             **payload_identity,
             "memory_id": "claimed-memory",
+        },
+        "learning_candidate_capture": {
+            **payload_identity,
+            "body": "A payload-only actor must not be able to retain this lesson.",
+            "source": {
+                "kind": "conversation",
+                "conversation_concept_id": "#V#claimed_conversation",
+            },
+            "contributor_concept_ids": ["#V#von_system"],
+            "target_concept_ids": ["#V#claimed_workflow"],
+        },
+        "learning_candidate_get": {
+            **payload_identity,
+            "candidate_id": "#V#claimed_candidate",
+        },
+        "learning_candidate_list": payload_identity,
+        "learning_candidate_revise": {
+            **payload_identity,
+            "candidate_id": "#V#claimed_candidate",
+            "body": "Payload-only revision",
+            "revision_request_id": "claimed-revision",
         },
     }
 

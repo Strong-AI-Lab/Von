@@ -1,11 +1,9 @@
-"""Materialise the canonical entity identity-resolution prompt authority.
+"""Materialise the canonical entity identity-resolution workflow authority.
 
-The workflow definition itself is published at startup by
-``publish_canonical_chat_workflow_graphs`` from
-``canonical_workflow_publication_seed_bundle.json``. This module ensures the
+This module publishes the workflow's canonical repo-seed graph, ensures the
 LLM rumination prompt concept (``#V#entity_duplicate_reasoning_prompt``) and
-its content text relation exist, and that the workflow concept links to the
-prompt via ``#V#hasEntityDuplicateReasoningPrompt``.
+its content text relation exist, and links the workflow concept to the prompt
+via ``#V#hasEntityDuplicateReasoningPrompt``.
 
 JVNAUTOSCI-2148 - replaces Python heuristic scoring with VWL + Vontology-stored
 prompt authority.
@@ -29,6 +27,7 @@ from .workflow_prompt_authority_service import (
     ensure_prompt_concept_support,
     prompt_concept_has_content,
 )
+from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 
 _MANAGED_BY = "entity_identity_resolution_workflow_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-2148"
@@ -38,6 +37,12 @@ _PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "entity_duplicate_reasoning_prompt_seed.md"
+)
+_REPO_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "canonical_workflow_publication_seed_bundle.json"
 )
 
 
@@ -54,7 +59,7 @@ def bootstrap_canonical_entity_identity_resolution_workflow(
     *,
     force_republish: bool = False,
 ) -> dict[str, Any]:
-    """Ensure the entity-duplicate reasoning prompt concept and link exist."""
+    """Publish the workflow graph and its entity-reasoning prompt authority."""
 
     report = ensure_prompt_concept_support(
         prompt_specs=(
@@ -129,7 +134,25 @@ def bootstrap_canonical_entity_identity_resolution_workflow(
     report["managed_by"] = _MANAGED_BY
     report["workflow_id"] = ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
     report["prompt_concept_id"] = ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID
-    report["success"] = not errors_by_target and seeded_prompt_ready
+    publication = bootstrap_repo_seed_workflow_bundle(
+        asset_path=_REPO_SEED_ASSET_PATH,
+        force_republish=force_republish,
+        target_workflow_ids=(ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,),
+    )
+    publication_counts = dict(
+        (publication.get("publication") or {}).get("counts") or {}
+    )
+    report["publication"] = publication.get("publication")
+    report["typed_workflow_ids"] = publication.get("typed_workflow_ids") or []
+    report["typed_step_ids"] = publication.get("typed_step_ids") or []
+    report["validation_by_workflow_id"] = (
+        publication.get("validation_by_workflow_id") or {}
+    )
+    report["success"] = (
+        not errors_by_target
+        and seeded_prompt_ready
+        and int(publication_counts.get("errors") or 0) == 0
+    )
     return report
 
 

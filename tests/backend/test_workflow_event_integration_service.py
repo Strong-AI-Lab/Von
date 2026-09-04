@@ -997,6 +997,35 @@ def test_maybe_launch_vontology_mutation_workflow_emits_specific_and_catch_all(
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
+def test_episode_evaluation_autotrigger_is_disabled_by_default(
+    mock_launch_event_workflow: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VON_EPISODE_EVALUATION_AUTOTRIGGER_ENABLE", raising=False)
+    monkeypatch.delenv(
+        "VON_WORKFLOW_INTROSPECTION_AUTOTRIGGER_ENABLE",
+        raising=False,
+    )
+
+    result = maybe_launch_episode_evaluation_for_turn_completion_gate(
+        request_id="req-default-off",
+        session_id="sess-default-off",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        selected_workflow_id="#V#tool_calling_workflow",
+        incident_text=None,
+        maintenance_apply_repairs_default=False,
+    )
+
+    assert result["success"] is False
+    assert result["triggered"] is False
+    assert result["enabled"] is False
+    assert result["reason"] == "autotrigger_disabled"
+    mock_launch_event_workflow.assert_not_called()
+
+
+@patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
 def test_maybe_launch_episode_evaluation_for_turn_completion_gate_uses_event_binding(
     mock_launch_event_workflow: MagicMock,
     monkeypatch,

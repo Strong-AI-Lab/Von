@@ -168,59 +168,38 @@ def test_represented_llm_policy_suppresses_raw_io_sentinel_across_timeout_thread
     assert raw_response_sentinel not in caplog.text
 
 
-def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> None:
+def test_compose_llm_prompt_includes_declared_context_labels() -> None:
     prompt = _compose_llm_prompt(
         base_prompt="Use the workflow policy.",
         llm_policy={
             "context_fields": [
                 {
-                    "context_key": "workflow_success_guidance_history",
-                    "label": (
-                        "Historical successful-run guidance: soft hints from "
-                        "prior successful executions."
-                    ),
+                    "context_key": "prior_observations",
+                    "label": "Prior observations",
                 },
                 {
-                    "context_key": "workflow_failure_avoidance_history",
-                    "label": (
-                        "Historical failure-avoidance guidance: past failure "
-                        "patterns to avoid when relevant."
-                    ),
+                    "context_key": "known_constraints",
+                    "label": "Known constraints",
                 },
                 {
-                    "context_key": "workflow_low_imposition_exploration_history",
-                    "label": (
-                        "Low-imposition exploration guidance: optional next-run "
-                        "probe; do not slow the user down or ask unnecessary "
-                        "questions to satisfy it."
-                    ),
+                    "context_key": "open_questions",
+                    "label": "Open questions",
                 },
             ]
         },
         context={
-            "workflow_success_guidance_history": [
-                {"text": "workflow_experience_guidance.v1\nbody:\nReuse evidence."}
-            ],
-            "workflow_failure_avoidance_history": [
-                {"text": "workflow_experience_guidance.v1\nbody:\nAvoid guessing."}
-            ],
-            "workflow_low_imposition_exploration_history": [
-                {
-                    "text": (
-                        "workflow_experience_guidance.v1\nbody:\n"
-                        "Inspect telemetry before asking the user."
-                    )
-                }
-            ],
+            "prior_observations": [{"text": "The earlier read was incomplete."}],
+            "known_constraints": [{"text": "Do not infer missing evidence."}],
+            "open_questions": [{"text": "Which source is authoritative?"}],
         },
     )
 
-    assert "Historical successful-run guidance: soft hints" in prompt
-    assert "Historical failure-avoidance guidance: past failure patterns" in prompt
-    assert "Low-imposition exploration guidance: optional next-run probe" in prompt
-    assert "Reuse evidence." in prompt
-    assert "Avoid guessing." in prompt
-    assert "Inspect telemetry before asking the user." in prompt
+    assert "Prior observations" in prompt
+    assert "Known constraints" in prompt
+    assert "Open questions" in prompt
+    assert "The earlier read was incomplete." in prompt
+    assert "Do not infer missing evidence." in prompt
+    assert "Which source is authoritative?" in prompt
 
 
 def test_context_field_lineage_is_sensitive_to_value_order_and_label() -> None:

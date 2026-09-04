@@ -503,6 +503,7 @@ REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
         "src/backend/services/conversation_turn_workflow_vontology_service.py",
         "src/backend/services/email_source_representation_convergence_workflow_vontology_service.py",
         "src/backend/services/entity_information_retrieval_workflow_vontology_service.py",
+        "src/backend/services/entity_identity_resolution_workflow_vontology_service.py",
         "src/backend/services/entity_representation_workflow_vontology_service.py",
         "src/backend/services/episode_evaluation_workflow_vontology_service.py",
         "src/backend/services/jira_task_incremental_import_workflow_vontology_service.py",

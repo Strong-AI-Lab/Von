@@ -417,12 +417,20 @@ Current phases:
 - `validation_failed`
 - `draft_failed_completion_gate`
 - `published`
+- `retired`
 
 Current routing/discovery rule:
 
 - workflows with explicit lifecycle metadata where `published=false` MUST remain loadable for validation and repair;
 - those workflows MUST NOT be returned by workflow discovery or treated as executable for routing;
-- only workflows with `published=true`, or workflows with no explicit lifecycle metadata, are discoverable.
+- a terminal non-current phase or rollout state (`validation_failed`,
+  `draft_failed_completion_gate`, `disabled`, `superseded`, `rolled_back`,
+  `demoted`, or `retired`) MUST remain non-routable even if malformed metadata
+  also says `published=true`; canonical retirement uses `phase=retired`,
+  `rollout_state=retired`, and `published=false`;
+- workflows with `published=true` and no terminal non-current phase or rollout
+  state, or workflows with no explicit lifecycle metadata, may be discoverable
+  subject to the remaining routing and executability checks.
 
 ### 4.1a Generic Workflow Authoring Primitives
 

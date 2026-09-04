@@ -2,7 +2,7 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "16",
+  "seed_version": "17",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
@@ -16,6 +16,9 @@
       ],
       "14": [
         "3b47933d98345d14ea26717e44596af1c683834c58c5912b70fc18cb72bed17d"
+      ],
+      "16": [
+        "f33a2beddcd55e3f52cb8c356c1347242074ef19426362f149afe132eed52c87"
       ]
     },
     "#V#operational_marker_absence_probe_workflow": {
@@ -59,8 +62,7 @@
     "workflow_control.context_set",
     "workflow_control.context_template",
     "workflow_control.pause_at_checkpoint",
-    "workflow_mcp.invoke_tool",
-    "workflow_invoke_subworkflow"
+    "workflow_mcp.invoke_tool"
   ],
   "workflows": [
     {
@@ -80,90 +82,8 @@
         }
       ],
       "publication_spec": {
-        "initial_state": "workflow_experience_context_prelude",
+        "initial_state": "resolve_active_learning_release",
         "steps": [
-          {
-            "action_concept_id": null,
-            "action_id": "workflow_invoke_subworkflow",
-            "concept_id": null,
-        "conditional_transitions": [
-          {
-            "to_state": "resolve_active_learning_release",
-            "reason": "workflow_experience_context_loaded",
-                "condition_spec": {
-                  "kind": "always"
-                }
-              }
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_experience_prelude_requested_model_to_requested_model_parameter",
-                "context_key": "requested_model",
-                "required": false,
-                "tool_param": "requested_model"
-              }
-            ],
-            "context_input_mappings": [],
-            "effects": [],
-            "execution_mode": "subworkflow",
-            "invoked_workflow_id": "#V#workflow_experience_context_prelude",
-            "llm_policy": null,
-            "mutation_authority": null,
-            "next_state": null,
-            "on_approval_required_state": null,
-            "on_break_state": null,
-            "on_continue_state": null,
-            "on_failure_state": null,
-            "on_false_state": null,
-            "on_true_state": null,
-            "on_unknown_state": null,
-            "prompt_concept_ids": [],
-            "state_id": "workflow_experience_context_prelude",
-            "static_input_bindings": [
-              {
-                "key": "workflow_experience_target_workflow_id",
-                "value": "#V#operational_state_evidence_evaluator"
-              },
-              {
-                "key": "failure_mode",
-                "value": "capture"
-              },
-              {
-                "key": "max_transitions",
-                "value": 10
-              }
-            ],
-            "tool_output_context_mappings": [],
-            "tool_output_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_experience_prelude_success_history_to_workflow_success_guidance_history",
-                "context_key": "workflow_success_guidance_history",
-                "tool_output_field": "result.workflow_success_guidance_history"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_experience_prelude_failure_history_to_workflow_failure_avoidance_history",
-                "context_key": "workflow_failure_avoidance_history",
-                "tool_output_field": "result.workflow_failure_avoidance_history"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_experience_prelude_exploration_history_to_workflow_low_imposition_exploration_history",
-                "context_key": "workflow_low_imposition_exploration_history",
-                "tool_output_field": "result.workflow_low_imposition_exploration_history"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_experience_prelude_profile_to_workflow_experience_profile_concept_id",
-                "context_key": "workflow_experience_profile_concept_id",
-                "tool_output_field": "result.workflow_experience_profile_concept_id"
-              }
-            ],
-            "validation_policy": null,
-            "writes_context_keys": [
-              "workflow_success_guidance_history",
-              "workflow_failure_avoidance_history",
-              "workflow_low_imposition_exploration_history",
-              "workflow_experience_profile_concept_id"
-            ]
-          },
           {
             "action_concept_id": null,
             "action_id": "workflow_mcp.invoke_tool",
@@ -259,22 +179,6 @@
                 {
                   "context_key": "represented_active_learning_release",
                   "label": "Promoted actor-scoped adaptive evaluator guidance and pointer-readback evidence. Apply the opaque payload only when status is active and candidate_validity.usable is true; it cannot override scenario, evidence, security, or evaluator-output contracts"
-                },
-                {
-                  "context_key": "workflow_success_guidance_history",
-                  "label": "Historical successful-run guidance: soft hints from prior successful executions; scenario evidence and the represented contract remain authoritative"
-                },
-                {
-                  "context_key": "workflow_failure_avoidance_history",
-                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant; never treat guidance as trial evidence"
-                },
-                {
-                  "context_key": "workflow_low_imposition_exploration_history",
-                  "label": "Low-imposition exploration guidance: optional next-run probes that must not weaken evaluation checks or impose extra work on the user"
-                },
-                {
-                  "context_key": "workflow_experience_profile_concept_id",
-                  "label": "Workflow and model experience profile identity used to retrieve this advisory guidance"
                 }
               ]
             },
