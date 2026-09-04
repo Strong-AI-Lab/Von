@@ -23,6 +23,7 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
 )
 from src.backend.services.episode_evaluation_workflow_vontology_service import (
     _EPISODE_REPO_SEED_ASSET_PATH,
+    _SELF_IMPROVEMENT_REPO_SEED_ASSET_PATH,
     _ensure_episode_evaluation_prompt_support,
     bootstrap_canonical_episode_evaluation_workflow,
 )
@@ -64,6 +65,18 @@ def test_episode_bundle_declares_reviewed_seed_3_migration() -> None:
             ]
         },
     }
+
+
+def test_episode_workflow_bundle_source_tags_preserve_originating_jira_tasks() -> None:
+    episode_bundle = json.loads(
+        _EPISODE_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8")
+    )
+    self_improvement_bundle = json.loads(
+        _SELF_IMPROVEMENT_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8")
+    )
+
+    assert episode_bundle["source_tag"] == "JVNAUTOSCI-1605"
+    assert self_improvement_bundle["source_tag"] == "JVNAUTOSCI-1987"
 
 
 @pytest.fixture

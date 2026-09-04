@@ -19893,6 +19893,30 @@ class InternalMCPChatOrchestrator:
         if namespace_binding is not None:
             bindings.append(namespace_binding)
 
+        # A learning candidate may be captured directly from the current chat
+        # even when that chat has not been materialised as a conversation
+        # concept.  Bind only an explicitly supplied, locator-empty
+        # conversation source; source choice itself remains model-owned.
+        if tool_name == "learning_candidate_capture" and conversation_session_id:
+            source_value = payload.get("source")
+            if (
+                isinstance(source_value, Mapping)
+                and source_value.get("kind") == "conversation"
+                and "conversation_concept_id" not in source_value
+                and "concept_id" not in source_value
+                and "session_id" not in source_value
+            ):
+                source = dict(source_value)
+                source["session_id"] = conversation_session_id
+                payload["source"] = source
+                bindings.append(
+                    {
+                        "field": "source.session_id",
+                        "source": "conversation_session_id",
+                        "value_present": True,
+                    }
+                )
+
         # Preserve user-attribution for auto-created concepts so namespace
         # isolation has a deterministic provenance trail (JVNAUTOSCI-925).
         if (

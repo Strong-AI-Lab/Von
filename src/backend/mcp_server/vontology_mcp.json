@@ -4284,6 +4284,228 @@
             }
         },
         {
+            "name": "learning_candidate_capture",
+            "description": "Capture a material, potentially reusable lesson as a source-linked, non-active learning candidate. It is not a fact, instruction, or authority grant, and zero candidates is normal. Contributor, target, audience, purpose, and beneficiary references do not confer visibility or authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "type": "string"
+                    },
+                    "source": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "contributor_concept_ids": {
+                        "type": "array",
+                        "items": {},
+                        "minItems": 1
+                    },
+                    "target_concept_ids": {
+                        "type": "array",
+                        "items": {},
+                        "minItems": 1
+                    },
+                    "audience_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 0
+                    },
+                    "beneficiary_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 0
+                    },
+                    "purpose_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 0
+                    },
+                    "idempotency_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "visibility_scope": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "actor",
+                            "organisation",
+                            null
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "body",
+                    "source",
+                    "contributor_concept_ids",
+                    "target_concept_ids"
+                ],
+                "additionalProperties": true,
+                "description": "Capture one material, potentially reusable lesson with an actor- or organisation-visible source. Source accepts a conversation_concept_id with an optional matching session_id, an actor-owned session_id with an optional exact trusted namespace, or an episode_critique_memory memory_id. Org-only capture requires an organisation-visible source and organisation visibility. Trusted actor context determines capture provenance and visibility; payload identity cannot grant access."
+            }
+        },
+        {
+            "name": "learning_candidate_get",
+            "description": "Read one actor- or organisation-visible, source-linked, non-active learning candidate. It is not a fact, instruction, or authority grant; zero available candidates is normal. Contributor, target, audience, purpose, and beneficiary references do not confer visibility or authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "candidate_id"
+                ],
+                "additionalProperties": true,
+                "description": "Read one learning candidate visible to the trusted actor or organisation. Payload identity cannot grant access."
+            }
+        },
+        {
+            "name": "learning_candidate_list",
+            "description": "List actor- or organisation-visible, source-linked, non-active learning candidates; zero candidates is a normal result. Candidates are not facts, instructions, or authority grants. Contributor, target, audience, purpose, and beneficiary references do not confer visibility or authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_kind": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "conversation",
+                            "episode_critique_memory",
+                            null
+                        ]
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List learning candidates visible to the trusted actor or organisation, optionally filtered by semantic target or source kind."
+            }
+        },
+        {
+            "name": "learning_candidate_revise",
+            "description": "Revise a material, reusable lesson while it remains a source-linked, non-active learning candidate. It is not a fact, instruction, or authority grant, and retaining zero candidates is normal. Contributor, target, audience, purpose, and beneficiary references do not confer visibility or authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {
+                        "type": "string"
+                    },
+                    "body": {
+                        "type": "string"
+                    },
+                    "revision_request_id": {
+                        "type": "string"
+                    },
+                    "contributor_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 1
+                    },
+                    "target_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 1
+                    },
+                    "audience_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 0
+                    },
+                    "beneficiary_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 0
+                    },
+                    "purpose_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {},
+                        "minItems": 0
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "candidate_id",
+                    "body",
+                    "revision_request_id"
+                ],
+                "additionalProperties": true,
+                "description": "Revise the text or semantic references of one actor- or organisation-visible learning candidate while retaining its immutable source and revision provenance."
+            }
+        },
+        {
             "name": "list_my_tasks",
             "description": "List tasks assigned to a user, optionally filtered by status.",
             "inputSchema": {
