@@ -1,0 +1,483 @@
+{
+  "kind": "bounded_live_replay_programme_evidence",
+  "evidence_date_utc": "2026-09-05",
+  "runtime_commit": "16e4fc79089e8480237e22bc3021874ced5f2cd4",
+  "runtime_dirty": false,
+  "scope": "Browser-test actor on the authorised local deployment; not Michael adoption or an estimated model success rate",
+  "initial_setup_failure": {
+    "model": "gpt-5.5",
+    "reason": "model_not_enabled",
+    "model_quality_evidence": false,
+    "request_id": "multi-turn-jira_lookup_followup_family-0-8717621e-578e-4bc5-af43-d5d158c5247b"
+  },
+  "trials": [
+    {
+      "requested_model": "gpt-5.6-terra",
+      "request_id": "multi-turn-jira_lookup_followup_family-0-91f52653-fdeb-461d-8243-9e6495addd73",
+      "actor": "#V#zhan_von_witbrock",
+      "gateway": {
+        "gateway_enabled": true,
+        "gateway_present": true,
+        "orchestrator_present": false,
+        "tool_catalogue": {
+          "method_count": 296,
+          "sample": [
+            "add_names",
+            "add_relationship",
+            "add_text_assertion_concept_links",
+            "build_paper_recommendations",
+            "build_spreadsheet_batch_completion_evidence",
+            "build_spreadsheet_record_completion_evidence",
+            "build_spreadsheet_record_materialisation_request",
+            "change_concept_publication_scope",
+            "chat_get_applied_prompt_context",
+            "chat_get_prompt_context",
+            "chat_history_get_debug_entry",
+            "chat_history_get_segments",
+            "chat_introspect",
+            "check_placeholder_description",
+            "coding_agent_mcp_access_profile",
+            "compare_spreadsheet_record_batch",
+            "compile_spreadsheet_record_plan",
+            "concept_exists",
+            "context_bundle_assemble_context_dossier",
+            "context_bundle_build_benchmark",
+            "context_bundle_build_reconstructed_workspace",
+            "context_bundle_resolve_effective_context",
+            "context_bundle_update_report_revision",
+            "context_search",
+            "conversation_get"
+          ],
+          "sample_truncated": true,
+          "sha256": "0676f7993a5703f500c7bb44d856447188190efd8bbef396afdc1615a7edbc87"
+        },
+        "tool_use_progress": {
+          "diagnostic_summary": null,
+          "enabled": false,
+          "request_id": "multi-turn-jira_lookup_followup_family-0-91f52653-fdeb-461d-8243-9e6495addd73",
+          "scope_keys": []
+        }
+      },
+      "server_elapsed_ms": 36684.032707998995,
+      "visible_answer": "I don\u2019t have a read-only Jira issue-search capability available in this session. The available Jira workflow would import issues into Von, which would be an unintended change for this request, so I did not run it.\n\nIf you enable or provide Jira search access, I can query `project = JVNAUTOSCI ORDER BY created DESC` and return the newest Task\u2019s key, summary, and status.",
+      "observer_verdict": "fail",
+      "turns_collected": 1,
+      "review": "Failed useful answer: direct Jira reads absent; four successful capability-discovery calls followed by refusal.",
+      "tool_invocations": [
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        }
+      ],
+      "model_calls": [
+        {
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 2777.028625001549,
+          "usage": {
+            "cache_write_input_tokens": 3141,
+            "cached_input_tokens": 0,
+            "completion_tokens": 45,
+            "prompt_tokens": 3144,
+            "total_tokens": 3189
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 2079.90083299228,
+          "usage": {
+            "cache_write_input_tokens": 8518,
+            "cached_input_tokens": 0,
+            "completion_tokens": 82,
+            "prompt_tokens": 8521,
+            "total_tokens": 8603
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 5298.137249992578,
+          "usage": {
+            "cache_write_input_tokens": 5100,
+            "cached_input_tokens": 8518,
+            "completion_tokens": 423,
+            "prompt_tokens": 13621,
+            "total_tokens": 14044
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 1601.7204579984536,
+          "usage": {
+            "cache_write_input_tokens": 5730,
+            "cached_input_tokens": 13618,
+            "completion_tokens": 44,
+            "prompt_tokens": 19351,
+            "total_tokens": 19395
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 2023.6894999979995,
+          "usage": {
+            "cache_write_input_tokens": 868,
+            "cached_input_tokens": 19348,
+            "completion_tokens": 85,
+            "prompt_tokens": 20219,
+            "total_tokens": 20304
+          }
+        }
+      ]
+    },
+    {
+      "requested_model": "gpt-5.6-luna",
+      "request_id": "multi-turn-jira_lookup_followup_family-0-4a8d587b-eada-44d2-96ed-ff3dcc55174c",
+      "actor": "#V#zhan_von_witbrock",
+      "gateway": {
+        "gateway_enabled": true,
+        "gateway_present": true,
+        "orchestrator_present": false,
+        "tool_catalogue": {
+          "method_count": 296,
+          "sample": [
+            "add_names",
+            "add_relationship",
+            "add_text_assertion_concept_links",
+            "build_paper_recommendations",
+            "build_spreadsheet_batch_completion_evidence",
+            "build_spreadsheet_record_completion_evidence",
+            "build_spreadsheet_record_materialisation_request",
+            "change_concept_publication_scope",
+            "chat_get_applied_prompt_context",
+            "chat_get_prompt_context",
+            "chat_history_get_debug_entry",
+            "chat_history_get_segments",
+            "chat_introspect",
+            "check_placeholder_description",
+            "coding_agent_mcp_access_profile",
+            "compare_spreadsheet_record_batch",
+            "compile_spreadsheet_record_plan",
+            "concept_exists",
+            "context_bundle_assemble_context_dossier",
+            "context_bundle_build_benchmark",
+            "context_bundle_build_reconstructed_workspace",
+            "context_bundle_resolve_effective_context",
+            "context_bundle_update_report_revision",
+            "context_search",
+            "conversation_get"
+          ],
+          "sample_truncated": true,
+          "sha256": "0676f7993a5703f500c7bb44d856447188190efd8bbef396afdc1615a7edbc87"
+        },
+        "tool_use_progress": {
+          "diagnostic_summary": null,
+          "enabled": false,
+          "request_id": "multi-turn-jira_lookup_followup_family-0-4a8d587b-eada-44d2-96ed-ff3dcc55174c",
+          "scope_keys": []
+        }
+      },
+      "server_elapsed_ms": 150278.14374999434,
+      "visible_answer": "The most recently created **Task** in the **JVNAUTOSCI** Jira project is:\n\n- **Key:** JVNAUTOSCI-2721  \n- **Summary:** Carry one research/funding responsibility across changed evidence and learned reuse.  \n- **Status:** In Progress",
+      "observer_verdict": "inconclusive",
+      "turns_collected": 1,
+      "review": "Later canonical result contains correct as-of-query Jira answer, but obtained through digest persistence with a Terra child. Not a clean read-only pass or a Luna-only success. Observer had returned pending/inconclusive; only first turn collected.",
+      "tool_invocations": [
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "tool": "turn_capabilities",
+          "method": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "tool": "represented_workflow_13c3a00071cce4c9273c",
+          "method": "represented_workflow_13c3a00071cce4c9273c",
+          "status": "ok",
+          "changed": true,
+          "effect_status": "succeeded",
+          "effect_id": "effect_f5fe1f85e63341ee720be958"
+        },
+        {
+          "tool": "turn_read_evidence",
+          "method": "turn_read_evidence",
+          "status": "ok"
+        },
+        {
+          "tool": "turn_read_evidence",
+          "method": "turn_read_evidence",
+          "status": "ok"
+        }
+      ],
+      "model_calls": [
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 1557.4036659963895,
+          "usage": {
+            "cache_write_input_tokens": 3145,
+            "cached_input_tokens": 0,
+            "completion_tokens": 52,
+            "prompt_tokens": 3148,
+            "total_tokens": 3200
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 2490.171332989121,
+          "usage": {
+            "cache_write_input_tokens": 8474,
+            "cached_input_tokens": 0,
+            "completion_tokens": 75,
+            "prompt_tokens": 8477,
+            "total_tokens": 8552
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 2039.8690000001807,
+          "usage": {
+            "cache_write_input_tokens": 13813,
+            "cached_input_tokens": 0,
+            "completion_tokens": 122,
+            "prompt_tokens": 13816,
+            "total_tokens": 13938
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 4765.060500008985,
+          "usage": {
+            "cache_write_input_tokens": 4509,
+            "cached_input_tokens": 13813,
+            "completion_tokens": 332,
+            "prompt_tokens": 18325,
+            "total_tokens": 18657
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 1620.9126670000842,
+          "usage": {
+            "cache_write_input_tokens": 1437,
+            "cached_input_tokens": 18322,
+            "completion_tokens": 67,
+            "prompt_tokens": 19762,
+            "total_tokens": 19829
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 4154.52224999899,
+          "usage": {
+            "cache_write_input_tokens": 2447,
+            "cached_input_tokens": 19759,
+            "completion_tokens": 114,
+            "prompt_tokens": 22209,
+            "total_tokens": 22323
+          }
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "duration_ms": 8996.808208001312,
+          "usage": {
+            "cache_write_input_tokens": 1255,
+            "cached_input_tokens": 22206,
+            "completion_tokens": 341,
+            "prompt_tokens": 23464,
+            "total_tokens": 23805
+          }
+        }
+      ]
+    }
+  ],
+  "luna_child": {
+    "instance_id": "0204da15-3c9a-498a-b79f-01299f91a691",
+    "workflow_id": "#V#lab_project_status_digest_workflow",
+    "canonical_status": "completed",
+    "source_event_id": "multi-turn-jira_lookup_followup_family-0-4a8d587b-eada-44d2-96ed-ff3dcc55174c",
+    "definition_identity": {
+      "action_count": 4,
+      "authoritative_definition_hash": "3d936d13e4db8f801e97fbdf066e60781fbf645947c5ddd1caff8d963b79e3f3",
+      "definition_hash": "3d936d13e4db8f801e97fbdf066e60781fbf645947c5ddd1caff8d963b79e3f3",
+      "hash_mismatch": false,
+      "runtime_definition_hash": "3d936d13e4db8f801e97fbdf066e60781fbf645947c5ddd1caff8d963b79e3f3",
+      "schema_version": "workflow_definition_identity.v1",
+      "source": "vontology",
+      "state_count": 11,
+      "version": 1,
+      "workflow_id": "#V#lab_project_status_digest_workflow"
+    },
+    "model_calls": [
+      {
+        "requested_model": "gpt-5.6-terra",
+        "selected_model": "gpt-5.6-terra",
+        "effective_model": "gpt-5.6-terra",
+        "model_identity_source": "provider_response",
+        "provider": "openai",
+        "duration_ms": 2642.065208987333,
+        "usage": {
+          "cache_write_input_tokens": 8481,
+          "cached_input_tokens": 0,
+          "completion_tokens": 152,
+          "prompt_tokens": 8484,
+          "total_tokens": 8636
+        }
+      },
+      {
+        "requested_model": "gpt-5.6-terra",
+        "selected_model": "gpt-5.6-terra",
+        "effective_model": "gpt-5.6-terra",
+        "model_identity_source": "provider_response",
+        "provider": "openai",
+        "duration_ms": 8102.044625004055,
+        "usage": {
+          "cache_write_input_tokens": 14591,
+          "cached_input_tokens": 0,
+          "completion_tokens": 825,
+          "prompt_tokens": 14594,
+          "total_tokens": 15419
+        }
+      }
+    ],
+    "work_product_id": "#V#operational_reliability_status_digest",
+    "write_receipt": {
+      "actor_concept_id": "#V#zhan_von_witbrock",
+      "canonical_read_back": {
+        "concept_id": "#V#operational_reliability_status_digest",
+        "context_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "language": "en-NZ",
+        "predicate": "hasContent",
+        "provenance_sha256": "35c4937bc5e1e29af83203b5c37c82606522691b2710d09ae817ccf070190b08",
+        "publication_context": {
+          "concept_id": "#V#zhan_von_witbrock",
+          "kind": "user",
+          "source": "concept_visibility"
+        },
+        "relation_id": "6a9b8ceec0e3f073c0a797d1",
+        "relation_present": true,
+        "text_sha256": "6b59adf9fc64cdb57be53fd445b5d55c978b15738f5d0afac244d3591fa755c1"
+      },
+      "changed": true,
+      "completed_at": "2026-09-05T03:30:58.986000+00:00",
+      "created_at": "2026-09-05T03:30:53.366000+00:00",
+      "decision_id": "oad_8Ugco1ZaTtmplsX84347cAw3",
+      "delegation_id": null,
+      "executing_agent_concept_id": "#V#von_system",
+      "idempotency_key": "workflow:#V#lab_project_status_digest_workflow:0204da15-3c9a-498a-b79f-01299f91a691:#V#workflow_step_lab_project_status_digest_workflow_persist_digest:upsert_singleton_text_relation",
+      "intent_fingerprint": "6aad35254d8a06082b87b57da89cc2dab7b3a2d73e5caa72664a0ac1f76efe74",
+      "mutation_outcome": "succeeded",
+      "operation": "text.upsert",
+      "publication_context": {
+        "concept_id": "#V#zhan_von_witbrock",
+        "kind": "user",
+        "source": "concept_visibility"
+      },
+      "receipt_id": "omr_1e7f740206d65a53a367dfab26fd06ba5baad19bc66ee6ad15c3c24bdf99ae67",
+      "response_effect_status": null,
+      "response_error_code": null,
+      "response_projection_truncated": false,
+      "response_success": true,
+      "schema_version": "ontology_mutation_receipt.v1",
+      "status": "succeeded",
+      "target_concept_ids": [
+        "#V#operational_reliability_status_digest"
+      ]
+    },
+    "exact_readback_verified": true,
+    "replaced_relation_ids": [
+      "6a5f1ea1b96ba91039d41a13"
+    ],
+    "prior_read_projection": "Only product title and description were exposed; previous hasContent bytes are not established by this projection. No absence or exact rollback claim."
+  },
+  "operator_connector_probe": {
+    "checkout": "/Users/mjw/Development/Von-runtime-main",
+    "connector_probe": "trusted operator gateway read, not ordinary-turn delegation",
+    "issue_key": "JVNAUTOSCI-2721",
+    "error_code": null,
+    "ordinary_exclusion": "deployment_global_account"
+  },
+  "limitations": [
+    "One attempted first turn per model, no completed four-turn family.",
+    "Child model was Terra even when caller override was Luna; this is not a controlled pure-model comparison.",
+    "Jira is live, not a frozen source dataset; operator planning updates were concurrent.",
+    "A successful collection or current correct answer does not establish acceptable effects, role competence, generality or expiry of any authority."
+  ],
+  "source_artifacts": {
+    "role-programme-jira-witness.json": "a5f3d4391f3c72ff943e1422b8c20d28d74ce3badfa089acb4388e7a6cf1a21a",
+    "role-programme-jira-terra.json": "99bfa14574d3cdb4230ae371db6c6b253956facbf48ba0d83e0e943978b43bbe",
+    "role-programme-jira-luna.json": "475be7fb2b5bfc93846a235fba7b11d4a41372ea4f8f91a20460b46b99a5b416",
+    "role-programme-terra-debug.json": "37ac03bbc0271d7f0d5a366f7d984694151f1a9451ce69a4a2a4a2199ab3c4b9",
+    "role-programme-luna-task0.json": "7427a2b11752b603256c204ee321cc780025881c1da8e76b9b7402627b0fda7d",
+    "role-programme-luna-instance.json": "1c0f97d47e614354221bcd4cbf278c1ff1b43cdf2cd9f1e80a04a625d8fd87dd",
+    "role-programme-runtime-jira-probe.json": "8b1b309f1456a5a16d4a25bc6befc02be1cf7b0f9c32a99cc9552925886e3298"
+  }
+}
