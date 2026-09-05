@@ -77,6 +77,47 @@ def test_upsert_does_not_dedup_away_newlines():
     assert tv.get("text") == "Hello\nworld"
 
 
+def test_exact_identity_does_not_reuse_normalised_case_or_spacing_variant():
+    """Exact callers retain their bytes despite the default dedup equivalence."""
+
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+    normalised_concept_id = "#V#fingerprint_normalised_identity_test_concept"
+    exact_concept_id = "#V#fingerprint_exact_identity_test_concept"
+    concepts.insert_many(
+        [
+            {"concept_id": normalised_concept_id, "relationships": {}},
+            {"concept_id": exact_concept_id, "relationships": {}},
+        ]
+    )
+
+    with bypass_access_control():
+        normalised = upsert_text_for_concept(
+            subject_concept_id=normalised_concept_id,
+            predicate="hasDescription",
+            text="Use message_list_direct.",
+            lang="en-NZ",
+        )
+        exact = upsert_text_for_concept(
+            subject_concept_id=exact_concept_id,
+            predicate="hasDescription",
+            text="use  message_list_direct.",
+            lang="en-NZ",
+            identity_mode="exact",
+        )
+
+    assert normalised["text_value_id"] != exact["text_value_id"]
+    exact_value = TextValuesRepository.find_one(
+        {"_id": ObjectId(exact["text_value_id"])}
+    )
+    assert exact_value is not None
+    assert exact_value.get("text") == "use  message_list_direct."
+
+
 def test_create_text_value_reconciles_duplicate_key_race(monkeypatch):
     """A concurrent insert winner is returned by its canonical fingerprint row."""
 

@@ -5,6 +5,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 
 def _set_dotted_value(target: dict[str, Any], dotted_key: str, value: Any) -> None:
     cursor = target
@@ -21,6 +23,7 @@ def _set_dotted_value(target: dict[str, Any], dotted_key: str, value: Any) -> No
 class _ConceptStore:
     def __init__(self) -> None:
         self.docs: dict[str, dict[str, Any]] = {}
+        self.create_calls: list[dict[str, Any]] = []
 
     def create_concept(
         self,
@@ -30,12 +33,28 @@ class _ConceptStore:
         description: str,
         **_kwargs: Any,
     ) -> dict[str, Any]:
+        self.create_calls.append(
+            {
+                "name": name,
+                "concept_id": concept_id,
+                "description": description,
+                **copy.deepcopy(_kwargs),
+            }
+        )
+        relationships: dict[str, Any] = {}
+        user_id = _kwargs.get("created_by_concept_id")
+        org_id = _kwargs.get("organisation_concept_id")
+        if user_id:
+            relationships["#V#specific_to_user"] = [user_id]
+        if org_id and _kwargs.get("visibility_scope_mode") != "user_only_default":
+            relationships["#V#specific_to_organisation"] = [org_id]
         doc = {
             "concept_id": concept_id,
             "name": name,
             "description": description,
             "concept_data": {},
             "attributes": {},
+            "relationships": relationships,
         }
         self.docs[concept_id] = doc
         return copy.deepcopy(doc)
@@ -191,6 +210,142 @@ def _patch_runtime(monkeypatch):
         },
     )
     return mod, store, run_collection, relations, text_writes, singleton_writes
+
+
+def test_actor_only_experiment_concepts_are_not_visible_to_an_org_peer(
+    monkeypatch,
+):
+    (
+        mod,
+        store,
+        _run_collection,
+        _relations,
+        _text_writes,
+        _singleton_writes,
+    ) = _patch_runtime(monkeypatch)
+    from src.backend.security.access_control import _document_visible_to_actor
+
+    owner = "#V#user"
+    organisation = "#V#org"
+    spec_id = "#V#actor_only_spec"
+    run_id = "#V#actor_only_run"
+    created = mod.create_experiment_spec(
+        name="Actor-only experiment",
+        experiment_spec_id=spec_id,
+        namespace="#V#user@org",
+        user_id=owner,
+        org_id=organisation,
+        require_actor_only_visibility=True,
+    )
+    started = mod.start_experiment_run(
+        experiment_spec_id=spec_id,
+        run_id=run_id,
+        namespace="#V#user@org",
+        user_id=owner,
+        org_id=organisation,
+        require_actor_only_visibility=True,
+    )
+
+    assert created["success"] is True
+    assert started["success"] is True
+    for concept_id in (spec_id, run_id):
+        concept = store.docs[concept_id]
+        assert concept["relationships"] == {"#V#specific_to_user": [owner]}
+        assert _document_visible_to_actor(concept, owner, organisation) is True
+        assert (
+            _document_visible_to_actor(concept, "#V#organisation_peer", organisation)
+            is False
+        )
+    actor_only_creates = [
+        item for item in store.create_calls if item["concept_id"] in {spec_id, run_id}
+    ]
+    assert len(actor_only_creates) == 2
+    assert all(
+        item["visibility_scope_mode"] == "user_only_default"
+        for item in actor_only_creates
+    )
+
+
+def test_actor_only_experiment_refuses_preexisting_wider_spec_before_state_write(
+    monkeypatch,
+):
+    (
+        mod,
+        store,
+        _run_collection,
+        _relations,
+        _text_writes,
+        singleton_writes,
+    ) = _patch_runtime(monkeypatch)
+    spec_id = "#V#wider_preexisting_spec"
+    store.docs[spec_id] = {
+        "concept_id": spec_id,
+        "relationships": {
+            "#V#specific_to_user": ["#V#user"],
+            "#V#specific_to_organisation": ["#V#org"],
+        },
+        "concept_data": {},
+        "attributes": {},
+    }
+
+    with pytest.raises(mod.ExperimentVisibilityScopeError):
+        mod.create_experiment_spec(
+            name="Must remain actor-only",
+            experiment_spec_id=spec_id,
+            namespace="#V#user@org",
+            user_id="#V#user",
+            org_id="#V#org",
+            fixture_payload={"candidate_ref": {"body_sha256": "a" * 64}},
+            require_actor_only_visibility=True,
+        )
+
+    assert "experiment_spec" not in store.docs[spec_id]["concept_data"]
+    assert singleton_writes == []
+
+
+def test_actor_only_experiment_refuses_preexisting_wider_run_before_state_write(
+    monkeypatch,
+):
+    (
+        mod,
+        store,
+        _run_collection,
+        _relations,
+        _text_writes,
+        _singleton_writes,
+    ) = _patch_runtime(monkeypatch)
+    spec_id = "#V#actor_only_existing_spec"
+    run_id = "#V#wider_preexisting_run"
+    mod.create_experiment_spec(
+        name="Actor-only experiment",
+        experiment_spec_id=spec_id,
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        require_actor_only_visibility=True,
+    )
+    store.docs[run_id] = {
+        "concept_id": run_id,
+        "relationships": {
+            "#V#specific_to_user": ["#V#user"],
+            "#V#specific_to_organisation": ["#V#org"],
+        },
+        "concept_data": {},
+        "attributes": {},
+    }
+
+    with pytest.raises(mod.ExperimentVisibilityScopeError):
+        mod.start_experiment_run(
+            experiment_spec_id=spec_id,
+            run_id=run_id,
+            namespace="#V#user@org",
+            user_id="#V#user",
+            org_id="#V#org",
+            metadata={"learning_advice_experiment": {"binding_sha256": "a" * 64}},
+            require_actor_only_visibility=True,
+        )
+
+    assert "experiment_run" not in store.docs[run_id]["concept_data"]
 
 
 def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch):
@@ -523,6 +678,103 @@ def test_compute_experiment_verdict_fails_on_forbidden_side_effect(monkeypatch):
     assert verdict["promotion_recommendation"]["recommended"] is False
     assert verdict["experiment_run"]["status"] == "failed"
     assert diff_calls == []
+
+
+def test_abort_experiment_run_preserves_evidence_without_content_failure(monkeypatch):
+    mod, _store, _runs, _relations, _texts, singleton_writes = _patch_runtime(
+        monkeypatch
+    )
+    binding_sha256 = "a" * 64
+    mod.create_experiment_spec(
+        name="Abortable experiment",
+        experiment_spec_id="#V#spec_abortable",
+    )
+    mod.start_experiment_run(
+        experiment_spec_id="#V#spec_abortable",
+        run_id="#V#run_abortable",
+        metadata={
+            "learning_advice_experiment": {
+                "schema_version": "learning_advice_experiment_run_binding.v1",
+                "binding_sha256": binding_sha256,
+            }
+        },
+    )
+    mod.record_experiment_observation(
+        run_id="#V#run_abortable",
+        observations={
+            "observation_id": "completed-trial",
+            "observation_type": "learning_advice_trial",
+            "verdict": "pass",
+        },
+        turn_execution_request_ids=["request-1"],
+    )
+
+    aborted = mod.abort_experiment_run(
+        run_id="#V#run_abortable",
+        reason_code="learning_advice_experiment_request_contamination",
+        binding_metadata_key="learning_advice_experiment",
+        expected_binding_sha256=binding_sha256,
+    )
+    readback = mod.get_experiment_run_state("#V#run_abortable")
+
+    assert aborted["success"] is True
+    assert aborted["idempotent"] is False
+    assert readback is not None
+    assert readback["status"] == "failed"
+    assert readback["verdict"] == "inconclusive"
+    assert [item["observation_id"] for item in readback["observations"]] == [
+        "completed-trial"
+    ]
+    assert readback["turn_execution_request_ids"] == ["request-1"]
+    assert readback["abort_summary"] == {
+        "schema_version": "experiment_run_abort.v1",
+        "reason_code": "learning_advice_experiment_request_contamination",
+        "binding_metadata_key": "learning_advice_experiment",
+        "binding_sha256": binding_sha256,
+        "preserved_observation_count": 1,
+        "preserved_turn_execution_request_count": 1,
+        "aborted_at_utc": readback["completed_at_utc"],
+    }
+    assert readback["evidence"]["experiment_run_abort"] == readback["abort_summary"]
+    assert singleton_writes[-1]["text"] == "inconclusive"
+
+    repeated = mod.abort_experiment_run(
+        run_id="#V#run_abortable",
+        reason_code="learning_advice_experiment_request_contamination",
+        binding_metadata_key="learning_advice_experiment",
+        expected_binding_sha256=binding_sha256,
+    )
+    assert repeated["success"] is True
+    assert repeated["idempotent"] is True
+
+
+def test_abort_experiment_run_rejects_binding_mismatch_without_mutation(monkeypatch):
+    mod, _store, _runs, _relations, _texts, _singleton_writes = _patch_runtime(
+        monkeypatch
+    )
+    mod.create_experiment_spec(
+        name="Bound experiment",
+        experiment_spec_id="#V#spec_bound_abort",
+    )
+    mod.start_experiment_run(
+        experiment_spec_id="#V#spec_bound_abort",
+        run_id="#V#run_bound_abort",
+        metadata={"learning_advice_experiment": {"binding_sha256": "b" * 64}},
+    )
+
+    result = mod.abort_experiment_run(
+        run_id="#V#run_bound_abort",
+        reason_code="learning_advice_experiment_integrity_failure",
+        binding_metadata_key="learning_advice_experiment",
+        expected_binding_sha256="c" * 64,
+    )
+
+    assert result == {"success": False, "error": "experiment_run_binding_mismatch"}
+    readback = mod.get_experiment_run_state("#V#run_bound_abort")
+    assert readback is not None
+    assert readback["status"] == "running"
+    assert readback["verdict"] is None
+    assert readback.get("abort_summary") is None
 
 
 def test_prepare_meeting_invitation_experiment_spec_builds_gateable_fixture(

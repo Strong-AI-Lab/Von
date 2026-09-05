@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Mapping
@@ -891,6 +892,502 @@ def test_scope_message_contains_boundaries_and_preserves_request_scope() -> None
     assert "every attempted tool call succeeded" in message
     assert "outcome_explanation_support" in message
     assert "its prompt body is not evidence" in message
+
+
+def _learning_advice_candidate_snapshot() -> dict[str, Any]:
+    body = (
+        "When a request uses a channel-neutral term such as ‘messages’, keep "
+        "the channel unresolved unless wording or the active task purpose "
+        "discriminates. Compare available authorised communication channels "
+        "rather than inheriting the most recently discussed one."
+    )
+    return {
+        "candidate_id": "#V#learning_candidate_message_channel",
+        "schema_version": "learning_candidate.v1",
+        "lifecycle_state": "non_active",
+        "evaluation_disposition": "undecided",
+        "body": body,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "revision_identity_sha256": "a" * 64,
+        "source_locator_sha256": "b" * 64,
+        "source": {"kind": "conversation", "locator": {"session_id": "source"}},
+        "authorship": {"author_concept_id": "#V#von_system"},
+        "target_concept_ids": ["#V#direct_adaptive_capability_choice"],
+        "visibility": {
+            "scope": "actor",
+            "actor_user_id": "#V#person",
+            "organisation_concept_id": "#V#org",
+        },
+        "namespace": "#V#person@org",
+        "revision": 1,
+    }
+
+
+def build_learning_advice_experiment_projection(
+    candidate: Mapping[str, Any], **kwargs: Any
+) -> dict[str, Any]:
+    from src.backend.services.learning_advice_projection_service import (
+        build_learning_advice_experiment_projection as build_projection,
+    )
+
+    return build_projection(candidate, **kwargs)
+
+
+def prepare_learning_advice_projection(
+    projection: Mapping[str, Any], **kwargs: Any
+) -> dict[str, Any]:
+    from src.backend.services.learning_advice_projection_service import (
+        prepare_learning_advice_projection as prepare_projection,
+    )
+
+    return prepare_projection(projection, **kwargs)
+
+
+def test_learning_advice_arm_a_is_model_blind_and_records_exact_control() -> None:
+    candidate = _learning_advice_candidate_snapshot()
+    projection = build_learning_advice_experiment_projection(
+        candidate,
+        arm="A",
+        experiment_id="experiment-message-channel",
+        case_id="case-ambiguous-message",
+    )
+    client = _SequenceClient(LLMResponse(text_response="No capability was needed."))
+    baseline_client = _SequenceClient(
+        LLMResponse(text_response="No capability was needed.")
+    )
+
+    execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Summarise recent messages to me.",
+        context=[],
+        llm_client=baseline_client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-advice-baseline",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Summarise recent messages to me.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        learning_advice_projection=projection,
+        turn_id="turn-advice-arm-a",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert candidate["body"] not in client.calls[0]["system_message"]
+    assert (
+        "LEARNED ADVICE FOR THIS CAPABILITY CHOICE"
+        not in client.calls[0]["system_message"]
+    )
+    assert (
+        client.calls[0]["system_message"] == baseline_client.calls[0]["system_message"]
+    )
+    assert (
+        client.calls[0]["available_tools"]
+        == baseline_client.calls[0]["available_tools"]
+    )
+    invoke_tool = next(
+        tool
+        for tool in client.calls[0]["available_tools"]
+        if tool.name == "turn_invoke_capability"
+    )
+    assert "learning_advice_disposition" not in invoke_tool.input_schema["properties"]
+    exposure = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_learning_advice_exposure"
+    )
+    assert exposure["arm"] == "A"
+    assert exposure["status"] == "withheld"
+    assert exposure["candidate_id"] == candidate["candidate_id"]
+    assert exposure["candidate_body_sha256"] == candidate["body_sha256"]
+    assert exposure["projected_item_count"] == 0
+    assert exposure["preparation_status"] == "prepared"
+    assert exposure["projection_status"] == "withheld"
+    assert exposure["exposure_status"] == "withheld"
+    assert exposure["model_visible_call_ids"] == []
+    assert exposure["completed_model_visible_call_ids"] == []
+    assert exposure["selected_capability_names"] == []
+    assert exposure["terminal_status"] == "completed"
+
+
+def test_model_request_observer_sees_exact_detached_request_before_submission() -> None:
+    candidate = _learning_advice_candidate_snapshot()
+    projection = build_learning_advice_experiment_projection(
+        candidate,
+        arm="B",
+        experiment_id="experiment-message-channel",
+        case_id="case-request-observer",
+    )
+    client = _SequenceClient(LLMResponse(text_response="Observed safely."))
+    observed: list[dict[str, Any]] = []
+
+    execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Summarise recent messages to me.",
+        context=[{"role": "system", "content": "Stable context."}],
+        llm_client=client,
+        model="test-model",
+        model_parameters={"temperature": 0.2},
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        learning_advice_projection=projection,
+        model_request_observer=lambda request: observed.append(dict(request)),
+        turn_id="turn-request-observer",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(observed) == len(client.calls) == 1
+    request = observed[0]
+    provider_call = client.calls[0]
+    assert request["schema_version"] == "adaptive_turn_model_request_observation.v1"
+    assert request["model_call_id"] == "turn-request-observer:llm:1"
+    assert request["stage"] == "adaptive_research"
+    assert request["prompt"] == provider_call["prompt"]
+    assert request["context"] == provider_call["context"]
+    assert request["model"] == provider_call["model"]
+    assert request["system_message"] == provider_call["system_message"]
+    assert request["model_parameters"] == provider_call["llm_params"]
+    assert request["continuation"] is None
+    assert request["tool_results"] == []
+    assert request["tools"] == [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+            "output_schema": tool.output_schema,
+        }
+        for tool in provider_call["available_tools"]
+    ]
+    assert candidate["body"] in request["system_message"]
+
+
+def test_model_request_observer_can_abort_before_provider_submission() -> None:
+    client = _SequenceClient(LLMResponse(text_response="Must not be submitted."))
+
+    def reject_request(request: Mapping[str, Any]) -> None:
+        assert request["model_call_id"] == "turn-request-rejected:llm:1"
+        raise RuntimeError("request attestation rejected")
+
+    with pytest.raises(RuntimeError, match="request attestation rejected"):
+        execute_adaptive_turn(
+            gateway=_gateway(lambda **_kwargs: {"success": True}),
+            prompt="Do not submit this request.",
+            context=[],
+            llm_client=client,
+            model="test-model",
+            model_request_observer=reject_request,
+            turn_id="turn-request-rejected",
+            turn_budget_seconds=10,
+            final_synthesis_reserve_seconds=2,
+        )
+
+    assert client.calls == []
+
+
+def test_learning_advice_arm_b_reaches_existing_choice_and_links_selection() -> None:
+    candidate = _learning_advice_candidate_snapshot()
+    projection = build_learning_advice_experiment_projection(
+        candidate,
+        arm="B",
+        experiment_id="experiment-message-channel",
+        case_id="case-ambiguous-message",
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    call_id="call-internal-messages",
+                    tool_name="turn_invoke_capability",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="I found the messages."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True, "messages": []}),
+        prompt="Summarise recent messages to me.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        learning_advice_projection=projection,
+        turn_id="turn-advice-arm-b",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    first_system_message = client.calls[0]["system_message"]
+    assert "LEARNED ADVICE FOR THIS CAPABILITY CHOICE" in first_system_message
+    assert candidate["body"] in first_system_message
+    assert candidate["candidate_id"] not in first_system_message
+    assert candidate["body_sha256"] not in first_system_message
+    invoke_tool = next(
+        tool
+        for tool in client.calls[0]["available_tools"]
+        if tool.name == "turn_invoke_capability"
+    )
+    assert "learning_advice_disposition" not in invoke_tool.input_schema["properties"]
+    exposure = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_learning_advice_exposure"
+    )
+    assert exposure["arm"] == "B"
+    assert exposure["status"] == "projected"
+    assert exposure["preparation_status"] == "prepared"
+    assert exposure["projection_status"] == "projected"
+    assert exposure["exposure_status"] == "exposed"
+    assert exposure["model_visible_call_ids"] == [
+        "turn-advice-arm-b:llm:1",
+        "turn-advice-arm-b:llm:2",
+    ]
+    assert exposure["completed_model_visible_call_ids"] == [
+        "turn-advice-arm-b:llm:1",
+        "turn-advice-arm-b:llm:2",
+    ]
+    assert exposure["visibility_indeterminate_call_ids"] == []
+    assert exposure["projected_item_count"] == 1
+    assert exposure["selected_capability_names"] == ["general_read"]
+    assert exposure["dispositions"] == []
+    invocation = result.tool_invocations[0]
+    assert "learning_advice_disposition" not in invocation["effective_arguments"]
+    assert "learning_advice_disposition" not in invocation
+    selection = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_capability_selection"
+    )
+    assert selection["learning_advice_exposure"] == {
+        "schema_version": "adaptive_capability_learning_advice_exposure.v1",
+        "arm": "B",
+        "preparation_status": "prepared",
+        "projection_status": "projected",
+        "exposure_status": "exposed",
+        "candidate_id": candidate["candidate_id"],
+        "candidate_revision": 1,
+        "candidate_evaluation_disposition": "undecided",
+        "candidate_body_sha256": candidate["body_sha256"],
+        "candidate_revision_identity_sha256": candidate["revision_identity_sha256"],
+        "candidate_source_locator_sha256": candidate["source_locator_sha256"],
+        "projection_sha256": projection["projection_sha256"],
+        "model_visible_call_ids": ["turn-advice-arm-b:llm:1"],
+        "completed_model_visible_call_ids": ["turn-advice-arm-b:llm:1"],
+        "visibility_indeterminate_call_ids": [],
+    }
+    assert "learning_advice_disposition" not in selection
+
+
+def test_learning_advice_does_not_change_acting_tool_schema() -> None:
+    projection = build_learning_advice_experiment_projection(
+        _learning_advice_candidate_snapshot(),
+        arm="B",
+        experiment_id="experiment-message-channel",
+        case_id="case-no-disposition",
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    call_id="call-without-disposition",
+                    tool_name="turn_invoke_capability",
+                    payload={"name": "general_read", "arguments": {}},
+                )
+            ],
+        ),
+        LLMResponse(text_response="Done."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Read the relevant item.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        learning_advice_projection=projection,
+        turn_id="turn-advice-not-reported",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    invoke_tool = next(
+        tool
+        for tool in client.calls[0]["available_tools"]
+        if tool.name == "turn_invoke_capability"
+    )
+    assert "learning_advice_disposition" not in invoke_tool.input_schema["properties"]
+    invocation = result.tool_invocations[0]
+    selection = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_capability_selection"
+    )
+    exposure = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_learning_advice_exposure"
+    )
+    assert "learning_advice_disposition" not in invocation
+    assert "learning_advice_disposition" not in selection
+    assert exposure["dispositions"] == []
+
+
+def test_learning_advice_visibility_separates_provider_error_from_completion() -> None:
+    projection = build_learning_advice_experiment_projection(
+        _learning_advice_candidate_snapshot(),
+        arm="B",
+        experiment_id="experiment-message-channel",
+        case_id="case-provider-error",
+    )
+    client = _SequenceClient(
+        StructuredToolTransportError(
+            "The provider rejected the request after submission.",
+            decision={
+                "failure_kind": "provider_rate_limited",
+                "provider_request_sent": True,
+            },
+        )
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Read the relevant item.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        learning_advice_projection=projection,
+        turn_id="turn-advice-provider-error",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    exposure = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_learning_advice_exposure"
+    )
+    assert exposure["model_visible_call_ids"] == ["turn-advice-provider-error:llm:1"]
+    assert exposure["completed_model_visible_call_ids"] == []
+    assert exposure["exposure_status"] == "exposed"
+
+
+def test_learning_advice_is_never_rendered_for_final_synthesis() -> None:
+    candidate = _learning_advice_candidate_snapshot()
+    projection = prepare_learning_advice_projection(
+        build_learning_advice_experiment_projection(
+            candidate,
+            arm="B",
+            experiment_id="experiment-message-channel",
+            case_id="case-final-synthesis",
+        ),
+        actor_user_id="#V#person",
+        organisation_concept_id="#V#org",
+        namespace="#V#person@org",
+    )
+    scope = TrustedTurnScope(
+        user_concept_id="#V#person",
+        organisation_concept_id="#V#org",
+        namespace="#V#person@org",
+    )
+
+    research_message = _scope_message(
+        scope,
+        delegated_count=1,
+        final_synthesis=False,
+        learning_advice_projection=projection,
+    )
+    final_message = _scope_message(
+        scope,
+        delegated_count=1,
+        final_synthesis=True,
+        learning_advice_projection=projection,
+    )
+
+    assert candidate["body"] in research_message
+    assert candidate["body"] not in final_message
+    assert "LEARNED ADVICE FOR THIS CAPABILITY CHOICE" not in final_message
+
+
+def test_out_of_scope_learning_advice_falls_back_without_exposing_body() -> None:
+    candidate = _learning_advice_candidate_snapshot()
+    projection = build_learning_advice_experiment_projection(
+        candidate,
+        arm="B",
+        experiment_id="experiment-message-channel",
+        case_id="case-scope-mismatch",
+    )
+    client = _SequenceClient(LLMResponse(text_response="Ordinary path remains usable."))
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Summarise recent messages to me.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#other@different_org",
+        user_concept_id="#V#other",
+        org_concept_id="#V#different_org",
+        learning_advice_projection=projection,
+        turn_id="turn-advice-scope-mismatch",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "Ordinary path remains usable."
+    assert candidate["body"] not in client.calls[0]["system_message"]
+    exposure = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_learning_advice_exposure"
+    )
+    assert exposure == {
+        "type": "adaptive_turn_learning_advice_exposure",
+        "schema_version": "adaptive_capability_learning_advice_exposure.v1",
+        "consumer": "direct_adaptive_turn",
+        "decision_kind": "capability_choice",
+        "status": "unavailable",
+        "preparation_status": "unavailable",
+        "projection_status": "not_projected",
+        "exposure_status": "not_exposed",
+        "model_visible": False,
+        "model_visible_call_ids": [],
+        "completed_model_visible_call_ids": [],
+        "visibility_indeterminate_call_ids": [],
+        "dispositions": [],
+        "reason_code": "learning_advice_projection_scope_unavailable",
+        "terminal_status": "completed",
+        "model_call_count": 1,
+        "selected_capability_names": [],
+        "selected_capability_count": 0,
+    }
 
 
 def test_progressive_evidence_guidance_survives_post_read_continuation() -> None:
@@ -8676,6 +9173,90 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier(
     )
 
 
+def test_bounded_experiment_can_disable_live_represented_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _unexpected_represented_read(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("bounded experiment read live represented state")
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        _unexpected_represented_read,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "resolve_tool_projection_contract",
+        _unexpected_represented_read,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="bounded-catalogue",
+                    payload={"query": "message reads"},
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="test",
+                api_surface="responses",
+                model="test-model",
+                response_id="bounded-catalogue-response",
+            ),
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="bounded-read",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "messages"},
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="test",
+                api_surface="responses",
+                model="test-model",
+                response_id="bounded-read-response",
+            ),
+        ),
+        LLMResponse(text_response="The frozen read completed."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "answer": "frozen replay result",
+                "outcome_explanation_support": {"prompt": "represented text"},
+            }
+        ),
+        prompt="Read the messages.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-bounded-represented-inputs",
+        allow_represented_workflow_discovery=False,
+        allow_represented_tool_projection=False,
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    catalogue = client.calls[1]["tool_results"][0].output
+    assert catalogue["workflow_discovery"]["status"] == (
+        "disabled_for_bounded_execution"
+    )
+    evidence = client.calls[2]["tool_results"][0].output
+    assert "projected_payload" not in evidence
+    assert "outcome_explanation_support" not in evidence
+    assert result.response_text == "The frozen read completed."
+
+
 def test_repeated_tool_results_resolve_projection_contract_once_per_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -15045,6 +15626,7 @@ def test_model_call_progress_reports_cumulative_usage_cost_and_exact_identity() 
     assert model_end_events[0]["requested_model"] == "gpt-test-requested"
     assert model_end_events[0]["selected_model"] == "gpt-test-requested"
     assert model_end_events[0]["effective_model"] == "gpt-test-effective"
+    assert model_end_events[0]["provider_observed_model"] == "gpt-test-effective"
     assert model_end_events[0]["model_identity_source"] == "provider_response"
     first_summary = model_end_events[0]["llm_usage_cost_summary"]
     second_summary = model_end_events[1]["llm_usage_cost_summary"]

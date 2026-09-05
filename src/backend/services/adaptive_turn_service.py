@@ -291,6 +291,7 @@ _CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
 _CAPABILITY_COST_PROFILE_SCHEMA_VERSION = "capability_cost_profile.v1"
 _CAPABILITY_SELECTION_POLICY_SCHEMA_VERSION = "capability_selection_policy.v1"
 _CAPABILITY_SELECTION_TRACE_SCHEMA_VERSION = "capability_selection_trace.v1"
+_MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION = "adaptive_turn_model_request_observation.v1"
 _CONVERSATION_SITUATION_START_TAG = "<von_conversation_situation>"
 _CONVERSATION_SITUATION_END_TAG = "</von_conversation_situation>"
 _CONVERSATION_SITUATION_PROTOCOL_RE = re.compile(
@@ -1397,6 +1398,69 @@ def _request_fingerprint(
     return hashlib.sha256(serialised).hexdigest(), len(serialised)
 
 
+def _render_learning_advice_projection(
+    projection: Mapping[str, Any] | None,
+) -> str | None:
+    """Load the experiment-only renderer only when advice is actually supplied."""
+
+    if projection is None:
+        return None
+    from src.backend.services.learning_advice_projection_service import (
+        render_learning_advice_projection,
+    )
+
+    return render_learning_advice_projection(projection)
+
+
+def _observe_model_request(
+    observer: Callable[[Mapping[str, Any]], None] | None,
+    *,
+    model_call_id: str,
+    stage: str,
+    prompt: str,
+    tools: Sequence[ToolDefinition],
+    context: Sequence[Mapping[str, Any]],
+    model: str | None,
+    system_message: str,
+    model_parameters: Mapping[str, Any],
+    continuation: LLMContinuation | None,
+    tool_results: Sequence[ToolResult],
+) -> None:
+    """Expose one exact provider-neutral request before provider submission.
+
+    The observer is an optional diagnostic seam.  It receives a detached,
+    JSON-only projection of the arguments about to be submitted and may raise
+    to stop the request.  It cannot mutate the actual provider request.
+    """
+
+    if observer is None:
+        return
+    payload = {
+        "schema_version": _MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
+        "model_call_id": model_call_id,
+        "stage": stage,
+        "prompt": prompt,
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "output_schema": tool.output_schema,
+            }
+            for tool in tools
+        ],
+        "context": [dict(item) for item in context],
+        "model": model,
+        "system_message": system_message,
+        "model_parameters": dict(model_parameters),
+        "continuation": (
+            continuation.to_mapping() if continuation is not None else None
+        ),
+        "tool_results": _serialisable_tool_result_batch(tool_results),
+    }
+    observer(json.loads(_json_bytes(payload)))
+
+
 def _is_transient_model_request_liveness_failure(exc: BaseException) -> bool:
     """Recognise request timeouts without retrying semantic/provider failures."""
 
@@ -1955,19 +2019,28 @@ def _compact_context_after_limit(
     ]
 
 
-def _tool_definitions() -> list[ToolDefinition]:
+def _tool_definitions(
+    *,
+    allow_represented_workflow_discovery: bool = True,
+) -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name=_CAPABILITY_TOOL_NAME,
             description=(
                 "Inspect the capabilities delegated to this turn. Non-exact "
-                "discovery returns a complete unranked compact purpose index, "
-                "including semantically discovered represented workflows. Direct "
-                "tools, small compositions, and represented workflows are peers; "
-                "representedness does not rank a plan. Judge semantic adequacy "
-                "yourself. Prefer the smallest plan that can produce the requested "
-                "work product and evidence; use a workflow when its added composition, "
-                "verification, or recovery is materially needed. Request the exact "
+                + (
+                    "discovery returns a complete unranked compact purpose index, "
+                    "including semantically discovered represented workflows. Direct "
+                    "tools, small compositions, and represented workflows are peers; "
+                    "representedness does not rank a plan. Judge semantic adequacy "
+                    "yourself. Prefer the smallest plan that can produce the requested "
+                    "work product and evidence; use a workflow when its added "
+                    "composition, verification, or recovery is materially needed. "
+                    if allow_represented_workflow_discovery
+                    else "discovery is limited to the delegated direct capability "
+                    "catalogue for this bounded execution. "
+                )
+                + "Request the exact "
                 "names of all alternatives being compared together to hydrate their "
                 "canonical descriptions, planner guidance, plan and effect facts, and "
                 "argument schemas on equal footing. This is discovery, "
@@ -2097,6 +2170,7 @@ def _scope_message(
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
     conversation_observation_state: Mapping[str, Any] | None = None,
     authorised_resource_choices: Sequence[Mapping[str, Any]] | None = None,
+    learning_advice_projection: Mapping[str, Any] | None = None,
 ) -> str:
     actor = scope.user_concept_id or "unauthenticated"
     organisation = scope.organisation_concept_id or "none"
@@ -2399,6 +2473,15 @@ def _scope_message(
                 "to learn an outcome already recorded here; perform a fresh read "
                 "only when the current canonical state itself still needs observation."
             )
+    if not final_synthesis and learning_advice_projection is not None:
+        rendered_learning_advice = _render_learning_advice_projection(
+            learning_advice_projection
+        )
+        if rendered_learning_advice:
+            # Place learned policy memory below the objective, ordinary turn
+            # support, shared situation and exact observations.  It remains an
+            # input to the existing semantic decision, never a tool boundary.
+            message += "\n\n" + rendered_learning_advice
     if answer_only:
         message += (
             "\n- The answer-only checkpoint has been reached. Answer now from the "
@@ -6702,6 +6785,10 @@ def execute_adaptive_turn(
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
     conversation_observation_state: Mapping[str, Any] | None = None,
     model_registry_snapshot: Any = None,
+    learning_advice_projection: Mapping[str, Any] | None = None,
+    model_request_observer: Callable[[Mapping[str, Any]], None] | None = None,
+    allow_represented_workflow_discovery: bool = True,
+    allow_represented_tool_projection: bool = True,
     turn_budget_seconds: float | None = None,
     final_synthesis_reserve_seconds: float | None = None,
     final_answer_reserve_seconds: float | None = None,
@@ -6827,7 +6914,9 @@ def execute_adaptive_turn(
     latest_workflow_discovery: dict[str, Any] | None = None
     catalogued_capabilities_by_name: dict[str, dict[str, Any]] = {}
     latest_capability_selection_policy: dict[str, Any] | None = None
-    available_tools = _tool_definitions()
+    available_tools = _tool_definitions(
+        allow_represented_workflow_discovery=allow_represented_workflow_discovery,
+    )
     final_synthesis_tools = [
         tool
         for tool in available_tools
@@ -6864,6 +6953,143 @@ def execute_adaptive_turn(
             "provider_retry_wait_max_seconds": provider_retry_wait_max,
         }
     ]
+    prepared_learning_advice: dict[str, Any] | None = None
+    learning_advice_exposure: dict[str, Any] | None = None
+    learning_advice_decision_binding: dict[str, Any] | None = None
+    if learning_advice_projection is not None:
+        from src.backend.services.learning_advice_projection_service import (
+            LEARNING_ADVICE_EXPOSURE_SCHEMA_VERSION,
+            LearningAdviceProjectionError,
+            build_learning_advice_exposure_record,
+            prepare_learning_advice_projection,
+        )
+
+        try:
+            prepared_learning_advice = prepare_learning_advice_projection(
+                learning_advice_projection,
+                actor_user_id=scope.user_concept_id,
+                organisation_concept_id=scope.organisation_concept_id,
+                namespace=scope.namespace,
+            )
+        except LearningAdviceProjectionError as exc:
+            # An unavailable or malformed optional projection must not block
+            # ordinary work or reveal a candidate outside trusted scope.
+            learning_advice_exposure = {
+                "type": "adaptive_turn_learning_advice_exposure",
+                "schema_version": LEARNING_ADVICE_EXPOSURE_SCHEMA_VERSION,
+                "consumer": "direct_adaptive_turn",
+                "decision_kind": "capability_choice",
+                "status": "unavailable",
+                "preparation_status": "unavailable",
+                "projection_status": "not_projected",
+                "exposure_status": "not_exposed",
+                "model_visible": False,
+                "model_visible_call_ids": [],
+                "completed_model_visible_call_ids": [],
+                "visibility_indeterminate_call_ids": [],
+                "dispositions": [],
+                "reason_code": exc.reason_code,
+            }
+        else:
+            learning_advice_exposure = build_learning_advice_exposure_record(
+                prepared_learning_advice
+            )
+            candidate_ref = prepared_learning_advice.get("candidate_ref")
+            if isinstance(candidate_ref, Mapping):
+                learning_advice_decision_binding = {
+                    "schema_version": LEARNING_ADVICE_EXPOSURE_SCHEMA_VERSION,
+                    "arm": prepared_learning_advice.get("arm"),
+                    "preparation_status": "prepared",
+                    "projection_status": prepared_learning_advice.get("status"),
+                    "exposure_status": (
+                        "withheld"
+                        if prepared_learning_advice.get("status") == "withheld"
+                        else "not_exposed"
+                    ),
+                    "candidate_id": candidate_ref.get("candidate_id"),
+                    "candidate_revision": candidate_ref.get("revision"),
+                    "candidate_evaluation_disposition": candidate_ref.get(
+                        "evaluation_disposition"
+                    ),
+                    "candidate_body_sha256": candidate_ref.get("body_sha256"),
+                    "candidate_revision_identity_sha256": candidate_ref.get(
+                        "revision_identity_sha256"
+                    ),
+                    "candidate_source_locator_sha256": candidate_ref.get(
+                        "source_locator_sha256"
+                    ),
+                    "projection_sha256": prepared_learning_advice.get(
+                        "projection_sha256"
+                    ),
+                    "model_visible_call_ids": [],
+                    "completed_model_visible_call_ids": [],
+                    "visibility_indeterminate_call_ids": [],
+                }
+        aux_calls.append(learning_advice_exposure)
+
+    def note_learning_advice_visibility(
+        call_id: str,
+        *,
+        provider_submitted: bool | None,
+        completed: bool,
+    ) -> None:
+        if (
+            learning_advice_exposure is None
+            or learning_advice_decision_binding is None
+            or prepared_learning_advice is None
+            or prepared_learning_advice.get("status") != "projected"
+        ):
+            return
+        if provider_submitted is True:
+            visible_call_ids = learning_advice_exposure.get("model_visible_call_ids")
+            if not isinstance(visible_call_ids, list):
+                visible_call_ids = []
+                learning_advice_exposure["model_visible_call_ids"] = visible_call_ids
+            if call_id not in visible_call_ids:
+                visible_call_ids.append(call_id)
+            learning_advice_exposure.update(
+                {
+                    "exposure_status": "exposed",
+                    "model_visible": True,
+                }
+            )
+            learning_advice_decision_binding.update(
+                {
+                    "exposure_status": "exposed",
+                    "model_visible_call_ids": list(visible_call_ids),
+                }
+            )
+        elif provider_submitted is None:
+            indeterminate_call_ids = learning_advice_exposure.get(
+                "visibility_indeterminate_call_ids"
+            )
+            if not isinstance(indeterminate_call_ids, list):
+                indeterminate_call_ids = []
+                learning_advice_exposure["visibility_indeterminate_call_ids"] = (
+                    indeterminate_call_ids
+                )
+            if call_id not in indeterminate_call_ids:
+                indeterminate_call_ids.append(call_id)
+            if learning_advice_exposure.get("exposure_status") == "not_exposed":
+                learning_advice_exposure["exposure_status"] = "indeterminate"
+            learning_advice_decision_binding["visibility_indeterminate_call_ids"] = (
+                list(indeterminate_call_ids)
+            )
+        if completed:
+            completed_call_ids = learning_advice_exposure.get(
+                "completed_model_visible_call_ids"
+            )
+            if not isinstance(completed_call_ids, list):
+                completed_call_ids = []
+                learning_advice_exposure["completed_model_visible_call_ids"] = (
+                    completed_call_ids
+                )
+            if call_id not in completed_call_ids:
+                completed_call_ids.append(call_id)
+            learning_advice_decision_binding["completed_model_visible_call_ids"] = list(
+                completed_call_ids
+            )
+
     usage_totals: dict[str, float] = {}
     model_call_sequence = 0
     successful_model_call_max_seconds: float | None = None
@@ -6906,6 +7132,7 @@ def execute_adaptive_turn(
                 "requested_model": call.get("requested_model"),
                 "selected_model": call.get("selected_model"),
                 "effective_model": call.get("effective_model"),
+                "provider_observed_model": call.get("provider_observed_model"),
                 "model_identity_source": call.get("model_identity_source"),
                 "provider_request_sent": call.get("provider_request_sent"),
                 "usage": call.get("usage"),
@@ -8593,6 +8820,22 @@ def execute_adaptive_turn(
                 }
             )
         evidence_index = _compact_evidence_index(evidence_store.index())
+        if learning_advice_exposure is not None:
+            selected_capabilities: list[str] = []
+            for invocation in reconciled_invocations:
+                if invocation.get("via") != _INVOKE_TOOL_NAME:
+                    continue
+                capability_name = str(invocation.get("tool") or "").strip()
+                if capability_name and capability_name not in selected_capabilities:
+                    selected_capabilities.append(capability_name)
+            learning_advice_exposure.update(
+                {
+                    "terminal_status": status,
+                    "model_call_count": len(llm_calls),
+                    "selected_capability_names": selected_capabilities,
+                    "selected_capability_count": len(selected_capabilities),
+                }
+            )
         aux_calls.append(
             {
                 "type": "adaptive_turn_evidence_index",
@@ -8955,11 +9198,31 @@ def execute_adaptive_turn(
             conversation_observations=conversation_observations,
             conversation_observation_state=conversation_observation_state,
             authorised_resource_choices=authorised_resource_choices,
+            learning_advice_projection=prepared_learning_advice,
+        )
+        learning_advice_rendered_for_call = bool(
+            not final_synthesis
+            and prepared_learning_advice is not None
+            and _render_learning_advice_projection(prepared_learning_advice)
         )
         pending_elapsed_time_advisories.clear()
+        provider_prompt = "" if continuation is not None else prompt
+        _observe_model_request(
+            model_request_observer,
+            model_call_id=model_call_id,
+            stage=stage,
+            prompt=provider_prompt,
+            tools=request_tools,
+            context=current_context,
+            model=model,
+            system_message=turn_system_message,
+            model_parameters=effective_params,
+            continuation=continuation,
+            tool_results=pending_results,
+        )
         try:
             response: LLMResponse = llm_client.generate_with_tools(
-                "" if continuation is not None else prompt,
+                provider_prompt,
                 request_tools,
                 context=current_context,
                 model=model,
@@ -8975,6 +9238,12 @@ def execute_adaptive_turn(
                 ),
             )
         except StructuredToolContextLimitError as exc:
+            if learning_advice_rendered_for_call:
+                note_learning_advice_visibility(
+                    model_call_id,
+                    provider_submitted=None,
+                    completed=False,
+                )
             if final_synthesis and not answer_only:
                 aux_calls.append(
                     {
@@ -9099,6 +9368,7 @@ def execute_adaptive_turn(
                     "requested_model": model,
                     "selected_model": model,
                     "effective_model": partial_response_model,
+                    "provider_observed_model": partial_response_model,
                     "model_identity_source": (
                         "provider_partial_response"
                         if partial_response_model
@@ -9131,6 +9401,12 @@ def execute_adaptive_turn(
                     **transport_failure_telemetry,
                 }
             )
+            if learning_advice_rendered_for_call:
+                note_learning_advice_visibility(
+                    model_call_id,
+                    provider_submitted=provider_request_sent,
+                    completed=False,
+                )
             emit_model_call_end(llm_calls[-1])
             if partial_response_text:
                 last_partial_text = partial_response_text
@@ -9421,6 +9697,7 @@ def execute_adaptive_turn(
                 "requested_model": model,
                 "selected_model": model,
                 "effective_model": provider_response_model,
+                "provider_observed_model": provider_response_model,
                 "model_identity_source": (
                     "provider_response" if provider_response_model else None
                 ),
@@ -9446,6 +9723,16 @@ def execute_adaptive_turn(
                 ),
             }
         )
+        if learning_advice_rendered_for_call:
+            # A completed request proves both provider submission and model
+            # completion. Provider failures are recorded separately above so
+            # they cannot be mistaken for completed exposures. Final synthesis
+            # never renders advice and therefore never adds either kind of ID.
+            note_learning_advice_visibility(
+                model_call_id,
+                provider_submitted=True,
+                completed=True,
+            )
         emit_model_call_end(llm_calls[-1])
         if response.text_response.strip():
             last_partial_text = response.text_response.strip()
@@ -9631,7 +9918,7 @@ def execute_adaptive_turn(
             if call.tool_name == _CAPABILITY_TOOL_NAME:
                 if gateway is not None:
                     workflow_query = str(call.payload.get("query") or "").strip()
-                    if workflow_query:
+                    if workflow_query and allow_represented_workflow_discovery:
                         from src.backend.services.workflow_turn_capability_service import (
                             discover_turn_workflow_capabilities,
                         )
@@ -9687,6 +9974,13 @@ def execute_adaptive_turn(
                                 workflow_capability.name.lower()
                             ] = workflow_capability
                         latest_workflow_discovery = dict(workflow_discovery)
+                    elif workflow_query:
+                        latest_workflow_discovery = {
+                            "schema_version": "workflow_turn_capability_discovery.v1",
+                            "status": "disabled_for_bounded_execution",
+                            "query": workflow_query,
+                            "match_count": 0,
+                        }
                     output = _capability_catalogue(
                         gateway,
                         delegated_names,
@@ -10840,7 +11134,10 @@ def execute_adaptive_turn(
                     envelope_payload["workflow_progress_evidence"] = dict(
                         workflow_progress_evidence
                     )
-                if isinstance(raw_payload, Mapping):
+                if (
+                    isinstance(raw_payload, Mapping)
+                    and allow_represented_tool_projection
+                ):
                     outcome_explanation_support = raw_payload.get(
                         "outcome_explanation_support"
                     )
@@ -10854,7 +11151,10 @@ def execute_adaptive_turn(
                         )
                 projection_started = time.perf_counter()
                 projection_duration_ms = 0.0
-                if isinstance(raw_payload, Mapping):
+                if (
+                    isinstance(raw_payload, Mapping)
+                    and allow_represented_tool_projection
+                ):
                     try:
                         from .tool_evidence_projection_service import (
                             project_tool_payload_for_llm,
@@ -11241,6 +11541,15 @@ def execute_adaptive_turn(
                         ),
                         "actual_cost": actual_cost,
                         "status": status,
+                        **(
+                            {
+                                "learning_advice_exposure": dict(
+                                    learning_advice_decision_binding
+                                )
+                            }
+                            if learning_advice_decision_binding is not None
+                            else {}
+                        ),
                         **(
                             {"effect_status": effect_status}
                             if effect_status is not None

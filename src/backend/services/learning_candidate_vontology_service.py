@@ -44,6 +44,13 @@ LEARNING_CANDIDATE_SYSTEM_TAG = "von_learning_candidate"
 LEARNING_CANDIDATE_ARTIFACT_TYPE_ID = "#V#artifact"
 LEARNING_CANDIDATE_AUTHOR_ID = "#V#von_system"
 LEARNING_CANDIDATE_LIFECYCLE_STATE = "non_active"
+LEARNING_CANDIDATE_EVALUATION_DISPOSITIONS = frozenset(
+    {"undecided", "retained", "rejected", "retracted"}
+)
+LEARNING_CANDIDATE_DISPOSITION_SCHEMA_VERSION = "learning_candidate_disposition.v1"
+LEARNING_CANDIDATE_EVIDENCE_VERDICTS = frozenset(
+    {"supports_use", "does_not_support_use", "inconclusive", "material_harm"}
+)
 
 CONVERSATION_TYPE_ID = "#V#conversation"
 EPISODE_CRITIQUE_MEMORY_TYPE_ID = "#V#episode_critique_memory"
@@ -56,7 +63,11 @@ _VISIBILITY_SCOPES = {"actor", "organisation"}
 _DESCRIPTION_PREDICATES = {"hasDescription", "#V#hasDescription"}
 _MAX_BODY_CHARS = 12_000
 _MAX_REFERENCE_COUNT = 100
+_MAX_SOURCE_MESSAGE_COUNT = 32
+_MAX_TRANSCRIPT_PAGE_SIZE = 100
 _MAX_LIST_LIMIT = 200
+_MAX_DISPOSITION_HISTORY = 100
+_SHA256_HEX_CHARS = frozenset("0123456789abcdef")
 
 
 class LearningCandidateError(RuntimeError):
@@ -169,6 +180,529 @@ def _body_digest(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def _required_sha256(value: Any, *, field: str) -> str:
+    digest = _required_text(value, field=field, max_chars=64).lower()
+    if len(digest) != 64 or any(char not in _SHA256_HEX_CHARS for char in digest):
+        raise InvalidLearningCandidateData(f"{field} must be a SHA-256 digest")
+    return digest
+
+
+def _validate_learning_advice_evaluation_evidence(
+    evaluation: Mapping[str, Any],
+    *,
+    planned_trial: Mapping[str, Any],
+    model: Mapping[str, Any],
+    runtime_snapshot: Mapping[str, Any],
+) -> None:
+    """Reject a typed verdict whose represented or model provenance is absent."""
+
+    verdict = evaluation.get("verdict")
+    if (
+        evaluation.get("schema_version") != "learning_advice_blind_evaluation_result.v1"
+        or evaluation.get("status") != "completed"
+        or verdict not in {"pass", "partial", "fail", "inconclusive"}
+        or evaluation.get("passed") is not (verdict == "pass")
+        or evaluation.get("capability_choice")
+        not in {"pass", "partial", "fail", "inconclusive"}
+        or evaluation.get("work_product")
+        not in {"pass", "partial", "fail", "inconclusive"}
+        or not isinstance(evaluation.get("material_failure"), bool)
+        or not isinstance(evaluation.get("external_availability_changed"), bool)
+    ):
+        raise InvalidLearningCandidateData(
+            "The canonical experiment evaluation has no completed typed outcome"
+        )
+    # Import lazily: the experiment service uses this candidate service for its
+    # canonical loader, while disposition validation runs only after both are
+    # fully initialised.
+    from .learning_advice_experiment_service import (
+        LearningAdviceExperimentError,
+        build_learning_advice_evaluator_runtime_identity,
+        derive_learning_advice_evaluator_verdict,
+    )
+
+    try:
+        expected_verdict = derive_learning_advice_evaluator_verdict(
+            capability_choice=evaluation["capability_choice"],
+            work_product=evaluation["work_product"],
+            material_failure=evaluation["material_failure"],
+        )
+    except LearningAdviceExperimentError as exc:
+        raise InvalidLearningCandidateData(
+            "The canonical experiment evaluator dimensions are invalid"
+        ) from exc
+    if verdict != expected_verdict:
+        raise InvalidLearningCandidateData(
+            "The canonical experiment verdict contradicts its evaluator dimensions"
+        )
+    _required_sha256(
+        evaluation.get("evaluator_output_sha256"),
+        field="experiment evaluator_output_sha256",
+    )
+    for field in (
+        "evaluator_concept_id",
+        "evaluator_sha256",
+        "rubric_concept_id",
+        "rubric_sha256",
+    ):
+        if evaluation.get(field) != planned_trial.get(field):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment evaluator authority contradicts its plan"
+            )
+    attestations = evaluation.get("authority_attestations")
+    expected_attestation_refs = (
+        (
+            "evaluator",
+            planned_trial.get("evaluator_concept_id"),
+            planned_trial.get("evaluator_sha256"),
+        ),
+        (
+            "rubric",
+            planned_trial.get("rubric_concept_id"),
+            planned_trial.get("rubric_sha256"),
+        ),
+    )
+    if (
+        not isinstance(attestations, Sequence)
+        or isinstance(attestations, (str, bytes, bytearray))
+        or len(attestations) != len(expected_attestation_refs)
+    ):
+        raise InvalidLearningCandidateData(
+            "The canonical experiment has no exact evaluator authority attestations"
+        )
+    for attestation, (kind, concept_id, sha256) in zip(
+        attestations, expected_attestation_refs, strict=True
+    ):
+        if (
+            not isinstance(attestation, Mapping)
+            or set(attestation)
+            != {"kind", "concept_id", "sha256", "utf8_byte_count", "status"}
+            or attestation.get("kind") != kind
+            or attestation.get("concept_id") != concept_id
+            or attestation.get("sha256") != sha256
+            or not isinstance(attestation.get("utf8_byte_count"), int)
+            or isinstance(attestation.get("utf8_byte_count"), bool)
+            or int(attestation["utf8_byte_count"]) <= 0
+            or attestation.get("status") != "canonical_bytes_attested"
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment evaluator authority attestation is invalid"
+            )
+
+    receipt = evaluation.get("model_call_receipt")
+    expected_receipt_fields = {
+        "schema_version",
+        "call_id",
+        "provider",
+        "requested_model",
+        "selected_model",
+        "effective_model",
+        "provider_observed_model",
+        "provider_request_sent",
+        "success",
+    }
+    expected_provider = model.get("provider")
+    expected_model_id = model.get("model_id")
+    if (
+        not isinstance(receipt, Mapping)
+        or set(receipt) != expected_receipt_fields
+        or receipt.get("schema_version")
+        != "learning_advice_evaluator_model_call_receipt.v1"
+        or not isinstance(receipt.get("call_id"), str)
+        or not str(receipt["call_id"]).strip()
+        or receipt.get("provider") != expected_provider
+        or any(
+            receipt.get(field) != expected_model_id
+            for field in (
+                "requested_model",
+                "selected_model",
+                "effective_model",
+                "provider_observed_model",
+            )
+        )
+        or receipt.get("provider_request_sent") is not True
+        or receipt.get("success") is not True
+    ):
+        raise InvalidLearningCandidateData(
+            "The canonical experiment evaluator model receipt is invalid"
+        )
+    parameters = model.get("parameters")
+    if not isinstance(parameters, Mapping):
+        raise InvalidLearningCandidateData(
+            "The canonical experiment evaluator model parameters are invalid"
+        )
+    runtime_sha256 = _stable_digest(runtime_snapshot)
+    runtime_identity = build_learning_advice_evaluator_runtime_identity(
+        model=model, runtime_snapshot=runtime_snapshot
+    )
+    expected_provenance = {
+        "schema_version": "learning_advice_evaluator_provenance.v1",
+        "model_call_id": receipt.get("call_id"),
+        "provider": expected_provider,
+        "requested_model": expected_model_id,
+        "selected_model": expected_model_id,
+        "effective_model": expected_model_id,
+        "provider_observed_model": expected_model_id,
+        "model_call_receipt_sha256": _stable_digest(receipt),
+        "model_parameters_sha256": _stable_digest(parameters),
+        "code_revision": runtime_snapshot.get("code_revision"),
+        "runtime_snapshot_sha256": runtime_sha256,
+        "runtime_code_identity_sha256": _stable_digest(runtime_identity),
+        "evaluator_concept_id": planned_trial.get("evaluator_concept_id"),
+        "evaluator_sha256": planned_trial.get("evaluator_sha256"),
+        "rubric_concept_id": planned_trial.get("rubric_concept_id"),
+        "rubric_sha256": planned_trial.get("rubric_sha256"),
+    }
+    if evaluation.get("evaluation_provenance") != expected_provenance:
+        raise InvalidLearningCandidateData(
+            "The canonical experiment evaluator provenance is invalid"
+        )
+
+
+def _evaluation_disposition(value: Any, *, field: str) -> str:
+    disposition = _required_text(value, field=field, max_chars=40).lower()
+    if disposition not in LEARNING_CANDIDATE_EVALUATION_DISPOSITIONS:
+        raise InvalidLearningCandidateData(f"{field} is unsupported")
+    return disposition
+
+
+def _normalise_disposition_history(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise InvalidLearningCandidateData(
+            "Stored learning candidate disposition history is invalid"
+        )
+    if len(value) > _MAX_DISPOSITION_HISTORY:
+        raise InvalidLearningCandidateData(
+            "Stored learning candidate disposition history is too long"
+        )
+    result: list[dict[str, Any]] = []
+    seen_requests: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise InvalidLearningCandidateData(
+                f"Stored learning candidate disposition {index} is invalid"
+            )
+        record = copy.deepcopy(dict(item))
+        if (
+            record.get("schema_version")
+            != LEARNING_CANDIDATE_DISPOSITION_SCHEMA_VERSION
+        ):
+            raise InvalidLearningCandidateData(
+                f"Stored learning candidate disposition {index} has an "
+                "unsupported schema"
+            )
+        request_id = _required_text(
+            record.get("disposition_request_id"),
+            field=f"stored disposition_history[{index}].disposition_request_id",
+            max_chars=300,
+        )
+        if request_id in seen_requests:
+            raise InvalidLearningCandidateData(
+                "Stored learning candidate disposition requests are not unique"
+            )
+        seen_requests.add(request_id)
+        normalised_disposition = _evaluation_disposition(
+            record.get("evaluation_disposition"),
+            field=f"stored disposition_history[{index}].evaluation_disposition",
+        )
+        if record.get("evaluation_disposition") != normalised_disposition:
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}].evaluation_disposition "
+                "is not canonical"
+            )
+        normalised_run_id = _concept_id(
+            record.get("experiment_run_id"),
+            field=f"stored disposition_history[{index}].experiment_run_id",
+        )
+        if record.get("experiment_run_id") != normalised_run_id:
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}].experiment_run_id is "
+                "not canonical"
+            )
+        normalised_evidence_sha256 = _required_sha256(
+            record.get("evidence_sha256"),
+            field=f"stored disposition_history[{index}].evidence_sha256",
+        )
+        if record.get("evidence_sha256") != normalised_evidence_sha256:
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}].evidence_sha256 is not canonical"
+            )
+        verdict = _required_text(
+            record.get("evidence_verdict"),
+            field=f"stored disposition_history[{index}].evidence_verdict",
+            max_chars=60,
+        ).lower()
+        if verdict not in LEARNING_CANDIDATE_EVIDENCE_VERDICTS:
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}].evidence_verdict is unsupported"
+            )
+        if record.get("evidence_verdict") != verdict:
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}].evidence_verdict is not canonical"
+            )
+        revision = record.get("candidate_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}].candidate_revision is invalid"
+            )
+        _required_sha256(
+            record.get("candidate_revision_identity_sha256"),
+            field=(
+                f"stored disposition_history[{index}]."
+                "candidate_revision_identity_sha256"
+            ),
+        )
+        identity_payload = {
+            "disposition_request_id": request_id,
+            "evaluation_disposition": record.get("evaluation_disposition"),
+            "evidence_verdict": verdict,
+            "experiment_run_id": record.get("experiment_run_id"),
+            "evidence_sha256": record.get("evidence_sha256"),
+            "candidate_revision": revision,
+            "candidate_revision_identity_sha256": record.get(
+                "candidate_revision_identity_sha256"
+            ),
+        }
+        if _required_sha256(
+            record.get("disposition_identity_sha256"),
+            field=f"stored disposition_history[{index}].disposition_identity_sha256",
+        ) != _stable_digest(identity_payload):
+            raise InvalidLearningCandidateData(
+                f"stored disposition_history[{index}] identity does not match"
+            )
+        result.append(record)
+    return result
+
+
+def _normalise_history_indices(source: Mapping[str, Any]) -> list[int]:
+    """Return a bounded, stable set of exact transcript positions to attest."""
+
+    values = source.get("history_indices")
+    if values is None:
+        return []
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        raise InvalidLearningCandidateData(
+            "source.history_indices must be a list of non-negative integers"
+        )
+    result: list[int] = []
+    seen: set[int] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise InvalidLearningCandidateData(
+                f"source.history_indices[{index}] must be a non-negative integer"
+            )
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+        if len(result) > _MAX_SOURCE_MESSAGE_COUNT:
+            raise InvalidLearningCandidateData(
+                "source.history_indices must contain at most "
+                f"{_MAX_SOURCE_MESSAGE_COUNT} distinct indices"
+            )
+    return result
+
+
+def _normalise_include_legacy(
+    source: Mapping[str, Any],
+) -> tuple[bool, bool]:
+    """Resolve the read boundary without changing identities of older retries."""
+
+    if "include_legacy" not in source:
+        return True, False
+    value = source.get("include_legacy")
+    if not isinstance(value, bool):
+        raise InvalidLearningCandidateData("source.include_legacy must be a boolean")
+    return value, True
+
+
+def _normalise_include_execution_evidence(source: Mapping[str, Any]) -> bool:
+    """Return whether exact assistant-turn evidence is part of this source.
+
+    Execution evidence is deliberately opt-in.  Most conversation citations need
+    only the selected transcript bytes, and must not acquire debug-record reads or
+    a stronger source identity merely because that evidence happens to exist.
+    """
+
+    value = source.get("include_execution_evidence", False)
+    if not isinstance(value, bool):
+        raise InvalidLearningCandidateData(
+            "source.include_execution_evidence must be a boolean"
+        )
+    return value
+
+
+def _conversation_turn_execution_evidence(
+    *,
+    actor_user_id: str,
+    session_id: str,
+    namespace: str | None,
+    include_legacy: bool,
+    history_index: int,
+) -> dict[str, str]:
+    """Attest one exact stored assistant Turn Execution Record without copying it."""
+
+    try:
+        debug_entry = chat_history_service.get_chat_history_debug_entry(
+            user_id=actor_user_id,
+            session_id=session_id,
+            history_index=history_index,
+            namespace=namespace,
+            include_legacy=include_legacy,
+            hydrate_blob_refs=False,
+        )
+    except Exception as exc:
+        raise LearningCandidateAccessError(
+            "learning_candidate_source_execution_evidence_read_unavailable",
+            "The cited assistant turn execution evidence could not be verified",
+        ) from exc
+    turn_execution_record = (
+        debug_entry.get("turn_execution_record")
+        if isinstance(debug_entry, Mapping)
+        else None
+    )
+    if not isinstance(turn_execution_record, Mapping):
+        raise InvalidLearningCandidateData(
+            f"source.history_indices[{history_index}] assistant message has no "
+            "exact turn execution record"
+        )
+    request_id = _required_text(
+        turn_execution_record.get("request_id"),
+        field=(
+            f"source.history_indices[{history_index}] turn execution record request_id"
+        ),
+        max_chars=300,
+    )
+    debug_request_id = (
+        str(debug_entry.get("request_id") or "").strip()
+        if isinstance(debug_entry, Mapping)
+        else ""
+    )
+    if debug_request_id and debug_request_id != request_id:
+        raise InvalidLearningCandidateData(
+            f"source.history_indices[{history_index}] turn execution record "
+            "request_id does not match its debug entry"
+        )
+    return {
+        "request_id": request_id,
+        "turn_execution_record_sha256": _stable_digest(dict(turn_execution_record)),
+    }
+
+
+def _conversation_message_evidence(
+    *,
+    actor_user_id: str | None,
+    session_id: str,
+    namespace: str | None,
+    include_legacy: bool,
+    include_execution_evidence: bool,
+    history_indices: Sequence[int],
+) -> list[dict[str, Any]]:
+    """Verify cited messages and freeze locators plus non-content attestations."""
+
+    if not history_indices:
+        return []
+    if actor_user_id is None:
+        raise LearningCandidateAccessError(
+            "learning_candidate_conversation_owner_required",
+            "Exact conversation-message sources require their trusted owner actor",
+        )
+
+    # Page by bounded windows instead of loading an unbounded transcript or
+    # issuing one datastore query for every cited message.  A sparse citation
+    # set may require more than one page, but never more than the bounded input.
+    requested = sorted(set(history_indices))
+    messages_by_index: dict[int, Mapping[str, Any]] = {}
+    remaining = list(requested)
+    try:
+        while remaining:
+            offset = remaining[0]
+            window_end = min(offset + _MAX_TRANSCRIPT_PAGE_SIZE - 1, remaining[-1])
+            page = chat_history_service.get_chat_history_transcript_page(
+                user_id=actor_user_id,
+                session_id=session_id,
+                namespace=namespace,
+                include_legacy=include_legacy,
+                offset=offset,
+                page_size=window_end - offset + 1,
+            )
+            if not isinstance(page, Mapping) or page.get("found") is not True:
+                raise _source_not_visible()
+            raw_messages = page.get("messages")
+            if isinstance(raw_messages, Sequence) and not isinstance(
+                raw_messages, (str, bytes, bytearray)
+            ):
+                for message in raw_messages:
+                    if not isinstance(message, Mapping):
+                        continue
+                    source_locator = message.get("source_locator")
+                    if not isinstance(source_locator, Mapping):
+                        continue
+                    history_index = source_locator.get("history_index")
+                    if (
+                        isinstance(history_index, int)
+                        and not isinstance(history_index, bool)
+                        and history_index in requested
+                    ):
+                        messages_by_index[history_index] = message
+            remaining = [value for value in remaining if value > window_end]
+    except LearningCandidateError:
+        raise
+    except Exception as exc:
+        raise LearningCandidateAccessError(
+            "learning_candidate_source_read_unavailable",
+            "The cited conversation messages could not be verified",
+        ) from exc
+
+    evidence: list[dict[str, Any]] = []
+    for history_index in history_indices:
+        message = messages_by_index.get(history_index)
+        if not isinstance(message, Mapping):
+            raise InvalidLearningCandidateData(
+                f"source.history_indices[{history_index}] is not a readable message"
+            )
+        role = message.get("role")
+        content = message.get("content")
+        if not isinstance(role, str) or not role.strip():
+            raise InvalidLearningCandidateData(
+                f"source.history_indices[{history_index}] has no stable role"
+            )
+        if not isinstance(content, str):
+            raise InvalidLearningCandidateData(
+                f"source.history_indices[{history_index}] has no stable text content"
+            )
+        raw_locator = message.get("source_locator")
+        raw_locator = dict(raw_locator) if isinstance(raw_locator, Mapping) else {}
+        locator: dict[str, Any] = {
+            "session_id": session_id,
+            "history_index": history_index,
+        }
+        for field in ("turn_id", "message_id"):
+            value = raw_locator.get(field) or message.get(field)
+            if isinstance(value, str) and value.strip():
+                locator[field] = value.strip()
+        evidence_item: dict[str, Any] = {
+            "source_locator": locator,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "role_sha256": hashlib.sha256(role.strip().encode("utf-8")).hexdigest(),
+            "turn_identity_sha256": _stable_digest(locator),
+        }
+        if include_execution_evidence and role.strip().casefold() == "assistant":
+            evidence_item["turn_execution_evidence"] = (
+                _conversation_turn_execution_evidence(
+                    actor_user_id=actor_user_id,
+                    session_id=session_id,
+                    namespace=namespace,
+                    include_legacy=include_legacy,
+                    history_index=history_index,
+                )
+            )
+        evidence.append(evidence_item)
+    return evidence
+
+
 def _revision_identity_sha256(
     *,
     revision_request_id: str,
@@ -273,6 +807,13 @@ def _normalise_visible_source(
         )
 
     if kind == _SOURCE_CONVERSATION:
+        history_indices = _normalise_history_indices(source)
+        include_legacy, include_legacy_was_explicit = _normalise_include_legacy(source)
+        include_execution_evidence = _normalise_include_execution_evidence(source)
+        if include_execution_evidence and not history_indices:
+            raise InvalidLearningCandidateData(
+                "source.include_execution_evidence requires source.history_indices"
+            )
         supplied_source_id = source.get("conversation_concept_id") or source.get(
             "concept_id"
         )
@@ -306,14 +847,30 @@ def _normalise_visible_source(
                 raise InvalidLearningCandidateData(
                     "source.session_id does not match the canonical conversation"
                 )
+            locator: dict[str, Any] = {
+                "conversation_concept_id": source_id,
+                "session_id": stored_session_id,
+            }
+            if include_legacy_was_explicit:
+                locator["include_legacy"] = include_legacy
+            if include_execution_evidence:
+                locator["include_execution_evidence"] = True
+            normalised_source: dict[str, Any] = {
+                "kind": kind,
+                "locator": locator,
+            }
+            message_evidence = _conversation_message_evidence(
+                actor_user_id=actor_user_id,
+                session_id=stored_session_id,
+                namespace=namespace,
+                include_legacy=include_legacy,
+                include_execution_evidence=include_execution_evidence,
+                history_indices=history_indices,
+            )
+            if message_evidence:
+                normalised_source["message_evidence"] = message_evidence
             return (
-                {
-                    "kind": kind,
-                    "locator": {
-                        "conversation_concept_id": source_id,
-                        "session_id": stored_session_id,
-                    },
-                },
+                normalised_source,
                 dict(source_doc),
             )
 
@@ -347,7 +904,7 @@ def _normalise_visible_source(
                 actor_user_id,
                 supplied_session_id,
                 namespace=source_namespace,
-                include_legacy=True,
+                include_legacy=include_legacy,
             )
         except Exception as exc:
             raise LearningCandidateAccessError(
@@ -361,6 +918,10 @@ def _normalise_visible_source(
             "session_id": supplied_session_id,
             "owner_user_id": actor_user_id,
         }
+        if include_legacy_was_explicit:
+            locator["include_legacy"] = include_legacy
+        if include_execution_evidence:
+            locator["include_execution_evidence"] = True
         if source_namespace:
             locator["namespace"] = source_namespace
         # Keep this locator stable if a conversation concept is materialised
@@ -370,7 +931,23 @@ def _normalise_visible_source(
             "concept_id": None,
             "relationships": set_specific_to_user_values({}, [actor_user_id]),
         }
-        return {"kind": kind, "locator": locator}, synthetic_source_doc
+        normalised_source = {"kind": kind, "locator": locator}
+        message_evidence = _conversation_message_evidence(
+            actor_user_id=actor_user_id,
+            session_id=supplied_session_id,
+            namespace=source_namespace,
+            include_legacy=include_legacy,
+            include_execution_evidence=include_execution_evidence,
+            history_indices=history_indices,
+        )
+        if message_evidence:
+            normalised_source["message_evidence"] = message_evidence
+        return normalised_source, synthetic_source_doc
+
+    if "include_execution_evidence" in source:
+        raise InvalidLearningCandidateData(
+            "source.include_execution_evidence is supported only for conversation sources"
+        )
 
     source_id = _concept_id(
         source.get("memory_id") or source.get("concept_id"),
@@ -427,6 +1004,52 @@ def _source_concept_id(source: Mapping[str, Any]) -> str | None:
     if value is None and source.get("kind") == _SOURCE_CONVERSATION:
         return None
     return _concept_id(value, field="stored source locator")
+
+
+def _stored_source_validation_input(source: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct capture input needed to re-attest a stored source."""
+
+    locator = source.get("locator")
+    if not isinstance(locator, Mapping):
+        raise InvalidLearningCandidateData("Stored candidate source is invalid")
+    result = {"kind": source.get("kind"), **dict(locator)}
+    message_evidence = source.get("message_evidence")
+    if message_evidence is None:
+        return result
+    if not isinstance(message_evidence, Sequence) or isinstance(
+        message_evidence, (str, bytes, bytearray)
+    ):
+        raise InvalidLearningCandidateData(
+            "Stored learning candidate message evidence is invalid"
+        )
+    history_indices: list[int] = []
+    for index, evidence in enumerate(message_evidence):
+        if not isinstance(evidence, Mapping):
+            raise InvalidLearningCandidateData(
+                f"Stored learning candidate message evidence {index} is invalid"
+            )
+        evidence_locator = evidence.get("source_locator")
+        if not isinstance(evidence_locator, Mapping):
+            raise InvalidLearningCandidateData(
+                f"Stored learning candidate message evidence {index} has no locator"
+            )
+        history_index = evidence_locator.get("history_index")
+        if (
+            not isinstance(history_index, int)
+            or isinstance(history_index, bool)
+            or history_index < 0
+        ):
+            raise InvalidLearningCandidateData(
+                f"Stored learning candidate message evidence {index} has an "
+                "invalid index"
+            )
+        history_indices.append(history_index)
+    if not history_indices:
+        raise InvalidLearningCandidateData(
+            "Stored learning candidate message evidence is empty"
+        )
+    result["history_indices"] = history_indices
+    return result
 
 
 def _visible_reference_ids(
@@ -545,6 +1168,30 @@ def _candidate_state(doc: Mapping[str, Any]) -> dict[str, Any]:
         raise InvalidLearningCandidateData(
             "Stored learning candidate authorship is invalid"
         )
+    current_disposition = _evaluation_disposition(
+        state.get("evaluation_disposition") or "undecided",
+        field="stored evaluation_disposition",
+    )
+    disposition_history = _normalise_disposition_history(
+        state.get("disposition_history")
+    )
+    latest_disposition = disposition_history[-1] if disposition_history else None
+    latest_is_current = bool(
+        isinstance(latest_disposition, Mapping)
+        and latest_disposition.get("candidate_revision") == state.get("revision")
+    )
+    if latest_is_current and (
+        latest_disposition.get("evaluation_disposition") != current_disposition
+    ):
+        raise InvalidLearningCandidateData(
+            "Stored learning candidate disposition does not match its history"
+        )
+    if current_disposition != "undecided" and not latest_is_current:
+        raise InvalidLearningCandidateData(
+            "Stored learning candidate disposition has no current evidence record"
+        )
+    state["evaluation_disposition"] = current_disposition
+    state["disposition_history"] = disposition_history
     source = state.get("source")
     if not isinstance(source, Mapping) or state.get(
         "source_locator_sha256"
@@ -671,15 +1318,17 @@ def _project_candidate(
             "Stored learning candidate source is invalid"
         )
     if validate_source:
-        _normalise_visible_source(
-            {
-                "kind": source.get("kind"),
-                **dict(source.get("locator") or {}),
-            },
+        revalidated_source, _source_doc = _normalise_visible_source(
+            _stored_source_validation_input(source),
             actor_user_id=actor_user_id,
             organisation_concept_id=organisation_concept_id,
             namespace=namespace,
         )
+        if _stable_digest(revalidated_source) != _stable_digest(source):
+            raise InvalidLearningCandidateData(
+                "Stored learning candidate message evidence no longer matches "
+                "the visible source transcript"
+            )
     body = _canonical_body_from_rows(description_rows)
     if _body_digest(body) != state.get("body_sha256"):
         raise InvalidLearningCandidateData(
@@ -689,8 +1338,14 @@ def _project_candidate(
         "candidate_id": doc.get("concept_id"),
         "schema_version": state.get("schema_version"),
         "lifecycle_state": state.get("lifecycle_state"),
+        "evaluation_disposition": state.get("evaluation_disposition"),
+        "disposition_history": copy.deepcopy(
+            list(state.get("disposition_history") or [])
+        ),
         "body": body,
         "body_sha256": state.get("body_sha256"),
+        "revision_identity_sha256": state.get("revision_identity_sha256"),
+        "source_locator_sha256": state.get("source_locator_sha256"),
         "source": copy.deepcopy(dict(source)),
         "authorship": {
             "author_concept_id": state.get("author_concept_id"),
@@ -749,6 +1404,7 @@ def _persist_body(
             "revision": revision,
         },
         garbage_collect=True,
+        identity_mode="exact",
     )
 
 
@@ -811,10 +1467,10 @@ def capture_learning_candidate(
 
     candidate_body = _required_text(body, field="body", max_chars=_MAX_BODY_CHARS)
     request = _optional_text(request_id, field="request_id", max_chars=300)
-    stable_key = (
-        _optional_text(idempotency_key, field="idempotency_key", max_chars=300)
-        or request
+    explicit_stable_key = _optional_text(
+        idempotency_key, field="idempotency_key", max_chars=300
     )
+    stable_key = explicit_stable_key or request
     if stable_key is None:
         raise InvalidLearningCandidateData("idempotency_key or request_id is required")
     actor, org, canonical_namespace = _resolve_actor_scope(
@@ -874,7 +1530,11 @@ def capture_learning_candidate(
             references=references,
             visibility=visibility,
             namespace=canonical_namespace,
-            request_id=request,
+            # A server-bound turn ID records the concrete capture attempt, but
+            # an explicit idempotency key deliberately spans attempts. Do not
+            # make cross-turn retries conflict solely because their attempt
+            # provenance differs.
+            request_id=None if explicit_stable_key is not None else request,
             idempotency_key=stable_key,
         )
         identity_sha256 = _stable_digest(identity_payload)
@@ -904,6 +1564,8 @@ def capture_learning_candidate(
                 body=candidate_body,
                 references=references,
             ),
+            "evaluation_disposition": "undecided",
+            "disposition_history": [],
             "prior_revisions": [],
             "created_at": _iso(now),
             "updated_at": _iso(now),
@@ -953,7 +1615,8 @@ def capture_learning_candidate(
                 existing_state = _candidate_state(existing)
                 if existing_state.get("capture_identity_sha256") != identity_sha256:
                     raise LearningCandidateConflictError(
-                        "The idempotency identity is already bound to different candidate data"
+                        "The idempotency identity is already bound to different "
+                        "candidate data"
                     )
                 state = existing_state
                 doc = dict(existing)
@@ -1164,15 +1827,17 @@ def revise_learning_candidate(
             raise InvalidLearningCandidateData(
                 "Stored learning candidate source is invalid"
             )
-        _normalise_visible_source(
-            {
-                "kind": source.get("kind"),
-                **dict(source.get("locator") or {}),
-            },
+        revalidated_source, _source_doc = _normalise_visible_source(
+            _stored_source_validation_input(source),
             actor_user_id=actor,
             organisation_concept_id=org,
             namespace=canonical_namespace,
         )
+        if _stable_digest(revalidated_source) != _stable_digest(source):
+            raise InvalidLearningCandidateData(
+                "Stored learning candidate message evidence no longer matches "
+                "the visible source transcript"
+            )
         normalised_supplied_references: dict[str, list[str] | None] = {}
         for field, supplied in supplied_reference_values.items():
             if supplied is None:
@@ -1310,6 +1975,7 @@ def revise_learning_candidate(
                 "revision_identity_sha256": state.get("revision_identity_sha256"),
                 "body": current_body,
                 "body_sha256": state.get("body_sha256"),
+                "evaluation_disposition": state.get("evaluation_disposition"),
                 "contributor_concept_ids": list(
                     state.get("contributor_concept_ids") or []
                 ),
@@ -1337,6 +2003,10 @@ def revise_learning_candidate(
             "revision": current_revision + 1,
             "revision_request_id": revision_request,
             "revision_identity_sha256": revision_identity_sha256,
+            # A changed semantic revision is a new hypothesis. Historical
+            # dispositions remain inspectable, but cannot automatically carry
+            # evidence forward to the new bytes.
+            "evaluation_disposition": "undecided",
             "last_revised_by_actor_concept_id": actor,
             "last_revised_by_organisation_concept_id": org,
             "prior_revisions": prior_revisions,
@@ -1349,6 +2019,12 @@ def revise_learning_candidate(
                     "concept_data.learning_candidate.revision": current_revision,
                     "concept_data.learning_candidate.lifecycle_state": (
                         LEARNING_CANDIDATE_LIFECYCLE_STATE
+                    ),
+                    "concept_data.learning_candidate.updated_at": state.get(
+                        "updated_at"
+                    ),
+                    "concept_data.learning_candidate.evaluation_disposition": (
+                        state.get("evaluation_disposition")
                     ),
                 },
                 {
@@ -1396,9 +2072,718 @@ def revise_learning_candidate(
         return result
 
 
+def record_learning_candidate_disposition(
+    candidate_id: str,
+    *,
+    experiment_run_id: str,
+    disposition_request_id: str,
+    actor_user_id: str | None = None,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    """Derive and attach one evidence-linked use disposition to this revision.
+
+    A disposition changes whether the same bytes remain eligible for an
+    experimental projection; it never activates them. The experiment run owns
+    detailed observations. This service reads its canonical final result and
+    derives the disposition; callers cannot independently assert a verdict or
+    supply an unrelated digest.
+    """
+
+    resolved_id = _concept_id(candidate_id, field="candidate_id")
+    run_id = _concept_id(experiment_run_id, field="experiment_run_id")
+    request_id = _required_text(
+        disposition_request_id,
+        field="disposition_request_id",
+        max_chars=300,
+    )
+    actor, org, canonical_namespace = _resolve_actor_scope(
+        actor_user_id=actor_user_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+
+    with override_current_actor(actor, org):
+        doc = ConceptsRepository.find_one({"concept_id": resolved_id})
+        if not isinstance(doc, Mapping):
+            raise LearningCandidateNotFoundError("Learning candidate not found")
+        state = _candidate_state(doc)
+        source = state.get("source")
+        if not isinstance(source, Mapping):
+            raise InvalidLearningCandidateData(
+                "Stored learning candidate source is invalid"
+            )
+        revalidated_source, _source_doc = _normalise_visible_source(
+            _stored_source_validation_input(source),
+            actor_user_id=actor,
+            organisation_concept_id=org,
+            namespace=canonical_namespace,
+        )
+        if _stable_digest(revalidated_source) != _stable_digest(source):
+            raise InvalidLearningCandidateData(
+                "Stored learning candidate message evidence no longer matches "
+                "the visible source transcript"
+            )
+        revision = state.get("revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise InvalidLearningCandidateData(
+                "Stored learning candidate revision is invalid"
+            )
+        revision_identity = _required_sha256(
+            state.get("revision_identity_sha256"),
+            field="stored revision_identity_sha256",
+        )
+
+        # Import lazily to keep the candidate persistence primitive independent
+        # of the broader experiment machinery at module import time.
+        from .experiment_run_service import get_experiment_run_state
+        from .learning_advice_experiment_service import (
+            LearningAdviceExperimentError,
+            compute_learning_advice_paired_results,
+            evaluate_learning_advice_content_decision,
+            validate_learning_advice_experiment_run_binding,
+        )
+        from .turn_execution_record_service import (
+            get_turn_execution_record_projection,
+            turn_execution_record_evidence_sha256,
+        )
+
+        experiment_state = get_experiment_run_state(run_id)
+        if not isinstance(experiment_state, Mapping):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run is not visible"
+            )
+        expected_scope = {
+            "run_id": run_id,
+            "namespace": canonical_namespace,
+            "user_id": actor,
+            "org_id": org,
+        }
+        for field, expected in expected_scope.items():
+            if experiment_state.get(field) != expected:
+                raise InvalidLearningCandidateData(
+                    "The canonical experiment run scope does not match the candidate"
+                )
+        terminal_status = experiment_state.get("status")
+        generic_verdict = experiment_state.get("verdict")
+        completed_at = _iso(experiment_state.get("completed_at_utc"))
+        if (
+            terminal_status not in {"completed", "failed"}
+            or completed_at is None
+            or (terminal_status == "failed" and generic_verdict != "fail")
+            or (
+                terminal_status == "completed"
+                and generic_verdict not in {"pass", "partial", "inconclusive"}
+            )
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run is not in a valid terminal state"
+            )
+        observations = experiment_state.get("observations")
+        if not isinstance(observations, Sequence) or isinstance(
+            observations, (str, bytes, bytearray)
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run has no inspectable observations"
+            )
+        result_observations = [
+            item
+            for item in observations
+            if isinstance(item, Mapping)
+            and item.get("observation_type") == "learning_advice_experiment_result"
+        ]
+        if len(result_observations) != 1:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run must contain exactly one final result"
+            )
+        result_observation = result_observations[0]
+        evidence = result_observation.get("evidence")
+        result = (
+            evidence.get("learning_advice_result")
+            if isinstance(evidence, Mapping)
+            else None
+        )
+        if not isinstance(result, Mapping) or result.get("schema_version") != (
+            "learning_advice_experiment_result.v1"
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result is invalid"
+            )
+        expected_result_fields = {
+            "schema_version",
+            "experiment_spec_id",
+            "experiment_run_id",
+            "manifest_sha256",
+            "plan_sha256",
+            "candidate_ref",
+            "runtime_snapshot",
+            "acting_support_identity",
+            "planned_trial_count",
+            "executed_trial_count",
+            "persisted_ter_count",
+            "persisted_trial_observation_count",
+            "valid_trial_count",
+            "completed_evaluation_count",
+            "paired_results",
+            "content_decision",
+            "secondary_metrics",
+            "trial_observation_ids",
+            "result_evidence_sha256",
+        }
+        if set(result) != expected_result_fields:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result fields are invalid"
+            )
+        _required_sha256(
+            result.get("manifest_sha256"),
+            field="experiment manifest_sha256",
+        )
+        _required_sha256(result.get("plan_sha256"), field="experiment plan_sha256")
+        paired_results = result.get("paired_results")
+        if not all(
+            isinstance(result.get(field), Mapping)
+            for field in (
+                "runtime_snapshot",
+                "acting_support_identity",
+                "content_decision",
+                "secondary_metrics",
+            )
+        ) or not isinstance(paired_results, Mapping):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result structure is invalid"
+            )
+        if set(paired_results) != {
+            "pair_count",
+            "valid_pair_count",
+            "comparison",
+            "outcome_counts",
+            "applicable",
+            "controls",
+            "b_only_material_failure_count",
+            "pairs",
+        }:
+            raise InvalidLearningCandidateData(
+                "The canonical paired experiment result fields are invalid"
+            )
+        pairs = paired_results.get("pairs")
+        if (
+            not isinstance(pairs, Sequence)
+            or isinstance(pairs, (str, bytes, bytearray))
+            or not isinstance(paired_results.get("comparison"), str)
+            or not all(
+                isinstance(paired_results.get(field), Mapping)
+                for field in ("outcome_counts", "applicable", "controls")
+            )
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical paired experiment result structure is invalid"
+            )
+        result_payload = copy.deepcopy(dict(result))
+        evidence_digest = _required_sha256(
+            result_payload.pop("result_evidence_sha256", None),
+            field="experiment result_evidence_sha256",
+        )
+        if _stable_digest(result_payload) != evidence_digest:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result digest does not match"
+            )
+        if result.get("experiment_run_id") != run_id or result.get(
+            "experiment_spec_id"
+        ) != experiment_state.get("experiment_spec_id"):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result is bound to a different run"
+            )
+        frozen_ref = result.get("candidate_ref")
+        expected_ref = {
+            "candidate_id": resolved_id,
+            "revision": revision,
+            "body_sha256": state.get("body_sha256"),
+            "revision_identity_sha256": revision_identity,
+            "source_locator_sha256": state.get("source_locator_sha256"),
+        }
+        if (
+            not isinstance(frozen_ref, Mapping)
+            or {field: frozen_ref.get(field) for field in expected_ref} != expected_ref
+            or set(frozen_ref)
+            != {
+                *expected_ref,
+                "evaluation_disposition",
+            }
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result targets a different candidate revision"
+            )
+        frozen_disposition = frozen_ref.get("evaluation_disposition")
+        if frozen_disposition not in {"undecided", "retained"}:
+            raise InvalidLearningCandidateData(
+                "The experiment used an ineligible candidate disposition"
+            )
+        metadata = experiment_state.get("metadata")
+        raw_binding = (
+            metadata.get("learning_advice_experiment")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        try:
+            run_binding = validate_learning_advice_experiment_run_binding(raw_binding)
+        except LearningAdviceExperimentError as exc:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run is not bound to inspectable frozen evidence"
+            ) from exc
+        manifest_preimage = run_binding["body_free_manifest_preimage"]
+        plan_preimage = run_binding["body_free_plan_preimage"]
+        expected_binding_values = {
+            "experiment_spec_id": result.get("experiment_spec_id"),
+            "experiment_run_id": run_id,
+            "manifest_sha256": result.get("manifest_sha256"),
+            "plan_sha256": result.get("plan_sha256"),
+            "candidate_ref": frozen_ref,
+            "trusted_scope_sha256": _stable_digest(
+                {
+                    "actor_user_id": actor,
+                    "organisation_concept_id": org,
+                    "namespace": canonical_namespace,
+                }
+            ),
+            "runtime_snapshot_sha256": _stable_digest(result.get("runtime_snapshot")),
+        }
+        if any(
+            run_binding.get(field) != expected
+            for field, expected in expected_binding_values.items()
+        ) or manifest_preimage.get("runtime_snapshot") != result.get(
+            "runtime_snapshot"
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run binding contradicts its result"
+            )
+        canonical_plan_trials = plan_preimage.get("trials")
+        if not isinstance(canonical_plan_trials, Sequence) or isinstance(
+            canonical_plan_trials, (str, bytes, bytearray)
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run has no inspectable frozen plan"
+            )
+        planned_count = result.get("planned_trial_count")
+        count_fields = (
+            "executed_trial_count",
+            "persisted_ter_count",
+            "persisted_trial_observation_count",
+            "completed_evaluation_count",
+        )
+        if (
+            not isinstance(planned_count, int)
+            or isinstance(planned_count, bool)
+            or planned_count <= 0
+            or any(result.get(field) != planned_count for field in count_fields)
+            or len(canonical_plan_trials) != planned_count
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result does not evidence a complete run"
+            )
+        valid_trial_count = result.get("valid_trial_count")
+        if (
+            not isinstance(valid_trial_count, int)
+            or isinstance(valid_trial_count, bool)
+            or valid_trial_count != planned_count
+            or paired_results.get("pair_count") != len(pairs)
+            or len(pairs) * 2 != planned_count
+            or not isinstance(paired_results.get("valid_pair_count"), int)
+            or isinstance(paired_results.get("valid_pair_count"), bool)
+            or paired_results.get("valid_pair_count")
+            != paired_results.get("pair_count")
+            or not isinstance(paired_results.get("b_only_material_failure_count"), int)
+            or isinstance(paired_results.get("b_only_material_failure_count"), bool)
+            or paired_results.get("b_only_material_failure_count") < 0
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result trial totals are invalid"
+            )
+        trial_observation_ids = result.get("trial_observation_ids")
+        if (
+            not isinstance(trial_observation_ids, Sequence)
+            or isinstance(trial_observation_ids, (str, bytes, bytearray))
+            or len(trial_observation_ids) != planned_count
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in trial_observation_ids
+            )
+            or len(set(trial_observation_ids)) != planned_count
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment trial observation index is invalid"
+            )
+        persisted_observation_ids = {
+            item.get("observation_id")
+            for item in observations
+            if isinstance(item, Mapping)
+            and item.get("observation_type") == "learning_advice_trial"
+            and isinstance(item.get("evidence"), Mapping)
+            and isinstance(item["evidence"].get("learning_advice_trial"), Mapping)
+        }
+        if set(trial_observation_ids) != persisted_observation_ids:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment result does not read back all trial evidence"
+            )
+        ordered_trial_observations = [
+            item
+            for item in observations
+            if isinstance(item, Mapping)
+            and item.get("observation_type") == "learning_advice_trial"
+        ]
+        if (
+            len(observations) != planned_count + 1
+            or len(ordered_trial_observations) != planned_count
+            or [item.get("observation_id") for item in ordered_trial_observations]
+            != list(trial_observation_ids)
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment run contains foreign or reordered evidence"
+            )
+        expected_request_ids: list[str] = []
+        canonical_trial_rows: list[Mapping[str, Any]] = []
+        for trial_index, item in enumerate(ordered_trial_observations):
+            item_evidence = item.get("evidence")
+            trial = (
+                item_evidence.get("learning_advice_trial")
+                if isinstance(item_evidence, Mapping)
+                else None
+            )
+            planned_trial = canonical_plan_trials[trial_index]
+            evaluation = trial.get("evaluation") if isinstance(trial, Mapping) else None
+            execution = trial.get("execution") if isinstance(trial, Mapping) else None
+            execution_identity = (
+                trial.get("execution_identity") if isinstance(trial, Mapping) else None
+            )
+            request_id_value = (
+                execution_identity.get("request_id")
+                if isinstance(execution_identity, Mapping)
+                else None
+            )
+            request_ids = (
+                trial.get("turn_execution_request_ids")
+                if isinstance(trial, Mapping)
+                else None
+            )
+            envelope_request_ids = item.get("turn_execution_request_ids")
+            if (
+                not isinstance(trial, Mapping)
+                or trial.get("schema_version")
+                != "learning_advice_experiment_observation.v1"
+                or trial.get("observation_kind") != "paired_trial"
+                or trial.get("experiment_spec_id") != result.get("experiment_spec_id")
+                or trial.get("experiment_run_id") != run_id
+                or trial.get("manifest_sha256") != result.get("manifest_sha256")
+                or trial.get("plan_sha256") != result.get("plan_sha256")
+                or trial.get("candidate_ref") != frozen_ref
+                or trial.get("runtime_snapshot") != result.get("runtime_snapshot")
+                or trial.get("model") != manifest_preimage.get("model")
+                or trial.get("trial_integrity_valid") is not True
+                or not isinstance(evaluation, Mapping)
+                or evaluation.get("status") != "completed"
+                or not isinstance(execution, Mapping)
+                or execution.get("acting_support_identity")
+                != result.get("acting_support_identity")
+                or not isinstance(request_id_value, str)
+                or not request_id_value.strip()
+                or request_ids != [request_id_value]
+                or envelope_request_ids != [request_id_value]
+            ):
+                raise InvalidLearningCandidateData(
+                    "The canonical experiment trial evidence is not bound to the result"
+                )
+            planned_identity_fields = (
+                "trial_id",
+                "pair_id",
+                "case_id",
+                "case_kind",
+                "repeat",
+                "arm",
+            )
+            if (
+                not isinstance(planned_trial, Mapping)
+                or any(
+                    trial.get(field) != planned_trial.get(field)
+                    for field in planned_identity_fields
+                )
+                or any(
+                    evaluation.get(field) != planned_trial.get(field)
+                    for field in (
+                        "evaluator_concept_id",
+                        "evaluator_sha256",
+                        "rubric_concept_id",
+                        "rubric_sha256",
+                    )
+                )
+            ):
+                raise InvalidLearningCandidateData(
+                    "The canonical experiment trial evidence contradicts its frozen plan"
+                )
+            _validate_learning_advice_evaluation_evidence(
+                evaluation,
+                planned_trial=planned_trial,
+                model=manifest_preimage["model"],
+                runtime_snapshot=result["runtime_snapshot"],
+            )
+            ter_sha256 = _required_sha256(
+                execution.get("turn_execution_record_sha256"),
+                field="trial execution turn_execution_record_sha256",
+            )
+            try:
+                turn_execution_record = get_turn_execution_record_projection(
+                    request_id=request_id_value,
+                    namespace=canonical_namespace,
+                )
+            except Exception as exc:
+                raise InvalidLearningCandidateData(
+                    "The canonical trial turn execution record is not readable"
+                ) from exc
+            execution_session_id = execution_identity.get("session_id")
+            execution_turn_id = execution_identity.get("turn_id")
+            expected_ter_scope = {
+                "request_id": request_id_value,
+                "session_id": execution_session_id,
+                "namespace": canonical_namespace,
+                "user_id": actor,
+                "org_id": org,
+            }
+            prompt_projection = (
+                turn_execution_record.get("prompt")
+                if isinstance(turn_execution_record, Mapping)
+                else None
+            )
+            final_response_projection = (
+                turn_execution_record.get("final_response")
+                if isinstance(turn_execution_record, Mapping)
+                else None
+            )
+            aux_calls = (
+                turn_execution_record.get("aux_llm_calls")
+                if isinstance(turn_execution_record, Mapping)
+                else None
+            )
+            trial_bindings = [
+                aux
+                for aux in aux_calls or []
+                if isinstance(aux, Mapping)
+                and aux.get("type") == "learning_advice_experiment_trial_binding"
+            ]
+            trial_binding = trial_bindings[0] if len(trial_bindings) == 1 else None
+            if (
+                not isinstance(turn_execution_record, Mapping)
+                or turn_execution_record.get("schema_version")
+                != "turn_execution_record.v1"
+                or any(
+                    turn_execution_record.get(field) != expected
+                    for field, expected in expected_ter_scope.items()
+                )
+                or turn_execution_record_evidence_sha256(turn_execution_record)
+                != ter_sha256
+                or not isinstance(prompt_projection, Mapping)
+                or prompt_projection.get("sha256")
+                != planned_trial.get("prompt_utf8_sha256")
+                or not isinstance(final_response_projection, Mapping)
+                or final_response_projection.get("response_sha256")
+                != execution.get("response_sha256")
+                or not isinstance(trial_binding, Mapping)
+                or trial_binding.get("schema_version")
+                != "learning_advice_experiment_trial_execution.v1"
+                or trial_binding.get("experiment_spec_id")
+                != result.get("experiment_spec_id")
+                or trial_binding.get("experiment_run_id") != run_id
+                or trial_binding.get("manifest_sha256") != result.get("manifest_sha256")
+                or trial_binding.get("plan_sha256") != result.get("plan_sha256")
+                or trial_binding.get("trial_id") != planned_trial.get("trial_id")
+                or trial_binding.get("pair_id") != planned_trial.get("pair_id")
+                or trial_binding.get("case_id") != planned_trial.get("case_id")
+                or trial_binding.get("repeat") != planned_trial.get("repeat")
+                or trial_binding.get("arm") != planned_trial.get("arm")
+                or trial_binding.get("turn_id") != execution_turn_id
+            ):
+                raise InvalidLearningCandidateData(
+                    "The canonical trial turn execution record does not match its observation"
+                )
+            expected_request_ids.append(request_id_value)
+            canonical_trial_rows.append(trial)
+        if experiment_state.get("turn_execution_request_ids") != expected_request_ids:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment turn-execution index does not match the trials"
+            )
+        try:
+            recomputed_paired_results = compute_learning_advice_paired_results(
+                canonical_trial_rows,
+                required_applicable_pair_count=run_binding[
+                    "required_applicable_pair_count"
+                ],
+                required_control_pair_count=run_binding["required_control_pair_count"],
+            )
+            recomputed_content_decision = evaluate_learning_advice_content_decision(
+                recomputed_paired_results,
+                decision_rule=run_binding["decision_rule"],
+            )
+        except LearningAdviceExperimentError as exc:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment evidence cannot be independently recomputed"
+            ) from exc
+        if recomputed_paired_results != paired_results:
+            raise InvalidLearningCandidateData(
+                "The canonical paired experiment result was not derived from its trials"
+            )
+        decision_record = result.get("content_decision")
+        if (
+            not isinstance(decision_record, Mapping)
+            or set(decision_record)
+            != {"decision", "activation_authorised", "decision_rule", "gates"}
+            or decision_record.get("activation_authorised") is not False
+            or not isinstance(decision_record.get("decision_rule"), Mapping)
+            or not isinstance(decision_record.get("gates"), Sequence)
+            or isinstance(decision_record.get("gates"), (str, bytes, bytearray))
+        ):
+            raise InvalidLearningCandidateData(
+                "The canonical experiment content decision is invalid"
+            )
+        if recomputed_content_decision != decision_record:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment decision was not derived from its trials"
+            )
+        decision = decision_record.get("decision")
+        if decision == "arm_b_content_win":
+            disposition = "retained"
+            verdict = "supports_use"
+            expected_observation_verdict = "pass"
+        elif decision == "arm_b_not_supported":
+            disposition = "rejected"
+            verdict = "does_not_support_use"
+            expected_observation_verdict = "fail"
+        elif decision == "inconclusive":
+            raise InvalidLearningCandidateData(
+                "An inconclusive experiment cannot change candidate disposition"
+            )
+        else:
+            raise InvalidLearningCandidateData(
+                "The canonical experiment content decision is unsupported"
+            )
+        if result_observation.get("verdict") != expected_observation_verdict:
+            raise InvalidLearningCandidateData(
+                "The experiment observation verdict contradicts its content decision"
+            )
+        identity_payload = {
+            "disposition_request_id": request_id,
+            "evaluation_disposition": disposition,
+            "evidence_verdict": verdict,
+            "experiment_run_id": run_id,
+            "evidence_sha256": evidence_digest,
+            "candidate_revision": revision,
+            "candidate_revision_identity_sha256": revision_identity,
+        }
+        identity_sha256 = _stable_digest(identity_payload)
+        history = _normalise_disposition_history(state.get("disposition_history"))
+        for prior in history:
+            if prior.get("disposition_request_id") != request_id:
+                continue
+            if prior.get("disposition_identity_sha256") != identity_sha256:
+                raise LearningCandidateConflictError(
+                    "The disposition request is already bound to different evidence"
+                )
+            result = _project_candidate(
+                doc,
+                description_rows=get_texts_for_concept(
+                    resolved_id,
+                    predicate="hasDescription",
+                    lang="en-NZ",
+                    recent_first=True,
+                ),
+                validate_source=True,
+                actor_user_id=actor,
+                organisation_concept_id=org,
+                namespace=canonical_namespace,
+            )
+            result["disposition_recorded"] = False
+            result["idempotent"] = True
+            result["replayed_disposition"] = copy.deepcopy(dict(prior))
+            return result
+
+        if state.get("evaluation_disposition") != frozen_disposition:
+            raise LearningCandidateConflictError(
+                "The learning candidate disposition changed after this experiment "
+                "was frozen"
+            )
+
+        if len(history) >= _MAX_DISPOSITION_HISTORY:
+            raise InvalidLearningCandidateData(
+                "The learning candidate disposition history is full"
+            )
+        now = _now()
+        record = {
+            "schema_version": LEARNING_CANDIDATE_DISPOSITION_SCHEMA_VERSION,
+            **identity_payload,
+            "disposition_identity_sha256": identity_sha256,
+            "recorded_by_actor_concept_id": actor,
+            "recorded_by_organisation_concept_id": org,
+            "recorded_at": _iso(now),
+        }
+        revised_state = {
+            **state,
+            "evaluation_disposition": disposition,
+            "disposition_history": [*history, record],
+            "last_revised_by_actor_concept_id": actor,
+            "last_revised_by_organisation_concept_id": org,
+            "updated_at": _iso(now),
+        }
+        with suppress_event_workflow_launches(
+            "learning_candidate_non_active_disposition"
+        ):
+            update_result = ConceptsRepository.update_one(
+                {
+                    "concept_id": resolved_id,
+                    "concept_data.learning_candidate.revision": revision,
+                    "concept_data.learning_candidate.updated_at": state.get(
+                        "updated_at"
+                    ),
+                    "concept_data.learning_candidate.evaluation_disposition": (
+                        frozen_disposition
+                    ),
+                },
+                {
+                    "$set": {
+                        "concept_data.learning_candidate": revised_state,
+                        "updated_at": now,
+                    }
+                },
+            )
+        if int(getattr(update_result, "matched_count", 0) or 0) != 1:
+            raise LearningCandidateConflictError(
+                "The learning candidate changed before this disposition was stored"
+            )
+
+        refreshed = ConceptsRepository.find_one({"concept_id": resolved_id})
+        if not isinstance(refreshed, Mapping):
+            raise LearningCandidateNotFoundError(
+                "Learning candidate was not readable after disposition"
+            )
+        result = _project_candidate(
+            refreshed,
+            description_rows=get_texts_for_concept(
+                resolved_id,
+                predicate="hasDescription",
+                lang="en-NZ",
+                recent_first=True,
+            ),
+            validate_source=True,
+            actor_user_id=actor,
+            organisation_concept_id=org,
+            namespace=canonical_namespace,
+        )
+        result["disposition_recorded"] = True
+        result["idempotent"] = False
+        return result
+
+
 __all__ = [
     "LEARNING_CANDIDATE_ARTIFACT_TYPE_ID",
     "LEARNING_CANDIDATE_AUTHOR_ID",
+    "LEARNING_CANDIDATE_DISPOSITION_SCHEMA_VERSION",
+    "LEARNING_CANDIDATE_EVALUATION_DISPOSITIONS",
+    "LEARNING_CANDIDATE_EVIDENCE_VERDICTS",
     "LEARNING_CANDIDATE_LIFECYCLE_STATE",
     "LEARNING_CANDIDATE_SCHEMA_VERSION",
     "LEARNING_CANDIDATE_SYSTEM_TAG",
@@ -1410,5 +2795,6 @@ __all__ = [
     "capture_learning_candidate",
     "get_learning_candidate",
     "list_learning_candidates",
+    "record_learning_candidate_disposition",
     "revise_learning_candidate",
 ]

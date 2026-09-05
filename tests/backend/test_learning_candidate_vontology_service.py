@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
@@ -11,6 +13,13 @@ import pytest
 from pymongo.errors import DuplicateKeyError
 
 from src.backend.services import learning_candidate_vontology_service as service
+from src.backend.services.learning_advice_experiment_service import (
+    build_learning_advice_experiment_manifest,
+    build_learning_advice_experiment_plan,
+    build_learning_advice_experiment_run_binding,
+    compute_learning_advice_paired_results,
+    evaluate_learning_advice_content_decision,
+)
 
 
 def _nested_value(document: dict[str, Any], path: str) -> Any:
@@ -44,7 +53,49 @@ class _MemoryStore:
         self.update_count = 0
         self.text_write_count = 0
         self.owned_chat_sessions: set[tuple[str, str]] = {
-            ("#V#alice", "session-without-concept")
+            ("#V#alice", "session-alice"),
+            ("#V#alice", "session-without-concept"),
+        }
+        self.chat_session_checks: list[dict[str, Any]] = []
+        self.transcript_page_calls: list[dict[str, Any]] = []
+        self.debug_entry_calls: list[dict[str, Any]] = []
+        self.chat_histories: dict[tuple[str, str], list[dict[str, Any]]] = {
+            ("#V#alice", "session-alice"): [
+                {
+                    "role": "user",
+                    "content": "Please check the finished work.",
+                    "turn_id": "turn-user-1",
+                    "message_id": "message-user-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "I claimed completion before checking.",
+                    "turn_id": "turn-assistant-1",
+                },
+                {
+                    "role": "user",
+                    "content": "The read-back is the important evidence.",
+                    "turn_id": "turn-user-2",
+                },
+            ],
+            ("#V#alice", "session-without-concept"): [],
+        }
+        self.chat_debug_entries: dict[tuple[str, str, int], dict[str, Any]] = {
+            ("#V#alice", "session-alice", 1): {
+                "request_id": "request-assistant-1",
+                "turn_execution_record": {
+                    "schema_version": "turn_execution_record.v1",
+                    "request_id": "request-assistant-1",
+                    "terminal_status": "completed",
+                    "tool_invocations": [
+                        {
+                            "tool": "gmail_list_messages",
+                            "status": "ok",
+                            "evidence": {"sha256": "a" * 64},
+                        }
+                    ],
+                },
+            }
         }
 
     @contextmanager
@@ -154,6 +205,7 @@ class _MemoryStore:
 
     def upsert_text(self, **kwargs: Any) -> dict[str, Any]:
         assert kwargs["predicate"] == "hasDescription"
+        assert kwargs["identity_mode"] == "exact"
         self.descriptions[kwargs["subject_concept_id"]] = kwargs["text"]
         self.text_write_count += 1
         return {"success": True, "relation_id": f"rel-{self.text_write_count}"}
@@ -184,9 +236,72 @@ class _MemoryStore:
         self,
         user_id: str,
         session_id: str,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> bool:
+        self.chat_session_checks.append(
+            {"user_id": user_id, "session_id": session_id, **kwargs}
+        )
         return (user_id, session_id) in self.owned_chat_sessions
+
+    def get_chat_history_transcript_page(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        namespace: str | None = None,
+        include_legacy: bool = True,
+        offset: int = 0,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        self.transcript_page_calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "namespace": namespace,
+                "include_legacy": include_legacy,
+                "offset": offset,
+                "page_size": page_size,
+            }
+        )
+        history = self.chat_histories.get((user_id, session_id))
+        if history is None:
+            return {"found": False, "messages": []}
+        messages: list[dict[str, Any]] = []
+        for history_index, value in enumerate(
+            history[offset : offset + page_size], start=offset
+        ):
+            message = deepcopy(value)
+            message["source_locator"] = {
+                "session_id": session_id,
+                "history_index": history_index,
+                "turn_id": message.get("turn_id"),
+                "message_id": message.get("message_id"),
+            }
+            messages.append(message)
+        return {"found": True, "messages": messages}
+
+    def get_chat_history_debug_entry(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        history_index: int,
+        namespace: str | None = None,
+        include_legacy: bool = True,
+        hydrate_blob_refs: bool = True,
+    ) -> dict[str, Any] | None:
+        self.debug_entry_calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "history_index": history_index,
+                "namespace": namespace,
+                "include_legacy": include_legacy,
+                "hydrate_blob_refs": hydrate_blob_refs,
+            }
+        )
+        value = self.chat_debug_entries.get((user_id, session_id, history_index))
+        return deepcopy(value) if value is not None else None
 
 
 def _global_concept(concept_id: str) -> dict[str, Any]:
@@ -265,6 +380,16 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _MemoryStore:
         "has_chat_history_session",
         memory.has_chat_history_session,
     )
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "get_chat_history_transcript_page",
+        memory.get_chat_history_transcript_page,
+    )
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "get_chat_history_debug_entry",
+        memory.get_chat_history_debug_entry,
+    )
     return memory
 
 
@@ -316,6 +441,7 @@ def test_capture_discussion_candidate_is_artifact_and_canonical_readback(
     )
     assert read_back["body"] == captured["body"]
     assert read_back["body_sha256"] == captured["body_sha256"]
+    assert store.debug_entry_calls == []
 
 
 def test_capture_candidate_from_episode_memory_preserves_stable_locator(
@@ -382,6 +508,362 @@ def test_capture_owned_discussion_without_materialising_conversation_concept(
     )
     assert replay["candidate_id"] == captured["candidate_id"]
     assert replay["idempotent"] is True
+
+
+def test_session_source_preserves_explicit_non_legacy_boundary(
+    store: _MemoryStore,
+) -> None:
+    captured = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-without-concept",
+            "include_legacy": False,
+        },
+        idempotency_key="non-legacy-discussion",
+        request_id="non-legacy-discussion-request",
+    )
+
+    assert captured["source"]["locator"]["include_legacy"] is False
+    assert store.chat_session_checks
+    assert all(call["include_legacy"] is False for call in store.chat_session_checks)
+
+
+def test_session_source_rejects_non_boolean_legacy_boundary(
+    store: _MemoryStore,
+) -> None:
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="source.include_legacy must be a boolean",
+    ):
+        _capture_from_discussion(
+            source={
+                "kind": "conversation",
+                "session_id": "session-without-concept",
+                "include_legacy": "false",
+            },
+            idempotency_key="invalid-legacy-boundary",
+        )
+
+    assert store.insert_count == 0
+    assert store.text_write_count == 0
+
+
+def test_exact_conversation_messages_are_verified_and_attested(
+    store: _MemoryStore,
+) -> None:
+    captured = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-alice",
+            "include_legacy": False,
+            "history_indices": [2, 0, 2],
+        },
+        idempotency_key="exact-discussion-evidence",
+        request_id="exact-discussion-evidence-request",
+    )
+
+    def sha256_text(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def stable_digest(value: Any) -> str:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    locator_two = {
+        "session_id": "session-alice",
+        "history_index": 2,
+        "turn_id": "turn-user-2",
+    }
+    locator_zero = {
+        "session_id": "session-alice",
+        "history_index": 0,
+        "turn_id": "turn-user-1",
+        "message_id": "message-user-1",
+    }
+    assert captured["source"] == {
+        "kind": "conversation",
+        "locator": {
+            "session_id": "session-alice",
+            "owner_user_id": "#V#alice",
+            "include_legacy": False,
+            "namespace": "#V#alice@research_org",
+        },
+        "message_evidence": [
+            {
+                "source_locator": locator_two,
+                "content_sha256": sha256_text(
+                    "The read-back is the important evidence."
+                ),
+                "role_sha256": sha256_text("user"),
+                "turn_identity_sha256": stable_digest(locator_two),
+            },
+            {
+                "source_locator": locator_zero,
+                "content_sha256": sha256_text("Please check the finished work."),
+                "role_sha256": sha256_text("user"),
+                "turn_identity_sha256": stable_digest(locator_zero),
+            },
+        ],
+    }
+    stored_source = store.docs[captured["candidate_id"]]["concept_data"][
+        "learning_candidate"
+    ]["source"]
+    assert stored_source == captured["source"]
+    assert "Please check the finished work." not in repr(stored_source)
+    assert store.transcript_page_calls
+    assert all(call["include_legacy"] is False for call in store.transcript_page_calls)
+
+    read_back = service.get_learning_candidate(
+        captured["candidate_id"],
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    assert read_back["source"] == captured["source"]
+    assert len(read_back["source_locator_sha256"]) == 64
+
+
+def test_exact_assistant_turn_execution_evidence_is_opt_in_and_body_free(
+    store: _MemoryStore,
+) -> None:
+    captured = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-alice",
+            "include_legacy": False,
+            "include_execution_evidence": True,
+            "history_indices": [0, 1],
+        },
+        idempotency_key="exact-turn-execution-evidence",
+        request_id="exact-turn-execution-evidence-request",
+    )
+
+    exact_record = store.chat_debug_entries[("#V#alice", "session-alice", 1)][
+        "turn_execution_record"
+    ]
+    encoded_record = json.dumps(
+        exact_record,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected_digest = hashlib.sha256(encoded_record.encode("utf-8")).hexdigest()
+    source = captured["source"]
+
+    assert source["locator"]["include_execution_evidence"] is True
+    assert "turn_execution_evidence" not in source["message_evidence"][0]
+    assert source["message_evidence"][1]["turn_execution_evidence"] == {
+        "request_id": "request-assistant-1",
+        "turn_execution_record_sha256": expected_digest,
+    }
+    assert exact_record["tool_invocations"][0]["tool"] not in repr(
+        source["message_evidence"][1]["turn_execution_evidence"]
+    )
+    expected_debug_read = {
+        "user_id": "#V#alice",
+        "session_id": "session-alice",
+        "history_index": 1,
+        "namespace": "#V#alice@research_org",
+        "include_legacy": False,
+        "hydrate_blob_refs": False,
+    }
+    # Capture performs canonical read-back, so it attests once before and once
+    # after persistence.
+    assert store.debug_entry_calls == [expected_debug_read, expected_debug_read]
+
+    read_back = service.get_learning_candidate(
+        captured["candidate_id"],
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    assert read_back["source"] == source
+    assert store.debug_entry_calls == [
+        expected_debug_read,
+        expected_debug_read,
+        expected_debug_read,
+    ]
+
+
+def test_missing_opted_in_assistant_execution_evidence_blocks_capture(
+    store: _MemoryStore,
+) -> None:
+    store.chat_debug_entries.clear()
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="assistant message has no exact turn execution record",
+    ):
+        _capture_from_discussion(
+            source={
+                "kind": "conversation",
+                "session_id": "session-alice",
+                "include_execution_evidence": True,
+                "history_indices": [1],
+            },
+            idempotency_key="missing-turn-execution-evidence",
+        )
+
+    assert store.insert_count == 0
+    assert store.text_write_count == 0
+
+
+def test_changed_turn_execution_evidence_is_re_attested_for_every_operation(
+    store: _MemoryStore,
+) -> None:
+    captured = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-alice",
+            "include_execution_evidence": True,
+            "history_indices": [1],
+        },
+        idempotency_key="changed-turn-execution-evidence",
+    )
+    store.chat_debug_entries[("#V#alice", "session-alice", 1)]["turn_execution_record"][
+        "terminal_status"
+    ] = "failed"
+    writes_before = (store.update_count, store.text_write_count)
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="message evidence no longer matches",
+    ):
+        service.get_learning_candidate(
+            captured["candidate_id"],
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    listed = service.list_learning_candidates(
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    listed_candidate = next(
+        item for item in listed if item["candidate_id"] == captured["candidate_id"]
+    )
+    assert listed_candidate["projection_status"] == "invalid"
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="message evidence no longer matches",
+    ):
+        service.revise_learning_candidate(
+            captured["candidate_id"],
+            body="A revision that must not survive stale source evidence.",
+            revision_request_id="stale-execution-evidence-revision",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="message evidence no longer matches",
+    ):
+        service.record_learning_candidate_disposition(
+            captured["candidate_id"],
+            experiment_run_id="#V#experiment_run_stale_execution_evidence",
+            disposition_request_id="stale-execution-evidence-disposition",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    assert (store.update_count, store.text_write_count) == writes_before
+
+
+def test_changed_cited_message_is_detected_on_readback(store: _MemoryStore) -> None:
+    captured = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-alice",
+            "history_indices": [1],
+        },
+        idempotency_key="changed-discussion-evidence",
+        request_id="changed-discussion-evidence-request",
+    )
+    store.chat_histories[("#V#alice", "session-alice")][1]["content"] = (
+        "This stored transcript message was changed."
+    )
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="message evidence no longer matches",
+    ):
+        service.get_learning_candidate(
+            captured["candidate_id"],
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+
+def test_changed_cited_message_blocks_revision_before_any_write(
+    store: _MemoryStore,
+) -> None:
+    captured = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-alice",
+            "history_indices": [1],
+        },
+        idempotency_key="changed-before-revision",
+        request_id="changed-before-revision-request",
+    )
+    store.chat_histories[("#V#alice", "session-alice")][1]["content"] = (
+        "This transcript message changed before the requested revision."
+    )
+    writes_before = (store.update_count, store.text_write_count)
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="message evidence no longer matches",
+    ):
+        service.revise_learning_candidate(
+            captured["candidate_id"],
+            body="A revision that must not be persisted.",
+            revision_request_id="blocked-revision",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    assert (store.update_count, store.text_write_count) == writes_before
+
+
+def test_unreadable_or_unbounded_history_indices_are_rejected_before_write(
+    store: _MemoryStore,
+) -> None:
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="is not a readable message",
+    ):
+        _capture_from_discussion(
+            source={
+                "kind": "conversation",
+                "session_id": "session-alice",
+                "history_indices": [99],
+            },
+            idempotency_key="missing-discussion-evidence",
+        )
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="at most 32 distinct indices",
+    ):
+        _capture_from_discussion(
+            source={
+                "kind": "conversation",
+                "session_id": "session-alice",
+                "history_indices": list(range(33)),
+            },
+            idempotency_key="unbounded-discussion-evidence",
+        )
+
+    assert store.insert_count == 0
+    assert store.text_write_count == 0
 
 
 def test_session_source_cannot_select_a_different_namespace(
@@ -497,6 +979,18 @@ def test_capture_retry_is_idempotent_without_semantic_global_deduplication(
         _capture_from_discussion(body="Different data under the same retry identity.")
 
 
+def test_explicit_idempotency_key_allows_cross_turn_capture_retry(
+    store: _MemoryStore,
+) -> None:
+    first = _capture_from_discussion(request_id="turn-one")
+    replay = _capture_from_discussion(request_id="turn-two")
+
+    assert replay["candidate_id"] == first["candidate_id"]
+    assert replay["idempotent"] is True
+    assert replay["capture_request_id"] == "turn-one"
+    assert store.insert_count == 1
+
+
 def test_other_actor_cannot_read_or_revise_candidate(store: _MemoryStore) -> None:
     captured = _capture_from_discussion()
 
@@ -571,6 +1065,49 @@ def test_revision_retains_source_history_authorship_and_non_active_state(
     assert replay["idempotent"] is True
     assert replay["revision"] == 2
     assert len(replay["prior_revisions"]) == 1
+
+
+def test_revision_cannot_erase_a_concurrent_same_revision_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    candidate_id = candidate["candidate_id"]
+    original_update = store.update_one
+
+    def disposition_wins_before_revision_cas(
+        query: dict[str, Any],
+        update: dict[str, Any],
+        upsert: bool = False,
+    ) -> SimpleNamespace:
+        state = store.docs[candidate_id]["concept_data"]["learning_candidate"]
+        state["evaluation_disposition"] = "rejected"
+        state["disposition_history"] = [{"marker": "concurrent-disposition"}]
+        state["updated_at"] = "2026-09-05T00:00:01+00:00"
+        return original_update(query, update, upsert=upsert)
+
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "update_one",
+        disposition_wins_before_revision_cas,
+    )
+
+    with pytest.raises(
+        service.LearningCandidateConflictError,
+        match="changed before this revision was stored",
+    ):
+        service.revise_learning_candidate(
+            candidate_id,
+            body="A revision that must not erase concurrently learned evidence.",
+            revision_request_id="revision-loses-to-concurrent-disposition",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    stored = store.docs[candidate_id]["concept_data"]["learning_candidate"]
+    assert stored["revision"] == 1
+    assert stored["evaluation_disposition"] == "rejected"
+    assert stored["disposition_history"] == [{"marker": "concurrent-disposition"}]
 
 
 def test_list_is_actor_filtered_and_omits_candidate_when_source_is_withdrawn(
@@ -926,3 +1463,761 @@ def test_partial_capture_is_explicit_in_list_and_exact_retry_repairs_it(
     assert repaired["body"] == (
         "Check the canonical work product before claiming completion."
     )
+
+
+def _experiment_state_for_candidate(
+    candidate: dict[str, Any],
+    *,
+    decision: str = "arm_b_content_win",
+    run_id: str = "#V#experiment_run_learning_advice",
+) -> dict[str, Any]:
+    runtime_snapshot = {
+        "code_revision": "candidate-disposition-test-revision",
+        "capability_catalogue_sha256": "1" * 64,
+        "workflow_catalogue_sha256": "2" * 64,
+        "relevant_ontology_sha256": "3" * 64,
+        "acting_support_sha256": "4" * 64,
+        "context_budget_tokens": 32_000,
+        "turn_budget_seconds": 180.0,
+        "final_synthesis_reserve_seconds": 30.0,
+        "final_answer_reserve_seconds": 0.0,
+    }
+    acting_support_identity = {"gateway_sha256": "e" * 64}
+    candidate_ref = {
+        "candidate_id": candidate["candidate_id"],
+        "revision": candidate["revision"],
+        "evaluation_disposition": candidate["evaluation_disposition"],
+        "body_sha256": candidate["body_sha256"],
+        "revision_identity_sha256": candidate["revision_identity_sha256"],
+        "source_locator_sha256": candidate["source_locator_sha256"],
+    }
+    cases: list[dict[str, Any]] = []
+    for index in range(1, 7):
+        cases.append(
+            {
+                "case_id": f"candidate-disposition-case-{index}",
+                "kind": "applicable" if index <= 4 else "control",
+                "prompt": f"Independent held-out case {index}",
+                "evaluator_concept_id": "#V#candidate_disposition_evaluator",
+                "evaluator_sha256": "5" * 64,
+                "rubric_concept_id": "#V#candidate_disposition_rubric",
+                "rubric_sha256": "6" * 64,
+                "evaluation_contract": {
+                    "allowed_first_capabilities": ["bounded_read"],
+                    "required_success_capability": "bounded_read",
+                    "after_capability_failure": "report_specific_failure",
+                    "focused_clarification_verdict": "fail",
+                    "unsolicited_alternative_policy": "fail",
+                    "read_only": True,
+                },
+            }
+        )
+    decision_rule = {
+        "minimum_applicable_b_passes": 6,
+        "minimum_applicable_pass_delta": 2,
+        "require_more_paired_improvements_than_regressions": True,
+        "forbid_b_only_material_failure": True,
+        "require_control_non_inferiority": True,
+    }
+    manifest = build_learning_advice_experiment_manifest(
+        experiment_spec_id="#V#experiment_spec_learning_advice",
+        experiment_run_id=run_id,
+        candidate_ref=candidate_ref,
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+        namespace="#V#alice@research_org",
+        provider="openai",
+        model_id="gpt-5.6-luna",
+        model_parameters={"temperature": 0.2},
+        runtime_snapshot=runtime_snapshot,
+        cases=cases,
+        decision_rule=decision_rule,
+        randomisation_seed=2720,
+        repeats=2,
+    )
+    plan = build_learning_advice_experiment_plan(manifest)
+    binding = build_learning_advice_experiment_run_binding(manifest, plan=plan)
+    request_ids: list[str] = []
+    trial_ids: list[str] = []
+    trial_rows: list[dict[str, Any]] = []
+    trial_observations: list[dict[str, Any]] = []
+    turn_execution_records: dict[str, dict[str, Any]] = {}
+
+    def _digest(value: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    for index, planned_trial in enumerate(plan["trials"], start=1):
+        request_id = f"trial-request-{index:02d}"
+        observation_id = f"trial-observation-{index:02d}"
+        request_ids.append(request_id)
+        trial_ids.append(observation_id)
+        if planned_trial["case_kind"] == "control":
+            verdict = "pass"
+        elif decision == "arm_b_not_supported":
+            verdict = "pass" if planned_trial["arm"] == "A" else "fail"
+        else:
+            verdict = "fail" if planned_trial["arm"] == "A" else "pass"
+        external_availability_changed = bool(
+            decision == "inconclusive"
+            and planned_trial["case_kind"] == "applicable"
+            and planned_trial["case_id"] == "candidate-disposition-case-1"
+        )
+        model_call_receipt = {
+            "schema_version": "learning_advice_evaluator_model_call_receipt.v1",
+            "call_id": f"evaluation-call-{index:02d}",
+            "provider": "openai",
+            "requested_model": "gpt-5.6-luna",
+            "selected_model": "gpt-5.6-luna",
+            "effective_model": "gpt-5.6-luna",
+            "provider_observed_model": "gpt-5.6-luna",
+            "provider_request_sent": True,
+            "success": True,
+        }
+        response_sha256 = hashlib.sha256(
+            f"synthetic-response-{index:02d}".encode("utf-8")
+        ).hexdigest()
+        trial_ter = {
+            "schema_version": "turn_execution_record.v1",
+            "request_id": request_id,
+            "session_id": f"trial-session-{index:02d}",
+            "namespace": "#V#alice@research_org",
+            "user_id": "#V#alice",
+            "org_id": "#V#research_org",
+            "prompt": {
+                "sha256": hashlib.sha256(
+                    planned_trial["prompt"].encode("utf-8")
+                ).hexdigest()
+            },
+            "final_response": {"response_sha256": response_sha256},
+            "aux_llm_calls": [
+                {
+                    "type": "learning_advice_experiment_trial_binding",
+                    "schema_version": "learning_advice_experiment_trial_execution.v1",
+                    "experiment_spec_id": manifest["experiment_spec_id"],
+                    "experiment_run_id": run_id,
+                    "manifest_sha256": manifest["manifest_sha256"],
+                    "plan_sha256": plan["plan_sha256"],
+                    "trial_id": planned_trial["trial_id"],
+                    "pair_id": planned_trial["pair_id"],
+                    "case_id": planned_trial["case_id"],
+                    "repeat": planned_trial["repeat"],
+                    "arm": planned_trial["arm"],
+                    "turn_id": f"trial-turn-{index:02d}",
+                }
+            ],
+        }
+        turn_execution_records[request_id] = trial_ter
+        runtime_identity = {
+            "schema_version": "learning_advice_evaluator_runtime_identity.v1",
+            "provider": "openai",
+            "requested_model": "gpt-5.6-luna",
+            "selected_model": "gpt-5.6-luna",
+            "effective_model": "gpt-5.6-luna",
+            "model_parameters_sha256": _digest(manifest["model"]["parameters"]),
+            "code_revision": runtime_snapshot["code_revision"],
+            "runtime_snapshot_sha256": _digest(runtime_snapshot),
+        }
+        evaluation_provenance = {
+            "schema_version": "learning_advice_evaluator_provenance.v1",
+            "model_call_id": model_call_receipt["call_id"],
+            "provider": "openai",
+            "requested_model": "gpt-5.6-luna",
+            "selected_model": "gpt-5.6-luna",
+            "effective_model": "gpt-5.6-luna",
+            "provider_observed_model": "gpt-5.6-luna",
+            "model_call_receipt_sha256": _digest(model_call_receipt),
+            "model_parameters_sha256": _digest(manifest["model"]["parameters"]),
+            "code_revision": runtime_snapshot["code_revision"],
+            "runtime_snapshot_sha256": _digest(runtime_snapshot),
+            "runtime_code_identity_sha256": _digest(runtime_identity),
+            "evaluator_concept_id": planned_trial["evaluator_concept_id"],
+            "evaluator_sha256": planned_trial["evaluator_sha256"],
+            "rubric_concept_id": planned_trial["rubric_concept_id"],
+            "rubric_sha256": planned_trial["rubric_sha256"],
+        }
+        trial = {
+            "schema_version": "learning_advice_experiment_observation.v1",
+            "observation_kind": "paired_trial",
+            "experiment_spec_id": manifest["experiment_spec_id"],
+            "experiment_run_id": run_id,
+            "manifest_sha256": manifest["manifest_sha256"],
+            "plan_sha256": plan["plan_sha256"],
+            "trial_id": planned_trial["trial_id"],
+            "pair_id": planned_trial["pair_id"],
+            "case_id": planned_trial["case_id"],
+            "case_kind": planned_trial["case_kind"],
+            "repeat": planned_trial["repeat"],
+            "arm": planned_trial["arm"],
+            "candidate_ref": candidate_ref,
+            "model": manifest["model"],
+            "runtime_snapshot": runtime_snapshot,
+            "trial_integrity_valid": True,
+            "execution_identity": {
+                "request_id": request_id,
+                "session_id": f"trial-session-{index:02d}",
+                "turn_id": f"trial-turn-{index:02d}",
+            },
+            "turn_execution_request_ids": [request_id],
+            "execution": {
+                "acting_support_identity": acting_support_identity,
+                "response_sha256": response_sha256,
+                "turn_execution_record_sha256": _digest(trial_ter),
+            },
+            "evaluation": {
+                "schema_version": "learning_advice_blind_evaluation_result.v1",
+                "evaluation_id": f"evaluation-{index:02d}",
+                "status": "completed",
+                "passed": verdict == "pass",
+                "verdict": verdict,
+                "evaluator_output_sha256": hashlib.sha256(
+                    f"evaluator-output-{index:02d}".encode()
+                ).hexdigest(),
+                "capability_choice": verdict,
+                "work_product": verdict,
+                "external_availability_changed": external_availability_changed,
+                "material_failure": False,
+                "evaluator_concept_id": planned_trial["evaluator_concept_id"],
+                "evaluator_sha256": planned_trial["evaluator_sha256"],
+                "rubric_concept_id": planned_trial["rubric_concept_id"],
+                "rubric_sha256": planned_trial["rubric_sha256"],
+                "authority_attestations": [
+                    {
+                        "kind": "evaluator",
+                        "concept_id": planned_trial["evaluator_concept_id"],
+                        "sha256": planned_trial["evaluator_sha256"],
+                        "utf8_byte_count": 100,
+                        "status": "canonical_bytes_attested",
+                    },
+                    {
+                        "kind": "rubric",
+                        "concept_id": planned_trial["rubric_concept_id"],
+                        "sha256": planned_trial["rubric_sha256"],
+                        "utf8_byte_count": 200,
+                        "status": "canonical_bytes_attested",
+                    },
+                ],
+                "model_call_receipt": model_call_receipt,
+                "evaluation_provenance": evaluation_provenance,
+                "reason_codes": [],
+                "material_failure_codes": [],
+            },
+        }
+        trial_rows.append(trial)
+        trial_observations.append(
+            {
+                "observation_id": observation_id,
+                "observation_type": "learning_advice_trial",
+                "turn_execution_request_ids": [request_id],
+                "evidence": {"learning_advice_trial": trial},
+            }
+        )
+    paired_results = compute_learning_advice_paired_results(
+        trial_rows,
+        required_applicable_pair_count=8,
+        required_control_pair_count=4,
+    )
+    content_decision = evaluate_learning_advice_content_decision(
+        paired_results,
+        decision_rule=decision_rule,
+    )
+    assert content_decision["decision"] == decision
+    result: dict[str, Any] = {
+        "schema_version": "learning_advice_experiment_result.v1",
+        "experiment_spec_id": "#V#experiment_spec_learning_advice",
+        "experiment_run_id": run_id,
+        "manifest_sha256": manifest["manifest_sha256"],
+        "plan_sha256": plan["plan_sha256"],
+        "candidate_ref": candidate_ref,
+        "runtime_snapshot": runtime_snapshot,
+        "acting_support_identity": acting_support_identity,
+        "planned_trial_count": 24,
+        "executed_trial_count": 24,
+        "persisted_ter_count": 24,
+        "persisted_trial_observation_count": 24,
+        "valid_trial_count": 24,
+        "completed_evaluation_count": 24,
+        "paired_results": paired_results,
+        "content_decision": content_decision,
+        "secondary_metrics": {},
+        "trial_observation_ids": trial_ids,
+    }
+    result["result_evidence_sha256"] = hashlib.sha256(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    observation_verdict = {
+        "arm_b_content_win": "pass",
+        "arm_b_not_supported": "fail",
+        "inconclusive": "inconclusive",
+    }[decision]
+    return {
+        "run_id": run_id,
+        "experiment_spec_id": "#V#experiment_spec_learning_advice",
+        "namespace": "#V#alice@research_org",
+        "user_id": "#V#alice",
+        "org_id": "#V#research_org",
+        "status": "completed",
+        "verdict": "partial",
+        "completed_at_utc": "2026-09-05T00:00:00+00:00",
+        "metadata": {"learning_advice_experiment": binding},
+        "turn_execution_request_ids": request_ids,
+        "observations": [
+            *trial_observations,
+            {
+                "observation_id": "final-result",
+                "observation_type": "learning_advice_experiment_result",
+                "verdict": observation_verdict,
+                "evidence": {"learning_advice_result": result},
+            },
+        ],
+        "_test_turn_execution_records": turn_execution_records,
+    }
+
+
+def _install_experiment_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    experiment_state: dict[str, Any],
+) -> None:
+    canonical_state = deepcopy(experiment_state)
+    records = canonical_state.pop("_test_turn_execution_records")
+    monkeypatch.setattr(
+        "src.backend.services.experiment_run_service.get_experiment_run_state",
+        lambda _run_id: deepcopy(canonical_state),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.get_turn_execution_record_projection",
+        lambda *, request_id, namespace: (
+            deepcopy(records.get(request_id))
+            if namespace == "#V#alice@research_org"
+            else None
+        ),
+    )
+
+
+def test_disposition_is_derived_from_canonical_experiment_and_is_idempotent(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(candidate)
+    _install_experiment_readback(monkeypatch, experiment_state)
+
+    retained = service.record_learning_candidate_disposition(
+        candidate["candidate_id"],
+        experiment_run_id=experiment_state["run_id"],
+        disposition_request_id="retain-from-bounded-experiment",
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    replay = service.record_learning_candidate_disposition(
+        candidate["candidate_id"],
+        experiment_run_id=experiment_state["run_id"],
+        disposition_request_id="retain-from-bounded-experiment",
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+
+    assert retained["evaluation_disposition"] == "retained"
+    assert retained["disposition_recorded"] is True
+    assert retained["disposition_history"][-1]["evidence_verdict"] == "supports_use"
+    assert replay["idempotent"] is True
+    assert replay["disposition_recorded"] is False
+    assert len(replay["disposition_history"]) == 1
+
+
+def test_negative_experiment_rejects_candidate_and_revision_resets_hypothesis(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(
+        candidate,
+        decision="arm_b_not_supported",
+    )
+    _install_experiment_readback(monkeypatch, experiment_state)
+
+    rejected = service.record_learning_candidate_disposition(
+        candidate["candidate_id"],
+        experiment_run_id=experiment_state["run_id"],
+        disposition_request_id="reject-from-bounded-experiment",
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    revised = service.revise_learning_candidate(
+        candidate["candidate_id"],
+        body="A narrowed candidate that must earn new evidence.",
+        revision_request_id="narrow-after-negative-evidence",
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+
+    assert rejected["evaluation_disposition"] == "rejected"
+    assert rejected["disposition_history"][-1]["evidence_verdict"] == (
+        "does_not_support_use"
+    )
+    assert revised["revision"] == 2
+    assert revised["evaluation_disposition"] == "undecided"
+    assert revised["prior_revisions"][-1]["evaluation_disposition"] == "rejected"
+
+
+def test_stale_run_cannot_overwrite_a_newer_candidate_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    rejecting_run = _experiment_state_for_candidate(
+        candidate,
+        decision="arm_b_not_supported",
+        run_id="#V#experiment_run_reject_candidate",
+    )
+    retaining_stale_run = _experiment_state_for_candidate(
+        candidate,
+        decision="arm_b_content_win",
+        run_id="#V#experiment_run_stale_retain_candidate",
+    )
+
+    _install_experiment_readback(monkeypatch, rejecting_run)
+    rejected = service.record_learning_candidate_disposition(
+        candidate["candidate_id"],
+        experiment_run_id=rejecting_run["run_id"],
+        disposition_request_id="reject-current-candidate",
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    assert rejected["evaluation_disposition"] == "rejected"
+
+    _install_experiment_readback(monkeypatch, retaining_stale_run)
+    with pytest.raises(
+        service.LearningCandidateConflictError,
+        match="disposition changed after this experiment was frozen",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=retaining_stale_run["run_id"],
+            disposition_request_id="must-not-resurrect-stale-candidate",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    current = service.get_learning_candidate(
+        candidate["candidate_id"],
+        actor_user_id="#V#alice",
+        organisation_concept_id="#V#research_org",
+    )
+    assert current["evaluation_disposition"] == "rejected"
+    assert len(current["disposition_history"]) == 1
+
+
+def test_inconclusive_or_tampered_experiment_cannot_change_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(
+        candidate,
+        decision="inconclusive",
+    )
+    _install_experiment_readback(monkeypatch, experiment_state)
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="inconclusive experiment cannot change",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="do-not-decide-inconclusive",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    experiment_state["observations"][-1]["evidence"]["learning_advice_result"][
+        "content_decision"
+    ]["decision"] = "arm_b_content_win"
+    _install_experiment_readback(monkeypatch, experiment_state)
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="result digest does not match",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-tampered-evidence",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+
+def test_nonterminal_unbound_or_foreign_experiment_cannot_change_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(candidate)
+    writes_before = store.update_count
+
+    experiment_state["status"] = "running"
+    experiment_state["verdict"] = None
+    experiment_state.pop("completed_at_utc")
+    _install_experiment_readback(monkeypatch, experiment_state)
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="not in a valid terminal state",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-nonterminal-evidence",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    experiment_state = _experiment_state_for_candidate(candidate)
+    experiment_state["metadata"]["learning_advice_experiment"]["binding_sha256"] = (
+        "f" * 64
+    )
+    _install_experiment_readback(monkeypatch, experiment_state)
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="not bound to inspectable frozen evidence",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-unbound-evidence",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    experiment_state = _experiment_state_for_candidate(candidate)
+    experiment_state["observations"].insert(
+        0,
+        {
+            "observation_id": "foreign-observation",
+            "observation_type": "unrelated",
+            "evidence": {},
+        },
+    )
+    _install_experiment_readback(monkeypatch, experiment_state)
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="foreign or reordered evidence",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-foreign-evidence",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    assert store.update_count == writes_before
+
+
+def test_redigested_self_report_cannot_override_canonical_trial_evidence(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(candidate)
+    final_observation = experiment_state["observations"][-1]
+    result = final_observation["evidence"]["learning_advice_result"]
+    result["paired_results"]["applicable"]["b_pass_count"] = 0
+    result["content_decision"]["decision"] = "arm_b_not_supported"
+    result_payload = deepcopy(result)
+    result_payload.pop("result_evidence_sha256")
+    result["result_evidence_sha256"] = hashlib.sha256(
+        json.dumps(
+            result_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    final_observation["verdict"] = "fail"
+    _install_experiment_readback(monkeypatch, experiment_state)
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="paired experiment result was not derived from its trials",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-redigested-self-report",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+
+def test_redigested_contradictory_evaluator_verdict_cannot_set_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(candidate)
+    trial_observations = experiment_state["observations"][:-1]
+    forged_trial = next(
+        item["evidence"]["learning_advice_trial"]
+        for item in trial_observations
+        if item["evidence"]["learning_advice_trial"]["evaluation"]["verdict"] == "pass"
+    )
+    evaluation = forged_trial["evaluation"]
+    evaluation["capability_choice"] = "fail"
+    evaluation["work_product"] = "fail"
+    evaluator_payload = deepcopy(evaluation)
+    evaluator_payload.pop("evaluator_output_sha256")
+    evaluation["evaluator_output_sha256"] = hashlib.sha256(
+        json.dumps(
+            evaluator_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    result = experiment_state["observations"][-1]["evidence"]["learning_advice_result"]
+    result_payload = deepcopy(result)
+    result_payload.pop("result_evidence_sha256")
+    result["result_evidence_sha256"] = hashlib.sha256(
+        json.dumps(
+            result_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    _install_experiment_readback(monkeypatch, experiment_state)
+    writes_before = store.update_count
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="verdict contradicts its evaluator dimensions",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-redigested-contradictory-evaluator",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    assert store.update_count == writes_before
+
+
+def test_unattested_evaluator_result_cannot_change_candidate_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(candidate)
+    first_trial = experiment_state["observations"][0]["evidence"][
+        "learning_advice_trial"
+    ]
+    first_trial["evaluation"]["model_call_receipt"].pop("provider_observed_model")
+    _install_experiment_readback(monkeypatch, experiment_state)
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="evaluator model receipt is invalid",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="reject-unattested-evaluator",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+
+@pytest.mark.parametrize("readback_kind", ["missing", "different"])
+def test_missing_or_changed_trial_ter_cannot_change_candidate_disposition(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    readback_kind: str,
+) -> None:
+    candidate = _capture_from_discussion()
+    experiment_state = _experiment_state_for_candidate(candidate)
+    records = deepcopy(experiment_state["_test_turn_execution_records"])
+    canonical_state = deepcopy(experiment_state)
+    canonical_state.pop("_test_turn_execution_records")
+    first_request_id = canonical_state["turn_execution_request_ids"][0]
+    if readback_kind == "missing":
+        records.pop(first_request_id)
+    else:
+        records[first_request_id]["final_response"]["response_sha256"] = "0" * 64
+    monkeypatch.setattr(
+        "src.backend.services.experiment_run_service.get_experiment_run_state",
+        lambda _run_id: deepcopy(canonical_state),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.get_turn_execution_record_projection",
+        lambda *, request_id, namespace: (
+            deepcopy(records.get(request_id))
+            if namespace == "#V#alice@research_org"
+            else None
+        ),
+    )
+    writes_before = store.update_count
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="trial turn execution record does not match",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id=f"reject-{readback_kind}-trial-ter",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    assert store.update_count == writes_before
+
+
+def test_changed_source_blocks_disposition_before_candidate_write(
+    store: _MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _capture_from_discussion(
+        source={
+            "kind": "conversation",
+            "session_id": "session-alice",
+            "history_indices": [1],
+        }
+    )
+    experiment_state = _experiment_state_for_candidate(candidate)
+    _install_experiment_readback(monkeypatch, experiment_state)
+    store.chat_histories[("#V#alice", "session-alice")][1]["content"] = (
+        "The cited message changed after the experiment."
+    )
+    writes_before = store.update_count
+
+    with pytest.raises(
+        service.InvalidLearningCandidateData,
+        match="message evidence no longer matches",
+    ):
+        service.record_learning_candidate_disposition(
+            candidate["candidate_id"],
+            experiment_run_id=experiment_state["run_id"],
+            disposition_request_id="must-not-ratchet-stale-source",
+            actor_user_id="#V#alice",
+            organisation_concept_id="#V#research_org",
+        )
+
+    assert store.update_count == writes_before

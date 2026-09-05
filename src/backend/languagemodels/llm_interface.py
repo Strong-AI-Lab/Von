@@ -2213,7 +2213,7 @@ class OpenAIClient(LLMInterface):
         requested_model: Optional[str],
         target_model: str,
         llm_params_for_model: Dict[str, Any],
-    ) -> tuple[str, str, str, Dict[str, Any] | None]:
+    ) -> tuple[str, str | None, str, Dict[str, Any] | None]:
         conv = build_conversation(prompt, context)
         messages = to_openai_messages(conv)
         responses_params = openai_responses_kwargs_from_model_parameters(
@@ -2232,7 +2232,8 @@ class OpenAIClient(LLMInterface):
             )
             if _should_log_llm_io():
                 logger.debug("OpenAI Responses raw response: %s", response)
-            actual_model = getattr(response, "model", None) or target_model
+            provider_observed_model = getattr(response, "model", None)
+            effective_model = provider_observed_model or target_model
             content = _extract_openai_responses_text(response)
             if not content:
                 raise RuntimeError(
@@ -2240,20 +2241,25 @@ class OpenAIClient(LLMInterface):
                 )
             if (
                 requested_model is not None
-                and isinstance(actual_model, str)
-                and actual_model != target_model
+                and isinstance(effective_model, str)
+                and effective_model != target_model
             ):
                 logger.warning(
                     "Model mismatch - Requested: %s, Used: %s",
                     target_model,
-                    actual_model,
+                    effective_model,
                 )
                 warnings.warn(
-                    f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
+                    f"Model mismatch - Requested: {target_model}, Used: {effective_model}"
                 )
             return (
                 content,
-                str(actual_model),
+                (
+                    str(provider_observed_model)
+                    if isinstance(provider_observed_model, str)
+                    and provider_observed_model.strip()
+                    else None
+                ),
                 "responses",
                 self._openai_usage_mapping(getattr(response, "usage", None)),
             )
@@ -2273,11 +2279,12 @@ class OpenAIClient(LLMInterface):
         )
         if _should_log_llm_io():
             logger.debug("OpenAI raw response: %s", response)
-        actual_model = getattr(response, "model", None) or target_model
+        provider_observed_model = getattr(response, "model", None)
+        effective_model = provider_observed_model or target_model
         if (
             requested_model is not None
-            and isinstance(actual_model, str)
-            and actual_model != target_model
+            and isinstance(effective_model, str)
+            and effective_model != target_model
         ):
 
             def _tier(name: str) -> int:
@@ -2288,19 +2295,24 @@ class OpenAIClient(LLMInterface):
                     return 3
                 return 1
 
-            if _tier(actual_model) < _tier(target_model):
+            if _tier(effective_model) < _tier(target_model):
                 logger.warning(
                     "Model mismatch - Requested: %s, Used: %s",
                     target_model,
-                    actual_model,
+                    effective_model,
                 )
                 warnings.warn(
-                    f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
+                    f"Model mismatch - Requested: {target_model}, Used: {effective_model}"
                 )
-        content = self.validate_model_response(response, str(actual_model))
+        content = self.validate_model_response(response, str(effective_model))
         return (
             content,
-            str(actual_model),
+            (
+                str(provider_observed_model)
+                if isinstance(provider_observed_model, str)
+                and provider_observed_model.strip()
+                else None
+            ),
             "chat_completions",
             self._openai_usage_mapping(getattr(response, "usage", None)),
         )
@@ -2331,13 +2343,15 @@ class OpenAIClient(LLMInterface):
         primary_failure_kind: str | None = None
         try:
             try:
-                content, actual_model, api_surface, usage = self._generate_once(
-                    request_client=self.client,
-                    prompt=prompt,
-                    context=context,
-                    requested_model=model,
-                    target_model=target_model,
-                    llm_params_for_model=llm_params_for_model,
+                content, provider_observed_model, api_surface, usage = (
+                    self._generate_once(
+                        request_client=self.client,
+                        prompt=prompt,
+                        context=context,
+                        requested_model=model,
+                        target_model=target_model,
+                        llm_params_for_model=llm_params_for_model,
+                    )
                 )
             except Exception as primary_exc:
                 primary_failure_kind = classify_api_key_failover_exception(
@@ -2352,20 +2366,24 @@ class OpenAIClient(LLMInterface):
                     "OpenAI primary credential rejected (%s); retrying once with backup credential.",
                     primary_failure_kind,
                 )
-                content, actual_model, api_surface, usage = self._generate_once(
-                    request_client=backup_client,
-                    prompt=prompt,
-                    context=context,
-                    requested_model=model,
-                    target_model=target_model,
-                    llm_params_for_model=llm_params_for_model,
+                content, provider_observed_model, api_surface, usage = (
+                    self._generate_once(
+                        request_client=backup_client,
+                        prompt=prompt,
+                        context=context,
+                        requested_model=model,
+                        target_model=target_model,
+                        llm_params_for_model=llm_params_for_model,
+                    )
                 )
                 credential_source = "backup"
 
+            effective_model = provider_observed_model or target_model
             transport_metadata: Dict[str, Any] = {
                 "provider": "openai",
                 "requested_model": target_model,
-                "effective_model": actual_model,
+                "effective_model": effective_model,
+                "provider_observed_model": provider_observed_model,
                 "effective_api_surface": api_surface,
                 "credential_source": credential_source,
                 "credential_failover_used": credential_source == "backup",
@@ -2378,14 +2396,15 @@ class OpenAIClient(LLMInterface):
                 "provider": "openai",
                 "api_surface": api_surface,
                 "requested_model": target_model,
-                "effective_model": actual_model,
+                "effective_model": effective_model,
+                "provider_observed_model": provider_observed_model,
                 "usage": usage,
                 "transport_metadata": transport_metadata,
             }
             if _should_log_llm_io():
                 logger.debug(
                     "[LLM RESPONSE][OpenAI][%s]: %s",
-                    actual_model,
+                    effective_model,
                     _truncate_for_log(content),
                 )
             _observe_request_advisory(

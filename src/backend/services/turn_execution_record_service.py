@@ -7,6 +7,7 @@ assistant turn and a query-optimised Mongo projection collection
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -91,6 +92,57 @@ TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
 REQUESTED_EVIDENCE_LINEAGE_SCHEMA_VERSION = "requested_evidence_lineage.v1"
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
+_LEARNING_ADVICE_EXPOSURE_AUX_TYPE = "adaptive_turn_learning_advice_exposure"
+_LEARNING_ADVICE_EXPOSURE_FIELDS: tuple[str, ...] = (
+    "schema_version",
+    "consumer",
+    "decision_kind",
+    "arm",
+    "source",
+    "status",
+    "reason_code",
+    "experiment_id",
+    "case_id",
+    "candidate_id",
+    "candidate_revision",
+    "candidate_evaluation_disposition",
+    "candidate_body_sha256",
+    "candidate_revision_identity_sha256",
+    "candidate_source_locator_sha256",
+    "target_concept_ids",
+    "projection_sha256",
+    "preparation_status",
+    "projection_status",
+    "exposure_status",
+    "projected_item_count",
+    "projected_body_chars",
+    "model_visible",
+    "model_visible_call_ids",
+    "completed_model_visible_call_ids",
+    "visibility_indeterminate_call_ids",
+    "dispositions",
+    "terminal_status",
+    "model_call_count",
+    "selected_capability_names",
+    "selected_capability_count",
+    "projection_duration_ms",
+)
+_LEARNING_ADVICE_EXPOSURE_LIMIT = 4
+_LEARNING_ADVICE_DISPOSITION_FIELDS: tuple[str, ...] = (
+    "schema_version",
+    "candidate_id",
+    "candidate_revision",
+    "candidate_body_sha256",
+    "candidate_revision_identity_sha256",
+    "candidate_source_locator_sha256",
+    "projection_sha256",
+    "reporting_model_call_id",
+    "capability_call_id",
+    "capability_name",
+    "disposition",
+)
+_LEARNING_ADVICE_DISPOSITION_LIMIT = 64
+
 _EXECUTION_SURFACE_CONTEXT_FIELDS: tuple[str, ...] = (
     "error",
     "error_code",
@@ -111,6 +163,58 @@ _FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS = frozenset(
 _FINAL_ANSWER_SYNTHESIS_PROMPT_MARKERS = (
     "# prompt_turn_execution_narrate_completion_report",
 )
+
+
+def extract_learning_advice_exposures(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Return compact, body-free advice exposure lineage for canonical TERs.
+
+    The adaptive turn keeps the candidate body in its transient model context.
+    Turn records need enough exact identity and call-level evidence to audit an
+    experiment, but must not become a second copy of actor- or organisation-
+    scoped learned text.  An explicit allow-list also prevents later additions
+    to the auxiliary event from silently widening persisted visibility.
+    """
+
+    if not isinstance(aux_llm_calls, Sequence) or isinstance(
+        aux_llm_calls, (str, bytes, bytearray)
+    ):
+        return []
+
+    projections: list[dict[str, Any]] = []
+    for entry in aux_llm_calls:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("type") != _LEARNING_ADVICE_EXPOSURE_AUX_TYPE:
+            continue
+        projection: dict[str, Any] = {}
+        for field in _LEARNING_ADVICE_EXPOSURE_FIELDS:
+            if field not in entry:
+                continue
+            if field != "dispositions":
+                projection[field] = copy.deepcopy(entry[field])
+                continue
+            raw_dispositions = entry[field]
+            if not isinstance(raw_dispositions, Sequence) or isinstance(
+                raw_dispositions, (str, bytes, bytearray)
+            ):
+                continue
+            projection[field] = [
+                {
+                    key: copy.deepcopy(item[key])
+                    for key in _LEARNING_ADVICE_DISPOSITION_FIELDS
+                    if key in item
+                }
+                for item in raw_dispositions[:_LEARNING_ADVICE_DISPOSITION_LIMIT]
+                if isinstance(item, Mapping)
+            ]
+        if projection:
+            projections.append(projection)
+        if len(projections) >= _LEARNING_ADVICE_EXPOSURE_LIMIT:
+            break
+    return projections
+
 
 _TURN_EXECUTION_INDEXES_READY = False
 _TURN_EXECUTION_INDEXES_LOCK = threading.Lock()
@@ -1267,6 +1371,27 @@ def _hash_payload(value: Any) -> str | None:
     except Exception:
         return None
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def turn_execution_record_evidence_sha256(record: Mapping[str, Any]) -> str:
+    """Hash one canonical TER while excluding datastore-only insertion metadata."""
+
+    if not isinstance(record, Mapping):
+        raise ValueError("turn execution record must be an object")
+    payload = copy.deepcopy(dict(record))
+    payload.pop("_id", None)
+    payload.pop("inserted_at", None)
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("turn execution record evidence must contain JSON values") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _payload_char_count(value: Any) -> int | None:
@@ -6695,9 +6820,9 @@ def _normalise_representation_decision_policy(raw: Any) -> dict[str, bool]:
     return policy
 
 
-def _load_representation_domain_profiles_from_vontology() -> (
-    tuple[list[dict[str, Any]], dict[str, Any]]
-):
+def _load_representation_domain_profiles_from_vontology() -> tuple[
+    list[dict[str, Any]], dict[str, Any]
+]:
     requested_profile_concept_ids = list(canonical_representation_profile_concept_ids())
     loaded_profiles, diagnostics = (
         load_representation_contract_profiles_from_concept_ids(
@@ -8174,10 +8299,7 @@ def _turn_projection_effect_mode(
         return status
     if (
         invocation.get("reconciliation_status") == "canonically_verified"
-        and (
-            _safe_str(invocation.get("tool"))
-            or _safe_str(invocation.get("method"))
-        )
+        and (_safe_str(invocation.get("tool")) or _safe_str(invocation.get("method")))
         == "create_concepts"
     ):
         return "created"
@@ -8270,9 +8392,7 @@ def _turn_projection_referent_candidates(
         display_label = _turn_projection_bounded_text(
             raw_candidate.get("display_label")
         )
-        source_kind = _turn_projection_bounded_text(
-            raw_candidate.get("source_kind")
-        )
+        source_kind = _turn_projection_bounded_text(raw_candidate.get("source_kind"))
         if not stable_id or not display_label or not source_kind:
             continue
         candidate = {
@@ -8319,8 +8439,7 @@ def _turn_projection_partial_label_match_is_material(
     if label_token_count == 1:
         return matched_token_count == 1
     return bool(
-        matched_token_count >= 2
-        and matched_token_count * 2 >= label_token_count
+        matched_token_count >= 2 and matched_token_count * 2 >= label_token_count
     )
 
 
@@ -8567,9 +8686,7 @@ def build_conversation_situation_turn_projection(
                             source_family.casefold(),
                             resource_identity.casefold(),
                         )
-                        previous_scope = resource_scopes_by_key.get(
-                            resource_scope_key
-                        )
+                        previous_scope = resource_scopes_by_key.get(resource_scope_key)
                         resource_scope = {
                             **(previous_scope or {}),
                             **resource_scope,
@@ -8616,9 +8733,7 @@ def build_conversation_situation_turn_projection(
                         ("evidence_id", evidence_payload.get("evidence_id")),
                         ("tool_concept_id", tool_concept_id),
                     ):
-                        cleaned_value = _turn_projection_bounded_text(
-                            provenance_value
-                        )
+                        cleaned_value = _turn_projection_bounded_text(provenance_value)
                         if cleaned_value:
                             provenance[provenance_field] = cleaned_value
                     candidate: dict[str, Any] = {
@@ -8641,9 +8756,7 @@ def build_conversation_situation_turn_projection(
                         candidate["resource_scope"] = resource_scope
                     if actor_scope_ref:
                         candidate["actor_scope_ref"] = actor_scope_ref
-                    previous_candidate = referent_candidates_by_key.get(
-                        candidate_key
-                    )
+                    previous_candidate = referent_candidates_by_key.get(candidate_key)
                     previous_resource_scope = (
                         previous_candidate.get("resource_scope")
                         if isinstance(previous_candidate, Mapping)
@@ -8735,9 +8848,7 @@ def build_conversation_situation_turn_projection(
                 effect["effect_id"] = effect_id
             if isinstance(changed, bool):
                 effect["changed"] = changed
-            reconciliation_status = _safe_str(
-                invocation.get("reconciliation_status")
-            )
+            reconciliation_status = _safe_str(invocation.get("reconciliation_status"))
             if reconciliation_status:
                 effect["reconciliation_status"] = reconciliation_status
             semantic_outcome = _safe_str(invocation.get("semantic_outcome"))
@@ -9594,8 +9705,7 @@ def _build_tool_authored_mutation_effects(
         if rows
         and all(
             (_safe_str(row.get("status")) or "error") == "ok"
-            and (_safe_str(row.get("effect_status")) or "").lower()
-            == "succeeded"
+            and (_safe_str(row.get("effect_status")) or "").lower() == "succeeded"
             for row in rows
         )
     }
@@ -10560,7 +10670,9 @@ def _derive_completion_gate(
         "completion_outcome": (
             "success"
             if decision == "completed"
-            else "inconclusive" if decision == "partial" else "failure"
+            else "inconclusive"
+            if decision == "partial"
+            else "failure"
         ),
     }
     return {
@@ -10615,9 +10727,7 @@ def build_turn_execution_record(
 
     applied_prompt_snapshot_payload = normalise_applied_prompt_snapshot(
         applied_prompt_snapshot,
-        expected_user_concept_id=(
-            _safe_str(user_id) or resolved_actor_concept_id
-        ),
+        expected_user_concept_id=(_safe_str(user_id) or resolved_actor_concept_id),
         expected_namespace=_safe_str(namespace),
     )
     workflow_discovery_normalised = _extract_workflow_discovery(workflow_discovery)
@@ -11577,11 +11687,26 @@ def build_turn_execution_record(
         for entry in (llm_calls or ())
         if isinstance(entry, Mapping)
     ]
-    aux_llm_call_log = [
-        {str(key): value for key, value in entry.items() if isinstance(key, str)}
-        for entry in (aux_llm_calls or ())
-        if isinstance(entry, Mapping)
-    ]
+    aux_llm_call_log: list[dict[str, Any]] = []
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("type") == _LEARNING_ADVICE_EXPOSURE_AUX_TYPE:
+            # Persist exactly the same explicit body-free view in the general
+            # auxiliary log. Otherwise that broad log would bypass the compact
+            # projection and a future producer field could silently copy
+            # private candidate text into the TER.
+            projected = extract_learning_advice_exposures([entry])
+            aux_llm_call_log.append(
+                {
+                    "type": _LEARNING_ADVICE_EXPOSURE_AUX_TYPE,
+                    **(projected[0] if projected else {}),
+                }
+            )
+            continue
+        aux_llm_call_log.append(
+            {str(key): value for key, value in entry.items() if isinstance(key, str)}
+        )
 
     decision_attribution_diagnostics = {
         "workflow_discovery": workflow_routing_diagnostics.get("discovery"),
@@ -12888,9 +13013,7 @@ def reconcile_durable_workflow_terminal_effect(
                 # Keep that distinction on the existing conversation observation
                 # so a late UI update cannot turn an operational completion into
                 # a semantic-success claim.
-                "domain_postcondition_status": (
-                    "not_established_by_workflow_terminal"
-                ),
+                "domain_postcondition_status": ("not_established_by_workflow_terminal"),
                 "changed": changed,
                 "outcome_finality": "canonical_durable_terminal",
                 "final_state": canonical_receipt.get("final_state"),

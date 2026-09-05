@@ -10,12 +10,18 @@
 - **Owner:** Von maintainers
 - **Current implementation and retrospective:**
   [JVNAUTOSCI-2719](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2719)
-- **Last reviewed:** 4 September 2026
+  and [JVNAUTOSCI-2720](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2720)
+- **Last reviewed:** 5 September 2026 UTC
 - **State or evidence as of:** Public Von
   `dc84fc1a850890b32b89bdc8b3e0da96cfce4264`, a read-only audit of the
   configured Vontology and workflow-instance store on 4 September 2026, and
-  the repository subtraction and non-active candidate implementation described
-  below; no deployment, live candidate, or live Vontology mutation is claimed
+  the repository subtraction, non-active candidate implementation, and isolated
+  experiment support described below. JVNAUTOSCI-2720 completed a bounded
+  negative learning cycle: source-derived candidate, later trial exposure,
+  canonical contrary evidence, rejection and subsequent verified absence.
+  The [experiment dossier](jvnautosci_2720_learning_cycle_2026-09-05.md)
+  records the exact result and earlier inconclusive comparisons. No positive
+  advice efficacy, production activation or deployment is claimed
 - **Supersedes / superseded by:** Nothing. This proposal owns represented-advice
   semantics, applicability, retrieval/projection, lifecycle, and retraction;
   the broader
@@ -93,17 +99,27 @@ The Phase 0 design decision is therefore:
 5. remove or collapse the mechanism if the same content works as well in an
    existing prompt or workflow profile.
 
-The bounded Phase 0.5 implementation now makes the positive half of that
-decision concrete. It adds an agent-reachable `learning_candidate.v1` artefact
-and `capture`, `get`, `list`, and `revise` operations for a material lesson
-linked to an actor- or organisation-visible conversation or episode critique.
+The bounded Phase 0.5 implementation makes the positive half of that decision
+concrete. It adds an agent-reachable `learning_candidate.v1` artefact and
+`capture`, `get`, `list`, and `revise` operations for a material lesson linked
+to an actor- or organisation-visible conversation or episode critique.
 An unmaterialised chat-history session is the narrower actor-owned source form.
 The body is a canonical `hasDescription` relation; compact structured metadata
 keeps source, contributors, target, audience, beneficiaries, purpose,
-visibility, revision history, and Von authorship distinct. Its lifecycle is
-fixed to `non_active`.
-The implementation performs no automatic capture, prompt injection, candidate
-selection, evaluation, activation, or promotion.
+visibility, revision history, and Von authorship distinct. Its lifecycle remains
+`non_active`; experimental evidence may give the exact revision an inspectable
+`undecided`, `retained`, `rejected`, or `retracted` disposition without making
+it active. Ordinary turns perform no automatic capture, selection, evaluation,
+activation, or promotion.
+
+JVNAUTOSCI-2720 adds an explicitly invoked, fixture-bound Phase 1 experiment.
+It can ask Von to form one candidate from a frozen source discussion, compare
+the exact bytes as an optional sidecar against a truly withheld control at the
+existing direct-adaptive model call, evaluate the trials blindly, and record a
+canonically recomputed disposition. This is experiment-local projection, not
+an ordinary runtime advice consumer. Candidate formation is learned policy
+memory; behavioural efficacy and the value of represented retrieval remain
+separate empirical claims.
 
 If the first local consumer and a second independently motivated consumer both
 earn reuse, they may share this lifecycle vocabulary while retaining
@@ -116,14 +132,12 @@ The shared vocabulary makes maintenance interoperable; it does not create one
 central maintainer or decide the underlying tool, workflow, acquisition,
 message, task, or role question for every consumer.
 
-The broader identity decomposition, projection name, active lifecycle terms,
-maintenance worker, and later role application below are candidate mechanisms,
-not a package to implement together. The first non-active capture pilot is now
-selected and implemented. Its explicit MCP reads can expose candidate text to a
-calling model for deliberation, but no active binding or configured
-decision-point projection is selected. When a retained candidate identifies a
-real consumer decision, the first comparison should use source-native
-identities and the minimum explicit active locator; later machinery is adopted
+The broader identity decomposition, active lifecycle terms, maintenance worker,
+and later role application below remain candidate mechanisms, not a package to
+implement together. Explicit MCP reads can expose candidate text to a calling
+model for deliberation. The Phase 1 runner can also supply one exact candidate
+revision to an isolated decision call, but no ordinary active binding, resolver,
+or configured production projection is selected. Later machinery is adopted
 only when the preceding evidence independently earns it.
 
 This design is intended to keep useful conjectures revisable for longer. It
@@ -1260,17 +1274,109 @@ view are not part of this first slice.
 
 ### Phase 1 — isolated comparison
 
-- Discover and curate a candidate from retained critique memory, successful
-  practice, or attributed discussion in an isolated experiment scope; extend
-  the existing candidate representation only where the selected case needs it.
-- Compare advice-off with the same candidate in the best simple sidecar first.
-  Add represented Arm C only for a represented-layer claim, and add a
-  revision/retraction crossover only when lifecycle value is part of that
-  claim.
-- Treat failures as evidence about content, retrieval, model capability, or
-  the surrounding route before proposing a mechanism.
+JVNAUTOSCI-2720 now implements the first bounded comparison without adding an
+ordinary consumer. Its fixed source is an actor-visible discussion about a
+channel-neutral message request that tried only Gmail, received a typed local
+failure, and overlooked an authorised Von-message capability that had worked
+earlier. Candidate formation sees only the selected source messages, their
+attested Turn Execution Records, and allowed semantic references—not Jira's
+draft wording, cases, evaluator, rubric, or result rule.
+
+The body-free manifest and deterministic plan bind one exact candidate revision,
+source, actor, organisation, namespace, evaluator, rubric, runtime, gateway,
+model configuration, six model-held-out cases, two repeats, and 24 balanced
+trials. OpenAI `gpt-5.6-luna` is fixed for acting and blinded evaluation. Arm A
+withholds both bytes and presence cues; Arm B supplies the exact bytes through a
+labelled optional sidecar in the same existing model call. A pre-provider
+observer rejects candidate or source contamination and records only request
+digests and sizes. Trial TERs retain normal actor-scoped bounded evidence needed
+to audit the work product; experiment observations and operator output do not
+duplicate raw message content.
+
+This is a stripped, read-only direct-adaptive replay with represented workflow
+discovery and represented tool-result projection disabled equally in both arms.
+It is not byte-equivalent to the ordinary production path. The comparison can
+screen candidate-content efficacy, not represented-layer value. A B win stops
+with `represented_arm_c_required`; Arm C, an ordinary consumer, and autonomous
+activation remain unimplemented, and the Phase 1 projection contract rejects a
+caller-constructed Arm C. A B non-win may reject the exact revision only from
+independently recomputed evidence, followed by trigger and neighbouring turn
+read-back proving the rejected bytes were absent. Drift, contamination,
+unblindable evidence, or incomplete pairs remain inconclusive.
+
+#### Phase 1 interim checkpoint — 4 September 2026
+
+The implementation formed and canonically read back one source-grounded,
+Von-authored candidate while keeping it non-active. Its contributor,
+organisation, semantic target, audience, beneficiary, and purpose remained
+distinct; capture did not create an authority grant or an ordinary consumer.
+The frozen comparison then exercised 24 balanced A/B trials, persisted every
+trial Turn Execution Record, completed every blind evaluation, and read back
+the bound manifest, plan, result, and request identities. An earlier run that
+lost persistence during an Atlas DNS failure was explicitly aborted and remains
+inspectable as an operational non-result.
+
+The first complete comparison was nevertheless inconclusive: only 2 of 12
+pairs were comparable. Eleven evaluations rejected themselves because the
+model-visible input schema identified an advice experiment, while the
+represented evaluator treated any experiment identity as a blinding failure;
+five more lacked the exact bounded read-evidence content that the acting model
+had seen. A single, predeclared harness repair replaced the treatment-labelled
+input schema with a neutral one and supplied that exact bounded content only to
+the evaluator. It did not change the candidate, cases, acting or evaluator
+model, randomisation, rubric, decision thresholds, or stored observations, and
+tests prove the private evaluator projection is not persisted.
+
+The one justified replacement run again completed all 24 trials, TER writes,
+and evaluations with valid execution integrity. It was still inconclusive:
+only 1 of 12 pairs was comparable and 18 evaluations returned
+`evaluator_blinding_failed` (8 in A and 10 in B). The remaining fixed evaluator
+and rubric metadata expose common study context, not treatment assignment, but
+the represented evaluator's broader wording currently rejects that context.
+This demonstrates evaluator self-invalidation, not observed treatment leakage.
+It is not evidence that the
+candidate helps, does not help, or should be activated or rejected.
+
+The stopping rule was applied at that checkpoint. No Arm C, ordinary consumer,
+activation, rejection or prospective later-use claim followed from those runs.
+The candidate remained non-active and undecided. Their records remain immutable,
+rather than being rescored; JVNAUTOSCI-2720 preserves the dated protocol
+registrations, run identifiers and interim delivery decision.
+
+#### Completed negative learning cycle — 5 September 2026 UTC
+
+Following the user's resumed completion request, the separately registered
+evidence-projection correction produced 24 valid trials and evaluations, with
+all 12 pairs comparable. B and A each passed 5 of 8 applicable trials; B did not
+meet the unchanged use criteria. The canonical service recorded rejection
+against the exact source-derived revision, preserving its text and provenance.
+Two subsequent turns verified absence across 15 actual model requests and
+canonical execution-record read-back. The
+[frozen dossier](jvnautosci_2720_learning_cycle_2026-09-05.md) gives individual
+outcomes, identities, repairs, costs and limitations. This establishes the
+bounded negative learning loop, not a performance improvement or an active
+represented advice layer. Current publication status remains in 2720.
 
 ### Phase 2 — one bounded consumer
+
+The resumed JVNAUTOSCI-2720 delivery, following review of
+[role convergence](role_learning_convergence.md) and JVNAUTOSCI-2721, corrects
+the demonstrated evaluator contradiction under a separately versioned prompt.
+Its pre-registration and live decision remain in 2720. Candidate formation,
+later behavioural benefit, and longitudinal role competence are distinct
+claims: 2721 consumes a fitting delivered result without expanding this
+experiment's acceptance criteria. The previous inconclusive runs remain
+historical evidence.
+
+The resumed harness preserves complete already-bounded model-visible tool
+outputs, including catalogue context and structured evidence matches; a second
+field whitelist had silently discarded facts needed to check grounding. The
+semantic evaluator judges task outcomes while the existing harness owns model
+identity, exposure and contamination checks. Four synthetic live calibration
+cases distinguished grounded output, fabrication, a correctly reported external
+failure and focused clarification. This is evaluator calibration, not evidence
+of learned benefit. Frozen versions and subsequent findings are recorded in
+2720 rather than retrospectively changing earlier results.
 
 Only if the comparison favours represented advice:
 
@@ -1401,6 +1507,12 @@ the exact effect. Add independence, churn, emergency withdrawal, or resource-
 budget tests only where the proposed autonomous path introduces those concrete
 dependencies or failure modes.
 
+For JVNAUTOSCI-2720 specifically, a B non-win blocks Arm C and may support a
+scientifically useful negative learning result only when canonical disposition
+and later no-exposure read-back agree. A B win is permission to test represented
+Arm C and prospective use, not permission to activate. An incomplete,
+contaminated, drifted, or unblindable run supports neither conclusion.
+
 ### 12.2 Stop-ship conditions
 
 Stop ship for the affected consumer when observed evidence or the implemented
@@ -1500,30 +1612,40 @@ A future pilot should resolve, rather than assume:
 ## 14. Current handoff decision
 
 The architectural decision is **retain federated convergence of soft guidance
-as a falsifiable hypothesis**. The completed Phase 0 and Phase 0.5 repository
-decision is **subtract the dormant workflow-experience machinery, preserve the
-viable evidence substrate, add one source-grounded and explicitly non-active
-candidate capture/read/revision path, and do not implement an unearned active
-binding, configured decision-point projection, resolver, A/B/C framework,
-maintenance worker, or general advice layer**.
+as a falsifiable hypothesis**. Phase 0 subtracted the dormant
+workflow-experience route; Phase 0.5 retained its useful evidence substrate and
+added source-grounded, explicitly non-active candidate capture, inspection, and
+revision. Phase 1 now has an isolated, task-specific A/B implementation under
+JVNAUTOSCI-2720. It can form one Von-authored candidate from the frozen source,
+project the exact bytes only in experimental Arm B, persist and blindly evaluate
+24 read-only trials, recompute the result, update the exact revision's
+disposition when warranted, and read the terminal state back. Live execution
+proved source-derived formation, exact experimental exposure, outcome
+evaluation, evidence-derived rejection and subsequent verified absence. The
+[completed dossier](jvnautosci_2720_learning_cycle_2026-09-05.md) records the
+negative result and preserves earlier inconclusive runs. The candidate remains
+non-active, with its text retained and use disposition rejected. No positive
+advice efficacy or broader role competence is claimed.
 
-No first configured decision-point projection is selected. Workflow Studio is
-already a human inspection consumer for retained structured suggestions. The
-new MCP surface is an explicitly selected human/AI deliberation and maintenance
-consumer for non-active candidates: a calling model may read candidate text,
-but the result is not an active binding or automatic advice projection. It is
-implemented and tested in the repository, but has not been deployed and no live
-candidate is claimed. Reopen active runtime projection only when an attributed
-candidate and concrete use point motivate the advice-off versus simple
-versioned-sidecar comparison.
-Represented retrieval
-must then preserve any measured end-to-end benefit and improve a real
-maintenance outcome over the same selected bytes, with any claimed
-retraction/no-advice state read back exactly and no material authority,
-latency, evidence-independence, or negative-transfer regression. A shared
+No ordinary configured advice consumer, active binding, resolver, represented
+Arm C, maintenance worker, or general advice layer is selected. Workflow Studio
+remains a human inspection consumer for retained structured suggestions, and
+the MCP surface remains a human/AI deliberation and maintenance consumer for
+non-active candidates. The experiment-only sidecar does not turn either surface
+into automatic production projection.
+
+The exercised candidate did not earn Arm C. Later work can inspect or revise
+the retained lesson in light of new experience without treating this bounded
+negative result as a universal prohibition. JVNAUTOSCI-2721 owns the separate
+longitudinal role pilot and reuses fitting delivered surfaces. A future positive
+content comparison would still require represented Arm C and prospective later
+use before claiming represented retrieval or production value. Represented C
+must preserve the measured content
+benefit and improve a named maintenance, scope, provenance, inspection,
+revision, or retract-to-empty outcome over the same versioned sidecar. A shared
 protocol still requires a second independently motivated consumer and measured
-removal of duplicated lifecycle/scope work without imported semantics.
-Autonomous activation remains a later, separately earned decision.
+removal of duplicated lifecycle or scope work. Autonomous activation remains a
+later, separately earned decision.
 
 Related guidance:
 
