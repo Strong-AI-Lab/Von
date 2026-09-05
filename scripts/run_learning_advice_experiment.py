@@ -1082,47 +1082,19 @@ def _tool_trace(tool_invocations: Any) -> list[dict[str, Any]]:
 def _bounded_tool_results(tool_invocations: Any) -> list[dict[str, Any]]:
     """Project model-visible outcome evidence for evaluation, not persistence.
 
-    In particular, ``turn_read_evidence`` returns the slice the acting model
-    saw in ``content``.  Omitting that field leaves the blind evaluator unable
-    to distinguish a grounded answer from a fabrication even though the
-    acting model had the evidence.  The projection remains bounded and is not
-    copied into the persisted experiment observation.
+    Preserve the exact output already bounded by the acting runtime. Evidence
+    reads may return structured matches, not just ``content``; catalogue output
+    also supplies legitimate account and scope context. A second field whitelist
+    or silent string truncation makes grounded answers look unsupported. These
+    private outputs are not copied into persisted experiment observations.
     """
 
     results: list[dict[str, Any]] = []
-    for invocation in _mapping_sequence(tool_invocations)[:40]:
+    for invocation in _mapping_sequence(tool_invocations):
         evidence = invocation.get("evidence")
         if not isinstance(evidence, Mapping):
             evidence = invocation.get("effective_payload")
         evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
-        bounded_evidence: dict[str, Any] = {}
-        for field in (
-            "success",
-            "status",
-            "error_code",
-            "failure_code",
-            "message",
-            "summary",
-            "preview",
-            "preview_truncated",
-            "sha256",
-            "source_sha256",
-            "content",
-            "content_format",
-            "selected_value_kind",
-            "returned_chars",
-            "total_chars",
-            "has_more",
-            "count",
-            "total",
-        ):
-            value = evidence.get(field)
-            if isinstance(value, str):
-                bounded_evidence[field] = value[:4_000]
-            elif isinstance(value, (int, float, bool)) and not (
-                isinstance(value, float) and not math.isfinite(value)
-            ):
-                bounded_evidence[field] = value
         results.append(
             {
                 "tool_name": _text(
@@ -1139,7 +1111,7 @@ def _bounded_tool_results(tool_invocations: Any) -> list[dict[str, Any]]:
                     max_chars=100,
                 )
                 or None,
-                "evidence": bounded_evidence,
+                "evidence": copy.deepcopy(evidence),
             }
         )
     return results

@@ -77,7 +77,9 @@ _REPLAY_VISIBLE_TEXTS = [
 _MODEL_VISIBLE_RESULT_SLICE = "private evaluator-only model-visible result slice"
 
 
-def test_blind_input_identity_is_neutral_and_evaluator_keeps_model_visible_slice() -> None:
+def test_blind_input_identity_is_neutral_and_evaluator_keeps_model_visible_slice() -> (
+    None
+):
     assert (
         LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION
         == "capability_choice_trial_evaluation_input.v1"
@@ -122,6 +124,28 @@ def test_blind_input_identity_is_neutral_and_evaluator_keeps_model_visible_slice
             },
         }
     ]
+
+
+@pytest.mark.parametrize("content_format", ["query_matches", "field_matches", "json"])
+def test_evaluator_projection_preserves_complete_actor_visible_evidence(content_format):
+    payload = {
+        "content_format": content_format,
+        "matches": [{"pointer": "/messages/0", "value": {"body": "Observed message"}}],
+        "content": "x" * 8_000,
+        "returned_chars": 8_000,
+        "conclusion": {"global_conclusion_supported": False},
+        "capabilities": [{"account": "authorised@example.test"}],
+        "failure_fact": {"code": "dependency_unavailable", "recoverable": True},
+    }
+    invocations = [
+        {"tool": "turn_read_evidence", "status": "ok", "effective_payload": payload}
+        for _ in range(41)
+    ]
+    projected = _bounded_tool_results(invocations)
+    assert len(projected) == 41
+    assert all(item["evidence"] == payload for item in projected)
+    projected[0]["evidence"]["matches"][0]["value"]["body"] = "Changed projection"
+    assert payload["matches"][0]["value"]["body"] == "Observed message"
 
 
 def _canonical_sha256(value: Any) -> str:

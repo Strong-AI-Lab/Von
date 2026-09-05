@@ -1331,7 +1331,8 @@ only 1 of 12 pairs was comparable and 18 evaluations returned
 `evaluator_blinding_failed` (8 in A and 10 in B). The remaining fixed evaluator
 and rubric metadata expose common study context, not treatment assignment, but
 the represented evaluator's broader wording currently rejects that context.
-This is demonstrated evaluator contamination. It is not evidence that the
+This demonstrates evaluator self-invalidation, not observed treatment leakage.
+It is not evidence that the
 candidate helps, does not help, or should be activated or rejected.
 
 The stopping rule therefore applies. No Arm C, ordinary consumer, activation,
@@ -1360,6 +1361,16 @@ later behavioural benefit, and longitudinal role competence are distinct
 claims: 2721 consumes a fitting delivered result without expanding this
 experiment's acceptance criteria. The previous inconclusive runs remain
 historical evidence.
+
+The resumed harness preserves complete already-bounded model-visible tool
+outputs, including catalogue context and structured evidence matches; a second
+field whitelist had silently discarded facts needed to check grounding. The
+semantic evaluator judges task outcomes while the existing harness owns model
+identity, exposure and contamination checks. Four synthetic live calibration
+cases distinguished grounded output, fabrication, a correctly reported external
+failure and focused clarification. This is evaluator calibration, not evidence
+of learned benefit. Frozen versions and subsequent findings are recorded in
+2720 rather than retrospectively changing earlier results.
 
 Only if the comparison favours represented advice:
 

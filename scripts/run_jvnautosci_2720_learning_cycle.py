@@ -53,9 +53,9 @@ FIXED_ORGANISATION_CONCEPT_ID = "#V#the_lu_witbrock_household"
 FIXED_NAMESPACE = "#V#michael_witbrock@the_lu_witbrock_household"
 FIXED_SOURCE_SESSION_ID = "1eec920c-0be0-4fcf-a045-6733768c8667"
 FIXED_FIXTURE_SHA256 = (
-    "a3a9b5ec98cd11559b209f00e77e660245628b539d8d09b8fa88050d4a561862"
+    "167baca3a827beb312dd65c37dbb5af255584cc348b9ff199c1e88e984b67e78"
 )
-# The v2 evaluator correction leaves source-only candidate formation unchanged.
+# Evaluator corrections leave source-only candidate formation unchanged.
 # Reuse its original receipt, with exact source/prompt/body checks below, rather
 # than regenerating a candidate after observing comparison outcomes.
 _ORIGINAL_FORMATION_FIXTURE_SHA256 = (
@@ -3377,7 +3377,8 @@ class LiveCycleBackend:
             or diagnostic.get("schema_version")
             != FORMATION_TER_DIAGNOSTIC_SCHEMA_VERSION
             or diagnostic.get("jira_issue") != "JVNAUTOSCI-2720"
-            or formation_fixture_sha256 not in {
+            or formation_fixture_sha256
+            not in {
                 fixture_sha256,
                 _ORIGINAL_FORMATION_FIXTURE_SHA256,
             }
