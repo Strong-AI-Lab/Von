@@ -40515,7 +40515,14 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_fetch_concept_content_input_schema(),
             output_schema=None,
             category="read",
-            description="Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
+            description=(
+                "Fetch concept content (content_html + md_content + raw_doc). "
+                "The default reconstruct_md=true includes stored text relations "
+                "when no legacy markdown exists. reconstruct_md=false inspects "
+                "legacy markdown/metadata only; empty md_content in that mode "
+                "does not mean the concept has no stored text. Use "
+                "get_text_relations for direct labelled text rows."
+            ),
         ),
         MethodDefinition(
             name="add_names",

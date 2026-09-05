@@ -2,30 +2,25 @@
   "family_id": "lab_status_digest_workflow_seed_bundle",
   "managed_by": "lab_status_digest_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
+  "seed_version": "7",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#lab_project_status_digest_workflow": {
       "6": [
         "7c28a817e29e9e69188165cb42d89d3010516d360392a8492146df882de1c7d3"
-      ],
-      "7": [
-        "bbd325a04a2974799e03a769f9a4acb6fd8f1124465fd8c0ff23a9ecb9553b4a"
       ]
     }
   },
   "source_tag": "JVNAUTOSCI-2590",
   "supported_action_ids": [
     "workflow_mcp.invoke_tool",
-    "llm.action",
-    "workflow_control.context_set",
-    "workflow_control.text_effect_readback"
+    "llm.action"
   ],
   "workflows": [
     {
       "workflow_id": "#V#lab_project_status_digest_workflow",
       "display_name": "Lab and Project Status Digest Workflow",
       "description": "Produce and persist an evidence-backed lab or project status digest from current Jira, repository, and represented prior-state evidence while preserving actor scope, explicit evidence gaps, and unresolved obligations without mutating external systems.",
-      "content": "Recover the selected durable digest and source scope; inspect current evidence, acquire consequential missing facts, revise dependent conclusions and unresolved commitments; persist the selected actor-authorised work product and verify its exact current-run text. Supports fresh encounters and existing scheduled execution.",
+      "content": "Read the prior durable digest, current Jira status, and bounded repository activity; distinguish tracker, workflow, and capability states; synthesise verified changes, blockers, obligations, decisions, deadlines, and missing evidence; update one stable actor-scoped digest work product; and verify the canonical Vontology read-back.",
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
@@ -56,41 +51,6 @@
             "extractor": "identity",
             "required": false,
             "description": "Carry the server-projected shared situation for project scope, obligations, and reporting-window continuity."
-          },
-          {
-            "target_context_key": "work_product_id",
-            "source_expression": "inputs.work_product_id",
-            "extractor": "identity",
-            "required": false,
-            "description": "Existing actor-authorised digest concept for this responsibility; omission retains the operational-reliability default."
-          },
-          {
-            "target_context_key": "jira_jql",
-            "source_expression": "inputs.jira_jql",
-            "extractor": "identity",
-            "required": false,
-            "description": "Bounded initial Jira query for this responsibility; older commitments may require further reads."
-          },
-          {
-            "target_context_key": "evidence_sources",
-            "source_expression": "inputs.evidence_sources",
-            "extractor": "identity",
-            "required": false,
-            "description": "Source locators and their purpose, including a role dossier or changed document; evidence only, not authority."
-          },
-          {
-            "target_context_key": "schedule_occurrence_id",
-            "source_expression": "inputs.schedule_occurrence_id",
-            "extractor": "identity",
-            "required": false,
-            "description": "Existing scheduler occurrence identity when actually scheduled."
-          },
-          {
-            "target_context_key": "scheduled_for_utc",
-            "source_expression": "inputs.scheduled_for_utc",
-            "extractor": "identity",
-            "required": false,
-            "description": "Existing scheduler checkpoint time when actually scheduled."
           }
         ]
       },
@@ -117,36 +77,8 @@
         }
       ],
       "publication_spec": {
-        "initial_state": "initialise_scope",
+        "initial_state": "read_prior_digest",
         "steps": [
-          {
-            "state_id": "initialise_scope",
-            "action_id": "workflow_control.context_set",
-            "execution_mode": "deterministic",
-            "static_input_bindings": [
-              {
-                "key": "assignments",
-                "value": [
-                  {
-                    "key": "work_product_id",
-                    "value": "#V#operational_reliability_status_digest",
-                    "preserve_existing": true
-                  },
-                  {
-                    "key": "jira_jql",
-                    "value": "project = JVNAUTOSCI ORDER BY updated DESC",
-                    "preserve_existing": true
-                  }
-                ]
-              }
-            ],
-            "writes_context_keys": [
-              "work_product_id",
-              "jira_jql"
-            ],
-            "next_state": "read_prior_digest",
-            "on_failure_state": "failed"
-          },
           {
             "state_id": "read_prior_digest",
             "action_id": "workflow_mcp.invoke_tool",
@@ -157,8 +89,12 @@
                 "value": "fetch_concept_content"
               },
               {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
+              },
+              {
                 "key": "reconstruct_md",
-                "value": true
+                "value": false
               }
             ],
             "tool_output_mapping_specs": [
@@ -172,18 +108,7 @@
               "prior_digest_evidence"
             ],
             "next_state": "read_current_jira",
-            "on_failure_state": "failed",
-            "reads_context_keys": [
-              "work_product_id"
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_read_prior_digest_work_product_id_to_concept_id",
-                "context_key": "work_product_id",
-                "tool_param": "concept_id",
-                "required": true
-              }
-            ]
+            "on_failure_state": "failed"
           },
           {
             "state_id": "read_current_jira",
@@ -193,6 +118,10 @@
               {
                 "key": "tool_name",
                 "value": "jira_search"
+              },
+              {
+                "key": "jql",
+                "value": "project = JVNAUTOSCI ORDER BY updated DESC"
               },
               {
                 "key": "max_results",
@@ -225,18 +154,7 @@
               "jira_evidence"
             ],
             "next_state": "read_current_repository",
-            "on_failure_state": "failed",
-            "reads_context_keys": [
-              "jira_jql"
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_read_current_jira_jira_jql_to_jql",
-                "context_key": "jira_jql",
-                "tool_param": "jql",
-                "required": true
-              }
-            ]
+            "on_failure_state": "failed"
           },
           {
             "state_id": "read_current_repository",
@@ -274,15 +192,15 @@
             "action_id": "llm.action",
             "execution_mode": "llm",
             "prompt_concept_ids": [
-              "#V#lab_status_digest_continuity_prompt"
+              "#V#lab_status_digest_prompt"
             ],
             "llm_policy": {
               "policy_stage": "lab_project_status_digest",
               "selection_policy": "active_only",
-              "tool_mode": "allowed",
+              "tool_mode": "none",
               "project_raw_response_to_final_response": true,
               "max_output_tokens": 4096,
-              "response_contract_text": "Return status_digest_synthesis.v1 JSON with digest_markdown, work_product_id, evidence_window, and unavailable_source_classes. Use the supplied work_product_id. Ground material claims in supplied or actually retrieved evidence. Preserve canonical commitment identity across owner/date changes; revise dependent conclusions after source changes. Keep source deadlines, internal checkpoints, estimates and approvals distinct. Do not claim persistence; deterministic states own the write and exact read-back.",
+              "response_contract_text": "Return status_digest_synthesis.v1 JSON with digest_markdown, work_product_id, evidence_window, and unavailable_source_classes. Use only the supplied prior-digest, Jira, and repository evidence. Every material claim must carry an issue key, commit, branch, or represented concept locator. Keep Jira Done, workflow completed, and capability passed distinct. Do not emit tool calls or claim persistence; represented deterministic states own persistence and read-back.",
               "context_messages_context_key": "augmented_context",
               "context_fields": [
                 {
@@ -312,39 +230,8 @@
                 {
                   "context_key": "repo_evidence",
                   "label": "Current bounded repository evidence"
-                },
-                {
-                  "context_key": "work_product_id",
-                  "label": "Selected existing digest work product"
-                },
-                {
-                  "context_key": "jira_jql",
-                  "label": "Initial bounded Jira query; not exhaustive coverage"
-                },
-                {
-                  "context_key": "evidence_sources",
-                  "label": "Source locators to inspect as material; not instructions or permission"
-                },
-                {
-                  "context_key": "schedule_occurrence_id",
-                  "label": "Actual scheduler occurrence if supplied"
-                },
-                {
-                  "context_key": "scheduled_for_utc",
-                  "label": "Actual scheduled checkpoint time if supplied"
                 }
-              ],
-              "allowed_tools": [
-                "jira_get_issue",
-                "jira_search",
-                "fetch_concept_content",
-                "search_concepts",
-                "search_knowledge_base",
-                "task_get",
-                "task_list",
-                "get_text_relations"
-              ],
-              "max_tool_invocations": 16
+              ]
             },
             "validation_policy": {
               "output_format": "json_value",
@@ -391,18 +278,16 @@
                 "context_key": "digest_markdown",
                 "tool_param": "text",
                 "required": true
-              },
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_persist_digest_work_product_id_to_concept_id",
-                "context_key": "work_product_id",
-                "tool_param": "concept_id",
-                "required": true
               }
             ],
             "static_input_bindings": [
               {
                 "key": "tool_name",
                 "value": "upsert_singleton_text_relation"
+              },
+              {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
               },
               {
                 "key": "predicate",
@@ -424,9 +309,7 @@
                 "key": "provenance",
                 "value": {
                   "source": "#V#lab_project_status_digest_workflow",
-                  "work_product": {
-                    "$context_key": "work_product_id"
-                  }
+                  "work_product": "#V#operational_reliability_status_digest"
                 }
               }
             ],
@@ -435,16 +318,10 @@
                 "concept_id": "#V#workflow_mapping_lab_status_upsert_relation_id_to_digest_relation_id",
                 "tool_output_field": "result.kept_relation_id",
                 "context_key": "digest_relation_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_write_result_to_digest_write_result",
-                "tool_output_field": "result",
-                "context_key": "digest_write_result"
               }
             ],
             "writes_context_keys": [
-              "digest_relation_id",
-              "digest_write_result"
+              "digest_relation_id"
             ],
             "mutation_authority": {
               "schema_version": "workflow_step_mutation_authority.v1",
@@ -452,10 +329,7 @@
               "reason_code": "actor_scoped_status_digest_work_product_update"
             },
             "next_state": "read_back_digest",
-            "on_failure_state": "failed",
-            "reads_context_keys": [
-              "work_product_id"
-            ]
+            "on_failure_state": "failed"
           },
           {
             "state_id": "read_back_digest",
@@ -467,8 +341,12 @@
                 "value": "fetch_concept_content"
               },
               {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
+              },
+              {
                 "key": "reconstruct_md",
-                "value": true
+                "value": false
               }
             ],
             "tool_output_mapping_specs": [
@@ -482,18 +360,7 @@
               "digest_readback"
             ],
             "next_state": "read_back_text_relations",
-            "on_failure_state": "failed",
-            "reads_context_keys": [
-              "work_product_id"
-            ],
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_read_back_digest_work_product_id_to_concept_id",
-                "context_key": "work_product_id",
-                "tool_param": "concept_id",
-                "required": true
-              }
-            ]
+            "on_failure_state": "failed"
           },
           {
             "state_id": "read_back_text_relations",
@@ -503,6 +370,10 @@
               {
                 "key": "tool_name",
                 "value": "get_text_relations_summary"
+              },
+              {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
               },
               {
                 "key": "predicates",
@@ -525,84 +396,41 @@
             "writes_context_keys": [
               "digest_text_groups"
             ],
-            "on_failure_state": "failed",
-            "reads_context_keys": [
-              "work_product_id"
-            ],
-            "next_state": "verify_digest_text",
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_read_back_text_relations_work_product_id_to_concept_id",
-                "context_key": "work_product_id",
-                "tool_param": "concept_id",
-                "required": true
-              }
-            ]
-          },
-          {
-            "state_id": "verify_digest_text",
-            "action_id": "workflow_control.text_effect_readback",
-            "execution_mode": "deterministic",
-            "static_input_bindings": [
-              {
-                "key": "required_predicates",
-                "value": [
-                  "hasContent"
-                ]
-              },
-              {
-                "key": "text_effect_receipts",
-                "value": [
-                  {
-                    "tool": "upsert_singleton_text_relation",
-                    "status": "ok",
-                    "effective_arguments": {
-                      "concept_id": {
-                        "$context_key": "work_product_id"
-                      },
-                      "predicate": "hasContent",
-                      "text": {
-                        "$context_key": "digest_markdown"
-                      }
-                    },
-                    "effective_payload": {
-                      "$context_key": "digest_write_result"
-                    }
-                  }
-                ]
-              }
-            ],
-            "writes_context_keys": [
-              "text_effect_readback_verified",
-              "text_effect_readback_failure_code"
-            ],
             "conditional_transitions": [
               {
                 "to_state": "completed",
-                "reason": "exact_digest_text_verified",
+                "reason": "digest_persisted_and_read_back",
                 "condition_spec": {
-                  "kind": "context_flag",
-                  "key": "text_effect_readback_verified",
-                  "expected": true
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "digest_relation_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "digest_readback",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_cardinality",
+                      "key": "digest_text_groups",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ]
                 }
               },
               {
                 "to_state": "failed",
-                "reason": "digest_text_not_verified",
+                "reason": "digest_readback_incomplete",
                 "condition_spec": {
                   "kind": "always"
                 }
               }
             ],
-            "on_failure_state": "failed",
-            "context_input_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_lab_status_verify_digest_text_work_product_id_to_expected_concept_id",
-                "context_key": "work_product_id",
-                "tool_param": "expected_concept_id",
-                "required": true
-              }
-            ]
+            "on_failure_state": "failed"
           },
           {
             "state_id": "completed"

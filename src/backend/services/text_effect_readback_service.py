@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .text_value_service import get_texts_for_concept
+from .text_relation_predicate_validation_service import predicate_concept_id_for_storage
 
 TEXT_EFFECT_READBACK_SCHEMA_VERSION = "workflow_text_effect_readback.v1"
 MAX_TEXT_EFFECT_RECORDS = 80
@@ -59,7 +60,9 @@ def _successful_text_effect(record: Mapping[str, Any]) -> dict[str, str] | None:
     )
     if payload_concept_id and payload_concept_id != concept_id:
         return None
-    if payload_predicate and payload_predicate != predicate:
+    if payload_predicate and (
+        predicate_concept_id_for_storage(payload_predicate) or payload_predicate
+    ) != (predicate_concept_id_for_storage(predicate) or predicate):
         return None
     effect_status = _clean_text(payload.get("effect_status"))
     if effect_status and effect_status != "succeeded":
@@ -98,9 +101,7 @@ def verify_text_effect_readback(
         required = list(
             dict.fromkeys(
                 predicate
-                for predicate in (
-                    _clean_text(item) for item in required_predicates
-                )
+                for predicate in (_clean_text(item) for item in required_predicates)
                 if predicate
             )
         )
@@ -117,9 +118,7 @@ def verify_text_effect_readback(
         optional = list(
             dict.fromkeys(
                 predicate
-                for predicate in (
-                    _clean_text(item) for item in optional_predicates
-                )
+                for predicate in (_clean_text(item) for item in optional_predicates)
                 if predicate and predicate not in required
             )
         )
@@ -149,7 +148,9 @@ def verify_text_effect_readback(
     concept_ids = list(dict.fromkeys(effect["concept_id"] for effect in effects))
     if failure_code is None:
         if expected_id:
-            effects = [effect for effect in effects if effect["concept_id"] == expected_id]
+            effects = [
+                effect for effect in effects if effect["concept_id"] == expected_id
+            ]
             concept_id = expected_id
         elif len(concept_ids) == 1:
             concept_id = concept_ids[0]
