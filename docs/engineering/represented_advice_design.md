@@ -1352,6 +1352,15 @@ additional runs in this tranche would not supply independent evidence.
 
 ### Phase 2 — one bounded consumer
 
+The resumed JVNAUTOSCI-2720 delivery, following review of
+[role convergence](role_learning_convergence.md) and JVNAUTOSCI-2721, corrects
+the demonstrated evaluator contradiction under a separately versioned prompt.
+Its pre-registration and live decision remain in 2720. Candidate formation,
+later behavioural benefit, and longitudinal role competence are distinct
+claims: 2721 consumes a fitting delivered result without expanding this
+experiment's acceptance criteria. The previous inconclusive runs remain
+historical evidence.
+
 Only if the comparison favours represented advice:
 
 - add one optional batched active-advice projection at the winning decision

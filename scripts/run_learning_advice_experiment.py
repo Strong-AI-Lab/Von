@@ -1289,7 +1289,6 @@ def _redact_candidate_identity(value: Any, *, candidate_ref: Mapping[str, Any]) 
 def _blind_evaluation_input(
     *,
     trial: Mapping[str, Any],
-    evaluation_id: str,
     response_text: str,
     terminal_status: str,
     tool_trace: Sequence[Mapping[str, Any]],
@@ -1298,7 +1297,6 @@ def _blind_evaluation_input(
 ) -> dict[str, Any]:
     payload = {
         "schema_version": LEARNING_ADVICE_BLIND_EVALUATION_INPUT_SCHEMA_VERSION,
-        "evaluation_id": evaluation_id,
         "prompt": trial["prompt"],
         "response": response_text,
         "terminal_status": terminal_status,
@@ -2900,7 +2898,6 @@ def _run_learning_advice_experiment_implementation(
             if learning_text_echo_path is not None
             else _blind_evaluation_input(
                 trial=trial,
-                evaluation_id=evaluation_id,
                 response_text=response_text,
                 terminal_status=terminal_status,
                 tool_trace=tool_trace,

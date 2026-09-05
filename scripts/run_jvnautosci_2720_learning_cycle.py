@@ -53,6 +53,12 @@ FIXED_ORGANISATION_CONCEPT_ID = "#V#the_lu_witbrock_household"
 FIXED_NAMESPACE = "#V#michael_witbrock@the_lu_witbrock_household"
 FIXED_SOURCE_SESSION_ID = "1eec920c-0be0-4fcf-a045-6733768c8667"
 FIXED_FIXTURE_SHA256 = (
+    "a3a9b5ec98cd11559b209f00e77e660245628b539d8d09b8fa88050d4a561862"
+)
+# The v2 evaluator correction leaves source-only candidate formation unchanged.
+# Reuse its original receipt, with exact source/prompt/body checks below, rather
+# than regenerating a candidate after observing comparison outcomes.
+_ORIGINAL_FORMATION_FIXTURE_SHA256 = (
     "19c5010e97ef034b68f623986fc0729ea20f4690dfddf17ab763e0e6ef4952ca"
 )
 FORMATION_SCHEMA_VERSION = "jvnautosci_2720_candidate_formation.v1"
@@ -3342,9 +3348,10 @@ class LiveCycleBackend:
             "model_call_receipt",
         }
         model_receipt = diagnostic.get("model_call_receipt")
+        formation_fixture_sha256 = diagnostic.get("fixture_sha256")
         expected_prompt_text = (
             f"[{_FORMATION_PROMPT_LABEL}; private source omitted; "
-            f"fixture_sha256={fixture_sha256}]"
+            f"fixture_sha256={formation_fixture_sha256}]"
         )
         expected_response_text = (
             "[candidate formation result; semantic body omitted; "
@@ -3370,7 +3377,10 @@ class LiveCycleBackend:
             or diagnostic.get("schema_version")
             != FORMATION_TER_DIAGNOSTIC_SCHEMA_VERSION
             or diagnostic.get("jira_issue") != "JVNAUTOSCI-2720"
-            or diagnostic.get("fixture_sha256") != fixture_sha256
+            or formation_fixture_sha256 not in {
+                fixture_sha256,
+                _ORIGINAL_FORMATION_FIXTURE_SHA256,
+            }
             or diagnostic.get("source_session_id") != FIXED_SOURCE_SESSION_ID
             or diagnostic.get("source_evidence") != source_evidence
             or diagnostic.get("source_evidence_sha256") != source_evidence_sha256
@@ -3398,7 +3408,7 @@ class LiveCycleBackend:
             "turn_execution_record_sha256": turn_execution_record_evidence_sha256(
                 record
             ),
-            "fixture_sha256": fixture_sha256,
+            "fixture_sha256": formation_fixture_sha256,
             "source_evidence_sha256": source_evidence_sha256,
             "source_only_prompt_sha256": source_only_prompt_sha256,
             "candidate_body_sha256": candidate.get("body_sha256"),

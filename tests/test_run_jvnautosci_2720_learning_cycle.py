@@ -1417,6 +1417,29 @@ def test_formation_result_contract_rejects_patch_like_or_oversized_output() -> N
         )
 
 
+@pytest.mark.parametrize("alter_source_prompt", [False, True])
+def test_protocol_revision_reuses_original_formation_without_reinduction(
+    alter_source_prompt: bool,
+) -> None:
+    fixture = load_fixture()
+    backend = _FakeBackend(fixture, existing_candidate=True)
+    record = backend.formation_records["existing-formation-request"]
+    original_digest = learning_cycle._ORIGINAL_FORMATION_FIXTURE_SHA256
+    record["aux_llm_calls"][0]["fixture_sha256"] = original_digest
+    record["prompt"]["sha256"] = _text_sha256(
+        "[JVNAUTOSCI-2720 source-only candidate formation; private source "
+        f"omitted; fixture_sha256={original_digest}]"
+    )
+    if alter_source_prompt:
+        record["aux_llm_calls"][0]["source_only_prompt_sha256"] = "0" * 64
+        with pytest.raises(LearningCycleError, match="source-only formation"):
+            execute_cycle(fixture, backend)
+    else:
+        result = execute_cycle(fixture, backend)
+        assert result["formation"]["outcome"] == "existing_candidate_reused"
+        assert not backend.formation_prompts
+
+
 def test_reused_candidate_requires_its_exact_formation_ter() -> None:
     fixture = load_fixture()
     backend = _FakeBackend(fixture, existing_candidate=True)

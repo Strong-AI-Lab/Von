@@ -798,6 +798,7 @@ def test_runner_executes_persists_blindly_evaluates_and_pairs_all_24_trials() ->
     assert len(harness.ter_records) == 24
     assert len(harness.ter_persist_calls) == 24
     assert len(harness.evaluator_inputs) == 24
+    assert all("evaluation_id" not in item for item in harness.evaluator_inputs)
     assert all(
         any(
             item["evidence"].get("content") == _MODEL_VISIBLE_RESULT_SLICE
