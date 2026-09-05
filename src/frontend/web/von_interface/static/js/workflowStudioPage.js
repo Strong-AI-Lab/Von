@@ -1440,7 +1440,13 @@ async function runScheduleCommand(action, button) {
   renderAll();
   try {
     let receipt;
-    if (action === 'toggle-schedule') {
+    if (action === 'reload-schedules') {
+      const schedules = await fetchJson(`/api/workflows/schedules?workflow_id=${encodeURIComponent(workflowId)}`);
+      if (workflowId !== state.selectedWorkflowId) return;
+      state.workflowDetail.operations.schedules = schedules;
+      setStatusBanner('Schedules reloaded from canonical state.', 'success');
+      return;
+    } else if (action === 'toggle-schedule') {
       receipt = await fetchJson(`/api/workflows/schedules/${encodeURIComponent(button.dataset.scheduleId)}/enabled`, {
         method: 'PUT', body: JSON.stringify({ enabled: button.dataset.enabled === 'true' })
       });
@@ -1456,7 +1462,12 @@ async function runScheduleCommand(action, button) {
     }
     if (workflowId !== state.selectedWorkflowId) return;
     state.scheduleReceipt = receipt;
-    if (!receipt.preview) await loadWorkflowDetail(workflowId);
+    if (!receipt.preview) {
+      const schedules = state.workflowDetail.operations.schedules;
+      const items = asArray(schedules.items).filter(item => item.schedule_id !== receipt.schedule_id);
+      items.push(receipt);
+      state.workflowDetail.operations.schedules = { ...schedules, items, count: items.length };
+    }
     setStatusBanner(receipt.preview ? 'Inputs checked; next occurrence previewed.' : 'Schedule state saved and read back.', 'success');
   } catch (error) {
     if (workflowId === state.selectedWorkflowId) setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Schedule command could not be confirmed.', 'error');
@@ -1482,10 +1493,8 @@ function handleCanvasClick(event) {
   const workflowAction = event.target.closest('[data-action]');
   if (!workflowAction) return;
   const action = cleanText(workflowAction.dataset.action);
-  if (['preview-schedule', 'create-schedule', 'toggle-schedule'].includes(action)) {
+  if (['preview-schedule', 'create-schedule', 'toggle-schedule', 'reload-schedules'].includes(action)) {
     void runScheduleCommand(action, workflowAction);
-  } else if (action === 'reload-schedules') {
-    void loadWorkflowDetail(state.selectedWorkflowId);
   } else if (action === 'suggest-description') {
     void requestDescriptionProposal();
   } else if (action === 'reset-draft') {

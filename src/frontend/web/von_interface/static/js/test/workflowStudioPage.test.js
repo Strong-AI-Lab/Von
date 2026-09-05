@@ -138,6 +138,7 @@ describe('actor schedule operations', () => {
         if (firstCreate) { firstCreate = false; throw new TypeError('Failed to fetch'); }
         return reply({ ...schedule, success: true, idempotent_replay: true });
       }
+      if (String(url).startsWith('/api/workflows/schedules?')) return reply({ items: schedule ? [schedule] : [], count: schedule ? 1 : 0 });
       if (String(url).endsWith('/enabled')) {
         schedule.enabled = JSON.parse(options.body).enabled;
         return reply({ ...schedule, success: true });
@@ -164,6 +165,7 @@ describe('actor schedule operations', () => {
       await flush();
       expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Paused');
       expect(document.querySelector('[data-action="toggle-schedule"]').textContent).toBe('Resume');
+      expect(global.fetch.mock.calls.filter(([url]) => String(url).startsWith('/api/workflow-studio/workflows/'))).toHaveLength(1);
       document.querySelector('[data-workflow-id="#V#other_workflow"]').click();
       await flush();
       expect(document.querySelector('[data-action="create-schedule"]')).toBeNull();
