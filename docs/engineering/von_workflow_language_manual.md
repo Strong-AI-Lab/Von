@@ -1337,6 +1337,38 @@ namespace service. Legacy slash-form inputs may still be accepted on read/query
 surfaces or normalised at write boundaries for compatibility, but new
 authoritative workflow launches must not emit fresh `user/org` namespaces.
 
+Ordinary conversations expose actor-owned schedule creation and pause/resume;
+permanent deletion and manual triggering remain operator surfaces. Chat derives
+owner, organisation, namespace, conversation and request identity from trusted
+turn context. Workflow Studio's Operations tab uses the same command service
+through `POST /api/workflows/schedules`, `/schedules/preview`, and
+`PUT /api/workflows/schedules/<id>/enabled`. A preview validates the executable
+definition and required launch inputs without creating a schedule.
+
+Creation returns the canonical schedule, definition identity at creation,
+normalised cadence, next occurrence, inputs, owner, `changed` and
+`idempotent_replay`. A stable caller key (the current turn by default in chat)
+and identical actor/definition/cadence/inputs reuse one schedule. Studio retains
+its caller key across a failed response and retry. Schedule creation does not
+prove execution: the existing scheduler must supply a due instance and that
+instance's outcome must be checked. Each occurrence revalidates the current
+workflow through the existing submission path.
+
+Intervals first run after one interval. One-time dates normalise to UTC;
+timezone-less legacy dates mean UTC, and past dates are immediately due. Cron
+preserves the existing scheduler dialect: five fields, UTC, weekday 0=Monday,
+and both day-of-month and weekday constraints apply. The preview uses those
+same semantics and rejects an invalid or unrealised next-year cadence. This is
+not a change to POSIX cron semantics for existing schedules.
+
+New schedules remain unavailable to readers and the scheduler until all their
+properties are initialised. Their `actor_owned` origin is distinct from
+`workflow_release` schedules managed by publication and `legacy_unmanaged`
+records. Reconciliation of release `schedule_specs` replaces only its own
+release schedules; it cannot adopt or disable actor-owned or unmarked records.
+Current delivery evidence and remaining consumers are tracked in
+[JVNAUTOSCI-2698](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2698).
+
 Awaited durable execution contract:
 
 - `workflow_execute` MUST use the canonical verified submission pathway and MUST NOT introduce a parallel launch bypass.

@@ -106,3 +106,78 @@ describe('workflowStudioPage helpers', () => {
     expect(editors.schedule_specs).toBe('');
   });
 });
+
+
+describe('actor schedule operations', () => {
+  const flush = async () => { for (let i = 0; i < 60; i += 1) await Promise.resolve(); };
+  test('creates, reuses a retry key, pauses and reloads a canonical schedule', async () => {
+    const api = require('../apiService.js');
+    jest.spyOn(api, 'ensureUniqueWindowSessionId').mockResolvedValue(undefined);
+    document.body.innerHTML = `
+      <div id="workflowStudioCatalogue"></div>
+      <div id="workflowStudioCanvas"></div>
+      <div id="workflowStudioStatusBanner"></div>
+      <button class="workflow-studio-view-tab" data-view="operations">Operations</button>`;
+    let schedule = null;
+    let firstCreate = true;
+    let resolveOther;
+    const creations = [];
+    global.fetch = jest.fn(async (url, options = {}) => {
+      const reply = data => ({ ok: true, json: async () => data });
+      if (String(url).startsWith('/api/workflow-studio/catalogue')) return reply({ items: [{ workflow_id: '#V#schedule_ui_test', is_executable: true }, { workflow_id: '#V#other_workflow', is_executable: true }] });
+      if (String(url).endsWith(encodeURIComponent('#V#other_workflow'))) return new Promise(resolve => {
+        resolveOther = () => resolve(reply({ summary: { is_executable: true }, operations: { schedules: { items: [] } } }));
+      });
+      if (String(url).startsWith('/api/workflow-studio/workflows/')) return reply({
+        summary: { is_executable: true }, operations: { schedules: { items: schedule ? [schedule] : [] } }
+      });
+      if (url === '/api/workflows/schedules') {
+        creations.push(JSON.parse(options.body));
+        // Save before losing the response, as an ordinary network retry can.
+        schedule = { schedule_id: '#V#schedule_saved', workflow_id: '#V#schedule_ui_test', schedule_type: 'interval', origin: 'actor_owned', enabled: true, next_run_at: '2026-09-06T12:00:00Z' };
+        if (firstCreate) { firstCreate = false; throw new TypeError('Failed to fetch'); }
+        return reply({ ...schedule, success: true, idempotent_replay: true });
+      }
+      if (String(url).startsWith('/api/workflows/schedules?')) return reply({ items: schedule ? [schedule] : [], count: schedule ? 1 : 0 });
+      if (String(url).endsWith('/enabled')) {
+        schedule.enabled = JSON.parse(options.body).enabled;
+        return reply({ ...schedule, success: true });
+      }
+      return reply({});
+    });
+    try {
+      document.dispatchEvent(new Event('DOMContentLoaded'));
+      await flush();
+      document.querySelector('[data-view="operations"]').click();
+      document.querySelector('[data-action="create-schedule"]').click();
+      await flush();
+      expect(document.getElementById('workflowStudioStatusBanner').textContent).toContain('Failed to fetch');
+      document.querySelector('[data-action="create-schedule"]').click();
+      await flush();
+      expect(creations).toHaveLength(2);
+      expect(creations[0].idempotency_key).toBe(creations[1].idempotency_key);
+      expect(creations[0]).not.toHaveProperty('user_id');
+      expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Existing schedule reused');
+      document.querySelector('[data-action="toggle-schedule"]').click();
+      await flush();
+      expect(schedule.enabled).toBe(false);
+      document.querySelector('[data-action="reload-schedules"]').click();
+      await flush();
+      expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Paused');
+      expect(document.querySelector('[data-action="toggle-schedule"]').textContent).toBe('Resume');
+      expect(global.fetch.mock.calls.filter(([url]) => String(url).startsWith('/api/workflow-studio/workflows/'))).toHaveLength(1);
+      document.querySelector('[data-workflow-id="#V#other_workflow"]').click();
+      await flush();
+      expect(document.querySelector('[data-action="create-schedule"]')).toBeNull();
+      expect(document.querySelector('[data-action="toggle-schedule"]')).toBeNull();
+      document.querySelector('[data-workflow-id="#V#schedule_ui_test"]').click();
+      await flush();
+      resolveOther();
+      await flush();
+      expect(document.querySelector('[data-action="toggle-schedule"]').dataset.scheduleId).toBe('#V#schedule_saved');
+    } finally {
+      jest.restoreAllMocks();
+      delete global.fetch;
+    }
+  });
+});

@@ -2545,129 +2545,45 @@ def api_stream_workflow_instances():
 
 
 @workflows_bp.post("/api/workflows/schedules")
+@workflows_bp.post("/api/workflows/schedules/preview")
 def api_create_workflow_schedule():
-    """Create a new workflow schedule.
+    """Validate or create a schedule through the common actor command service."""
+    from ...services.workflow_schedule_service import (
+        ScheduleCommandError,
+        create_actor_schedule,
+        prepare_actor_schedule,
+        schedule_receipt,
+    )
 
-    Request body:
-    {
-        "workflow_id": "#V#example_workflow",
-        "user_id": "#V#user_123",
-        "org_id": "#V#org_456",
-        "namespace": "#V#user_123@org_456",
-        "schedule_type": "interval" | "cron" | "once",
-        "interval_seconds": 3600,  // for interval type
-        "cron_expression": "0 9 * * 1-5",  // for cron type
-        "run_at": "2026-02-04T10:00:00Z",  // for once type
-        "default_inputs": {"param1": "value1"},
-        "description": "Daily sync"
-    }
-    """
     data = request.get_json() or {}
-
-    workflow_id = data.get("workflow_id")
-    if not workflow_id:
-        return jsonify({"error": "workflow_id is required"}), 400
-
-    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+    actor_scope, actor_error = _resolve_http_workflow_actor_scope(
         claimed_user_id=data.get("user_id"),
         claimed_org_id=data.get("org_id"),
         claimed_namespace=data.get("namespace"),
     )
-    if actor_error_response is not None:
-        return actor_error_response
-    user_id = getattr(actor_scope, "user_concept_id", None)
-    org_id = getattr(actor_scope, "organisation_concept_id", None)
-    namespace = getattr(actor_scope, "namespace", None)
-    if not user_id or not namespace:
-        return (
-            jsonify(
-                {
-                    "error": "workflow_actor_authority_required",
-                    "error_code": "workflow_actor_authority_required",
-                }
-            ),
-            403,
-        )
-    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
-        return jsonify({"error": "workflow_not_found"}), 404
-    default_inputs = data.get("default_inputs", {})
-    description = data.get("description")
-
-    schedule_type_str = data.get("schedule_type", "interval")
+    if actor_error is not None:
+        return actor_error
     try:
-        schedule_type = ScheduleType(schedule_type_str.lower())
-    except ValueError:
-        return jsonify({"error": f"Invalid schedule_type: {schedule_type_str}"}), 400
-
-    schedule: WorkflowSchedule | None = None
-
-    if schedule_type == ScheduleType.INTERVAL:
-        interval_seconds = data.get("interval_seconds")
-        if not interval_seconds or not isinstance(interval_seconds, int):
-            return (
-                jsonify({"error": "interval_seconds is required for interval type"}),
-                400,
+        if request.path.endswith("/preview"):
+            return jsonify(
+                schedule_receipt(
+                    prepare_actor_schedule(data, actor_scope), preview=True
+                )
             )
-        schedule = WorkflowSchedule.create_interval(
-            workflow_id,
-            interval_seconds=interval_seconds,
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            default_inputs=default_inputs,
-            description=description,
-        )
-
-    elif schedule_type == ScheduleType.CRON:
-        cron_expression = data.get("cron_expression")
-        if not cron_expression:
-            return jsonify({"error": "cron_expression is required for cron type"}), 400
-        schedule = WorkflowSchedule.create_cron(
-            workflow_id,
-            cron_expression=cron_expression,
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            default_inputs=default_inputs,
-            description=description,
-        )
-
-    elif schedule_type == ScheduleType.ONCE:
-        run_at_str = data.get("run_at")
-        if not run_at_str:
-            return jsonify({"error": "run_at is required for once type"}), 400
-        try:
-            run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
-        except ValueError:
-            return jsonify({"error": "Invalid run_at datetime format"}), 400
-        schedule = WorkflowSchedule.create_once(
-            workflow_id,
-            run_at=run_at,
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            default_inputs=default_inputs,
-            description=description,
-        )
-
-    if schedule is None:
-        return jsonify({"error": "Failed to create schedule"}), 500
-
-    try:
-        manager = _get_instance_manager()
-        schedule_id = manager.create_schedule(schedule)
+        result = create_actor_schedule(_get_instance_manager(), data, actor_scope)
+        return jsonify(result), 201 if result["changed"] else 200
+    except ScheduleCommandError as exc:
         return (
             jsonify(
                 {
-                    "schedule_id": schedule_id,
-                    "schedule_type": schedule_type.value,
+                    "success": False,
+                    "error": exc.code,
+                    "error_code": exc.code,
+                    "detail": exc.detail,
                 }
             ),
-            201,
+            exc.status,
         )
-    except Exception as e:
-        logger.exception("Failed to create workflow schedule")
-        return jsonify({"error": str(e)}), 500
 
 
 @workflows_bp.get("/api/workflows/schedules")
@@ -2790,16 +2706,23 @@ def api_set_schedule_enabled(schedule_id: str):
             404,
         )
 
-    success = manager.set_schedule_enabled(schedule_id, enabled)
-    if success:
+    from ...services.workflow_schedule_service import (
+        ScheduleCommandError,
+        set_owned_schedule_enabled,
+    )
+
+    actor_scope, actor_error = _resolve_http_workflow_actor_scope()
+    if actor_error is not None:
+        return actor_error
+    try:
         return jsonify(
-            {
-                "schedule_id": schedule_id,
-                "enabled": enabled,
-            }
+            set_owned_schedule_enabled(manager, schedule_id, enabled, actor_scope)
         )
-    else:
-        return jsonify({"error": "update_failed"}), 500
+    except ScheduleCommandError as exc:
+        return (
+            jsonify({"success": False, "error": exc.code, "detail": exc.detail}),
+            exc.status,
+        )
 
 
 @workflows_bp.delete("/api/workflows/schedules/<schedule_id>")

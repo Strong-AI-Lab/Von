@@ -277,6 +277,9 @@ export function buildWorkflowLayout(definition) {
 }
 
 const state = {
+  scheduleForm: null,
+  scheduleReceipt: null,
+  scheduleBusy: false,
   catalogue: [],
   filteredCatalogue: [],
   selectedWorkflowId: '',
@@ -680,10 +683,26 @@ function renderOperationsView() {
     </div>
     <div class="workflow-studio-section">
       <h4>Schedules</h4>
+      ${state.workflowDetail?.summary?.is_executable ? `
+        <div class="workflow-studio-section" aria-label="Create an actor-owned schedule">
+          <label>Cadence <select data-schedule-field="schedule_type" aria-label="Schedule cadence">
+            ${['once', 'interval', 'cron'].map(value => `<option value="${value}" ${state.scheduleForm?.schedule_type === value ? 'selected' : ''}>${value}</option>`).join('')}
+          </select></label>
+          ${state.scheduleForm?.schedule_type === 'once' ? `<label>Run at (local time) <input type="datetime-local" aria-label="Run at local time" data-schedule-field="run_at" value="${escapeHtml(state.scheduleForm?.run_at || '')}"></label>` : ''}
+          ${state.scheduleForm?.schedule_type === 'interval' ? `<label>Interval in seconds <input type="number" min="1" step="1" aria-label="Interval in seconds" data-schedule-field="interval_seconds" value="${escapeHtml(state.scheduleForm?.interval_seconds || 3600)}"></label>` : ''}
+          ${state.scheduleForm?.schedule_type === 'cron' ? `<label>Cron (UTC; weekday 0=Monday) <input aria-label="Cron expression" data-schedule-field="cron_expression" value="${escapeHtml(state.scheduleForm?.cron_expression || '')}" placeholder="0 9 * * 0-4"></label>` : ''}
+          <label>Workflow inputs (JSON object)<textarea aria-label="Schedule workflow inputs" data-schedule-field="inputs" rows="5">${escapeHtml(state.scheduleForm?.inputs || '{}')}</textarea></label>
+          <button type="button" class="btn-mini" data-action="preview-schedule" ${state.scheduleBusy ? 'disabled' : ''}>Check inputs and preview</button>
+          <button type="button" class="btn-mini" data-action="create-schedule" ${state.scheduleBusy ? 'disabled' : ''}>Create schedule</button>
+          <button type="button" class="btn-mini" data-action="reload-schedules">Reload schedules</button>
+          ${state.scheduleReceipt ? `<div role="status">${escapeHtml(state.scheduleReceipt.preview ? 'Preview' : `Schedule ${state.scheduleReceipt.schedule_id}`)} · ${escapeHtml(state.scheduleReceipt.enabled ? 'Enabled' : 'Paused')} · Next: ${escapeHtml(state.scheduleReceipt.next_run_at ? `${new Date(state.scheduleReceipt.next_run_at).toLocaleString()} (local) / ${state.scheduleReceipt.next_run_at} (UTC)` : 'No further occurrence')}${state.scheduleReceipt.idempotent_replay ? ' · Existing schedule reused' : ''}</div>` : ''}
+        </div>` : ''}
       ${renderOperationsList(asArray(schedules.items), (item) => `
         <div class="workflow-studio-list-row">
-          <div><strong>${escapeHtml(item.schedule_type)}</strong></div>
+          <div><strong>${escapeHtml(item.schedule_type)}</strong> · ${escapeHtml(item.origin || 'legacy_unmanaged')} · ${escapeHtml(item.enabled ? 'Enabled' : 'Paused')}</div>
           <div>${escapeHtml(item.next_run_at || 'unscheduled')}</div>
+          <div>${escapeHtml(item.schedule_id)}</div>
+          ${item.origin === 'actor_owned' ? `<button type="button" class="btn-mini" data-action="toggle-schedule" data-schedule-id="${escapeHtml(item.schedule_id)}" data-enabled="${!item.enabled}" ${state.scheduleBusy ? 'disabled' : ''}>${item.enabled ? 'Pause' : 'Resume'}</button>` : ''}
         </div>
       `)}
     </div>
@@ -1095,10 +1114,17 @@ async function loadCatalogue({ selectFirst = false } = {}) {
 async function loadWorkflowDetail(workflowId) {
   const workflowIdClean = cleanText(workflowId);
   if (!workflowIdClean) return;
+  if (workflowIdClean !== state.selectedWorkflowId || !state.scheduleForm) {
+    state.workflowDetail = null;
+    state.scheduleForm = { schedule_type: 'interval', interval_seconds: 3600, inputs: '{}', idempotency_key: crypto.randomUUID() };
+    state.scheduleReceipt = null;
+  }
   state.selectedWorkflowId = workflowIdClean;
   setConnectionBadge('Loading', 'loading');
+  renderAll();
   try {
     const data = await fetchJson(`/api/workflow-studio/workflows/${encodeURIComponent(workflowIdClean)}`);
+    if (workflowIdClean !== state.selectedWorkflowId) return;
     state.workflowDetail = data;
     const draftSource = buildDraftSource(data);
     state.draftSpec = data.authoring?.available && draftSource.spec
@@ -1113,6 +1139,7 @@ async function loadWorkflowDetail(workflowId) {
     setStatusBanner('', 'info');
     setConnectionBadge('Ready', 'ready');
   } catch (error) {
+    if (workflowIdClean !== state.selectedWorkflowId) return;
     console.error('Workflow studio detail failed:', error);
     setConnectionBadge('Error', 'error');
     setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not load workflow detail.', 'error');
@@ -1406,6 +1433,50 @@ async function supersedePublication() {
   }
 }
 
+async function runScheduleCommand(action, button) {
+  if (state.scheduleBusy) return;
+  const workflowId = state.selectedWorkflowId;
+  state.scheduleBusy = true;
+  renderAll();
+  try {
+    let receipt;
+    if (action === 'reload-schedules') {
+      const schedules = await fetchJson(`/api/workflows/schedules?workflow_id=${encodeURIComponent(workflowId)}`);
+      if (workflowId !== state.selectedWorkflowId) return;
+      state.workflowDetail.operations.schedules = schedules;
+      setStatusBanner('Schedules reloaded from canonical state.', 'success');
+      return;
+    } else if (action === 'toggle-schedule') {
+      receipt = await fetchJson(`/api/workflows/schedules/${encodeURIComponent(button.dataset.scheduleId)}/enabled`, {
+        method: 'PUT', body: JSON.stringify({ enabled: button.dataset.enabled === 'true' })
+      });
+    } else {
+      const form = state.scheduleForm;
+      const inputs = JSON.parse(form.inputs || '{}');
+      if (!inputs || Array.isArray(inputs) || typeof inputs !== 'object') throw new Error('Workflow inputs must be a JSON object.');
+      const body = { workflow_id: workflowId, schedule_type: form.schedule_type, default_inputs: inputs, idempotency_key: form.idempotency_key };
+      if (form.schedule_type === 'interval') body.interval_seconds = Number(form.interval_seconds);
+      if (form.schedule_type === 'cron') body.cron_expression = form.cron_expression;
+      if (form.schedule_type === 'once') body.run_at = new Date(form.run_at).toISOString();
+      receipt = await fetchJson(`/api/workflows/schedules${action === 'preview-schedule' ? '/preview' : ''}`, { method: 'POST', body: JSON.stringify(body) });
+    }
+    if (workflowId !== state.selectedWorkflowId) return;
+    state.scheduleReceipt = receipt;
+    if (!receipt.preview) {
+      const schedules = state.workflowDetail.operations.schedules;
+      const items = asArray(schedules.items).filter(item => item.schedule_id !== receipt.schedule_id);
+      items.push(receipt);
+      state.workflowDetail.operations.schedules = { ...schedules, items, count: items.length };
+    }
+    setStatusBanner(receipt.preview ? 'Inputs checked; next occurrence previewed.' : 'Schedule state saved and read back.', 'success');
+  } catch (error) {
+    if (workflowId === state.selectedWorkflowId) setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Schedule command could not be confirmed.', 'error');
+  } finally {
+    state.scheduleBusy = false;
+    renderAll();
+  }
+}
+
 function handleCanvasClick(event) {
   const stepNode = event.target.closest('[data-step-id]');
   if (stepNode) {
@@ -1422,7 +1493,9 @@ function handleCanvasClick(event) {
   const workflowAction = event.target.closest('[data-action]');
   if (!workflowAction) return;
   const action = cleanText(workflowAction.dataset.action);
-  if (action === 'suggest-description') {
+  if (['preview-schedule', 'create-schedule', 'toggle-schedule', 'reload-schedules'].includes(action)) {
+    void runScheduleCommand(action, workflowAction);
+  } else if (action === 'suggest-description') {
     void requestDescriptionProposal();
   } else if (action === 'reset-draft') {
     const draftSource = buildDraftSource(state.workflowDetail);
@@ -1457,6 +1530,14 @@ function handleCanvasClick(event) {
 }
 
 function handleCanvasInput(event) {
+  const scheduleField = event.target.closest('[data-schedule-field]');
+  if (scheduleField && state.scheduleForm) {
+    state.scheduleForm[scheduleField.dataset.scheduleField] = scheduleField.value;
+    state.scheduleForm.idempotency_key = crypto.randomUUID();
+    state.scheduleReceipt = null;
+    if (scheduleField.dataset.scheduleField === 'schedule_type') renderAll();
+    return;
+  }
   const lifecycleField = event.target.closest('[data-lifecycle-field]');
   if (lifecycleField) {
     const field = cleanText(lifecycleField.dataset.lifecycleField);

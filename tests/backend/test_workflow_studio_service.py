@@ -400,6 +400,43 @@ def test_apply_workflow_authoring_spec_updates_existing_workflow_without_root_cr
     }
 
 
+def test_schedule_publication_preserves_actor_and_unmanaged_schedules(monkeypatch):
+    disabled = []
+    created = []
+    manager = SimpleNamespace(
+        list_schedules=lambda **kw: [
+            SimpleNamespace(
+                schedule_id="actor", workflow_id="#V#digest", origin="actor_owned"
+            ),
+            SimpleNamespace(schedule_id="legacy", workflow_id="#V#digest"),
+            SimpleNamespace(
+                schedule_id="release",
+                workflow_id="#V#digest",
+                origin="workflow_release",
+            ),
+        ],
+        set_schedule_enabled=lambda sid, enabled: disabled.append((sid, enabled))
+        or True,
+        create_schedule=lambda schedule: created.append(schedule)
+        or schedule.schedule_id,
+    )
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: manager)
+    result = mod._apply_workflow_policy_metadata(
+        workflow_id="#V#digest",
+        workflow_metadata={
+            "schedule_specs": [
+                {"schedule_type": "interval", "interval_seconds": 60, "enabled": False}
+            ]
+        },
+        policy_keys=["schedule_specs"],
+    )
+    assert disabled == [("release", False)]
+    assert result["disabled_schedule_ids"] == ["release"]
+    assert len(created) == 1
+    assert created[0].origin == "workflow_release"
+    assert created[0].enabled is False
+
+
 def test_apply_workflow_policy_metadata_persists_launch_and_required_effects(
     monkeypatch,
 ) -> None:
