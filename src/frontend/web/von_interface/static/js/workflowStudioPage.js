@@ -1115,13 +1115,16 @@ async function loadWorkflowDetail(workflowId) {
   const workflowIdClean = cleanText(workflowId);
   if (!workflowIdClean) return;
   if (workflowIdClean !== state.selectedWorkflowId || !state.scheduleForm) {
+    state.workflowDetail = null;
     state.scheduleForm = { schedule_type: 'interval', interval_seconds: 3600, inputs: '{}', idempotency_key: crypto.randomUUID() };
     state.scheduleReceipt = null;
   }
   state.selectedWorkflowId = workflowIdClean;
   setConnectionBadge('Loading', 'loading');
+  renderAll();
   try {
     const data = await fetchJson(`/api/workflow-studio/workflows/${encodeURIComponent(workflowIdClean)}`);
+    if (workflowIdClean !== state.selectedWorkflowId) return;
     state.workflowDetail = data;
     const draftSource = buildDraftSource(data);
     state.draftSpec = data.authoring?.available && draftSource.spec
@@ -1136,6 +1139,7 @@ async function loadWorkflowDetail(workflowId) {
     setStatusBanner('', 'info');
     setConnectionBadge('Ready', 'ready');
   } catch (error) {
+    if (workflowIdClean !== state.selectedWorkflowId) return;
     console.error('Workflow studio detail failed:', error);
     setConnectionBadge('Error', 'error');
     setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not load workflow detail.', 'error');

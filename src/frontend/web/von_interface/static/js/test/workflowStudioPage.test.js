@@ -120,10 +120,14 @@ describe('actor schedule operations', () => {
       <button class="workflow-studio-view-tab" data-view="operations">Operations</button>`;
     let schedule = null;
     let firstCreate = true;
+    let resolveOther;
     const creations = [];
     global.fetch = jest.fn(async (url, options = {}) => {
       const reply = data => ({ ok: true, json: async () => data });
-      if (String(url).startsWith('/api/workflow-studio/catalogue')) return reply({ items: [{ workflow_id: '#V#schedule_ui_test', is_executable: true }] });
+      if (String(url).startsWith('/api/workflow-studio/catalogue')) return reply({ items: [{ workflow_id: '#V#schedule_ui_test', is_executable: true }, { workflow_id: '#V#other_workflow', is_executable: true }] });
+      if (String(url).endsWith(encodeURIComponent('#V#other_workflow'))) return new Promise(resolve => {
+        resolveOther = () => resolve(reply({ summary: { is_executable: true }, operations: { schedules: { items: [] } } }));
+      });
       if (String(url).startsWith('/api/workflow-studio/workflows/')) return reply({
         summary: { is_executable: true }, operations: { schedules: { items: schedule ? [schedule] : [] } }
       });
@@ -160,6 +164,15 @@ describe('actor schedule operations', () => {
       await flush();
       expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Paused');
       expect(document.querySelector('[data-action="toggle-schedule"]').textContent).toBe('Resume');
+      document.querySelector('[data-workflow-id="#V#other_workflow"]').click();
+      await flush();
+      expect(document.querySelector('[data-action="create-schedule"]')).toBeNull();
+      expect(document.querySelector('[data-action="toggle-schedule"]')).toBeNull();
+      document.querySelector('[data-workflow-id="#V#schedule_ui_test"]').click();
+      await flush();
+      resolveOther();
+      await flush();
+      expect(document.querySelector('[data-action="toggle-schedule"]').dataset.scheduleId).toBe('#V#schedule_saved');
     } finally {
       jest.restoreAllMocks();
       delete global.fetch;
