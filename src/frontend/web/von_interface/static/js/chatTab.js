@@ -14996,7 +14996,7 @@ function stopForegroundTaskResultPolling(request) {
     request.foregroundTaskResultPoll = null;
 }
 
-function startForegroundTaskResultPolling(request, handlers = {}) {
+function startForegroundTaskResultPolling(request, handlers = {}, { immediate = false } = {}) {
     if (!request || request.aborted || !request.clientRequestId) {
         return;
     }
@@ -15011,18 +15011,22 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
         // A server-dispatched retry is already running by the time the browser
         // adopts it, so check promptly instead of imposing the foreground
         // generate path's initial grace period.
-        nextDelayMs: request.observingServerDispatch === true
+        nextDelayMs: immediate || request.observingServerDispatch === true
             ? 250
             : FOREGROUND_TASK_RESULT_POLL_INITIAL_DELAY_MS,
         delivering: false
     };
+    const isCurrent = () => (
+        request.foregroundTaskResultPoll === poll
+        && !poll.abortController.signal.aborted
+        && !request.aborted
+        && !request.foregroundDeliveryCompleted
+        && isLiveChatRequest(request)
+        && isChatOrganisationRequestCurrent(request.organisationGeneration)
+    );
 
     const scheduleNextPoll = (delayMs) => {
-        if (
-            request.aborted
-            || request.foregroundDeliveryCompleted
-            || !isLiveChatRequest(request)
-        ) {
+        if (!isCurrent()) {
             return;
         }
         poll.timeoutId = setTimeout(() => {
@@ -15062,12 +15066,7 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
     };
 
     const pollOnce = async () => {
-        if (
-            poll.delivering
-            || request.aborted
-            || request.foregroundDeliveryCompleted
-            || !isLiveChatRequest(request)
-        ) {
+        if (poll.delivering || !isCurrent()) {
             return;
         }
 
@@ -15075,6 +15074,9 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
             const { resp: statusResp, payload: statusPayload } = await fetchJson(
                 `/von/api/task/status/${encodeURIComponent(requestId)}`
             );
+            if (!isCurrent()) {
+                return;
+            }
             if (await repairWindowContextIfNeeded(statusResp, statusPayload)) {
                 return;
             }
@@ -15105,6 +15107,9 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
             const { resp: resultResp, payload: resultPayload } = await fetchJson(
                 `/von/api/task/result/${encodeURIComponent(requestId)}`
             );
+            if (!isCurrent()) {
+                return;
+            }
             if (await repairWindowContextIfNeeded(resultResp, resultPayload)) {
                 return;
             }
@@ -15150,7 +15155,7 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
     };
 
     request.foregroundTaskResultPoll = poll;
-    if (request.observingServerDispatch === true) {
+    if (immediate || request.observingServerDispatch === true) {
         void pollOnce();
     } else {
         scheduleNextPoll(poll.nextDelayMs);
@@ -37785,6 +37790,38 @@ async function handleSendPrompt(options = {}) {
         }
     };
 
+    // Observation owns this lifetime once the generate connection is gone.
+    // Reuse the same actor-scoped result reader for server dispatch and lost
+    // responses; neither path resubmits the user's prompt.
+    const waitForForegroundTaskResult = () => new Promise((resolve) => {
+        const signal = request.abortController.signal;
+        const settle = () => {
+            signal.removeEventListener('abort', settle);
+            resolve();
+        };
+        signal.addEventListener('abort', settle, { once: true });
+        if (signal.aborted || !isLiveChatRequest(request) || !isRequestCurrentOrganisation()) {
+            settle();
+            return;
+        }
+        startForegroundTaskResultPolling(request, {
+            onCompleted: async (...args) => {
+                try {
+                    await foregroundTaskResultHandlers.onCompleted(...args);
+                } finally {
+                    settle();
+                }
+            },
+            onFailed: async (...args) => {
+                try {
+                    await foregroundTaskResultHandlers.onFailed(...args);
+                } finally {
+                    settle();
+                }
+            }
+        }, { immediate: true });
+    });
+
     if (!fromQueue) {
         // Clear input only for direct sends; queued execution should preserve current draft text.
         if (promptText) {
@@ -37793,6 +37830,7 @@ async function handleSendPrompt(options = {}) {
         setPromptComposerValue('', { promptInput });
     }
 
+    let generateTransportInterrupted = false;
     try {
         setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
 
@@ -37807,19 +37845,7 @@ async function handleSendPrompt(options = {}) {
                 return;
             }
             startToolUseProgressPolling(request);
-            await new Promise((resolve) => {
-                let settled = false;
-                const settle = () => {
-                    if (settled) {
-                        return;
-                    }
-                    settled = true;
-                    request.abortController.signal.removeEventListener('abort', settle);
-                    resolve();
-                };
-                request.abortController.signal.addEventListener('abort', settle, { once: true });
-                startForegroundTaskResultPolling(request, foregroundTaskResultHandlers);
-            });
+            await waitForForegroundTaskResult();
             return;
         }
 
@@ -37884,7 +37910,10 @@ async function handleSendPrompt(options = {}) {
         // before an immediate generate response tears down the active card.
         await Promise.resolve();
         await Promise.resolve();
-        const response = await responsePromise;
+        const response = await responsePromise.catch((error) => {
+            generateTransportInterrupted = true;
+            throw error;
+        });
         if (response?.ok) {
             request.attachmentBindingAccepted = true;
         }
@@ -37907,6 +37936,10 @@ async function handleSendPrompt(options = {}) {
             data = await response.json();
         } catch (parseError) {
             console.warn('[chatTab] Unable to parse /von/generate response JSON:', parseError);
+            if (response.ok) {
+                generateTransportInterrupted = true;
+                throw parseError;
+            }
             data = {
                 error: response.ok
                     ? 'Server returned an unreadable response.'
@@ -37989,7 +38022,15 @@ async function handleSendPrompt(options = {}) {
         if (request?.foregroundDeliveryCompleted) {
             return;
         }
-        if (request && (request.aborted || (error && error.name === 'AbortError'))) {
+        if (request.aborted || request.abortController.signal.aborted) {
+            return;
+        }
+        if (generateTransportInterrupted && !isThinkingFailureProgress(request.latestProgress)) {
+            console.warn('[chatTab] Response connection interrupted; observing the original task:', error);
+            if (isRequestVisible()) {
+                showToast('The answer connection was interrupted. Checking the original request for its result.', 'info');
+            }
+            await waitForForegroundTaskResult();
             return;
         }
         const failureSummary = resolveGenerateCatchFailureSummary(request, error);

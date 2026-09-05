@@ -9175,6 +9175,100 @@ describe('thinking card toggle accessibility', () => {
         }
     });
 
+    test.each(['connection', 'body', 'cancel', 'organisation'])(
+        'reconciles an interrupted answer without resubmission: %s', async (scenario) => {
+            const { getUserContext } = require('../apiService.js');
+            const {
+                __testOnly_getLiveChatRequestForSession,
+                __testOnly_startOrganisationSwitchForChatTab,
+                __testOnly_handleOrgSwitchFailureForChatTab
+            } = require('../chatTab.js');
+            getUserContext.mockReturnValue({ user_id: 'user', org_id: 'org' });
+            const sessionId = 'session-interrupted-answer';
+            __testOnly_setActiveChatSession(sessionId, 'Interrupted answer');
+            document.getElementById('promptInput').value = 'Read the issue details';
+            let finishResult;
+            let resultRequested = false;
+            let statusReads = 0;
+            global.fetch = jest.fn(async (url, options = {}) => {
+                const reply = (payload, status = 200) => ({
+                    ok: status === 200, status, json: async () => payload
+                });
+                if (url === '/von/generate') {
+                    if (scenario === 'body') {
+                        return { ok: true, json: async () => { throw new TypeError('Load failed'); } };
+                    }
+                    throw new TypeError('Failed to fetch');
+                }
+                if (String(url).startsWith('/von/api/task/status/')) {
+                    statusReads += 1;
+                    if (scenario === 'connection' && statusReads === 1) {
+                        return reply({ error: 'Task not found' }, 404);
+                    }
+                    return reply({ status: 'completed', has_result: true });
+                }
+                if (String(url).startsWith('/von/api/task/result/')) {
+                    resultRequested = true;
+                    // Deliberately ignore abort here: a late read must not deliver
+                    // after Stop or an organisation change, even if transport races.
+                    return new Promise(resolve => {
+                        finishResult = () => resolve(reply({ result: {
+                            response: 'Saved answer for the original request',
+                            llm_debug: { model: 'test-model' }
+                        } }));
+                    });
+                }
+                if (String(url).startsWith('/von/progress/')) {
+                    return reply({ status: 'working', phase: 'response_finalising' });
+                }
+                if (String(url).startsWith('/von/api/render_markdown')) {
+                    return reply({ html: JSON.parse(options.body).text });
+                }
+                return reply({});
+            });
+            jest.useFakeTimers();
+            try {
+                const sendPromise = sendMessage();
+                for (let i = 0; i < 50; i += 1) await Promise.resolve();
+                expect(document.querySelector('.error-turn')).toBeNull();
+                if (scenario === 'connection') {
+                    expect(resultRequested).toBe(false);
+                    await jest.advanceTimersByTimeAsync(400);
+                }
+                expect(resultRequested).toBe(true);
+                const request = __testOnly_getLiveChatRequestForSession(sessionId);
+                expect(request).toBeTruthy();
+                if (scenario === 'cancel') {
+                    __testOnly_bindThinkingCardControls();
+                    document.getElementById('abortButton').click();
+                } else if (scenario === 'organisation') {
+                    __testOnly_startOrganisationSwitchForChatTab({});
+                }
+                finishResult();
+                for (let i = 0; i < 60; i += 1) await Promise.resolve();
+                await sendPromise;
+                const answers = document.querySelectorAll('.assistant-turn .chat-message-text');
+                if (scenario === 'cancel' || scenario === 'organisation') {
+                    expect(answers).toHaveLength(0);
+                } else {
+                    expect(answers).toHaveLength(1);
+                    expect(answers[0].dataset.originalText).toBe('Saved answer for the original request');
+                    expect(request.turnOutcome.status).toBe('completed');
+                }
+                expect(global.fetch.mock.calls.filter(([url]) => url === '/von/generate')).toHaveLength(1);
+                const originalId = JSON.parse(global.fetch.mock.calls.find(([url]) => url === '/von/generate')[1].body).client_request_id;
+                expect(global.fetch.mock.calls.filter(([url]) => String(url).startsWith('/von/api/task/result/')))
+                    .toEqual([[`/von/api/task/result/${originalId}`, expect.objectContaining({ credentials: 'same-origin' })]]);
+            } finally {
+                if (scenario === 'organisation') {
+                    await __testOnly_handleOrgSwitchFailureForChatTab({});
+                }
+                __testOnly_resetChatRequestState();
+                jest.useRealTimers();
+            }
+        }
+    );
+
     test('retains a failed card inline when the last live progress remains non-terminal', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
