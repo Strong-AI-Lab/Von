@@ -499,6 +499,7 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
 REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
     {
+        "src/backend/services/academic_roster_workflow_vontology_service.py",
         "src/backend/services/concept_search_instance_retrieval_workflow_vontology_service.py",
         "src/backend/services/conversation_turn_workflow_vontology_service.py",
         "src/backend/services/email_source_representation_convergence_workflow_vontology_service.py",

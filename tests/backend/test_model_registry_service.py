@@ -129,9 +129,9 @@ def test_batched_graph_loader_preserves_registry_semantics_with_bounded_reads(
     del concept_docs["#V#test_registry_entry"]["relationships"][
         mod.PRED_HAS_MODEL_API_PROFILE
     ]
-    text_map[
-        ("#V#test_registry_entry", mod.PRED_HAS_MODEL_API_PROFILE)
-    ] = ["#V#test_profile"]
+    text_map[("#V#test_registry_entry", mod.PRED_HAS_MODEL_API_PROFILE)] = [
+        "#V#test_profile"
+    ]
 
     assert mod._load_registry_from_vontology_graph_batched() is None
 
@@ -140,6 +140,19 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
     monkeypatch,
 ) -> None:
     import src.backend.services.model_registry_service as mod
+
+    # This case exercises legacy graph encoding; the batch loader has its own
+    # bounded-read test above. Do not let its real DB read bypass these stubs.
+    monkeypatch.setattr(
+        mod, "_load_registry_from_vontology_graph_batched", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(mod, "_MODEL_REGISTRY_SNAPSHOT_CACHE", {})
+    monkeypatch.setattr(
+        mod, "_load_registry_snapshot_from_disk", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        mod, "_persist_registry_snapshot_to_disk", lambda **_kwargs: None
+    )
 
     resolution_map = {
         "default_model_registry": "#V#default_model_registry",
@@ -253,9 +266,7 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
         "llm_model_capabilities.v1"
     )
     assert model_entry["capabilities"]["input_token_limit"] == 400000
-    assert model_entry["capabilities"]["features"]["function_calling"] == (
-        "supported"
-    )
+    assert model_entry["capabilities"]["features"]["function_calling"] == ("supported")
 
     profile = model_entry["api_profiles"][0]
     assert profile["api_surface"] == "chat_completions"

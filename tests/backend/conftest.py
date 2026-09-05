@@ -38,3 +38,22 @@ def workspace_tmp_path(request) -> Generator[Path, None, None]:
     path.mkdir(parents=True, exist_ok=True)
     yield path
     shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture()
+def isolated_window_session_db(monkeypatch):
+    """Exercise durable bindings and mutation receipts against a fresh mock DB."""
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_isolated_window_sessions")
+    from src.backend.db.mongo_client import close_connection
+    from src.backend.services import window_session_context_service as windows
+
+    close_connection()
+    monkeypatch.setattr(windows, "_window_session_store", None)
+    monkeypatch.setattr(windows, "_window_session_binding_repository", None)
+    try:
+        yield
+    finally:
+        if windows._window_session_store is not None:
+            windows._window_session_store.stop_cleanup_thread()
+        close_connection()

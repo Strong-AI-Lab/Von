@@ -11,6 +11,8 @@ from contextlib import contextmanager
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_window_session_db")
+
 
 @pytest.fixture
 def app_client(monkeypatch):
@@ -98,8 +100,7 @@ def app_client(monkeypatch):
             "organisation_concept_id": organisation_concept_id,
             "role": (
                 "admin"
-                if organisation_concept_id
-                == "#V#university_of_auckland_strong_ai_lab"
+                if organisation_concept_id == "#V#university_of_auckland_strong_ai_lab"
                 else "member"
             ),
         },
@@ -124,9 +125,7 @@ def app_client(monkeypatch):
         lambda user_concept_id: {
             "user_concept_id": user_concept_id,
             "memberships": represented_memberships.get(user_concept_id, []),
-            "total_memberships": len(
-                represented_memberships.get(user_concept_id, [])
-            ),
+            "total_memberships": len(represented_memberships.get(user_concept_id, [])),
         },
     )
 
@@ -493,8 +492,7 @@ def test_set_user_concept_preserves_window_scoped_org_namespace(app_client):
     assert data["organisation_id"] == "#V#university_of_auckland_strong_ai_lab"
     assert data["role"] == "admin"
     assert (
-        data["namespace"]
-        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+        data["namespace"] == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
     )
 
     ctx = client.get(
