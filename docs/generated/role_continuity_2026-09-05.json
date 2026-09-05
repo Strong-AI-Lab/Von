@@ -1,0 +1,1841 @@
+{
+  "kind": "fictional_development_evidence",
+  "authority": "evidence only",
+  "review": "Codex inspected retrieved source locators, canonical saved text and exact-readback result; not blind or independent efficacy evaluation",
+  "assets_sha256": {
+    "src/backend/workflows/repo_seed_bundles/lab_status_digest_prompt_seed.md": "ab6b746e7255ccd687382379ee0d1da317421adf7bb89175c5089f0c2d7948b3",
+    "src/backend/workflows/repo_seed_bundles/lab_status_digest_workflow_seed_bundle.json": "9daef66a62fe8c5eb4108ac5d00b22ae15e7412ae91966c6967662c238a93a4d"
+  },
+  "runs": [
+    {
+      "label": "initial Luna: stale deadline failure",
+      "local_source_artifact": "role-continuity-rehearsal-5.json",
+      "source_artifact_sha256": "bbe0cea67d87ded59a51b9ebf362cc92b938dc210bd0c004a8f6a91f1b0f2d0d",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 12.42,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Project Kestrel research-funding readiness\n\n**As of:** 6 October 2026 NZ\n\n## Verified changes\n- Current source evidence describes a draft narrative; no evidence shows submission, funding award, or acceptance. **[#V#rehearsal_project; #V#rehearsal_call]**\n- Budget ownership is assigned to Ari, and Bo owns the collaborator statement. The collaborator statement has not been received and has no promised delivery date. Canonical commitment **TASK-1 remains open**. **[#V#rehearsal_project]**\n\n## Current milestones\n- Draft narrative exists. **[#V#rehearsal_project]**\n- Budget can be started without a polished narrative; this is an internal process premise, not evidence that budget work has begun. **[#V#rehearsal_office]**\n- Compute cost remains unknown, so funding readiness is not yet demonstrated. **[#V#rehearsal_project]**\n\n## Blockers and unresolved obligations\n- **TASK-1 \u2014 budget and collaborator statement:** remains open. Ari\u2019s budget work is not evidenced as complete; compute cost is unknown. Bo\u2019s collaborator statement is still outstanding, with no due date evidenced. **[#V#rehearsal_project; TASK-1]**\n- Required call materials are budget and collaborator statement. No evidence establishes that either is complete, submitted, approved, or accepted. **[#V#rehearsal_call]**\n- No Jira issue row was returned in the bounded window, and the query indicates additional pages (`isLast: false`, `nextPageToken: more`); absence is not resolution of TASK-1. **[TASK-1; bounded Jira query]**\n\n## Decisions needed\n- Decide or confirm an internal owner/checkpoint for obtaining Bo\u2019s collaborator statement; no owner change or due date is evidenced, so TASK-1 identity and uncertainty are preserved. **[#V#rehearsal_project; TASK-1]**\n- Determine the compute-cost estimate/input needed for Ari\u2019s budget. This is an estimate/input gap, not resource approval. **[#V#rehearsal_project]**\n- Confirm whether the draft narrative is sufficient for the internal budget checkpoint; the available premise says polishing is not required to start, not that the application is ready. **[#V#rehearsal_office]**\n\n## Deadlines\n- **Internal checkpoint:** 23 October 2026 12:00; budget work may start before the narrative is polished. **[#V#rehearsal_office]**\n- **External deadline:** 30 October 2026 17:00; Harbour Fund call-v1 requires budget and collaborator statement. **[#V#rehearsal_call]**\n- No evidence of a scheduler run, submission, spending, funding award, or capability acceptance. **[#V#rehearsal_call; bounded repository evidence]**\n\n## Evidence gaps\n- Fictional repository; no commits or branch evidence available. **[bounded repository evidence]**\n- Jira coverage is incomplete; TASK-1 status/details beyond the returned page are unavailable. **[TASK-1; bounded Jira query]**\n- No evidence of budget commencement/completion, compute-cost basis, collaborator-statement receipt, approval, submission, or acceptance. **[#V#rehearsal_project; #V#rehearsal_call]**\n\n## Continuity\nOutstanding canonical task: **TASK-1**. Consequential unknowns: compute cost, budget progress, collaborator-statement receipt/date, and any Jira updates outside the bounded page. Source dependencies: **#V#rehearsal_project**, **#V#rehearsal_call**, **#V#rehearsal_office**, plus the incomplete Jira ledger. Next useful checkpoint: verify TASK-1 and budget progress before the **23 October internal checkpoint**, then confirm required materials before the **30 October external deadline**."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1716,
+              "completion_tokens": 33,
+              "total_tokens": 1749,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 1713
+            },
+            {
+              "prompt_tokens": 3645,
+              "completion_tokens": 34,
+              "total_tokens": 3679,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 3642
+            },
+            {
+              "prompt_tokens": 5729,
+              "completion_tokens": 33,
+              "total_tokens": 5762,
+              "cached_input_tokens": 3642,
+              "cache_write_input_tokens": 2084
+            },
+            {
+              "prompt_tokens": 7872,
+              "completion_tokens": 1040,
+              "total_tokens": 8912,
+              "cached_input_tokens": 5726,
+              "cache_write_input_tokens": 2143
+            }
+          ]
+        },
+        {
+          "stage": "B",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 9.38,
+          "source_sha256": "7fda6698c5ef808cb77469342a2c7221847e15ee248b8304862f34f9ce2a53a9",
+          "canonical_text": [
+            "# Project Kestrel research-funding readiness\n\n**As of:** 14 October 2026 NZ\n\n## Verified changes\n- No new completion evidence was found. The only newly retrieved source remains the 6 October 2026 NZ call record: Harbour Fund call-v1 requires a budget and collaborator statement, and records no funding award. **[#V#rehearsal_call; observed 6 October 2026 NZ]**\n- The bounded repository still has no commits and is explicitly identified as fictional; no branch, submission, or acceptance evidence is available. **[bounded repository evidence]**\n\n## Current milestones\n- A draft narrative exists, but submission, funding award, and capability acceptance remain un evidenced. **[#V#rehearsal_project; #V#rehearsal_call]**\n- Budget work may start before narrative polishing as an internal process premise; this does not prove budget commencement or completion. **[#V#rehearsal_office]**\n- Funding readiness is not demonstrated because compute cost, budget progress, and the collaborator statement remain unverified. **[#V#rehearsal_project; #V#rehearsal_call]**\n\n## Blockers and unresolved obligations\n- **TASK-1 \u2014 budget and collaborator statement:** remains the canonical open commitment. Ari\u2019s budget completion and compute-cost basis are not evidenced; Bo\u2019s collaborator statement remains unverified, with no due date or receipt evidenced. **[TASK-1; #V#rehearsal_project]**\n- Required call materials are not shown as complete, submitted, approved, or accepted. A Jira issue being Done, a workflow completing, and capability acceptance are distinct states; none is evidenced here. **[#V#rehearsal_call; TASK-1]**\n- The Jira query returned no row but is incomplete (`isLast: false`, `nextPageToken: more`); absence does not resolve TASK-1. **[TASK-1; bounded Jira query]**\n\n## Decisions needed\n- Confirm an owner and checkpoint for obtaining Bo\u2019s collaborator statement without changing TASK-1\u2019s identity; no such change is evidenced. **[TASK-1; #V#rehearsal_project]**\n- Obtain or approve the compute-cost estimate/input required for Ari\u2019s budget. This is an estimate/input gap, not resource approval. **[#V#rehearsal_project]**\n- Confirm whether the draft narrative is sufficient for the internal budget checkpoint; the office premise only permits starting budget work before polishing. **[#V#rehearsal_office]**\n\n## Upcoming deadlines\n- **Internal checkpoint:** 23 October 2026 12:00. **[#V#rehearsal_office]**\n- **External deadline:** 30 October 2026 17:00 for Harbour Fund call-v1; budget and collaborator statement are required. **[#V#rehearsal_call; observed 6 October 2026 NZ]**\n- No scheduler occurrence, submission, spending, award, or acceptance evidence is present. **[bounded repository evidence; #V#rehearsal_call]**\n\n## Evidence gaps\n- Fictional repository: no commits or branches. **[bounded repository evidence]**\n- Jira coverage is incomplete; TASK-1 details outside the returned page are unavailable. **[TASK-1; bounded Jira query]**\n- No current evidence of budget start/completion, compute-cost basis, collaborator-statement receipt/date, approval, submission, or acceptance. **[#V#rehearsal_project; #V#rehearsal_call]**\n\n## Continuity\nOutstanding canonical task: **TASK-1**. Consequential unknowns: budget progress, compute cost, collaborator-statement receipt/date, and Jira status outside the bounded page. Source dependencies: **#V#rehearsal_project**, **#V#rehearsal_call**, **#V#rehearsal_office**, and the incomplete Jira ledger. Next useful checkpoint: verify TASK-1 and budget progress before 23 October, then verify both required materials before 30 October. **[TASK-1; #V#rehearsal_project; #V#rehearsal_call; #V#rehearsal_office]**"
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 3627,
+              "completion_tokens": 33,
+              "total_tokens": 3660,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 3624
+            },
+            {
+              "prompt_tokens": 7466,
+              "completion_tokens": 1135,
+              "total_tokens": 8601,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 7463
+            }
+          ]
+        },
+        {
+          "stage": "C",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 10.14,
+          "source_sha256": "68bf6ce055b6031b776c66f1c69d97361bf89d0f8a5d82595512131fef02ad39",
+          "canonical_text": [
+            "# Project Kestrel research-funding readiness\n\n**As of:** 15 October 2026 NZ\n\n## Verified changes\n- A compute quote is now available: **compute-quote-v1 estimates 8,000 budget units and is valid through 31 October**. It is an estimate/input for budgeting, not an allocation, purchase approval, or authority to spend. **[#V#rehearsal_compute_quote; source record created/updated 5 September 2026 NZ]**\n- No evidence resolves the prior gaps: the bounded repository has no commits and is identified as fictional; the Jira query for TASK-1 is incomplete (`isLast: false`, `nextPageToken: more`). **[bounded repository evidence; TASK-1; bounded Jira query]**\n\n## Current milestones and readiness\n- The draft narrative remains evidenced, but budget completion, collaborator-statement receipt, submission, funding award, and capability acceptance are not evidenced. **[#V#rehearsal_project; #V#rehearsal_call]**\n- Readiness improves from \u201ccompute-cost basis unavailable\u201d to \u201ccompute-cost estimate available,\u201d but funding readiness is still **not demonstrated**: the quote must be incorporated into or accepted for the budget, and the collaborator statement and submission evidence remain missing. **[#V#rehearsal_compute_quote; TASK-1; #V#rehearsal_call]**\n- The quote\u2019s validity through 31 October overlaps the external deadline, but does not establish approval, spending, or resource availability. **[#V#rehearsal_compute_quote]**\n\n## Blockers and unresolved obligations\n- **TASK-1 \u2014 budget and collaborator statement:** remains the canonical open commitment. Ari\u2019s budget completion and use/acceptance of the 8,000-unit quote are unverified; Bo\u2019s collaborator statement remains unverified, with no receipt date or due-date evidence. **[TASK-1; #V#rehearsal_compute_quote; #V#rehearsal_project]**\n- Required call materials are not shown as complete, submitted, approved, or accepted. Jira Done status, workflow completion, and capability acceptance remain distinct and none is evidenced. **[TASK-1; #V#rehearsal_call]**\n\n## Decisions needed\n- Decide whether the 8,000-unit compute quote is the budgeting basis and whether any approval is required; do not treat it as resource approval. **[#V#rehearsal_compute_quote; TASK-1]**\n- Confirm the owner and checkpoint for obtaining Bo\u2019s collaborator statement while preserving TASK-1\u2019s identity. **[TASK-1; #V#rehearsal_project]**\n- Confirm whether the draft narrative is sufficient for the internal budget checkpoint; the office premise permits starting budget work before polishing but does not prove that work has started or is complete. **[#V#rehearsal_office; #V#rehearsal_project]**\n\n## Upcoming deadlines\n- **Internal checkpoint:** 23 October 2026 12:00. **[#V#rehearsal_office]**\n- **External deadline:** 30 October 2026 17:00 for Harbour Fund call-v1; budget and collaborator statement are required. **[#V#rehearsal_call; observed 6 October 2026 NZ]**\n- **Quote validity:** through 31 October 2026. This is a source validity period, not a submission or approval deadline. **[#V#rehearsal_compute_quote]**\n\n## Evidence gaps\n- No evidence of budget commencement/completion, quote acceptance in the budget, collaborator-statement receipt/date, approval, submission, award, scheduler occurrence, spending, or capability acceptance. **[TASK-1; #V#rehearsal_project; #V#rehearsal_call; #V#rehearsal_compute_quote]**\n- Jira coverage remains incomplete; absence of a returned TASK-1 row is not resolution. **[TASK-1; bounded Jira query]**\n- Repository evidence remains fictional and contains no commits, branches, or submission artifacts. **[bounded repository evidence]**\n\n## Continuity\nOutstanding canonical task: **TASK-1**. Consequential unknowns: whether Ari has incorporated the 8,000-unit quote, whether Bo\u2019s statement exists, and whether any approval or submission occurred. Source dependencies: **#V#rehearsal_project**, **#V#rehearsal_call**, **#V#rehearsal_office**, **#V#rehearsal_compute_quote**, and the incomplete Jira ledger. Next useful checkpoint: verify TASK-1 and budget progress before 23 October, then verify both required materials and submission evidence before 30 October. **[TASK-1; #V#rehearsal_compute_quote; #V#rehearsal_call; #V#rehearsal_office]**"
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_compute_quote",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 3766,
+              "completion_tokens": 34,
+              "total_tokens": 3800,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 3763
+            },
+            {
+              "prompt_tokens": 7748,
+              "completion_tokens": 1288,
+              "total_tokens": 9036,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 7745
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "initial GPT-5.5: metadata-only source failure",
+      "local_source_artifact": "role-continuity-55-1.json",
+      "source_artifact_sha256": "6c737fcc41ef17d18dd45743c213899680e752615007c97a2889b00b472d673d",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 17.59,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 continuity_test_kestrel\n\n_Fictional clock: 6 Oct 2026 NZ. Scope: internal brief only; no messages, submission, Jira mutation, or spending._\n\n## Verified changes / current evidence\n- Prior work product `#V#continuity_test_kestrel` exists, but its prior `md_content` only contains the heading `# continuity_test_kestrel`; it provides no current commitments, milestones, decisions, or deadlines. Prior digest raw document timestamps: created/updated `2026-09-05 02:39:58.214000`.\n- Named source `#V#rehearsal_call` was read. It is accessible to `#V#continuity_test_operator`, but has no `md_content` and empty rendered content. Raw document timestamps: created/updated `2026-09-05 02:39:58.239000`.\n- Named source `#V#rehearsal_office` was read. It is accessible to `#V#continuity_test_operator`, but has no `md_content` and empty rendered content. Raw document timestamps: created/updated `2026-09-05 02:39:58.243000`.\n- Named source `#V#rehearsal_project` was read. It is accessible to `#V#continuity_test_operator`, but has no `md_content` and empty rendered content. Raw document timestamps: created/updated `2026-09-05 02:39:58.247000`.\n- Initial bounded Jira query `key = TASK-1` returned no issues, with `isLast: false` and `nextPageToken: more`; this is explicitly partial coverage and is not proof that `TASK-1` is resolved, absent, or done.\n- Repository evidence returned no commits and reports `evidence_gap: fictional repository`; no branch, commit, submission artifact, or acceptance evidence is available from repository metadata.\n\n## Current milestones\n- No research-funding milestones are verified from the current evidence. The named concept sources contain no readable milestone text, and the prior digest contains no milestone details.\n\n## Blockers\n- Readiness cannot be assessed because the material named sources `#V#rehearsal_call`, `#V#rehearsal_office`, and `#V#rehearsal_project` are present but content-empty in the retrieved view.\n- `TASK-1` must be preserved as an unresolved/stale obligation: the bounded Jira window returned no row and was not exhaustive (`isLast: false`, `nextPageToken: more`). No current status, owner, due date, or acceptance state is evidenced.\n- Repository support for readiness is unavailable because the repository source is fictional and contains no commits.\n\n## Unresolved or stale obligations\n- `TASK-1`: canonical obligation retained. Current evidence does not show its status, owner, due date, completion, or acceptance. Absence from the partial Jira result is not resolution.\n- Any obligations that may have been embedded in `#V#rehearsal_call`, `#V#rehearsal_office`, or `#V#rehearsal_project` remain unknown because retrieved `md_content` is null and rendered content is empty.\n\n## Decisions needed\n- Decide whether to obtain a complete Jira read for `TASK-1` before using this brief for readiness decisions.\n- Decide whether alternate authoritative funding documents or schedules exist beyond the three named concept sources, because no external deadline, internal checkpoint, budget approval, or submission state is evidenced here.\n\n## Upcoming deadlines\n- No external funder deadline is evidenced.\n- No internal checkpoint is evidenced.\n- No scheduler occurrence evidence is present; a request to maintain the brief is not proof that a scheduler ran.\n\n## Continuity / next useful checkpoint\n- Continue with work product `#V#continuity_test_kestrel`.\n- Carry forward `TASK-1` as unresolved until a complete Jira/source read provides current status or superseding evidence.\n- Source dependencies: `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`, complete Jira evidence for `TASK-1`, and any non-fictional repository or submission artifact evidence if readiness depends on implementation or submitted materials.\n- Next useful checkpoint: after complete `TASK-1` evidence and readable funding-source content are available, reassess readiness while keeping Jira Done, workflow completion, and capability acceptance separate."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1712,
+              "completion_tokens": 33,
+              "total_tokens": 1745,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 3534,
+              "completion_tokens": 34,
+              "total_tokens": 3568,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 5528,
+              "completion_tokens": 33,
+              "total_tokens": 5561,
+              "cached_input_tokens": 2816
+            },
+            {
+              "prompt_tokens": 7556,
+              "completion_tokens": 1504,
+              "total_tokens": 9060,
+              "cached_input_tokens": 4864
+            }
+          ]
+        },
+        {
+          "stage": "B",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 17.59,
+          "source_sha256": "7fda6698c5ef808cb77469342a2c7221847e15ee248b8304862f34f9ce2a53a9",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 continuity_test_kestrel\n\n_Fictional clock: 14 Oct 2026 NZ. Scope: internal brief only; read-only synthesis. Work product: `#V#continuity_test_kestrel`._\n\n## Verified changes / current evidence\n- The continuing work product is `#V#continuity_test_kestrel`. The supplied prior digest is historical state only; its raw document timestamps are created/updated `2026-09-05 02:39:58.214000`.\n- Current bounded Jira evidence for query `key = TASK-1` again returned no issues, but the window is not exhaustive: `isLast: false`, `nextPageToken: more`. This does not prove `TASK-1` is absent, resolved, Done, accepted, or superseded.\n- Current bounded repository evidence reports `success: true`, no commits, and `evidence_gap: fictional repository`; there is no current branch, commit, implementation artifact, submission artifact, or acceptance evidence from repository metadata.\n- Material concept source `#V#rehearsal_call` was read in this encounter. It is accessible to `#V#continuity_test_operator`, but `md_content` is null and rendered `content_html` is empty. Raw document timestamps: created/updated `2026-09-05 02:39:58.239000`.\n- Material concept source `#V#rehearsal_office` was read in this encounter. It is accessible to `#V#continuity_test_operator`, but `md_content` is null and rendered `content_html` is empty. Raw document timestamps: created/updated `2026-09-05 02:39:58.243000`.\n- Material concept source `#V#rehearsal_project` was read in this encounter. It is accessible to `#V#continuity_test_operator`, but `md_content` is null and rendered `content_html` is empty. Raw document timestamps: created/updated `2026-09-05 02:39:58.247000`.\n\n## Current milestones\n- No research-funding milestone is verified from current evidence. The three named source concepts (`#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`) remain content-empty in the retrieved view, Jira evidence is partial, and repository evidence has no commits.\n\n## Blockers\n- Readiness cannot be assessed from the current source set because the material funding/source concepts are present but content-empty: `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`.\n- `TASK-1` remains a blocker/unknown if readiness depends on it. The only current Jira locator is the partial query `key = TASK-1`, which returned no issues with `isLast: false`; no status, owner, due date, Jira Done state, workflow completion, or capability acceptance is evidenced.\n- Repository-dependent readiness is blocked by unavailable repository evidence: current repository metadata has no commits and reports `evidence_gap: fictional repository`.\n\n## Unresolved or stale obligations\n- `TASK-1`: canonical obligation carried forward from the prior digest. Current evidence does not resolve or supersede it and does not show current status, owner, due date, completion, or acceptance. Absence from the partial Jira window is not resolution.\n- Any obligations that may be contained in `#V#rehearsal_call`, `#V#rehearsal_office`, or `#V#rehearsal_project` remain unknown because current reads expose no readable `md_content` or rendered content.\n\n## Decisions needed\n- Decide whether to obtain complete Jira evidence for `TASK-1` before using this brief for readiness decisions.\n- Decide whether there are alternate authoritative funding documents, schedules, approval records, or submission artifacts beyond `#V#rehearsal_call`, `#V#rehearsal_office`, and `#V#rehearsal_project`, because none are evidenced in the current window.\n- Decide whether repository evidence is actually required for this funding-readiness responsibility; if so, a non-fictional repository/source locator is needed.\n\n## Upcoming deadlines\n- No external funder deadline is evidenced in current sources.\n- No internal checkpoint is evidenced in current sources.\n- No resource approval, budget approval, submitted work, or acceptance/pass evidence is present.\n- No scheduler occurrence evidence is present; the human request to revisit the brief is not proof that a scheduler ran.\n\n## Explicit evidence gaps\n- Complete Jira ledger or direct issue read for `TASK-1` is unavailable; current query is partial (`isLast: false`, `nextPageToken: more`).\n- Readable content for `#V#rehearsal_call`, `#V#rehearsal_office`, and `#V#rehearsal_project` is unavailable despite successful concept reads.\n- Repository evidence is unavailable for readiness purposes because the current repository source is fictional and has no commits.\n\n## Continuity / next useful checkpoint\n- Continue under work product `#V#continuity_test_kestrel`.\n- Carry forward `TASK-1` as unresolved until complete Jira/source evidence provides current status or superseding evidence.\n- Source dependencies: `TASK-1`, `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`, and any authoritative non-fictional repository/submission/approval records if readiness depends on them.\n- Next useful checkpoint: after complete `TASK-1` evidence and readable funding-source content are available, reassess milestones, blockers, deadlines, approvals, submission state, and acceptance while keeping Jira Done, workflow completion, and capability acceptance separate."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 3928,
+              "completion_tokens": 33,
+              "total_tokens": 3961,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 7966,
+              "completion_tokens": 34,
+              "total_tokens": 8000,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 12176,
+              "completion_tokens": 33,
+              "total_tokens": 12209,
+              "cached_input_tokens": 6912
+            },
+            {
+              "prompt_tokens": 16420,
+              "completion_tokens": 1819,
+              "total_tokens": 18239,
+              "cached_input_tokens": 12032
+            }
+          ]
+        },
+        {
+          "stage": "C",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 18.91,
+          "source_sha256": "68bf6ce055b6031b776c66f1c69d97361bf89d0f8a5d82595512131fef02ad39",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 continuity_test_kestrel\n\n_Fictional clock: 15 Oct 2026 NZ. Scope: internal brief only; read-only synthesis. Work product: `#V#continuity_test_kestrel`._\n\n## Verified changes / current evidence\n- Continuing work product remains `#V#continuity_test_kestrel`; prior digest is historical state only. Prior raw document timestamps: created/updated `2026-09-05 02:39:58.214000`.\n- Current bounded Jira query `key = TASK-1` returned no issues, but coverage is explicitly incomplete: `isLast: false`, `nextPageToken: more`. This is not evidence that `TASK-1` is absent, Done, workflow-completed, accepted, or superseded.\n- Current bounded repository evidence reports `success: true`, `commits: []`, and `evidence_gap: fictional repository`; no branch, commit, implementation, submission, or acceptance artifact is evidenced.\n- Named source `#V#rehearsal_call` was read successfully for `#V#continuity_test_operator`; `md_content` is null and `content_html` is empty. Raw timestamps: created/updated `2026-09-05 02:39:58.239000`.\n- Named source `#V#rehearsal_office` was read successfully; `md_content` is null and `content_html` is empty. Raw timestamps: created/updated `2026-09-05 02:39:58.243000`.\n- Named source `#V#rehearsal_project` was read successfully; `md_content` is null and `content_html` is empty. Raw timestamps: created/updated `2026-09-05 02:39:58.247000`.\n- New named source `#V#rehearsal_compute_quote` was read successfully and is now a current evidence locator, but the retrieved view has `md_content: null` and empty `content_html`; raw timestamps: created/updated `2026-09-05 02:40:33.447000`.\n\n## Current milestones\n- Compute-quote availability is partially verified only as a represented concept: `#V#rehearsal_compute_quote` exists and was accessible. Its quote amount, validity period, vendor, scope, and whether it is an estimate or approved resource commitment are not readable from current evidence.\n- No funding-call, office-approval, project-submission, or acceptance milestone is verified from readable content because `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`, and `#V#rehearsal_compute_quote` expose no readable body content.\n\n## Readiness / blockers\n- Readiness improves only in locator coverage: the previously missing compute-quote source is now present as `#V#rehearsal_compute_quote`. Readiness cannot be marked ready because the quote details and approval status are unavailable.\n- `TASK-1` remains an unresolved blocker/unknown if readiness depends on it. Current evidence does not show status, owner, due date, Jira Done state, workflow completion, or capability acceptance.\n- Repository-dependent readiness remains blocked by the current repository evidence gap: no commits and `evidence_gap: fictional repository`.\n\n## Unresolved or stale obligations\n- `TASK-1`: canonical obligation carried forward. Current partial Jira evidence does not resolve, close, reassign, or supersede it; absence from the bounded query is not resolution.\n- Potential obligations inside `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`, or `#V#rehearsal_compute_quote` remain unknown because retrieved content is empty/null.\n\n## Decisions needed\n- Decide whether to obtain complete Jira/direct issue evidence for `TASK-1` before relying on this brief.\n- Decide whether a readable compute quote or procurement/finance approval record is required. Current `#V#rehearsal_compute_quote` verifies source existence, not budget approval.\n- Decide whether alternate authoritative call, office, project, submission, or acceptance records exist beyond the four named concepts.\n\n## Upcoming deadlines\n- No external funder deadline is evidenced in current readable sources.\n- No internal checkpoint is evidenced in current readable sources.\n- No resource approval, budget approval, submitted work, or acceptance/pass evidence is present.\n- No scheduler occurrence evidence is present; the request to revisit is not proof that a scheduler ran.\n\n## Explicit evidence gaps\n- Complete Jira ledger/direct read for `TASK-1` is unavailable; current query is partial (`isLast: false`, `nextPageToken: more`).\n- Readable body content is unavailable for `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`, and `#V#rehearsal_compute_quote` despite successful concept reads.\n- Repository evidence is unavailable for readiness purposes because the current repository source is fictional and has no commits.\n\n## Continuity / next useful checkpoint\n- Continue under `#V#continuity_test_kestrel`.\n- Carry forward `TASK-1` and the four source dependencies: `#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`, `#V#rehearsal_compute_quote`.\n- Next useful checkpoint: after readable compute quote details, complete `TASK-1` evidence, and readable funding/approval/submission sources are available, reassess readiness while keeping Jira Done, workflow completion, resource approval, submission, and acceptance distinct."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_compute_quote",
+              "reconstruct_md": false
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 4600,
+              "completion_tokens": 33,
+              "total_tokens": 4633,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 9309,
+              "completion_tokens": 34,
+              "total_tokens": 9343,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 14191,
+              "completion_tokens": 33,
+              "total_tokens": 14224,
+              "cached_input_tokens": 8960
+            },
+            {
+              "prompt_tokens": 19107,
+              "completion_tokens": 34,
+              "total_tokens": 19141,
+              "cached_input_tokens": 14080
+            },
+            {
+              "prompt_tokens": 24027,
+              "completion_tokens": 1879,
+              "total_tokens": 25906,
+              "cached_input_tokens": 18176
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "revised GPT-5.5: bounded A-C pass",
+      "local_source_artifact": "role-continuity-55-2.json",
+      "source_artifact_sha256": "be22c756559ffdec30e76961aebdb2d5eab5645809aa7b7ebc761fbbde4be29f",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 18.32,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\nFictional clock: 6 October 2026 NZ. Work product: `#V#continuity_test_kestrel`.\n\n## Verified changes / current evidence\n- Prior represented digest `#V#continuity_test_kestrel` was refreshed as evidence in this encounter and contains only the title, with no stored readiness details in reconstructed Markdown. Raw doc timestamps: created/updated `2026-09-05 02:41:53.080000`.\n- Call source `#V#rehearsal_call` says Harbour Fund call-v1 was observed 6 October 2026 NZ; external deadline is **30 October 17:00**; budget and collaborator statement are required; no funding has been awarded. Source raw doc created/updated `2026-09-05 02:41:53.106000`.\n- Office source `#V#rehearsal_office` says office-v1 was observed 6 October; internal deadline is **23 October 12:00**; starting the budget does not require a polished narrative. Source raw doc created/updated `2026-09-05 02:41:53.110000`.\n- Project source `#V#rehearsal_project` says Project Kestrel has a draft narrative; compute cost is unknown; Ari owns the budget; Bo owns the collaborator statement, which has not yet been received and has no promised delivery date; canonical commitment `TASK-1` remains open. Source raw doc created/updated `2026-09-05 02:41:53.115000`.\n\n## Current milestones and deadlines\n- External funder deadline: Harbour Fund application due **30 October 17:00** (`#V#rehearsal_call`). This is an external deadline, not evidence of submission or acceptance.\n- Internal checkpoint/deadline: office deadline **23 October 12:00** (`#V#rehearsal_office`). This is an internal deadline, not resource approval.\n- Budget work can start before the narrative is polished (`#V#rehearsal_office`), but compute cost remains unknown (`#V#rehearsal_project`).\n\n## Blockers / readiness risks\n- Budget readiness is blocked or at risk because compute cost is unknown while the call requires a budget (`#V#rehearsal_project`, `#V#rehearsal_call`). Ari is the evidenced budget owner (`#V#rehearsal_project`).\n- Collaborator-statement readiness is blocked or at risk because the statement is required by the call but is not yet received and has no promised delivery date. Bo is the evidenced owner (`#V#rehearsal_project`, `#V#rehearsal_call`).\n- Funding has not been awarded (`#V#rehearsal_call`); do not treat readiness work as approval to spend.\n\n## Unresolved or stale obligations\n- Preserve canonical commitment identity: `TASK-1` remains the open commitment for this readiness work. Current bounded Jira query `key = TASK-1` returned no issues but `isLast=false` with `nextPageToken=more`, so the Jira evidence is incomplete and does not resolve, close, reassign, or supersede `TASK-1`. Project source explicitly says `TASK-1` remains open (`#V#rehearsal_project`).\n- Ari budget ownership and Bo collaborator-statement ownership are current only as represented in `#V#rehearsal_project`; no Jira row was available to corroborate owner/status fields.\n\n## Decisions needed\n- Decide how to obtain or estimate compute cost for the budget before the 23 October internal deadline (`#V#rehearsal_project`, `#V#rehearsal_office`).\n- Decide how to secure Bo\u2019s collaborator statement or define an escalation path, because no promised delivery date is evidenced (`#V#rehearsal_project`).\n\n## Explicit evidence gaps\n- Jira: initial bounded query for `TASK-1` is partial and returned no rows despite `isLast=false`; current Jira status, assignee, due date, comments, and transitions are unavailable from the supplied window.\n- Repository: supplied repository evidence has no commits and reports `evidence_gap: fictional repository`; no branch/commit evidence supports technical or document changes.\n- No evidence of submission, acceptance, scheduler occurrence, messages sent, resource approval, spending approval, or funding award was supplied or retrieved.\n\n## Continuity / next useful checkpoint\n- Continue tracking `TASK-1` as the canonical open commitment. Next useful checkpoint: refresh `TASK-1` Jira evidence and the three represented sources (`#V#rehearsal_call`, `#V#rehearsal_office`, `#V#rehearsal_project`) before restating deadlines, owners, or readiness status."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1850,
+              "completion_tokens": 34,
+              "total_tokens": 1884,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 4003,
+              "completion_tokens": 33,
+              "total_tokens": 4036,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 6223,
+              "completion_tokens": 34,
+              "total_tokens": 6257,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 8470,
+              "completion_tokens": 33,
+              "total_tokens": 8503,
+              "cached_input_tokens": 5888
+            },
+            {
+              "prompt_tokens": 10732,
+              "completion_tokens": 1539,
+              "total_tokens": 12271,
+              "cached_input_tokens": 0
+            }
+          ]
+        },
+        {
+          "stage": "B",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 17.91,
+          "source_sha256": "7fda6698c5ef808cb77469342a2c7221847e15ee248b8304862f34f9ce2a53a9",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\nFictional clock: 14 October 2026 NZ. Work product: `#V#continuity_test_kestrel`.\n\n## Verified changes / current evidence\n- Call source `#V#rehearsal_call` was refreshed in this encounter. It still identifies Harbour Fund call-v1, observed 6 October 2026 NZ, with external deadline **30 October 17:00**; budget and collaborator statement are required; no funding has been awarded. Source raw doc created/updated `2026-09-05 02:41:53.106000`.\n- Office source `#V#rehearsal_office` was refreshed in this encounter and has changed the internal deadline: office-v2, observed 14 October, says the internal deadline is now **20 October 12:00**, superseding office-v1 **23 October**. It also says the external fund deadline is unchanged and the collaborator statement remains missing. Source raw doc created/updated `2026-09-05 02:41:53.110000`.\n- Project source `#V#rehearsal_project` was refreshed in this encounter. It says Project Kestrel has a draft narrative; compute cost is unknown; Ari owns the budget; Bo owns the collaborator statement, which is not yet received and has no promised delivery date; canonical commitment `TASK-1` remains open. Source raw doc created/updated `2026-09-05 02:41:53.115000`.\n- Current bounded Jira query `key = TASK-1` returned no issues, but `isLast=false` with `nextPageToken=more`; this is incomplete coverage and does not resolve or supersede `TASK-1`.\n- Current bounded repository evidence has no commits and reports `evidence_gap: fictional repository`; no branch or commit evidence supports document or technical changes.\n\n## Current milestones and deadlines\n- External funder deadline: Harbour Fund application due **30 October 17:00** (`#V#rehearsal_call`; unchanged per `#V#rehearsal_office`). This is an external deadline, not evidence of submission, acceptance, or funding.\n- Internal checkpoint/deadline: **20 October 12:00** (`#V#rehearsal_office` office-v2), superseding the prior internal checkpoint **23 October 12:00** from office-v1 recorded in the prior digest. This is an internal deadline, not resource approval.\n- Budget work remains needed because the call requires a budget (`#V#rehearsal_call`) and compute cost remains unknown (`#V#rehearsal_project`).\n\n## Blockers / readiness risks\n- Budget readiness is blocked or at risk: compute cost is still unknown (`#V#rehearsal_project`) while the call requires a budget (`#V#rehearsal_call`). Ari remains the evidenced budget owner (`#V#rehearsal_project`). The shortened internal deadline increases urgency, but does not itself approve resources (`#V#rehearsal_office`).\n- Collaborator-statement readiness is blocked or at risk: the call requires the statement (`#V#rehearsal_call`), office-v2 says it remains missing (`#V#rehearsal_office`), and the project source says Bo owns it but it has not been received and has no promised delivery date (`#V#rehearsal_project`).\n- Funding has not been awarded (`#V#rehearsal_call`); readiness work must not be treated as approval to spend.\n\n## Unresolved or stale obligations\n- Preserve canonical commitment identity: `TASK-1` remains the open readiness commitment (`#V#rehearsal_project`). The bounded Jira result for `key = TASK-1` is partial and empty (`isLast=false`, `nextPageToken=more`), so Jira status, assignee, due date, comments, and transitions are not established and the issue must not be inferred Done, closed, reassigned, or superseded.\n- Ari budget ownership and Bo collaborator-statement ownership are evidenced only by `#V#rehearsal_project`; no Jira row corroborates or changes those owner fields.\n\n## Decisions needed\n- Decide how Ari should obtain or estimate compute cost quickly enough for the revised **20 October 12:00** internal deadline (`#V#rehearsal_project`, `#V#rehearsal_office`).\n- Decide whether to escalate or set a delivery path for Bo\u2019s collaborator statement, because it remains missing and no promised delivery date is evidenced (`#V#rehearsal_office`, `#V#rehearsal_project`).\n\n## Upcoming deadlines\n- **20 October 2026 12:00** \u2014 internal office deadline (`#V#rehearsal_office` office-v2); supersedes the prior **23 October 12:00** internal checkpoint.\n- **30 October 2026 17:00** \u2014 external Harbour Fund deadline (`#V#rehearsal_call`; unchanged per `#V#rehearsal_office`).\n\n## Explicit evidence gaps\n- Jira: current bounded query for `TASK-1` is incomplete and returned no rows despite `isLast=false`; no current Jira status, assignee, due date, comments, or transitions are available.\n- Repository: no commits are available; repository evidence explicitly reports `fictional repository`.\n- No evidence was supplied or retrieved for submission, acceptance, scheduler occurrence, messages sent, resource approval, spending approval, or funding award.\n- Prior digest is historical state only; current readiness conclusions above rely on refreshed `#V#rehearsal_call`, `#V#rehearsal_office`, and `#V#rehearsal_project` plus the current bounded Jira/repository windows.\n\n## Continuity / next useful checkpoint\n- Continue tracking `TASK-1` as the canonical open commitment. Next useful checkpoint: refresh Jira coverage for `TASK-1`, confirm whether compute cost has been estimated, and check whether Bo\u2019s collaborator statement has been received before the **20 October 12:00** internal deadline."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 4228,
+              "completion_tokens": 33,
+              "total_tokens": 4261,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 8832,
+              "completion_tokens": 34,
+              "total_tokens": 8866,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 13441,
+              "completion_tokens": 33,
+              "total_tokens": 13474,
+              "cached_input_tokens": 7936
+            },
+            {
+              "prompt_tokens": 18082,
+              "completion_tokens": 1872,
+              "total_tokens": 19954,
+              "cached_input_tokens": 13056
+            }
+          ]
+        },
+        {
+          "stage": "C",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 18.15,
+          "source_sha256": "68bf6ce055b6031b776c66f1c69d97361bf89d0f8a5d82595512131fef02ad39",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\nFictional clock: 15 October 2026 NZ. Work product: `#V#continuity_test_kestrel`.\n\n## Verified changes / current evidence\n- Call source `#V#rehearsal_call` was refreshed in this encounter. It identifies Harbour Fund call-v1, observed 6 October 2026 NZ, with external deadline **30 October 17:00**; a budget and collaborator statement are required; no funding has been awarded. Source raw doc created/updated `2026-09-05 02:41:53.106000`.\n- Office source `#V#rehearsal_office` was refreshed in this encounter. It remains office-v2, observed 14 October: internal deadline **20 October 12:00**, superseding office-v1 **23 October**; external fund deadline unchanged; collaborator statement remains missing. Source raw doc created/updated `2026-09-05 02:41:53.110000`.\n- Project source `#V#rehearsal_project` was refreshed in this encounter. It still says Project Kestrel has a draft narrative; Ari owns the budget; Bo owns the collaborator statement, which is not yet received and has no promised delivery date; canonical commitment `TASK-1` remains open. It still says compute cost is unknown, so this source is stale/conflicting on compute cost relative to the new quote. Source raw doc created/updated `2026-09-05 02:41:53.115000`.\n- New compute quote source `#V#rehearsal_compute_quote` was retrieved. It gives `compute-quote-v1`: estimate **8,000 budget units**, valid until **31 October**. It explicitly says this is a quote, not an allocation, purchase approval, or authority to spend. Source raw doc created/updated `2026-09-05 02:42:29.370000`.\n- Current bounded Jira query `key = TASK-1` returned no issues, but `isLast=false` with `nextPageToken=more`; this is incomplete coverage and does not resolve or supersede `TASK-1`.\n- Current bounded repository evidence has no commits and reports `evidence_gap: fictional repository`; no branch or commit evidence supports document or technical changes.\n\n## Current milestones and readiness\n- External funder deadline: Harbour Fund application due **30 October 2026 17:00** (`#V#rehearsal_call`; unchanged per `#V#rehearsal_office`). This is an external deadline, not evidence of submission, acceptance, or funding.\n- Internal checkpoint/deadline: **20 October 2026 12:00** (`#V#rehearsal_office` office-v2), superseding the prior **23 October** internal checkpoint. This is an internal deadline, not resource approval.\n- Budget readiness has improved: the prior compute-cost unknown in `#V#rehearsal_project` is now partly superseded by quote `#V#rehearsal_compute_quote` for **8,000 budget units**, valid until **31 October**. Remaining budget work is to incorporate/validate the estimate in the application budget owned by Ari (`#V#rehearsal_project`, `#V#rehearsal_compute_quote`, `#V#rehearsal_call`).\n- Collaborator-statement readiness remains blocked/risky: the statement is required by the call (`#V#rehearsal_call`), office-v2 says it remains missing (`#V#rehearsal_office`), and the project source says Bo owns it, it has not been received, and no promised delivery date is evidenced (`#V#rehearsal_project`).\n\n## Blockers / unresolved obligations\n- Preserve canonical commitment identity: `TASK-1` remains the open readiness commitment per `#V#rehearsal_project`. The bounded Jira result is partial and empty (`isLast=false`, `nextPageToken=more`), so Jira status, assignee, due date, comments, and transitions are not established; do not infer Done, closure, reassignment, or supersession.\n- Ari remains the evidenced budget owner and Bo remains the evidenced collaborator-statement owner only from `#V#rehearsal_project`; no Jira row corroborates or changes those owner fields.\n- Funding has not been awarded (`#V#rehearsal_call`), and the compute quote is not spending/resource approval (`#V#rehearsal_compute_quote`).\n\n## Decisions needed\n- Decide whether Ari should use the **8,000 budget-unit** quote as the application budget input or seek validation before the **20 October 12:00** internal deadline (`#V#rehearsal_compute_quote`, `#V#rehearsal_office`, `#V#rehearsal_project`).\n- Decide whether to escalate or set a delivery path for Bo\u2019s collaborator statement, because it remains missing and no promised delivery date is evidenced (`#V#rehearsal_office`, `#V#rehearsal_project`).\n\n## Upcoming deadlines\n- **20 October 2026 12:00** \u2014 internal office deadline (`#V#rehearsal_office` office-v2).\n- **30 October 2026 17:00** \u2014 external Harbour Fund deadline (`#V#rehearsal_call`; unchanged per `#V#rehearsal_office`).\n- **31 October 2026** \u2014 compute quote validity end date (`#V#rehearsal_compute_quote`); this is quote validity, not funder deadline or approval.\n\n## Explicit evidence gaps\n- Jira coverage for `TASK-1` remains incomplete; no current Jira status/assignee/due date/comments/transitions are available.\n- Repository evidence remains unavailable/fictional: no commits or branches.\n- No evidence was supplied or retrieved for application submission, funder acceptance, scheduler occurrence, messages sent, collaborator statement receipt, resource allocation, purchase/spending approval, or funding award.\n\n## Continuity / next useful checkpoint\n- Continue tracking `TASK-1` as the canonical open readiness commitment. Next useful checkpoint before **20 October 12:00**: refresh Jira coverage for `TASK-1`, confirm Ari has incorporated or validated the `#V#rehearsal_compute_quote` estimate, and check whether Bo\u2019s collaborator statement has been received."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_compute_quote",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 4884,
+              "completion_tokens": 33,
+              "total_tokens": 4917,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 10144,
+              "completion_tokens": 34,
+              "total_tokens": 10178,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 15409,
+              "completion_tokens": 33,
+              "total_tokens": 15442,
+              "cached_input_tokens": 9984
+            },
+            {
+              "prompt_tokens": 20705,
+              "completion_tokens": 34,
+              "total_tokens": 20739,
+              "cached_input_tokens": 15104
+            },
+            {
+              "prompt_tokens": 26001,
+              "completion_tokens": 1880,
+              "total_tokens": 27881,
+              "cached_input_tokens": 20224
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "revised Luna: bounded A-C pass",
+      "local_source_artifact": "role-continuity-luna-final.json",
+      "source_artifact_sha256": "84b258920120de44317021af5d36c049b2749ea50a20eceb01413f8a511af21d",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 11.63,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness \u2014 Project Kestrel\n\n**As of:** 6 October 2026 NZ\n\n## Verified changes\n- Current source refresh confirms the Harbour Fund call requires a budget and collaborator statement; no funding has been awarded. **Evidence:** `#V#rehearsal_call` (observed 6 October 2026 NZ).\n- Project status remains: draft narrative; compute cost unknown. Ari owns the budget. Bo owns the collaborator statement, which has not been received and has no promised delivery date. **Evidence:** `#V#rehearsal_project` (source record updated 5 September 2026; content observed in this encounter).\n- The internal office guidance confirms that starting the budget does not require a polished narrative. **Evidence:** `#V#rehearsal_office` (observed 6 October 2026).\n\n## Current milestones\n- **Budget:** Not evidenced as started or complete. Ari remains the evidenced owner. **Evidence:** `#V#rehearsal_project`.\n- **Collaborator statement:** Outstanding; Bo is the evidenced owner, with no delivery date recorded. **Evidence:** `#V#rehearsal_project`.\n- **Narrative:** Draft status only; no acceptance or submission evidence. **Evidence:** `#V#rehearsal_project`.\n- **Funding/readiness:** No funding award is evidenced, and readiness cannot be accepted or inferred from the available records. **Evidence:** `#V#rehearsal_call`, `#V#rehearsal_project`.\n\n## Blockers and unresolved obligations\n- **TASK-1 remains open** and is the canonical commitment identity; the empty bounded Jira result does not resolve it because the query is explicitly partial (`isLast: false`, continuation token present). **Evidence:** `TASK-1`; `#V#rehearsal_project`; bounded Jira query.\n- Unknown compute cost blocks a complete budget. **Evidence:** `#V#rehearsal_project`.\n- The collaborator statement remains missing, with no evidenced due date. **Evidence:** `#V#rehearsal_project`.\n- No evidence establishes that either required component has been submitted or accepted. **Evidence:** `#V#rehearsal_call`, `#V#rehearsal_project`, bounded Jira query.\n\n## Decisions needed\n- Decide whether to begin the budget now; current guidance says a polished narrative is not a prerequisite. **Evidence:** `#V#rehearsal_office`.\n- Resolve the compute-cost assumption and obtain a delivery checkpoint for Bo\u2019s collaborator statement; neither is currently evidenced. **Evidence:** `#V#rehearsal_project`.\n\n## Upcoming deadlines\n- **Internal checkpoint:** 23 October 2026 at 12:00. **Evidence:** `#V#rehearsal_office` (observed 6 October 2026).\n- **External funder deadline:** 30 October 2026 at 17:00. Required materials are the budget and collaborator statement. **Evidence:** `#V#rehearsal_call` (observed 6 October 2026).\n\n## Evidence gaps and continuity\n- Jira coverage is incomplete; no current status, owner change, due-date change, or Done transition for `TASK-1` is evidenced. **Evidence:** bounded Jira query (`isLast: false`, continuation token `more`).\n- Repository evidence is unavailable/fictional; no commits or branch evidence can establish progress or acceptance. **Evidence:** bounded repository result (`evidence_gap: fictional repository`).\n- Outstanding continuity items: `TASK-1`, budget/compute-cost dependency, and Bo\u2019s collaborator statement. Next useful checkpoint is the 23 October internal deadline, while preserving the 30 October external deadline as distinct. No workflow completion, capability acceptance, submission, or spending is evidenced."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1846,
+              "completion_tokens": 33,
+              "total_tokens": 1879,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 1843
+            },
+            {
+              "prompt_tokens": 4066,
+              "completion_tokens": 34,
+              "total_tokens": 4100,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 4063
+            },
+            {
+              "prompt_tokens": 6271,
+              "completion_tokens": 33,
+              "total_tokens": 6304,
+              "cached_input_tokens": 4063,
+              "cache_write_input_tokens": 2205
+            },
+            {
+              "prompt_tokens": 8535,
+              "completion_tokens": 961,
+              "total_tokens": 9496,
+              "cached_input_tokens": 6268,
+              "cache_write_input_tokens": 2264
+            }
+          ]
+        },
+        {
+          "stage": "B",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 11.57,
+          "source_sha256": "7fda6698c5ef808cb77469342a2c7221847e15ee248b8304862f34f9ce2a53a9",
+          "canonical_text": [
+            "# Research-funding readiness \u2014 Project Kestrel\n\n**As of:** 14 October 2026 NZ\n\n## Verified changes\n- The internal checkpoint has moved to **20 October 2026 at 12:00**; this supersedes the historical 23 October checkpoint. **Evidence:** `#V#rehearsal_office` (office-v2, observed 14 October 2026).\n- The external Harbour Fund deadline remains **30 October 2026 at 17:00**. A budget and collaborator statement are required; no funding award is evidenced. **Evidence:** `#V#rehearsal_call` (observed 6 October 2026); unchanged premise is current only to that observation.\n- The collaborator statement remains missing. **Evidence:** `#V#rehearsal_office` (observed 14 October 2026); `#V#rehearsal_project` (retrieved this encounter).\n\n## Current milestones\n- **Budget:** Compute cost remains unknown; no evidence shows the budget started or is complete. Ari remains the evidenced owner. **Evidence:** `#V#rehearsal_project`.\n- **Collaborator statement:** Outstanding; Bo remains the evidenced owner, with no promised delivery date. **Evidence:** `#V#rehearsal_project`; `#V#rehearsal_office`.\n- **Narrative:** Draft status only; no submission or acceptance evidence. **Evidence:** `#V#rehearsal_project`.\n- **Readiness/funding:** Required components are not evidenced as submitted or accepted, and no funding award is evidenced. Jira completion, workflow completion, and capability acceptance remain distinct and unestablished. **Evidence:** `#V#rehearsal_call`; `#V#rehearsal_project`; bounded Jira result.\n\n## Blockers and unresolved obligations\n- **`TASK-1` remains the canonical unresolved commitment.** The bounded Jira query returned no issue rows but is explicitly incomplete (`isLast: false`, continuation token `more`); absence is not resolution and no Done transition, owner change, or due-date change is evidenced. **Evidence:** `TASK-1`; `#V#rehearsal_project`; bounded Jira result.\n- Unknown compute cost blocks a complete budget. **Evidence:** `#V#rehearsal_project`.\n- Bo\u2019s collaborator statement remains outstanding without a delivery checkpoint. **Evidence:** `#V#rehearsal_project`; `#V#rehearsal_office`.\n\n## Decisions needed\n- Decide whether Ari should begin the budget despite the narrative remaining draft; the historical office guidance said a polished narrative was not a prerequisite, but that guidance was not refreshed in the current read. **Evidence:** prior digest citing `#V#rehearsal_office` (observed 6 October 2026); current project state `#V#rehearsal_project`.\n- Resolve the compute-cost assumption and set a checkpoint for the collaborator statement. **Evidence:** `#V#rehearsal_project`.\n\n## Upcoming deadlines\n- **Internal checkpoint:** 20 October 2026 at 12:00; supersedes 23 October. **Evidence:** `#V#rehearsal_office` (observed 14 October 2026).\n- **External funder deadline:** 30 October 2026 at 17:00; required materials are the budget and collaborator statement. **Evidence:** `#V#rehearsal_call` (observed 6 October 2026).\n\n## Evidence gaps and continuity\n- Jira coverage remains partial; current `TASK-1` status and any transition or commitment revision require a complete Jira read. **Evidence:** bounded Jira result (`isLast: false`, `nextPageToken: more`).\n- Repository evidence is unavailable/fictional; no commit or branch can establish progress or acceptance. **Evidence:** bounded repository result (`evidence_gap: fictional repository`).\n- Continuity items: `TASK-1`, budget/compute-cost dependency, and Bo\u2019s collaborator statement. Source dependencies: `#V#rehearsal_call`, `#V#rehearsal_office`, and `#V#rehearsal_project`. Next useful checkpoint is the revised internal checkpoint on 20 October, while retaining the external deadline on 30 October. No submission, funding award, workflow completion, capability acceptance, or spending is evidenced."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 3792,
+              "completion_tokens": 33,
+              "total_tokens": 3825,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 3789
+            },
+            {
+              "prompt_tokens": 7958,
+              "completion_tokens": 34,
+              "total_tokens": 7992,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 7955
+            },
+            {
+              "prompt_tokens": 12130,
+              "completion_tokens": 33,
+              "total_tokens": 12163,
+              "cached_input_tokens": 7955,
+              "cache_write_input_tokens": 4172
+            },
+            {
+              "prompt_tokens": 16339,
+              "completion_tokens": 1155,
+              "total_tokens": 17494,
+              "cached_input_tokens": 12127,
+              "cache_write_input_tokens": 4209
+            }
+          ]
+        },
+        {
+          "stage": "C",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 13.86,
+          "source_sha256": "68bf6ce055b6031b776c66f1c69d97361bf89d0f8a5d82595512131fef02ad39",
+          "canonical_text": [
+            "# Research-funding readiness \u2014 Project Kestrel\n\n**As of:** 15 October 2026 NZ\n\n## Verified changes\n- A compute quote is now available: **8,000 budget units**, valid through **31 October 2026**. It is an estimate/quote, not an allocation, purchase approval, or authority to spend. **Evidence:** `#V#rehearsal_compute_quote` (compute-quote-v1; source text retrieved this encounter).\n- The compute-cost unknown has therefore been narrowed: Ari can use 8,000 units as the current budgeting assumption, subject to approval. The budget is not evidenced as started or complete. **Evidence:** `#V#rehearsal_compute_quote`; `#V#rehearsal_project`.\n- The internal checkpoint remains **20 October 2026 at 12:00**, superseding 23 October. **Evidence:** `#V#rehearsal_office` (office-v2, observed 14 October 2026).\n\n## Current milestones and readiness\n- **Budget:** A usable compute estimate exists, but no completed budget or resource approval is evidenced. Ari remains the evidenced budget owner. **Evidence:** `#V#rehearsal_compute_quote`; `#V#rehearsal_project`.\n- **Collaborator statement:** Still not received; Bo remains the evidenced owner and has no promised delivery date. **Evidence:** `#V#rehearsal_project`; `#V#rehearsal_office` (observed 14 October 2026).\n- **Narrative:** Still draft; no submission or acceptance evidence. **Evidence:** `#V#rehearsal_project`.\n- **Readiness:** Readiness has improved because the compute estimate is available, but the required budget and collaborator statement are not evidenced as submitted or accepted. No funding award is evidenced. A Jira issue being Done, workflow completion, and capability acceptance remain separate and unestablished. **Evidence:** `#V#rehearsal_compute_quote`; `#V#rehearsal_call` (observed 6 October 2026); `#V#rehearsal_project`; bounded Jira result.\n\n## Blockers and unresolved obligations\n- **`TASK-1` remains the canonical unresolved commitment.** The Jira query is incomplete (`isLast: false`, `nextPageToken: more`), returned no issue rows, and does not establish resolution, a Done transition, owner change, or due-date change. **Evidence:** `TASK-1`; bounded Jira result; `#V#rehearsal_project`.\n- **Budget completion and approval remain outstanding.** The 8,000-unit quote is not approval or spending authority. **Evidence:** `#V#rehearsal_compute_quote`.\n- **Bo\u2019s collaborator statement remains outstanding**, with no delivery checkpoint. **Evidence:** `#V#rehearsal_project`; `#V#rehearsal_office`.\n\n## Decisions needed\n- Ari should proceed or not with preparing the budget using the 8,000-unit quote; the remaining decision is approval/assumption handling, not whether a compute estimate exists. **Evidence:** `#V#rehearsal_compute_quote`; `#V#rehearsal_project`.\n- Set a delivery checkpoint for Bo\u2019s collaborator statement and determine whether any additional non-compute budget items are required. **Evidence:** `#V#rehearsal_project`; `#V#rehearsal_call`.\n\n## Upcoming deadlines\n- **Internal checkpoint:** 20 October 2026 at 12:00. **Evidence:** `#V#rehearsal_office` (observed 14 October 2026).\n- **External Harbour Fund deadline:** 30 October 2026 at 17:00; budget and collaborator statement required. **Evidence:** `#V#rehearsal_call` (observed 6 October 2026).\n- **Quote validity:** 31 October 2026; this is a source validity date, not a funding or submission deadline. **Evidence:** `#V#rehearsal_compute_quote`.\n\n## Evidence gaps and continuity\n- Jira coverage remains partial; complete current status and history for `TASK-1` are unavailable. **Evidence:** bounded Jira result (`isLast: false`, `nextPageToken: more`).\n- Repository evidence is unavailable/fictional; no commit or branch can establish progress, submission, or acceptance. **Evidence:** bounded repository result (`evidence_gap: fictional repository`).\n- No evidence establishes budget completion, resource approval, collaborator delivery, submission, funding award, workflow completion, capability acceptance, or spending. **Evidence:** `#V#rehearsal_compute_quote`; `#V#rehearsal_project`; `#V#rehearsal_call`.\n- Continuity items: `TASK-1`, Ari\u2019s budget using the compute quote, and Bo\u2019s collaborator statement. Next useful checkpoint: **20 October 2026 at 12:00**, retaining the external deadline of **30 October 2026 at 17:00**. **Evidence:** `TASK-1`; `#V#rehearsal_office`; `#V#rehearsal_call`; `#V#rehearsal_compute_quote`."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_compute_quote",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#continuity_test_kestrel",
+              "reconstruct_md": true
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 4070,
+              "completion_tokens": 33,
+              "total_tokens": 4103,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 4067
+            },
+            {
+              "prompt_tokens": 8513,
+              "completion_tokens": 34,
+              "total_tokens": 8547,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 8510
+            },
+            {
+              "prompt_tokens": 12963,
+              "completion_tokens": 33,
+              "total_tokens": 12996,
+              "cached_input_tokens": 8510,
+              "cache_write_input_tokens": 4450
+            },
+            {
+              "prompt_tokens": 17450,
+              "completion_tokens": 34,
+              "total_tokens": 17484,
+              "cached_input_tokens": 12960,
+              "cache_write_input_tokens": 4487
+            },
+            {
+              "prompt_tokens": 21928,
+              "completion_tokens": 1317,
+              "total_tokens": 23245,
+              "cached_input_tokens": 17447,
+              "cache_write_input_tokens": 4478
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "Joined rehearsal preflight: missing harness actor binding at B; not a production worker failure",
+      "local_source_artifact": "role-continuity-scheduled-final.json",
+      "source_artifact_sha256": "722b7151c383e81b8344e6a098a9081f3d684e4cd1dba763779320edb5757337",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 10.42,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness brief\n\n**As of:** 6 October 2026 NZ\n\n## Verified changes\n- The Harbour Fund call-v1 is evidenced as current in this encounter: external deadline **30 October 2026 at 17:00**; a budget and collaborator statement are required; no funding has been awarded. Source: **#V#rehearsal_call** (observed 6 October 2026 NZ; source record updated 5 September 2026).\n- No Jira issue status was returned in the bounded window. **TASK-1** remains an outstanding canonical obligation; its status is unresolved because the query was partial and returned no issue row. Source: **TASK-1**; Jira window `isLast=false`, next page token `more`.\n- No repository commits were returned. Repository evidence is explicitly unavailable for the fictional repository. Source: **fictional repository**.\n\n## Current milestones\n- Funding-call requirements identified: budget and collaborator statement. Source: **#V#rehearsal_call**.\n- Readiness is **not established**: no evidence of completed materials, submission, acceptance, funding award, or approval. Source gaps: **TASK-1**, fictional repository.\n\n## Blockers and unresolved obligations\n- **TASK-1:** preserve and continue the obligation; completion, owner, due date, and acceptance state are not evidenced in the available Jira results. Absence from this partial window is not resolution. Source: **TASK-1**; bounded Jira result.\n- Budget and collaborator statement remain required deliverables, but their preparation and review status are unknown. Source: **#V#rehearsal_call**.\n- No funding award is evidenced; the call source explicitly states no funding awarded. Source: **#V#rehearsal_call**.\n\n## Decisions needed\n- Decide the internal checkpoint and responsible owner for completing/reviewing the budget and collaborator statement, if not already governed by **TASK-1**. The source does not evidence an owner or checkpoint. Source: **TASK-1**, **#V#rehearsal_call**.\n- Confirm whether the project should be considered ready for submission only after the required documents are complete; no acceptance or submission evidence is present. Source: **#V#rehearsal_call**, fictional repository.\n\n## Upcoming deadline\n- **External deadline:** 30 October 2026, 17:00 NZ, Harbour Fund call-v1. Source: **#V#rehearsal_call** (observed 6 October 2026 NZ).\n- No internal checkpoint, estimate, resource approval, submission, or scheduler occurrence is evidenced. Sources: **TASK-1**, bounded Jira result, fictional repository.\n\n## Continuity and evidence gaps\n- Outstanding source/task IDs: **TASK-1**, **#V#rehearsal_call**; named but unread sources **#V#rehearsal_office** and **#V#rehearsal_project** remain evidence gaps.\n- Consequential unknowns: TASK-1 status/owner/due date; document completion; internal approval; submission status; acceptance and funding outcome.\n- Next useful checkpoint: obtain the remaining Jira coverage for **TASK-1** and read **#V#rehearsal_office** and **#V#rehearsal_project**, then reassess readiness against the 30 October external deadline.\n- This brief records evidence only; no Jira mutation, message, submission, or spending is claimed."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1849,
+              "completion_tokens": 33,
+              "total_tokens": 1882,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 1846
+            },
+            {
+              "prompt_tokens": 4074,
+              "completion_tokens": 960,
+              "total_tokens": 5034,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 4071
+            }
+          ],
+          "schedule_evidence": null
+        }
+      ]
+    },
+    {
+      "label": "Later Luna: honest partial source coverage; executor-only B left canonical instance pending",
+      "local_source_artifact": "role-continuity-scheduled-verified.json",
+      "source_artifact_sha256": "aa423f09e6a7a7ef74055f96300b436d292ae772c65dcc4d50c088cd14e9166a",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 10.42,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness brief\n\n**As of:** 6 October 2026 NZ\n\n## Verified changes\n- Refreshed funding-call evidence: **Harbour Fund call-v1** has an external deadline of **30 October 2026 at 17:00 NZ**; a budget and collaborator statement are required. No funding has been awarded. Evidence: **#V#rehearsal_call** (observed 6 October 2026 NZ; record updated 5 September 2026).\n- No current Jira issue row was returned in the bounded window, and no repository commits were returned. These results do not resolve or close **TASK-1** because the Jira window is explicitly partial. Evidence: **TASK-1** query result (`isLast: false`, next page `more`); fictional repository evidence (`evidence_gap: fictional repository`).\n\n## Current milestones\n- Funding-call requirements are identified: budget and collaborator statement. Evidence: **#V#rehearsal_call**.\n- Submission readiness is **not established**. No evidence shows that required materials are complete, submitted, accepted, or that funding has been awarded. Evidence gaps: **#V#rehearsal_call**, **TASK-1**, repository window.\n\n## Blockers and unresolved obligations\n- **TASK-1 remains outstanding/uncertain.** Its current status, owner, due date, and completion evidence were not present in the bounded Jira response. Absence from this partial window is not resolution. Evidence: **TASK-1** query result.\n- Required budget and collaborator statement have no completion or approval evidence in the retrieved sources. Evidence: **#V#rehearsal_call**.\n- No repository evidence is available to verify implementation or supporting work. Evidence: fictional repository result.\n\n## Decisions needed\n- Decide who will own completion of the budget and collaborator statement, and establish internal checkpoints before the external deadline; no owner or checkpoint is evidenced in the available sources. Evidence: **#V#rehearsal_call**, **TASK-1**.\n- Determine whether the project can meet the 30 October deadline once TASK-1 status and required-document readiness are verified. This is a decision request, not a readiness assertion.\n\n## Upcoming deadlines\n- **External deadline:** 30 October 2026, 17:00 NZ, Harbour Fund call-v1. Evidence: **#V#rehearsal_call** (observed 6 October 2026 NZ).\n- No internal checkpoint, estimate, resource approval, submission, or acceptance date is evidenced.\n\n## Evidence gaps\n- **#V#rehearsal_office** and **#V#rehearsal_project** were named for inspection but were not available in the retrieved evidence; their contents require refresh before relying on them.\n- Jira coverage is incomplete (`isLast: false`); TASK-1 status and history require a later source read.\n- Repository coverage is unavailable; no commit, branch, or acceptance evidence was provided.\n- No evidence establishes workflow completion, capability acceptance, or funding award; none is inferred from the absence of Jira rows.\n\n## Continuity\n- Outstanding canonical task: **TASK-1**; preserve its identity across any later owner or date revision.\n- Source dependencies: **#V#rehearsal_call** for deadline and requirements; **#V#rehearsal_office** and **#V#rehearsal_project** pending refresh; Jira and repository records pending broader retrieval.\n- Next useful checkpoint: refresh the named concepts and obtain the remaining Jira page, then verify TASK-1 ownership/status and the budget and collaborator-statement completion evidence."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1853,
+              "completion_tokens": 33,
+              "total_tokens": 1886,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 1850
+            },
+            {
+              "prompt_tokens": 4076,
+              "completion_tokens": 1000,
+              "total_tokens": 5076,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 4073
+            }
+          ],
+          "schedule_evidence": null
+        },
+        {
+          "stage": "B",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 9.59,
+          "source_sha256": "7fda6698c5ef808cb77469342a2c7221847e15ee248b8304862f34f9ce2a53a9",
+          "canonical_text": [
+            "# Research-funding readiness brief\n\n**As of:** 14 October 2026 NZ\n\n## Verified changes\n- The refreshed **#V#rehearsal_call** record confirms Harbour Fund call-v1 has an external deadline of **30 October 2026 at 17:00 NZ** and requires a budget and collaborator statement. It states that no funding has been awarded. The source was observed 6 October 2026 NZ and its record was updated 5 September 2026.\n- No Jira issue row was returned for **TASK-1** in the bounded query; coverage remains explicitly incomplete (`isLast: false`, next page token `more`). This does not resolve, close, or establish the status of TASK-1.\n- No repository commits were returned; the supplied repository evidence is marked **fictional repository** and does not verify implementation, submission, or acceptance.\n\n## Current milestones\n- Funding-call requirements remain identified: budget and collaborator statement (**#V#rehearsal_call**).\n- Submission readiness is **not established**. There is no evidence that either required document is complete or approved, that an application was submitted, that the capability was accepted, or that funding was awarded (**#V#rehearsal_call**, **TASK-1**, repository evidence).\n\n## Blockers and unresolved obligations\n- **TASK-1 remains an outstanding/uncertain canonical obligation.** Current status, owner, due date, history, and completion evidence are unavailable from the partial Jira window (**TASK-1**; `isLast: false`).\n- Completion and approval of the budget and collaborator statement remain unevidenced (**#V#rehearsal_call**).\n- Repository evidence remains unavailable, so no implementation or supporting-work claim can be verified (fictional repository evidence).\n\n## Decisions needed\n- Assign or confirm ownership and internal checkpoints for the budget and collaborator statement; no such owner or checkpoint is evidenced (**#V#rehearsal_call**, **TASK-1**).\n- Decide whether to pursue the 30 October deadline only after TASK-1 status and required-document readiness are verified. This is a decision point, not a readiness assertion (**#V#rehearsal_call**, **TASK-1**).\n\n## Upcoming deadlines\n- **External deadline:** 30 October 2026 at 17:00 NZ, Harbour Fund call-v1 (**#V#rehearsal_call**, observed 6 October 2026 NZ).\n- No internal checkpoint, estimate, resource approval, submission date, or acceptance date is evidenced (**TASK-1**, **#V#rehearsal_call**).\n\n## Evidence gaps\n- **#V#rehearsal_office** and **#V#rehearsal_project** were not available in the retrieved evidence and require refresh before reliance.\n- Jira coverage is incomplete; the remaining page/history for **TASK-1** has not been retrieved (**TASK-1**, `nextPageToken: more`).\n- Repository coverage is unavailable (fictional repository evidence); no commit, branch, or acceptance locator is available.\n- No evidence establishes workflow completion, capability acceptance/passing, application submission, or funding award. A Jira Done state, if later found, must not be treated as workflow completion or capability acceptance without separate evidence.\n\n## Continuity\n- Preserve the outstanding canonical task identity **TASK-1** across any later owner or due-date revision.\n- Source dependencies: **#V#rehearsal_call** for deadline and requirements; **#V#rehearsal_office** and **#V#rehearsal_project** pending refresh; Jira and repository records pending broader retrieval.\n- Next useful checkpoint: retrieve the remaining Jira coverage and refresh the two unavailable concepts, then verify TASK-1 ownership/status and evidence of completion or approval for both required documents. No persistence or scheduler execution is claimed; the supplied schedule occurrence is only historical workflow evidence."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 3710,
+              "completion_tokens": 33,
+              "total_tokens": 3743,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 3707
+            },
+            {
+              "prompt_tokens": 7790,
+              "completion_tokens": 1070,
+              "total_tokens": 8860,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 7787
+            }
+          ],
+          "schedule_evidence": {
+            "schedule_id": "#V#schedule_11190eddb4a34cfd9f7ea90d4c6b937c",
+            "instance_id": "c5ece12a-c9cd-4834-b29d-381a720595ba",
+            "occurrence_id": "#V#schedule_11190eddb4a34cfd9f7ea90d4c6b937c:scheduled:2026-09-05T02:49:47.165429+00:00",
+            "canonical_status": "pending",
+            "instances_after_second_poll": 1
+          }
+        },
+        {
+          "stage": "C",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 11.61,
+          "source_sha256": "68bf6ce055b6031b776c66f1c69d97361bf89d0f8a5d82595512131fef02ad39",
+          "canonical_text": [
+            "# Research-funding readiness brief\n\n**As of:** 15 October 2026 NZ\n\n## Verified changes\n- **Compute quote now evidenced:** `compute-quote-v1` estimates **8,000 budget units** and is valid through **31 October 2026** (**#V#rehearsal_compute_quote**, retrieved this encounter; source record updated 5 September 2026). It is explicitly a quote, not an allocation, purchase approval, or authority to spend.\n- The Harbour Fund call still requires a budget and collaborator statement, with an external deadline of **30 October 2026 at 17:00 NZ**; no funding has been awarded (**#V#rehearsal_call**, observed 6 October 2026 NZ; record updated 5 September 2026).\n- The bounded Jira result still contains no row for **TASK-1** and is incomplete (`isLast: false`, `nextPageToken: more`); this does not establish status or completion (**TASK-1**).\n\n## Current milestones\n- A cost estimate is available for planning, but readiness remains **not established**: the quote does not prove funding, allocation, procurement approval, or spending authority (**#V#rehearsal_compute_quote**).\n- The two required application artefacts remain identified, but their completion, review, and approval are unevidenced (**#V#rehearsal_call**).\n- No application submission, workflow completion, capability acceptance/passing, or funding award is evidenced (**#V#rehearsal_call**, **TASK-1**, fictional repository evidence).\n\n## Blockers and unresolved obligations\n- **TASK-1 remains the same outstanding/uncertain canonical obligation.** Its owner, status, due date, history, and completion evidence remain unavailable because Jira coverage is partial (**TASK-1**, `nextPageToken: more`).\n- Budget and collaborator statement completion/approval remain unverified (**#V#rehearsal_call**).\n- Compute funding and purchasing authority remain unresolved; the 8,000-unit figure is an estimate only (**#V#rehearsal_compute_quote**).\n- Repository evidence remains unavailable: no commit, branch, implementation, submission, or acceptance locator was supplied (fictional repository evidence).\n\n## Decisions needed\n- Decide whether to pursue the Harbour Fund submission, contingent on verifying **TASK-1**, completing/approving both required documents, and resolving budget authority (**#V#rehearsal_call**, **TASK-1**, **#V#rehearsal_compute_quote**).\n- If pursuing it, obtain an explicit resource allocation or purchase approval; do not treat the quote as approval (**#V#rehearsal_compute_quote**).\n- No evidenced internal checkpoint, owner change, or due-date change is available; any revision should remain attached to canonical obligation **TASK-1** rather than create a new commitment (**TASK-1**).\n\n## Upcoming deadlines\n- **External deadline:** 30 October 2026 at 17:00 NZ for Harbour Fund call-v1 (**#V#rehearsal_call**, observed 6 October 2026 NZ).\n- **Quote validity:** 31 October 2026 (**#V#rehearsal_compute_quote**).\n- No internal checkpoint, approved budget, submission date, or acceptance date is evidenced (**TASK-1**, **#V#rehearsal_compute_quote**).\n\n## Evidence gaps\n- Remaining Jira coverage/history for **TASK-1** has not been retrieved; absence from the bounded window is not resolution (**TASK-1**, `nextPageToken: more`).\n- **#V#rehearsal_office** and **#V#rehearsal_project** remain unrefreshed and cannot support current claims.\n- No evidence verifies document completion/approval, resource allocation, procurement authority, application submission, workflow completion, capability acceptance, or funding award (**#V#rehearsal_call**, **#V#rehearsal_compute_quote**, **TASK-1**).\n- Repository coverage is unavailable and marked fictional; no implementation evidence can be relied upon.\n\n## Continuity\n- Preserve canonical obligation **TASK-1** across any later owner or date revision.\n- Source dependencies: **#V#rehearsal_call** for requirements/deadline; **#V#rehearsal_compute_quote** for the estimate and validity; **#V#rehearsal_office** and **#V#rehearsal_project** pending refresh; Jira and repository evidence pending broader retrieval.\n- Next useful checkpoint: retrieve the remaining Jira coverage, refresh the office/project concepts, verify ownership and document status, and obtain explicit resource approval if the quote is to be used. No persistence or scheduler execution is claimed."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_compute_quote",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "selected_model": "gpt-5.6-luna",
+              "effective_model": "gpt-5.6-luna",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 3781,
+              "completion_tokens": 33,
+              "total_tokens": 3814,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 3778
+            },
+            {
+              "prompt_tokens": 7932,
+              "completion_tokens": 34,
+              "total_tokens": 7966,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 7929
+            },
+            {
+              "prompt_tokens": 12085,
+              "completion_tokens": 1216,
+              "total_tokens": 13301,
+              "cached_input_tokens": 7929,
+              "cache_write_input_tokens": 4153
+            }
+          ],
+          "schedule_evidence": null
+        }
+      ]
+    },
+    {
+      "label": "Worker harness preflight: incompatible definition loader signature; B failed before model synthesis",
+      "local_source_artifact": "role-continuity-worker-55.json",
+      "source_artifact_sha256": "e28440420ee7e9c4f78c4cb27e870264a175d7b7f2447c2d468234f362f0c71c",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 16.08,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\n_Fictional clock: 6 October 2026 NZ._\n\n## Verified changes / current evidence\n- Prior work product `#V#continuity_test_kestrel` contained only a heading and no substantive current commitments; it remains historical context, not proof of readiness.\n- Harbour Fund call evidence `#V#rehearsal_call` states call-v1 was observed 6 October 2026 NZ, with an external deadline of **30 October 17:00**, and requires both a budget and collaborator statement. It also states **no funding awarded**. Source document timestamp: created/updated `2026-09-05 02:55:44.597000`.\n- Office evidence `#V#rehearsal_office` states office-v1 was observed 6 October, with an internal deadline of **23 October 12:00**. It clarifies that starting the budget does not require a polished narrative. Source document timestamp: created/updated `2026-09-05 02:55:44.601000`.\n- Project evidence `#V#rehearsal_project` states Project Kestrel has a draft narrative, compute cost is unknown, Ari owns the budget, Bo owns the collaborator statement, the collaborator statement has not yet been received and has no promised delivery date, and canonical commitment **TASK-1 remains open**. Source document timestamp: created/updated `2026-09-05 02:55:44.605000`.\n\n## Current milestones and deadlines\n- **Internal checkpoint:** 23 October 2026 12:00, per `#V#rehearsal_office`; this is an internal office deadline, not the funder deadline.\n- **External submission deadline:** 30 October 2026 17:00, per `#V#rehearsal_call`; this is the Harbour Fund call deadline, not evidence of submission or acceptance.\n- **Readiness milestone:** budget and collaborator statement are both required by the call (`#V#rehearsal_call`). Current evidence does not show either item complete.\n\n## Blockers / readiness risks\n- **TASK-1 remains open:** `#V#rehearsal_project` explicitly preserves canonical commitment ID TASK-1 as open. The bounded Jira query for `key = TASK-1` returned no issues, but `isLast: false` and `nextPageToken: more`, so the Jira window is incomplete and cannot resolve or close TASK-1.\n- **Budget blocker:** Ari owns the budget, but compute cost is unknown (`#V#rehearsal_project`). Starting the budget can proceed before the narrative is polished (`#V#rehearsal_office`), so the immediate blocker is compute-cost discovery rather than narrative polish.\n- **Collaborator statement blocker:** Bo owns the collaborator statement, but it has not been received and has no promised delivery date (`#V#rehearsal_project`). This is a material readiness risk against both the internal checkpoint and the external deadline.\n\n## Decisions needed\n- Decide how to obtain or estimate the unknown compute cost for Ari\u2019s budget work, citing TASK-1 / `#V#rehearsal_project` as the continuing commitment context.\n- Decide whether Bo needs a requested delivery date for the collaborator statement before the 23 October internal checkpoint; current evidence gives no promised date (`#V#rehearsal_project`).\n\n## Unresolved or stale obligations\n- Preserve **TASK-1** as the canonical open commitment. No Jira mutation, closure, reassignment, or status transition is evidenced or permitted here. The source state from `#V#rehearsal_project` supersedes absence from the partial Jira window.\n- Funding status remains **not awarded** per `#V#rehearsal_call`; this is distinct from application readiness, submission, or acceptance.\n\n## Evidence gaps and continuity\n- Jira evidence for TASK-1 is incomplete: bounded query returned no rows but also `isLast: false` with `nextPageToken: more`; absence from this window is not resolution.\n- Repository evidence contains no commits and reports `evidence_gap: fictional repository`; no repository-based readiness or implementation claim is supported.\n- No evidence of submission, acceptance, scheduler run, spending approval, messages sent, or collaborator statement receipt was provided.\n- Next useful checkpoint: refresh TASK-1/Jira if available, confirm compute-cost source for Ari\u2019s budget, and check whether Bo\u2019s collaborator statement has a promised delivery date before the 23 October internal deadline."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1853,
+              "completion_tokens": 33,
+              "total_tokens": 1886,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 4079,
+              "completion_tokens": 34,
+              "total_tokens": 4113,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 6293,
+              "completion_tokens": 33,
+              "total_tokens": 6326,
+              "cached_input_tokens": 3840
+            },
+            {
+              "prompt_tokens": 8565,
+              "completion_tokens": 1330,
+              "total_tokens": 9895,
+              "cached_input_tokens": 0
+            }
+          ],
+          "schedule_evidence": null
+        }
+      ],
+      "scheduled_worker_failure": {
+        "schedule_id": "#V#schedule_a6f263e5b3314b50807cb50dc241bfad",
+        "instance_id": "90b35161-56f0-46a7-a287-b4640e865858",
+        "occurrence_id": "#V#schedule_a6f263e5b3314b50807cb50dc241bfad:scheduled:2026-09-05T02:55:59.710349+00:00",
+        "canonical_status": "failed",
+        "instances_after_second_poll": 1
+      }
+    },
+    {
+      "label": "Final GPT-5.5 A-C: B through production scheduler, worker and definition loader; canonical completion and no duplicate occurrence",
+      "local_source_artifact": "role-continuity-worker-55-final.json",
+      "source_artifact_sha256": "fe08415c507bb5e7005fe7dca84e2d19152b55e3e10fc47dd93d48752fe7e01d",
+      "stages": [
+        {
+          "stage": "A",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 17.67,
+          "source_sha256": "0a4d7380c5e04dbee711f595a8c0f0ee0010a5b7bfc8156213b72427ee50d450",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\n_Fictional clock: 6 October 2026 NZ. Work product: #V#continuity_test_kestrel._\n\n## Verified changes / current evidence\n- The prior represented digest for #V#continuity_test_kestrel contains only the title and no substantive commitments; it is historical state, not current proof. Prior raw_doc timestamps: created/updated 2026-09-05 02:56:49.988000.\n- Harbour Fund call-v1 is current source evidence for the external call: observed 6 October 2026 NZ, external deadline **30 October 17:00**, and the application requires a budget and collaborator statement. It does **not** evidence funding awarded. Source: #V#rehearsal_call, raw_doc updated 2026-09-05 02:56:50.011000.\n- Office guidance sets an internal checkpoint/deadline of **23 October 12:00** and says starting the budget does not require a polished narrative. Source: #V#rehearsal_office, raw_doc updated 2026-09-05 02:56:50.015000.\n- Project source says Project Kestrel has a draft narrative; compute cost is unknown; Ari owns the budget; Bo owns the collaborator statement, which is not yet received and has no promised delivery date. Source: #V#rehearsal_project, raw_doc updated 2026-09-05 02:56:50.019000.\n\n## Current milestones and deadlines\n- **Internal checkpoint:** 23 October 2026, 12:00 \u2014 office internal deadline for readiness before submission. Source: #V#rehearsal_office.\n- **External deadline:** 30 October 2026, 17:00 \u2014 Harbour Fund call deadline. Source: #V#rehearsal_call.\n- **Readiness milestone:** budget plus collaborator statement are required application components. Source: #V#rehearsal_call; current component status from #V#rehearsal_project.\n\n## Blockers / readiness risks\n- Budget is not ready because compute cost is unknown, although Ari is the evidenced owner. Sources: #V#rehearsal_project; budget requirement from #V#rehearsal_call.\n- Collaborator statement is required but not yet received; Bo is the evidenced owner and there is no promised delivery date. Sources: #V#rehearsal_project; requirement from #V#rehearsal_call.\n- Draft narrative exists, but no evidence shows the complete application has been submitted, accepted, or funded. Source: #V#rehearsal_project and #V#rehearsal_call.\n\n## Unresolved or stale obligations\n- **TASK-1** remains the canonical open commitment identity. The bounded Jira query `key = TASK-1` returned no issues and `isLast=false` with `nextPageToken=more`, so absence from this partial window is **not** resolution. Current project source explicitly says TASK-1 remains open. Source: #V#rehearsal_project; bounded Jira window.\n- TASK-1 should continue to track research-funding readiness dependencies unless a refreshed Jira source later supersedes this; do not infer Jira Done, workflow completion, capability acceptance, or submission from the current evidence.\n\n## Decisions needed\n- Decide how to obtain or estimate compute cost for Ari\u2019s budget work before the 23 October internal checkpoint. Sources: #V#rehearsal_project, #V#rehearsal_office.\n- Decide whether Bo needs a requested delivery date for the collaborator statement, since none is evidenced and the external call requires it. Sources: #V#rehearsal_project, #V#rehearsal_call.\n\n## Evidence gaps\n- Jira evidence for TASK-1 is incomplete: the initial query window was non-exhaustive and returned no row despite project-source evidence that TASK-1 is open.\n- Repository evidence is unavailable/non-material here: current bounded repository evidence has no commits and reports `fictional repository`.\n- No evidence was provided for messages sent, submission made, spending approved, funding awarded, scheduler occurrence, or acceptance/pass state.\n\n## Continuity / next useful checkpoint\n- Preserve work product #V#continuity_test_kestrel and canonical commitment TASK-1.\n- Source dependencies to refresh next: TASK-1 Jira row if accessible, #V#rehearsal_project for budget/statement status, #V#rehearsal_office for internal checkpoint, and #V#rehearsal_call for external deadline or call-version changes.\n- Next useful checkpoint: before 23 October 2026 12:00, verify compute cost/budget status and collaborator statement receipt against TASK-1 and the project source."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 1848,
+              "completion_tokens": 33,
+              "total_tokens": 1881,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 4071,
+              "completion_tokens": 34,
+              "total_tokens": 4105,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 6281,
+              "completion_tokens": 33,
+              "total_tokens": 6314,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 8545,
+              "completion_tokens": 1454,
+              "total_tokens": 9999,
+              "cached_input_tokens": 5888
+            }
+          ],
+          "schedule_evidence": null
+        },
+        {
+          "stage": "B",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 19.32,
+          "source_sha256": "7fda6698c5ef808cb77469342a2c7221847e15ee248b8304862f34f9ce2a53a9",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\n_Fictional clock: 14 October 2026 NZ. Work product: #V#continuity_test_kestrel._\n\n## Verified changes / current evidence\n- Refreshed call source: Harbour Fund call-v1 still evidences the external deadline as **30 October 2026 17:00**, requires a budget and collaborator statement, and says no funding has been awarded. Source: #V#rehearsal_call, raw_doc updated 2026-09-05 02:56:50.011000.\n- Refreshed office source changes the internal checkpoint: **20 October 2026 12:00** now supersedes the prior office-v1 checkpoint of 23 October. It also says the external fund deadline is unchanged and the collaborator statement remains missing. Source: #V#rehearsal_office, raw_doc updated 2026-09-05 02:56:50.015000; superseded premise locator: prior digest / #V#rehearsal_office office-v1.\n- Refreshed project source still says Project Kestrel has a draft narrative, compute cost is unknown, Ari owns the budget, Bo owns the collaborator statement, the statement is not yet received, no promised delivery date is evidenced, and canonical commitment **TASK-1 remains open**. Source: #V#rehearsal_project, raw_doc updated 2026-09-05 02:56:50.019000.\n- The supplied scheduler occurrence exists for this workflow checkpoint: #V#schedule_d3260afc0fed4d759f4869ea00f3f801:scheduled:2026-09-05T02:57:06.894880+00:00. It is scheduler evidence only, not evidence of submission, acceptance, Jira completion, or funding.\n\n## Current milestones and upcoming deadlines\n- **Internal checkpoint:** 20 October 2026, 12:00 \u2014 office-v2 internal deadline, superseding the prior 23 October checkpoint. Source: #V#rehearsal_office.\n- **External deadline:** 30 October 2026, 17:00 \u2014 Harbour Fund call deadline. Sources: #V#rehearsal_call and #V#rehearsal_office.\n- **Readiness components:** budget and collaborator statement are required application components. Requirement source: #V#rehearsal_call; current component status: #V#rehearsal_project and #V#rehearsal_office.\n\n## Blockers / readiness risks\n- Budget is not ready on current evidence because compute cost remains unknown; Ari is the evidenced owner. Sources: #V#rehearsal_project; budget requirement from #V#rehearsal_call.\n- Collaborator statement remains missing; Bo is the evidenced owner, and no promised delivery date is evidenced. Sources: #V#rehearsal_project and #V#rehearsal_office; requirement from #V#rehearsal_call.\n- The earlier readiness conclusion worsens because the internal checkpoint moved earlier from 23 October to 20 October. Dependent next action should be treated as more urgent, but there is still no evidence of compute-cost resolution or statement receipt. Source: #V#rehearsal_office; unresolved status from #V#rehearsal_project.\n- Draft narrative exists, but no current evidence shows the complete application has been submitted, accepted, passed, or funded. Sources: #V#rehearsal_project and #V#rehearsal_call.\n\n## Unresolved or stale obligations\n- **TASK-1** remains the canonical open commitment identity. The current bounded Jira query `key = TASK-1` returned no issues and `isLast=false` with `nextPageToken=more`; this non-exhaustive absence is not resolution. The refreshed project source explicitly says TASK-1 remains open. Sources: bounded Jira window; #V#rehearsal_project.\n- Do not infer Jira Done, workflow completion, capability acceptance/pass, submission, or funding from scheduler evidence, repository metadata, or the absence of a Jira row in the bounded window.\n\n## Decisions needed\n- Decide how Ari should obtain or estimate compute cost soon enough for the **20 October 12:00** internal checkpoint. Sources: #V#rehearsal_project and #V#rehearsal_office.\n- Decide whether Bo should be asked for a concrete delivery date for the collaborator statement, since it remains missing and no promised date is evidenced. Sources: #V#rehearsal_project, #V#rehearsal_office, #V#rehearsal_call.\n\n## Evidence gaps\n- Jira evidence for TASK-1 remains incomplete: the initial bounded query was non-exhaustive and returned no row despite refreshed project-source evidence that TASK-1 is open.\n- Repository evidence is unavailable/non-material: current bounded repository evidence has no commits and reports `fictional repository`.\n- No evidence was supplied or retrieved for messages sent, compute spending/resource approval, collaborator statement receipt, final submission, acceptance/pass, Jira Done state, or funding awarded.\n\n## Continuity / next useful checkpoint\n- Preserve work product #V#continuity_test_kestrel and canonical commitment TASK-1.\n- Source dependencies to refresh next: TASK-1 Jira row if accessible, #V#rehearsal_project for budget/statement status, #V#rehearsal_office for internal checkpoint changes, and #V#rehearsal_call for external call changes.\n- Next useful checkpoint: before **20 October 2026 12:00**, verify compute cost/budget status and collaborator statement receipt against TASK-1 and the project/office sources."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 4188,
+              "completion_tokens": 33,
+              "total_tokens": 4221,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 8751,
+              "completion_tokens": 34,
+              "total_tokens": 8785,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 13324,
+              "completion_tokens": 33,
+              "total_tokens": 13357,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 17928,
+              "completion_tokens": 1689,
+              "total_tokens": 19617,
+              "cached_input_tokens": 7936
+            }
+          ],
+          "schedule_evidence": {
+            "schedule_id": "#V#schedule_d3260afc0fed4d759f4869ea00f3f801",
+            "instance_id": "bba96df4-906d-4d66-adef-c8d1764f5f18",
+            "occurrence_id": "#V#schedule_d3260afc0fed4d759f4869ea00f3f801:scheduled:2026-09-05T02:57:06.894880+00:00",
+            "canonical_status": "completed",
+            "instances_after_second_poll": 1
+          }
+        },
+        {
+          "stage": "C",
+          "execution_completed": true,
+          "exact_readback_verified": true,
+          "elapsed_seconds": 18.94,
+          "source_sha256": "68bf6ce055b6031b776c66f1c69d97361bf89d0f8a5d82595512131fef02ad39",
+          "canonical_text": [
+            "# Research-funding readiness brief \u2014 Project Kestrel\n\n_Fictional clock: 15 October 2026 NZ. Work product: #V#continuity_test_kestrel._\n\n## Verified changes / current evidence\n- Harbour Fund call remains the current refreshed call evidence: external deadline **30 October 2026 17:00**; budget and collaborator statement are required; no funding has been awarded. Source: #V#rehearsal_call, raw_doc updated 2026-09-05 02:56:50.011000.\n- Office source still sets the internal checkpoint at **20 October 2026 12:00**, superseding office-v1\u2019s 23 October checkpoint; it says the external fund deadline is unchanged and the collaborator statement remains missing. Source: #V#rehearsal_office, raw_doc updated 2026-09-05 02:56:50.015000; superseded premise locator: prior digest / #V#rehearsal_office office-v1.\n- Project source still says Project Kestrel has a draft narrative; Ari owns the budget; Bo owns the collaborator statement; the statement is not yet received; no promised delivery date is evidenced; canonical commitment **TASK-1 remains open**. It still says compute cost is unknown, which now conflicts with the separate compute quote source. Source: #V#rehearsal_project, raw_doc updated 2026-09-05 02:56:50.019000.\n- New named-source evidence: compute-quote-v1 provides an **estimate of 8,000 budget units**, valid until **31 October 2026**. It explicitly is a quote, not an allocation, purchase approval, or authority to spend. Source: #V#rehearsal_compute_quote, raw_doc updated 2026-09-05 02:57:27.036000.\n\n## Current milestones and upcoming deadlines\n- **Internal checkpoint:** 20 October 2026, 12:00 \u2014 office-v2 internal deadline. Source: #V#rehearsal_office.\n- **External fund deadline:** 30 October 2026, 17:00 \u2014 Harbour Fund call deadline. Sources: #V#rehearsal_call and #V#rehearsal_office.\n- **Compute quote validity:** quote valid until 31 October 2026; this is later than the external deadline but does not evidence spending approval. Source: #V#rehearsal_compute_quote.\n- **Required application components:** budget and collaborator statement. Requirement source: #V#rehearsal_call.\n\n## Readiness / blockers\n- Budget readiness has improved but is not fully accepted as complete: the prior \u201ccompute cost unknown\u201d blocker is partly superseded by the 8,000-unit quote (#V#rehearsal_compute_quote), but #V#rehearsal_project still says compute cost is unknown and there is no evidence of budget incorporation, allocation, purchase approval, or authority to spend. Ari remains the evidenced budget owner. Sources: #V#rehearsal_compute_quote; #V#rehearsal_project; requirement from #V#rehearsal_call.\n- Collaborator statement remains the clearest blocker: current office and project sources say it is missing; Bo is the evidenced owner; no promised delivery date is evidenced. Sources: #V#rehearsal_office and #V#rehearsal_project; requirement from #V#rehearsal_call.\n- Draft narrative exists, but no current evidence shows the complete application has been submitted, accepted, passed, or funded. Sources: #V#rehearsal_project and #V#rehearsal_call.\n\n## Unresolved or stale obligations\n- **TASK-1** remains the canonical open commitment identity. The current bounded Jira query `key = TASK-1` returned no issues with `isLast=false` and `nextPageToken=more`; this non-exhaustive absence is not resolution. The refreshed project source explicitly says TASK-1 remains open. Sources: bounded Jira window; #V#rehearsal_project.\n- Keep distinct: Jira Done, workflow completion, capability acceptance/pass, application submission, and funding award. None is evidenced by the current Jira window, repository window, or named concept sources.\n\n## Decisions needed\n- Decide whether Ari should use the 8,000-unit quote as the budget estimate for the 20 October internal checkpoint, and what approval/allocation evidence is needed before treating the budget as ready. Sources: #V#rehearsal_compute_quote, #V#rehearsal_project, #V#rehearsal_office.\n- Decide whether to request a concrete delivery date from Bo for the collaborator statement, because it remains missing and no promised date is evidenced. Sources: #V#rehearsal_project, #V#rehearsal_office, #V#rehearsal_call.\n\n## Evidence gaps\n- Jira evidence for TASK-1 remains incomplete: bounded query was non-exhaustive and returned no issue row despite project-source evidence that TASK-1 is open.\n- Repository evidence is unavailable/non-material: current bounded repository evidence has no commits and reports `fictional repository`.\n- No evidence was supplied or retrieved for messages sent, budget integration, compute allocation/spend approval, collaborator statement receipt, final submission, acceptance/pass, Jira Done state, or funding awarded.\n- There is a current conflict/staleness gap between #V#rehearsal_project saying compute cost is unknown and #V#rehearsal_compute_quote providing an estimate.\n\n## Continuity / next useful checkpoint\n- Preserve work product #V#continuity_test_kestrel and canonical commitment TASK-1.\n- Source dependencies to refresh next: TASK-1 Jira row if accessible; #V#rehearsal_project for whether the quote has been incorporated and whether the statement arrived; #V#rehearsal_office for checkpoint changes; #V#rehearsal_call for call changes; #V#rehearsal_compute_quote for quote validity/changes.\n- Next useful checkpoint: before **20 October 2026 12:00**, verify whether Ari has incorporated the 8,000-unit quote into the budget and whether Bo\u2019s collaborator statement has been received or at least has an evidenced delivery date."
+          ],
+          "reads": [
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            },
+            {
+              "tool": "jira_search",
+              "jql": "key = TASK-1"
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_call",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_office",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_project",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "concept_id": "#V#rehearsal_compute_quote",
+              "reconstruct_md": true
+            },
+            {
+              "tool": "fetch_concept_content",
+              "reconstruct_md": true,
+              "concept_id": "#V#continuity_test_kestrel"
+            }
+          ],
+          "model_identities": [
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            },
+            {
+              "requested_model": "gpt-5.5",
+              "selected_model": "gpt-5.5",
+              "effective_model": "gpt-5.5-2026-04-23",
+              "model_identity_source": "provider_response"
+            }
+          ],
+          "reported_token_usage": [
+            {
+              "prompt_tokens": 4533,
+              "completion_tokens": 33,
+              "total_tokens": 4566,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 9441,
+              "completion_tokens": 34,
+              "total_tokens": 9475,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 14358,
+              "completion_tokens": 33,
+              "total_tokens": 14391,
+              "cached_input_tokens": 0
+            },
+            {
+              "prompt_tokens": 19307,
+              "completion_tokens": 34,
+              "total_tokens": 19341,
+              "cached_input_tokens": 14080
+            },
+            {
+              "prompt_tokens": 24251,
+              "completion_tokens": 1784,
+              "total_tokens": 26035,
+              "cached_input_tokens": 19200
+            }
+          ],
+          "schedule_evidence": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "No real lab adoption, deployment, autonomous noticing by a live worker, learned benefit or transfer is established.",
+    "Jira/repository reads are fictional adapters; real workflow, provider calls and canonical text services use an in-process isolated database.",
+    "Initial interface/preflight failures are described in the accompanying record; these are selected developmental runs, not a pass-rate sample.",
+    "Monetary cost is unavailable. Reported token usage is retained per call; setup, debugging and reviewer effort are not included in turn latency.",
+    "Later Luna source coverage was partial despite exact persistence. Executor-only scheduling was insufficient terminal evidence; final GPT-5.5 worker run supersedes that harness claim, not the partial semantic observation."
+  ]
+}

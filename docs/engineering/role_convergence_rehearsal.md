@@ -174,3 +174,26 @@ protocol. Do not label completion of all these fictional stages a real lab
 pilot or broad certification. Stop collecting evidence when additional runs
 would not change delivery; repair only a material observed failure on the
 selected path. Record unresolved programme work in the existing Jira plan.
+
+## 6. Executable A–C development path
+
+The [2721 continuity record](jvnautosci_2721_continuity_2026-09-05.md)
+describes an exercised bounded implementation using the existing lab/project
+digest workflow. Reproduce the isolated rehearsal with:
+
+```sh
+pdm run python scripts/testing/run_role_continuity_rehearsal.py \
+  --model gpt-5.5 --scheduled-middle --output tmp/role-continuity.json
+```
+
+It uses a real allowed model, fictional source adapters and an in-process mock
+database. It does not use the shared Vontology database or create a live
+schedule. A and C are fresh workflow executions with no prior transcript; B
+uses the existing scheduler and durable worker. It requires the developer's
+configured OpenAI credential and makes paid calls. The default is Luna;
+`--model gpt-5.5` selects the other exercised model. Sol is prohibited.
+
+An exit code of zero means execution and collection succeeded. Review the
+actual retrieved sources, canonical texts and remaining uncertainty against
+the outcome criteria above before calling a stage a pass. This development
+sequence is intentionally visible to its author and is not a held-out study.

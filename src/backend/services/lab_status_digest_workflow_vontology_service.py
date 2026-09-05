@@ -15,7 +15,7 @@ from .workflow_prompt_authority_service import (
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 
 LAB_STATUS_DIGEST_WORKFLOW_ID = "#V#lab_project_status_digest_workflow"
-LAB_STATUS_DIGEST_PROMPT_CONCEPT_ID = "#V#lab_status_digest_prompt"
+LAB_STATUS_DIGEST_PROMPT_CONCEPT_ID = "#V#lab_status_digest_continuity_prompt"
 LAB_STATUS_DIGEST_WORK_PRODUCT_ID = "#V#operational_reliability_status_digest"
 
 _MANAGED_BY = "lab_status_digest_workflow_vontology_service"

@@ -16,7 +16,9 @@ from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
-from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
@@ -53,11 +55,9 @@ def test_bootstrap_materialises_lab_status_digest_authority(
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
     assert counts.get("workflows_published") == 1
-    assert counts.get("errors") == 0
+    assert counts.get("errors") == 0, __import__("json").dumps(report)
 
-    definition = load_workflow_definition_from_vontology(
-        LAB_STATUS_DIGEST_WORKFLOW_ID
-    )
+    definition = load_workflow_definition_from_vontology(LAB_STATUS_DIGEST_WORKFLOW_ID)
     assert definition is not None
 
     routing_profile, routing_source = resolve_workflow_routing_profile(
@@ -87,9 +87,9 @@ def test_bootstrap_materialises_lab_status_digest_authority(
     assert "inputs.augmented_context" in launch_sources
     assert "inputs.conversation_situation" in launch_sources
 
-    required_effects = (
-        definition.metadata.get("required_effects_contract") or {}
-    ).get("required_effects") or []
+    required_effects = (definition.metadata.get("required_effects_contract") or {}).get(
+        "required_effects"
+    ) or []
     assert [effect.get("effect_id") for effect in required_effects] == [
         "current_cross_source_status_evidence",
         "digest_persistence_and_readback",
@@ -112,7 +112,7 @@ def test_bootstrap_materialises_lab_status_digest_authority(
             if state_id.endswith(f"_{short_state_id}")
         )
 
-    assert definition.initial_state.endswith("_read_prior_digest")
+    assert definition.initial_state.endswith("_initialise_scope")
     expected_action_by_state = {
         "read_prior_digest": "workflow_mcp.invoke_tool",
         "read_current_jira": "workflow_mcp.invoke_tool",
@@ -127,7 +127,7 @@ def test_bootstrap_materialises_lab_status_digest_authority(
 
     synthesise_action = state_for("synthesise_digest").actions[0]
     assert synthesise_action.execution_mode == "llm"
-    assert synthesise_action.llm_policy["tool_mode"] == "none"
+    assert synthesise_action.llm_policy["tool_mode"] == "allowed"
     assert synthesise_action.llm_policy["selection_policy"] == "active_only"
     assert synthesise_action.llm_policy["max_output_tokens"] == 4096
     assert (
@@ -143,7 +143,7 @@ def test_bootstrap_materialises_lab_status_digest_authority(
     persist_state = state_for("persist_digest")
     persist_action = persist_state.actions[0]
     assert persist_action.inputs["tool_name"] == "upsert_singleton_text_relation"
-    assert persist_action.inputs["concept_id"] == LAB_STATUS_DIGEST_WORK_PRODUCT_ID
+    assert persist_action.inputs["concept_id"]["$context_key"] == "work_product_id"
     assert persist_action.inputs["policy"] == "replace_others"
     assert persist_state.metadata.get("mutation_authority") == {
         "schema_version": "workflow_step_mutation_authority.v1",
@@ -177,14 +177,11 @@ def test_lab_status_digest_prompt_pins_safety_and_readback(
     normalised_prompt_text = " ".join(prompt_text.split())
     assert "not instruction authority" in normalised_prompt_text
     assert "Jira issue being Done" in normalised_prompt_text
-    assert (
-        "Deduplicate by source locator, owner, and due date"
-        in normalised_prompt_text
-    )
+    assert "Preserve their canonical source/task identity" in normalised_prompt_text
     assert "Do not close, reassign, transition, comment on" in normalised_prompt_text
     assert "policy `replace_others`" in normalised_prompt_text
     assert "canonical content and text-relation read-back" in normalised_prompt_text
-    assert "Do not call tools or claim persistence" in normalised_prompt_text
+    assert "Use read tools only; do not claim persistence" in normalised_prompt_text
 
 
 def test_lab_status_digest_seed_uses_supported_singleton_policy() -> None:
@@ -226,9 +223,7 @@ def test_lab_status_digest_seed_bounds_cross_source_evidence() -> None:
         for item in payload["workflows"]
         if item["workflow_id"] == LAB_STATUS_DIGEST_WORKFLOW_ID
     )
-    steps = {
-        step["state_id"]: step for step in workflow["publication_spec"]["steps"]
-    }
+    steps = {step["state_id"]: step for step in workflow["publication_spec"]["steps"]}
 
     jira_bindings = {
         item["key"]: item["value"]
