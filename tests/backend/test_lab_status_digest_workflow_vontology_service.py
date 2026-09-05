@@ -97,7 +97,7 @@ def test_bootstrap_materialises_lab_status_digest_authority(
     assert required_effects[0]["required_tools"] == [
         "jira_search",
         "repo_dossier_git_metadata",
-        "fetch_concept_content",
+        "get_text_relations",
     ]
     assert required_effects[1]["required_tools"] == [
         "upsert_singleton_text_relation",

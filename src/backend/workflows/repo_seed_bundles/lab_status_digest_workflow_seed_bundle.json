@@ -2,7 +2,7 @@
   "family_id": "lab_status_digest_workflow_seed_bundle",
   "managed_by": "lab_status_digest_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
+  "seed_version": "9",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#lab_project_status_digest_workflow": {
       "6": [
@@ -10,6 +10,9 @@
       ],
       "7": [
         "bbd325a04a2974799e03a769f9a4acb6fd8f1124465fd8c0ff23a9ecb9553b4a"
+      ],
+      "8": [
+        "17b2b9d9156c0f3d3f5a96b819e62584315d4394de89f3c498d33e06fc765460"
       ]
     }
   },
@@ -112,7 +115,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"evidence_backed_lab_status_digest\",\"required_effects\":[{\"effect_id\":\"current_cross_source_status_evidence\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must inspect current Jira and repository evidence plus the prior represented digest before synthesis.\",\"required_tools\":[\"jira_search\",\"repo_dossier_git_metadata\",\"fetch_concept_content\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"status_digest_source_evidence_missing\",\"failed_failure_code\":\"status_digest_source_evidence_failed\"},{\"effect_id\":\"digest_persistence_and_readback\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must update the stable represented digest and read back both content and text-relation evidence before success.\",\"required_tools\":[\"upsert_singleton_text_relation\",\"fetch_concept_content\",\"get_text_relations_summary\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"status_digest_readback_missing\",\"failed_failure_code\":\"status_digest_readback_failed\"}]}",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"evidence_backed_lab_status_digest\",\"required_effects\":[{\"effect_id\":\"current_cross_source_status_evidence\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must inspect current Jira and repository evidence plus the prior represented digest before synthesis.\",\"required_tools\":[\"jira_search\",\"repo_dossier_git_metadata\",\"get_text_relations\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"status_digest_source_evidence_missing\",\"failed_failure_code\":\"status_digest_source_evidence_failed\"},{\"effect_id\":\"digest_persistence_and_readback\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must update the stable represented digest and read back both content and text-relation evidence before success.\",\"required_tools\":[\"upsert_singleton_text_relation\",\"fetch_concept_content\",\"get_text_relations_summary\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"status_digest_readback_missing\",\"failed_failure_code\":\"status_digest_readback_failed\"}]}",
           "lang": "en-NZ"
         }
       ],
@@ -154,10 +157,22 @@
             "static_input_bindings": [
               {
                 "key": "tool_name",
-                "value": "fetch_concept_content"
+                "value": "get_text_relations"
               },
               {
-                "key": "reconstruct_md",
+                "key": "predicate",
+                "value": "hasContent"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "limit",
+                "value": 10
+              },
+              {
+                "key": "recent_first",
                 "value": true
               }
             ],
@@ -202,6 +217,7 @@
                 "key": "fields",
                 "value": [
                   "summary",
+                  "description",
                   "status",
                   "assignee",
                   "updated",
