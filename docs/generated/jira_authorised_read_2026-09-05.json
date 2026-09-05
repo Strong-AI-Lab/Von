@@ -1,0 +1,261 @@
+{
+  "issue": "JVNAUTOSCI-2722",
+  "observed_date": "2026-09-05",
+  "base_commit": "7dd93457695f97deb64369c04aa10cc7a1ddfe40",
+  "runtime_port": 5002,
+  "runtime_started_at_utc": "2026-09-05T11:58:27.550179Z",
+  "positive_path": "normal authenticated Chrome /von/generate, fresh session for every case",
+  "isolation": "normal shared Atlas data and authentication; isolated runtime marker and background consumers disabled",
+  "trials": [
+    {
+      "case": "luna-exact",
+      "request_id": "5f6a53b5-f2e9-4dc2-be10-9ae5727277f1",
+      "session_id": "0ed3aa38-4c22-4325-8035-11fe5068f6d0",
+      "history_index": 4,
+      "terminal_status": "completed",
+      "requested_selected_provider_observed_model": "gpt-5.6-luna",
+      "provider_call_count": 4,
+      "tools": [
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "jira_get_issue",
+          "status": "ok"
+        }
+      ],
+      "jira_arguments": {
+        "issue_key": "JVNAUTOSCI-2722",
+        "fields": [
+          "summary",
+          "status"
+        ]
+      },
+      "jira_evidence_sha256": "0f000bd9024fc6b0061c281b41f59b5b73d4c35bed092e0468cdf7952ff8beb3",
+      "authority": {
+        "access": "read_only",
+        "actor_concept_id": "#V#michael_witbrock",
+        "grant_source": "governed_login_email_owner",
+        "principal_kind": "authenticated_actor"
+      },
+      "answer_issue": "JVNAUTOSCI-2722",
+      "answer_status": "In Progress",
+      "answer_summary": "Restore authorised Jira reads on ordinary turns without import side effects",
+      "recency_basis": null,
+      "import_reconciliation_or_jira_write_invocations": 0,
+      "ui_elapsed_seconds": 58,
+      "recorded_elapsed_ms": 53970,
+      "llm_elapsed_ms": 12268,
+      "input_tokens": 38263,
+      "output_tokens": 356,
+      "estimated_cost_usd": 0.00512256,
+      "pricing_version": [
+        "openai-standard-observed-2026-08-05"
+      ]
+    },
+    {
+      "case": "luna-newest",
+      "request_id": "1a1ab383-86a4-44c5-a21c-853d13dc9d5e",
+      "session_id": "e5262bf6-41a7-4f38-8628-1e3a54640a21",
+      "history_index": 4,
+      "terminal_status": "completed",
+      "requested_selected_provider_observed_model": "gpt-5.6-luna",
+      "provider_call_count": 4,
+      "tools": [
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "jira_search",
+          "status": "ok"
+        }
+      ],
+      "jira_arguments": {
+        "jql": "project = JVNAUTOSCI AND issuetype = Task ORDER BY created DESC",
+        "max_results": 1,
+        "fields": [
+          "key",
+          "summary",
+          "status",
+          "created",
+          "issuetype"
+        ]
+      },
+      "jira_evidence_sha256": "b772c80fce39d5f96554c08a085239ba3e02e86503512c773c5ff3e1f9da4d2b",
+      "authority": {
+        "access": "read_only",
+        "actor_concept_id": "#V#michael_witbrock",
+        "grant_source": "governed_login_email_owner",
+        "principal_kind": "authenticated_actor"
+      },
+      "answer_issue": "JVNAUTOSCI-2722",
+      "answer_status": "In Progress",
+      "answer_summary": "Restore authorised Jira reads on ordinary turns without import side effects",
+      "recency_basis": "Jira created DESC with issuetype Task",
+      "import_reconciliation_or_jira_write_invocations": 0,
+      "ui_elapsed_seconds": 45,
+      "recorded_elapsed_ms": 40868,
+      "llm_elapsed_ms": 9792,
+      "input_tokens": 38950,
+      "output_tokens": 376,
+      "estimated_cost_usd": 0.00529554,
+      "pricing_version": [
+        "openai-standard-observed-2026-08-05"
+      ]
+    },
+    {
+      "case": "terra-exact",
+      "request_id": "313a8a98-6c2d-45c1-b6a0-f7d4fbbe0fb0",
+      "session_id": "fd577fe7-fdd6-4808-bc99-f99c2f1a12b5",
+      "history_index": 4,
+      "terminal_status": "completed",
+      "requested_selected_provider_observed_model": "gpt-5.6-terra",
+      "provider_call_count": 4,
+      "tools": [
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "jira_get_issue",
+          "status": "ok"
+        }
+      ],
+      "jira_arguments": {
+        "issue_key": "JVNAUTOSCI-2722",
+        "fields": [
+          "summary",
+          "status"
+        ]
+      },
+      "jira_evidence_sha256": "0f000bd9024fc6b0061c281b41f59b5b73d4c35bed092e0468cdf7952ff8beb3",
+      "authority": {
+        "access": "read_only",
+        "actor_concept_id": "#V#michael_witbrock",
+        "grant_source": "governed_login_email_owner",
+        "principal_kind": "authenticated_actor"
+      },
+      "answer_issue": "JVNAUTOSCI-2722",
+      "answer_status": "In Progress",
+      "answer_summary": "Restore authorised Jira reads on ordinary turns without import side effects",
+      "recency_basis": null,
+      "import_reconciliation_or_jira_write_invocations": 0,
+      "ui_elapsed_seconds": 53,
+      "recorded_elapsed_ms": 48883,
+      "llm_elapsed_ms": 8530,
+      "input_tokens": 38208,
+      "output_tokens": 200,
+      "estimated_cost_usd": 0.0492552,
+      "pricing_version": [
+        "openai-standard-observed-2026-08-05"
+      ]
+    },
+    {
+      "case": "terra-newest",
+      "request_id": "de2118a6-678e-4c66-aa5d-bda91f627248",
+      "session_id": "965d5e1c-b070-4415-9857-b779af65bbea",
+      "history_index": 4,
+      "terminal_status": "completed",
+      "requested_selected_provider_observed_model": "gpt-5.6-terra",
+      "provider_call_count": 4,
+      "tools": [
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "turn_capabilities",
+          "status": "ok"
+        },
+        {
+          "name": "jira_search",
+          "status": "ok"
+        }
+      ],
+      "jira_arguments": {
+        "jql": "project = JVNAUTOSCI ORDER BY created DESC",
+        "max_results": 1,
+        "fields": [
+          "summary",
+          "status",
+          "created"
+        ]
+      },
+      "jira_evidence_sha256": "bd0b2045ef2bfc645c745e2682aebf415dd2ee21acfd208cf9e6e05f6887f84e",
+      "authority": {
+        "access": "read_only",
+        "actor_concept_id": "#V#michael_witbrock",
+        "grant_source": "governed_login_email_owner",
+        "principal_kind": "authenticated_actor"
+      },
+      "answer_issue": "JVNAUTOSCI-2722",
+      "answer_status": "In Progress",
+      "answer_summary": "Restore authorised Jira reads on ordinary turns without import side effects",
+      "recency_basis": "Jira created DESC with issuetype Task",
+      "import_reconciliation_or_jira_write_invocations": 0,
+      "ui_elapsed_seconds": 42,
+      "recorded_elapsed_ms": 38308,
+      "llm_elapsed_ms": 7819,
+      "input_tokens": 39827,
+      "output_tokens": 250,
+      "estimated_cost_usd": 0.0526285,
+      "pricing_version": [
+        "openai-standard-observed-2026-08-05"
+      ]
+    }
+  ],
+  "code_sha256": {
+    "src/backend/integrations/internal_mcp/jira_proxy_mcp.py": "8c705f4f51cc660682b23c09566acb69ede6bf8bd09bbf0400931d1a9865f730",
+    "src/backend/integrations/internal_mcp/catalogue.py": "1c539d27ff567c86fe0085c71a974cd498f38122f4ab818c437547136858f712",
+    "src/backend/server/routes/von_routes.py": "3756c5e9667b255b1efc51cce699ddfa4762d9e6e46d65cf2f49379ff9aa6341"
+  },
+  "negative_probe": {
+    "binding_source": "live_governed_login_identity",
+    "owner_binding_present": true,
+    "other_actor_binding_present": false,
+    "rpc_calls": 0,
+    "results": [
+      {
+        "route": "gateway_forged_payload",
+        "actor": "#V#zhan_von_witbrock",
+        "error_code": "jira_resource_not_authorised"
+      },
+      {
+        "route": "gateway_forged_payload",
+        "actor": null,
+        "error_code": "authenticated_actor_context_required"
+      },
+      {
+        "route": "direct_workflow_proxy",
+        "actor": "#V#zhan_von_witbrock",
+        "error_code": "jira_resource_not_authorised"
+      }
+    ]
+  },
+  "test_evidence": {
+    "passed": 124,
+    "deselected": 1,
+    "baseline_failure": "test_canonical_outcome_report_uses_natural_fact_grounded_projection also fails on unchanged main7dd93457"
+  },
+  "limits": [
+    "One fresh trial per model and prompt; no stochastic reliability or general model-ranking claim.",
+    "Cost is Von telemetry estimate, not an invoice; caching and trial order are not randomised.",
+    "Other actors do not gain Jira access; no multi-user delegation added.",
+    "No complete multi-turn family, role certification, or Jira write release.",
+    "Negative live binding probe substituted an RPC sentinel; positive trials used real Jira."
+  ]
+}

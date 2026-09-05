@@ -325,6 +325,19 @@ selected profile against trusted invocation provenance and current represented
 authority. Revalidate the catalogue and adaptive-turn service before relying
 on this dated candidate implementation claim.
 
+The Jira account-owner read path uses the authenticated actor and the configured
+Atlassian account's unique, governed `#V#hasVonLoginEmail` identity binding.
+Ordinary contact email, imported Jira person data and organisation membership
+do not supply that binding. The server projects `jira_search`, `jira_get_issue`
+and `jira_get_comments` with a hidden account selector only for that owner.
+Jira retrieval rechecks the actual proxy account and current binding, including
+direct workflow calls; a model-supplied selector or identity is not authority.
+The account's Jira permissions determine its issue visibility. This bounded
+owner path does not delegate the deployment account to other Von users or
+release Jira writes. Explicit trusted-local operator access remains separate.
+Missing or ambiguous identity binding fails closed, and a changed credential
+configuration cannot silently reuse the previous account's proxy.
+
 **Protection**:
 - The ordinary-turn projection excludes undelegated effects; an operation's
   catalogue category alone does not establish authority

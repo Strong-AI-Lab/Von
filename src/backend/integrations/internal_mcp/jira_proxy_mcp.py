@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, cast
 
@@ -31,6 +32,106 @@ JIRA_PROXY_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
 
 class JiraProxyError(Exception):
     """Raised when Jira proxy operations fail."""
+
+
+class JiraInvocationAuthorityError(JiraProxyError):
+    """Non-enumerating denial before the configured account is queried."""
+
+    def __init__(self, reason_code: str, message: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _jira_resource_id(auth: Mapping[str, Any]) -> str:
+    identity = f"{auth.get('base_url', '')}\n{str(auth.get('email') or '').casefold()}"
+    return "jira_account_" + sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def _jira_account_owner(auth: Mapping[str, Any]) -> str | None:
+    from ...services.von_user_authentication_service import (
+        find_user_concept_by_login_email,
+    )
+
+    if not all(auth.get(key) for key in ("base_url", "email", "token_present")):
+        raise JiraInvocationAuthorityError(
+            "jira_configuration_unavailable",
+            "Jira account configuration is unavailable.",
+        )
+    try:
+        # This governed authentication binding is deliberately stronger than
+        # contact email, imported Jira person data or organisation membership.
+        owner = find_user_concept_by_login_email(auth["email"])
+    except Exception as exc:
+        raise JiraInvocationAuthorityError(
+            "jira_account_binding_unavailable",
+            "The Jira account's governed owner binding could not be verified.",
+        ) from exc
+    return owner.get("concept_id") if owner else None
+
+
+def jira_resource_binding_for_user(user_concept_id: str | None) -> str | None:
+    """Project this deployment's Jira account only for its authenticated owner."""
+
+    if not user_concept_id:
+        return None
+    auth = inspect_jira_auth_config()
+    try:
+        owner = _jira_account_owner(auth)
+    except JiraInvocationAuthorityError:
+        return None
+    return _jira_resource_id(auth) if owner == user_concept_id else None
+
+
+def resolve_jira_read_authority(
+    auth: Mapping[str, Any], *, resource_id: str | None = None
+) -> dict[str, Any]:
+    """Recheck the actual proxy account for direct and workflow retrieval."""
+
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+        internal_mcp_actor_context_is_trusted_local_operator,
+        internal_mcp_actor_context_is_untrusted_payload_fallback,
+    )
+    from ...security.access_control import get_effective_user_concept_id
+
+    actual_resource_id = _jira_resource_id(auth)
+    if resource_id is not None and resource_id != actual_resource_id:
+        raise JiraInvocationAuthorityError(
+            "jira_resource_not_authorised", "The Jira account binding has changed."
+        )
+    operator = internal_mcp_actor_context_is_trusted_local_operator()
+    actor_id = None
+    if not operator:
+        preexisting = get_internal_mcp_preexisting_actor_context()
+        if not internal_mcp_actor_context_is_untrusted_payload_fallback():
+            if preexisting is not None:
+                actor_id = preexisting[0]
+            elif get_internal_mcp_actor_context_source() is None:
+                # A durable worker may call the proxy directly inside its
+                # server-bound actor context. An unscoped call is not an operator.
+                actor_id = get_effective_user_concept_id()
+        if not actor_id:
+            raise JiraInvocationAuthorityError(
+                "authenticated_actor_context_required",
+                "Jira reads require an authenticated actor or the trusted local operator route.",
+            )
+        if _jira_account_owner(auth) != actor_id:
+            raise JiraInvocationAuthorityError(
+                "jira_resource_not_authorised",
+                "The configured Jira account is not authorised for this actor.",
+            )
+    return {
+        "principal_kind": (
+            "trusted_local_operator" if operator else "authenticated_actor"
+        ),
+        "actor_concept_id": actor_id,
+        "resource_id": actual_resource_id,
+        "grant_source": (
+            "trusted_local_operator" if operator else "governed_login_email_owner"
+        ),
+        "access": "read_only",
+    }
 
 
 def _resolve_jira_auth(
@@ -67,11 +168,16 @@ def _resolve_jira_auth(
     if base_url:
         base_url = base_url.rstrip("/")
 
-    return base_url, email, token, {
-        "base_url": base_url_key,
-        "email": email_key,
-        "token": token_key,
-    }
+    return (
+        base_url,
+        email,
+        token,
+        {
+            "base_url": base_url_key,
+            "email": email_key,
+            "token": token_key,
+        },
+    )
 
 
 @dataclass
@@ -88,6 +194,7 @@ class JiraMCPProxy:
     """Manages external Jira MCP server subprocess using MCP SDK client."""
 
     def __init__(self, config: JiraProxyConfig):
+        self._auth_identity = _resolve_jira_auth(config.env)[:3]
         client_config = MCPServerConfig(
             command=config.command,
             args=config.args,
@@ -97,9 +204,25 @@ class JiraMCPProxy:
         )
         self._client = MCPStdIOClient(client_config)
 
-    async def _call(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def _call(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        resource_id: str | None = None,
+    ) -> Any:
+        authority = None
+        if tool_name == "jira_search" or tool_name.startswith("jira_get_"):
+            base_url, email, token = self._auth_identity
+            authority = resolve_jira_read_authority(
+                {"base_url": base_url, "email": email, "token_present": bool(token)},
+                resource_id=resource_id,
+            )
         try:
-            return await self._client.call_tool(tool_name, arguments)
+            result = await self._client.call_tool(tool_name, arguments)
+            if authority is not None and isinstance(result, dict):
+                result = {**result, "authority": authority}
+            return result
         except MCPToolClientError as exc:
             raise JiraProxyError(str(exc)) from exc
 
@@ -111,6 +234,7 @@ class JiraMCPProxy:
         start_at: Optional[int] = None,
         next_page_token: Optional[str] = None,
         fields: Optional[list[str]] = None,
+        resource_id: str | None = None,
     ) -> Dict[str, Any]:
         arguments: Dict[str, Any] = {"jql": jql}
         if isinstance(max_results, int):
@@ -121,7 +245,7 @@ class JiraMCPProxy:
             arguments["next_page_token"] = next_page_token.strip()
         if fields:
             arguments["fields"] = fields
-        return await self._call("jira_search", arguments)
+        return await self._call("jira_search", arguments, resource_id=resource_id)
 
     async def get_issue(
         self,
@@ -129,13 +253,14 @@ class JiraMCPProxy:
         issue_key: str,
         fields: Optional[list[str]] = None,
         expand: Optional[list[str]] = None,
+        resource_id: str | None = None,
     ) -> Dict[str, Any]:
         arguments: Dict[str, Any] = {"issue_key": issue_key}
         if fields:
             arguments["fields"] = fields
         if expand:
             arguments["expand"] = expand
-        return await self._call("jira_get_issue", arguments)
+        return await self._call("jira_get_issue", arguments, resource_id=resource_id)
 
     async def get_comments(
         self,
@@ -145,6 +270,7 @@ class JiraMCPProxy:
         max_results: Optional[int] = None,
         order_by: Optional[str] = None,
         body_format: Optional[str] = None,
+        resource_id: str | None = None,
     ) -> Dict[str, Any]:
         arguments: Dict[str, Any] = {"issue_key": issue_key}
         if isinstance(start_at, int):
@@ -155,7 +281,7 @@ class JiraMCPProxy:
             arguments["order_by"] = order_by.strip()
         if isinstance(body_format, str) and body_format.strip():
             arguments["body_format"] = body_format.strip()
-        return await self._call("jira_get_comments", arguments)
+        return await self._call("jira_get_comments", arguments, resource_id=resource_id)
 
     async def get_watchers(self, *, issue_key: str) -> Dict[str, Any]:
         return await self._call("jira_get_watchers", {"issue_key": issue_key})
@@ -347,8 +473,13 @@ async def get_jira_proxy() -> JiraMCPProxy:
     global _proxy_instance
 
     with _proxy_lock:
-        if _proxy_instance is None:
-            config = _build_jira_config()
+        config = _build_jira_config()
+        # Never authorise a freshly configured account and then send the read
+        # through a process still authenticated as the previous account.
+        if (
+            _proxy_instance is None
+            or _proxy_instance._auth_identity != _resolve_jira_auth(config.env)[:3]
+        ):
             _proxy_instance = JiraMCPProxy(config)
             logger.info("%s Initialised Jira MCP proxy via %s", _LOG_TAG, config.args)
         return _proxy_instance
