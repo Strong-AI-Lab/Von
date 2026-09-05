@@ -1,5 +1,11 @@
 # JVNAUTOSCI-2011 Role-Learning Design Review - 24 April 2026
 
+> **Planning superseded on 4 September 2026:** Use the
+> [role-learning convergence guide](role_learning_convergence.md) and live
+> `JVNAUTOSCI-2011` for current direction and delivery. The April observations
+> below remain historical; they do not require a universal role schema or
+> promotion framework before bounded role learning can begin.
+
 > **Document status: Long-horizon design with a dated implementation snapshot.**
 > The role-learning framing may remain useful. Claims about the current
 > substrate, gaps, source anchors, or task ordering describe the 24 April 2026
