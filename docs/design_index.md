@@ -80,6 +80,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Enduring role competence, organisational continuity, active acquisition, learned reuse or transfer | [Role-learning convergence](engineering/role_learning_convergence.md), with the [staged development rehearsal](engineering/role_convergence_rehearsal.md); live Jira owns delivery status and the next integrating increment |
 | Material security exposure: authentication/authorisation, private or cross-namespace data, secrets, untrusted content with tool authority, effects outside ordinary bounded and recoverable delegation, deployment, or administrator surfaces | [Security considerations](engineering/security_considerations.md) |
 | Substantial agent-behaviour implementation | Relevant sections of the [modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) |
 | Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
@@ -111,6 +112,7 @@ from `AGENTS.md`.
 | [Prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) | Active playbook | Normative only within its stated prompt/model scope |
 | [OpenRouter provider deployment](engineering/openrouter_provider_deployment.md) | Active bounded operator note | Operational reference for the opt-in OpenRouter transport; scoped settings and represented model policy remain authoritative |
 | [Agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) | Active design guide | Normative only within its stated memory/retrieval scope |
+| [Role-learning convergence](engineering/role_learning_convergence.md) | Active programme design and guide | Canonical programme direction under `AGENTS.md` for claims about enduring role competence; no runtime activation, universal per-PR gate or demonstrated role capability is implied |
 | [Contextual knowledge evolution](engineering/contextual_knowledge_evolution.md) | Active design guide | Advisory under `AGENTS.md` when assertion/context distinctions are material; it does not select a microtheory formalism or prove present implementation |
 | [Assertion and propositional-sentence ontology](engineering/assertion_and_propositional_sentence_ontology.md) | Active design and partial implementation boundary | Canonical model and phased integration plan; the minimal public vocabulary is live, while assertion-record typing, context semantics, general logical storage, and reasoning remain future work |
 | [External conversation import](engineering/external_conversation_import.md) | Active design and implementation boundary | Canonical reference for source-neutral transcript packages, actor-scoped read-only projections, provider adapters, append-only resynchronisation, durable machine-wide batches, and native continuation; verify supported provider export shapes against current fixtures and live evidence |
