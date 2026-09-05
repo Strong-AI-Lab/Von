@@ -568,6 +568,10 @@ class WorkflowSchedule:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     description: str | None = None
+    # Legacy schedules are deliberately not adopted by release reconciliation.
+    origin: str = "legacy_unmanaged"
+    definition_identity: dict[str, Any] = field(default_factory=dict)
+    creation_context: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create_once(
@@ -673,6 +677,9 @@ class WorkflowSchedule:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "description": self.description,
+            "origin": self.origin,
+            "definition_identity": self.definition_identity,
+            "creation_context": self.creation_context,
         }
 
     @classmethod
@@ -695,6 +702,9 @@ class WorkflowSchedule:
             created_at=doc.get("created_at", datetime.now(timezone.utc)),
             updated_at=doc.get("updated_at", datetime.now(timezone.utc)),
             description=doc.get("description"),
+            origin=doc.get("origin", "legacy_unmanaged"),
+            definition_identity=doc.get("definition_identity", {}),
+            creation_context=doc.get("creation_context", {}),
         )
 
     def to_status_dict(self) -> dict[str, Any]:
@@ -710,4 +720,7 @@ class WorkflowSchedule:
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
             "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
             "description": self.description,
+            "origin": self.origin,
+            "definition_identity": self.definition_identity,
+            "creation_context": self.creation_context,
         }

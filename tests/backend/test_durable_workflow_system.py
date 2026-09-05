@@ -2520,6 +2520,45 @@ class TestWorkflowInstanceManager:
 
 
 class TestScheduleManagement:
+
+    def test_schedule_is_unavailable_until_all_properties_are_published(
+        self, monkeypatch
+    ):
+        from src.backend.workflows.durable.vontology_schedule_repository import (
+            VontologyScheduleRepository,
+        )
+
+        manager = WorkflowInstanceManager()
+        original = VontologyScheduleRepository._set_text
+        partial_reads = []
+
+        def observe_partial(repo, concept_id, *args, **kwargs):
+            partial_reads.append(repo.get_schedule(concept_id))
+            return original(repo, concept_id, *args, **kwargs)
+
+        monkeypatch.setattr(VontologyScheduleRepository, "_set_text", observe_partial)
+        run_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+        schedule = WorkflowSchedule.create_once(
+            "#V#test_workflow",
+            run_at,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            default_inputs={"prompt": "Maintain a brief"},
+        )
+        schedule.origin = "actor_owned"
+        schedule.definition_identity = {"definition_hash": "version-a"}
+        schedule.creation_context = {"request_id": "turn-1"}
+        sid = manager.create_schedule(schedule)
+        assert partial_reads and all(item is None for item in partial_reads)
+        saved = manager.get_schedule(sid)
+        assert saved.enabled is True
+        assert saved.origin == "actor_owned"
+        assert saved.run_at == run_at
+        assert saved.default_inputs == schedule.default_inputs
+        assert saved.definition_identity == schedule.definition_identity
+        assert saved.creation_context == schedule.creation_context
+
     """Unit tests for schedule management in WorkflowInstanceManager."""
 
     def test_create_and_get_schedule(self) -> None:

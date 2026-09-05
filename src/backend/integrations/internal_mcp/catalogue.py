@@ -24715,22 +24715,14 @@ def _authorise_internal_mcp_workflow_schedule(schedule: Any):
 
 
 def _workflow_create_schedule(**kwargs):
-    """Create a new workflow schedule."""
-    from datetime import datetime
-    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
-    from ...workflows.durable import (
-        WorkflowInstanceManager,
-        WorkflowSchedule,
-        ScheduleType,
-    )
+    """Create and canonically read back an actor-owned schedule."""
 
-    workflow_id = kwargs.get("workflow_id")
-    if not isinstance(workflow_id, str) or not workflow_id.strip():
-        return make_error_response(
-            "missing_parameter",
-            "workflow_id is required",
-            details={"missing": ["workflow_id"]},
-        )
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
+    from ...services.workflow_schedule_service import (
+        ScheduleCommandError,
+        create_actor_schedule,
+    )
+    from ...workflows.durable import WorkflowInstanceManager
 
     try:
         actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
@@ -24738,114 +24730,17 @@ def _workflow_create_schedule(**kwargs):
             org_id=kwargs.get("org_id"),
             namespace=kwargs.get("namespace"),
         )
+        return create_actor_schedule(
+            WorkflowInstanceManager(),
+            kwargs,
+            actor_scope,
+            request_id=kwargs.get("request_id"),
+            conversation_id=kwargs.get("conversation_id"),
+        )
     except WorkflowActorScopeError as exc:
         return _workflow_actor_scope_error_response(exc)
-    user_id = actor_scope.user_concept_id
-    org_id = actor_scope.organisation_concept_id
-    namespace = actor_scope.namespace
-    if not user_id or not namespace:
-        return make_error_response(
-            "workflow_actor_authority_required",
-            "Workflow schedule actor authority is required.",
-        )
-    from ...workflows.workflow_listing_service import (
-        filter_workflow_ids_for_current_actor,
-    )
-
-    workflow_id = workflow_id.strip()
-    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
-        return make_error_response(
-            "not_found",
-            "Workflow definition not found.",
-        )
-    default_inputs = kwargs.get("default_inputs", {})
-    description = kwargs.get("description")
-
-    schedule_type_str = kwargs.get("schedule_type", "interval")
-    try:
-        schedule_type = ScheduleType(schedule_type_str.lower())
-    except ValueError:
-        return make_error_response(
-            "invalid_schedule_type",
-            f"Invalid schedule_type: {schedule_type_str}. Valid values: once, interval, cron",
-        )
-
-    schedule = None
-
-    if schedule_type == ScheduleType.INTERVAL:
-        interval_seconds = kwargs.get("interval_seconds")
-        if not interval_seconds or not isinstance(interval_seconds, (int, float)):
-            return make_error_response(
-                "missing_parameter",
-                "interval_seconds is required for interval type",
-            )
-        schedule = WorkflowSchedule.create_interval(
-            workflow_id,
-            interval_seconds=int(interval_seconds),
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            default_inputs=default_inputs if isinstance(default_inputs, dict) else {},
-            description=description,
-        )
-
-    elif schedule_type == ScheduleType.CRON:
-        cron_expression = kwargs.get("cron_expression")
-        if not isinstance(cron_expression, str) or not cron_expression.strip():
-            return make_error_response(
-                "missing_parameter",
-                "cron_expression is required for cron type",
-            )
-        schedule = WorkflowSchedule.create_cron(
-            workflow_id,
-            cron_expression=cron_expression.strip(),
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            default_inputs=default_inputs if isinstance(default_inputs, dict) else {},
-            description=description,
-        )
-
-    elif schedule_type == ScheduleType.ONCE:
-        run_at_str = kwargs.get("run_at")
-        if not isinstance(run_at_str, str) or not run_at_str.strip():
-            return make_error_response(
-                "missing_parameter",
-                "run_at is required for once type",
-            )
-        try:
-            run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
-        except ValueError:
-            return make_error_response(
-                "invalid_datetime",
-                "Invalid run_at datetime format. Use ISO format: 2026-02-04T10:00:00Z",
-            )
-        schedule = WorkflowSchedule.create_once(
-            workflow_id,
-            run_at=run_at,
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            default_inputs=default_inputs if isinstance(default_inputs, dict) else {},
-            description=description,
-        )
-
-    if schedule is None:
-        return make_error_response("create_failed", "Failed to create schedule")
-
-    try:
-        manager = WorkflowInstanceManager()
-        schedule_id = manager.create_schedule(schedule)
-        return {
-            "success": True,
-            "schedule_id": schedule_id,
-            "schedule_type": schedule_type.value,
-        }
-    except Exception as e:
-        return make_error_response(
-            "create_failed",
-            f"Failed to create workflow schedule: {e}",
-        )
+    except ScheduleCommandError as exc:
+        return make_error_response(exc.code, exc.detail)
 
 
 def _workflow_list_schedules(**kwargs):
@@ -24970,15 +24865,17 @@ def _workflow_set_schedule_enabled(**kwargs):
             f"Workflow schedule not found: {schedule_id}",
         )
 
-    success = manager.set_schedule_enabled(schedule_id.strip(), enabled)
-    if success:
-        return {
-            "success": True,
-            "schedule_id": schedule_id,
-            "enabled": enabled,
-        }
-    else:
-        return make_error_response("update_failed", "Failed to update schedule")
+    from ...services.workflow_schedule_service import (
+        ScheduleCommandError,
+        set_owned_schedule_enabled,
+    )
+
+    try:
+        return set_owned_schedule_enabled(
+            manager, schedule_id.strip(), enabled, actor_scope
+        )
+    except ScheduleCommandError as exc:
+        return make_error_response(exc.code, exc.detail)
 
 
 def _workflow_delete_schedule(**kwargs):
@@ -45795,6 +45692,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "run_at": str,
                     "default_inputs": (dict, type(None)),
                     "description": (str, type(None)),
+                    "idempotency_key": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
@@ -45815,10 +45713,18 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Schedule creation result.",
             ),
             category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_trusted_argument_bindings={
+                "user_id": "actor_user_concept_id",
+                "org_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+                "conversation_id": "conversation_id",
+                "request_id": "turn_id",
+            },
             description=(
                 "Create a scheduled trigger for a workflow. Supports three types: "
                 "'interval' (run every N seconds), 'cron' (5-field cron expression), "
-                "'once' (run at a specific time). The scheduler will automatically "
+                "'once' (run at a specific time). Cron uses UTC and weekday 0=Monday. Intervals first run after one interval. The scheduler will automatically "
                 "create workflow instances when schedules are due."
             ),
         ),
@@ -45894,6 +45800,14 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Update result.",
             ),
             category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_trusted_argument_bindings={
+                "user_id": "actor_user_concept_id",
+                "org_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+                "conversation_id": "conversation_id",
+                "request_id": "turn_id",
+            },
             description="Enable or disable a workflow schedule.",
         ),
         MethodDefinition(

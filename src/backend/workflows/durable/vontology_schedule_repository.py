@@ -102,6 +102,13 @@ class VontologyScheduleRepository:
                     "user_id": schedule.user_id,
                     "org_id": schedule.org_id,
                     "namespace": schedule.namespace,
+                    "schedule_origin": schedule.origin,
+                    "schedule_definition_identity": schedule.definition_identity,
+                    "schedule_creation_context": schedule.creation_context,
+                    "schedule_run_at": (
+                        schedule.run_at.isoformat() if schedule.run_at else None
+                    ),
+                    "schedule_initialisation_complete": False,
                 },
             )
         except Exception as e:
@@ -111,7 +118,8 @@ class VontologyScheduleRepository:
         # 3. Add Text Relations (properties)
         try:
             # Enabled
-            self._set_enabled_state(concept_id, schedule.enabled)
+            # Publish enablement only after every execution property exists.
+            self._set_enabled_state(concept_id, False)
 
             # Schedule specific properties
             if schedule.schedule_type == ScheduleType.CRON and schedule.cron_expression:
@@ -143,6 +151,10 @@ class VontologyScheduleRepository:
                 self._set_text(
                     concept_id, PRED_INPUTS, json.dumps(schedule.default_inputs)
                 )
+            self._set_enabled_state(concept_id, schedule.enabled)
+            concept_service.update_concept(
+                concept_id, {"attributes.schedule_initialisation_complete": True}
+            )
 
         except Exception as e:
             logger.error(
@@ -650,6 +662,11 @@ class VontologyScheduleRepository:
         concept_id = concept.get("concept_id")
         if not concept_id:
             return None
+        if (
+            concept.get("attributes", {}).get("schedule_initialisation_complete")
+            is False
+        ):
+            return None
 
         has_cron = self._get_text(concept_id, PRED_HAS_CRON)
         has_interval = self._get_text(concept_id, PRED_HAS_INTERVAL)
@@ -717,6 +734,10 @@ class VontologyScheduleRepository:
             last_run_at=last_run_at,
             default_inputs=default_inputs,
             description=description,
+            run_at=self._parse_iso_datetime(attrs.get("schedule_run_at")),
+            origin=attrs.get("schedule_origin", "legacy_unmanaged"),
+            definition_identity=attrs.get("schedule_definition_identity", {}),
+            creation_context=attrs.get("schedule_creation_context", {}),
             # Timestamps
             created_at=datetime.now(timezone.utc),  # TODO: parse concept created_at
             updated_at=datetime.now(timezone.utc),

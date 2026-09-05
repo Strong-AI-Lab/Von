@@ -1392,6 +1392,7 @@ def _apply_workflow_policy_metadata(
             schedule
             for schedule in manager.list_schedules(limit=200)
             if _clean_text(getattr(schedule, "workflow_id", "")) == workflow_id
+            and getattr(schedule, "origin", "legacy_unmanaged") == "workflow_release"
         ]
         for schedule in existing_schedules:
             schedule_id = _clean_text(getattr(schedule, "schedule_id", ""))
@@ -1447,9 +1448,9 @@ def _apply_workflow_policy_metadata(
                     default_inputs=default_inputs,
                     description=description,
                 )
+            schedule.origin = "workflow_release"
+            schedule.enabled = bool(spec.get("enabled", True))
             schedule_id = manager.create_schedule(schedule)
-            if not spec.get("enabled", True):
-                manager.set_schedule_enabled(schedule_id, False)
             applied["schedule_ids"].append(schedule_id)
 
     return applied

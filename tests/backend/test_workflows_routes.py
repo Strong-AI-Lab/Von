@@ -1450,13 +1450,40 @@ def test_create_workflow_schedule_route_canonicalises_legacy_namespace(
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    from src.backend.services import workflow_schedule_service as schedules
+
+    monkeypatch.setattr(
+        schedules.workflow_listing_service,
+        "filter_workflow_ids_for_current_actor",
+        lambda ids: ids,
+    )
+    monkeypatch.setattr(
+        schedules,
+        "verify_workflow_runnable",
+        lambda *a, **kw: types.SimpleNamespace(
+            runnable_verification_success=True,
+            definition_identity={"definition_hash": "test-definition"},
+        ),
+    )
+    monkeypatch.setattr(
+        schedules,
+        "_resolve_submission_launch_inputs",
+        lambda **kw: (
+            object(),
+            types.SimpleNamespace(unresolved_required_inputs=(), resolved_inputs={}),
+        ),
+    )
     captured: dict[str, object] = {}
 
     def _create_schedule(schedule):
+        schedule.schedule_id = "#V#schedule_" + schedule.schedule_id
         captured["schedule"] = schedule
         return schedule.schedule_id
 
-    manager = types.SimpleNamespace(create_schedule=_create_schedule)
+    manager = types.SimpleNamespace(
+        create_schedule=_create_schedule,
+        get_schedule=lambda sid: captured.get("schedule"),
+    )
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
     monkeypatch.setattr(
         workflows_routes,
@@ -3167,7 +3194,6 @@ def test_workflow_studio_existing_target_mutations_conceal_hidden_workflows(
         "error": "workflow_definition_not_found",
         "workflow_id": "#V#hidden_workflow",
     }
-
 
 
 def test_workflow_studio_page_route(app_client):

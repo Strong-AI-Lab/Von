@@ -126,6 +126,33 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
     )
 
 
+def _patch_schedule_creation_authority(monkeypatch):
+    """Existing scheduler/actor tests use a declared executable test workflow."""
+    from src.backend.services import workflow_schedule_service as schedules
+
+    monkeypatch.setattr(
+        schedules.workflow_listing_service,
+        "filter_workflow_ids_for_current_actor",
+        lambda ids: ids,
+    )
+    monkeypatch.setattr(
+        schedules,
+        "verify_workflow_runnable",
+        lambda *a, **kw: SimpleNamespace(
+            runnable_verification_success=True,
+            definition_identity={"definition_hash": "test-definition"},
+        ),
+    )
+    monkeypatch.setattr(
+        schedules,
+        "_resolve_submission_launch_inputs",
+        lambda **kw: (
+            object(),
+            SimpleNamespace(unresolved_required_inputs=(), resolved_inputs={}),
+        ),
+    )
+
+
 def _patch_read_only_registry(monkeypatch, *workflow_ids: str) -> None:
     class _StubRegistry:
         def all_workflow_ids(self) -> list[str]:
@@ -510,6 +537,7 @@ class _InMemoryScheduleWorkflowManager:
         self._instance_counter = 0
 
     def create_schedule(self, schedule):
+        schedule.schedule_id = "#V#schedule_" + schedule.schedule_id
         self.schedules[schedule.schedule_id] = schedule
         return schedule.schedule_id
 
@@ -571,6 +599,31 @@ class _InMemoryScheduleWorkflowManager:
         stub_instance.schedule_id = schedule_id
         self._instance_lookup[instance_id] = stub_instance
         return instance_id
+
+    def list_instances(
+        self, *, user_id=None, namespace=None, status=None, workflow_id=None, limit=100
+    ):
+        return [
+            i
+            for i in self._instance_lookup.values()
+            if (user_id is None or i.user_id == user_id)
+            and (namespace is None or i.namespace == namespace)
+            and (workflow_id is None or i.workflow_id == workflow_id)
+            and (status is None or i.status.value in status)
+        ][:limit]
+
+    def create_instance_for_event(
+        self, *, event_idempotency_key, source_event_type, source_event_id, **kwargs
+    ):
+        for instance in self._instance_lookup.values():
+            if instance.event_idempotency_key == event_idempotency_key:
+                return instance.instance_id, False
+        instance_id = self.create_instance(**kwargs)
+        instance = self._instance_lookup[instance_id]
+        instance.event_idempotency_key = event_idempotency_key
+        instance.source_event_type = source_event_type
+        instance.source_event_id = source_event_id
+        return instance_id, True
 
     def get_instance(self, instance_id: str):
         return self._instance_lookup.get(instance_id)
@@ -3682,6 +3735,7 @@ def test_authenticated_actor_cannot_inspect_or_mutate_global_event_bindings(
 
 
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
+    _patch_schedule_creation_authority(monkeypatch)
     manager = _InMemoryScheduleWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
     monkeypatch.setattr(
@@ -3972,6 +4026,7 @@ def test_revoked_workflow_visibility_hides_persisted_instances_and_schedules(
 
 
 def test_workflow_schedule_tools_are_exactly_scoped_to_preexisting_actor(monkeypatch):
+    _patch_schedule_creation_authority(monkeypatch)
     from src.backend.security import access_control
 
     manager = _InMemoryScheduleWorkflowManager()
@@ -4062,6 +4117,7 @@ def test_workflow_schedule_tools_are_exactly_scoped_to_preexisting_actor(monkeyp
 
 
 def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
+    _patch_schedule_creation_authority(monkeypatch)
     manager = _InMemoryScheduleWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
     monkeypatch.setattr(
@@ -4127,6 +4183,7 @@ def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
 
 
 def test_workflow_trigger_schedule_rejects_unrunnable_workflow(monkeypatch):
+    _patch_schedule_creation_authority(monkeypatch)
     manager = _InMemoryScheduleWorkflowManager()
     monkeypatch.setattr(
         "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
