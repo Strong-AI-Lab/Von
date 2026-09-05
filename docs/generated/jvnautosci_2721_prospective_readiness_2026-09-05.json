@@ -1,0 +1,2126 @@
+{
+  "record_kind": "dated_operational_evidence",
+  "evidence_date_utc": "2026-09-05",
+  "runtime_commit": "38afefd252071274a497bdc9b9be41982c4ca9e1",
+  "prompt_bank_sha256": "601e8a729c9797553bc7f1f29dd3558315482115f61ca0e1217d9b9aec9a9ef6",
+  "trials": [
+    {
+      "label": "encounter-a",
+      "turn": 1,
+      "session_id": "a1fb157e-a4b2-4bd7-b45b-ddb21acff5fd",
+      "request_id": "ea086bbd-a3d8-4f50-bd2f-520a7deb942f",
+      "history_index": 137,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "partial_judgement",
+      "ui_elapsed_seconds": 440,
+      "recorded_timing": {
+        "elapsed_ms": 405241,
+        "llm_call_count": 19,
+        "llm_elapsed_ms": 198339,
+        "observed_timeline_ms": 404111,
+        "operation_elapsed_ms": 393763,
+        "phase_elapsed_ms": 404152,
+        "tool_elapsed_ms": 156908
+      },
+      "response_sha256": "6dced19923ecbf44a967d3dab03f66c7829897818bb4218ce15920d081ca602f",
+      "tool_counts": {
+        "turn_capabilities": 4,
+        "resolve_concept_by_name": 4,
+        "jira_get_issue": 7,
+        "jira_get_comments": 7,
+        "turn_read_evidence": 100,
+        "search_concepts": 8,
+        "create_concepts": 1,
+        "add_relationship": 1,
+        "upsert_text_relation": 1,
+        "fetch_concept": 1,
+        "fetch_concept_content": 1,
+        "get_text_relations": 1
+      },
+      "model_identities": [
+        {
+          "call_count": 18,
+          "connection_id": "#V#openai_provider",
+          "effective_model": "gpt-5.6-luna",
+          "effective_service_tier": "default",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "provider_request_sent": true,
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna"
+        },
+        {
+          "call_count": 1,
+          "connection_id": null,
+          "effective_model": null,
+          "effective_service_tier": null,
+          "model_identity_source": null,
+          "provider": "openai",
+          "provider_request_sent": true,
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna"
+        }
+      ],
+      "usage": {
+        "cache_write_input_tokens": null,
+        "cached_input_tokens": null,
+        "input_tokens": null,
+        "known_cache_write_input_tokens": 347187,
+        "known_cached_input_tokens": 712912,
+        "known_input_tokens": 1060153,
+        "known_output_tokens": 15458,
+        "known_total_tokens": 1075611,
+        "output_tokens": null,
+        "partial_call_count": 0,
+        "reported_call_count": 18,
+        "status": "partial",
+        "total_tokens": null,
+        "unavailable_call_count": 1
+      },
+      "estimated_cost": {
+        "amount": null,
+        "currency": "USD",
+        "known_amount": 0.11961539,
+        "partial_call_count": 0,
+        "priced_call_count": 18,
+        "pricing": {
+          "effective_at_utc": "2026-08-05T00:00:00Z",
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05"
+        },
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "status": "partial",
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ],
+        "unpriced_call_count": 1
+      },
+      "effects": [
+        {
+          "tool": "create_concepts",
+          "effect_id": "effect_a498a75b172b26836c329b59",
+          "effect_status": "succeeded",
+          "changed": true
+        },
+        {
+          "tool": "add_relationship",
+          "effect_id": "effect_893639a5d85f41fdd949c722",
+          "effect_status": "succeeded",
+          "changed": true
+        },
+        {
+          "tool": "upsert_text_relation",
+          "effect_id": "effect_0a4ff3e40612a73ec1524eca",
+          "effect_status": "succeeded",
+          "changed": true
+        }
+      ],
+      "source_receipts": [
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "dbc7581a92c322c96511d734138f9f906f69612490b609b0c0dc0d319b5afdef",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "Von replay and reliability readiness — Michael — 2721",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "d94ae4bac2f6d013c0e079b7fd7743cb7388c7ce6cb5eb187901441dd29bfdd5",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2721",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "edff5f261cf5e1f1f3f93979fa57e302de6d5bdbe3fbe91688f39cad5106821a",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2722",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "c437e2fc0cf8d4a51852acfbac3b56111c40983ad88c6e9184e0597d5071b603",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2720",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "1019447fe1e55b620d24c6ae3422c7bd07aff235eb4c3f887db0f0f8f0193200",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2568",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "e55330f2ea72963b804b196cf9f76e71d368ba034482ea83b292d9b13647fe9b",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2577",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "5dffe1aab53803d1d1622ed1072060a1b1b0a4d445cf071fa0e7ca72a81b412b",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2578",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "623648a5791bc085fbd85c1601eefe145623f22f63c7960103e70d45d7a5d6a5",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2590",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "comment",
+              "issuelinks",
+              "subtasks",
+              "parent",
+              "labels",
+              "components",
+              "fixVersions",
+              "priority",
+              "assignee",
+              "reporter",
+              "updated",
+              "created"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "4eb3d4aef397e3762badd03829a54349af941a00d68cde522d10ae88b605fb26",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2721"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "d0dfc5c3a07a20eaceb9bdb6b246c0d2ec77fc6ed6eb068b8b7127612d49831e",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2722"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "9acf783e29ead70370bfaebbabffd694e6b7a6c86a9258fcaa85082d4441dbfb",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2720"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "9a6cd29ed38f5407ed35e0317074621c780a8c954b917c97bd3bfd1f0cbcd507",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2568"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "9e233c7b40f60769e309e4f7c7012ece15dfaa86fc46c06b00bbf6d8525d73ec",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2577"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "e9771b6f23a10c546c71121c5c339d8bf115af6a655a549eb212e62bb3d1d3c8",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2578"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "daa1547c968570ccc22d68db2d10ed0632df01814dc5627425dd635447d2168a",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2590"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "56754280ddf03a8c5ab40729323d133075fabdee991ee4a664bc2926cd3feefe",
+          "target_ids": [
+            "#V#administering_a_drug",
+            "#V#call_for_workshop_proposals",
+            "#V#conceptual_work",
+            "#V#criterion",
+            "#V#crop_plant",
+            "#V#document_describing_a_transient_state_of_the_world",
+            "#V#non_natural_inanimate_thing",
+            "#V#norm",
+            "#V#omnivore",
+            "#V#organic_matter",
+            "#V#practice",
+            "#V#professional",
+            "#V#professional_activity",
+            "#V#sail_group_ph_d_project_meeting",
+            "#V#scholarly_article",
+            "#V#scholarly_work",
+            "#V#self_administrationofdrug",
+            "#V#the_union_of_consumer_durables_service_products",
+            "#V#the_union_of_types_of_information_bearing_thing_classified_by_content_information_structures_of_a_conceptual_work_works",
+            "#V#work_activity"
+          ],
+          "selected_arguments": {
+            "query": "work product",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "159532ba3f9f252a1cb7eb286fc242460a0a7d58a9787e5d6efd756626aeafa7",
+          "target_ids": [
+            "#V#department_of_internal_affairs",
+            "#V#human_rights_watch_international_award",
+            "#V#iconip",
+            "#V#internal_model_evaluation",
+            "#V#propositional_logic"
+          ],
+          "selected_arguments": {
+            "query": "internal work product",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "929a743f89205f147ecea5322db3bc8ff094aab7f095c0a7035afba326513458",
+          "target_ids": [
+            "#V#task",
+            "#V#task_specification",
+            "#V#task_description_document",
+            "#V#programming_task"
+          ],
+          "selected_arguments": {
+            "query": "task",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "b55209881f565fc698690e57d91b47ffc8f76ba5b1ac970216d270df18c78802",
+          "target_ids": [
+            "#V#document",
+            "#V#document_contianing_a_list",
+            "#V#document_describing_a_transient_state_of_the_world",
+            "#V#work_document",
+            "#V#online_document",
+            "#V#sub_document",
+            "#V#reading_a_document",
+            "#V#system_design_document",
+            "#V#task_description_document",
+            "#V#work_description_document",
+            "#V#von_system_design_document",
+            "#V#sail_system_design_document",
+            "#V#workflow_description_document",
+            "#V#von_agentic_system_overview_document",
+            "#V#von_agentic_component_design_document",
+            "#V#ai_produced_document",
+            "#V#journalistic_document",
+            "#V#best_documentary_feature",
+            "#V#submission_to_governmentdocument",
+            "#V#best_documentary_short_subject_motion_picture"
+          ],
+          "selected_arguments": {
+            "query": "document",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "563447be4d6bb7892a1f4de2c75ca56838fd309d85b725a98af3f00f9416653c",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "owned by",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "0c915ca425a10769adc573a77d4004f2835ef07bdee275206208bebd9f1a1005",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "has owner",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "ad93558dd5a4d6f45543e17d2423dbd74d26db1ac6521da0beb0cfaeb5ed5ed5",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "work document",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "2d48c93846f2e40408238d161b274888491a8f8c0eb3a2aa286421f7103071a4",
+          "target_ids": [
+            "#V#hasowner"
+          ],
+          "selected_arguments": {
+            "query": "owner",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "d93167d6f4f8698bbdd2953209757d28665525eb0e0348f72563d4b0d4532ef1",
+          "target_ids": [],
+          "selected_arguments": {
+            "query": "responsible",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "dea6513028aba0632e807525d9c0e1943d088a7da322d9b70d9bc01e2c093acb",
+          "target_ids": [
+            "#V#has_author"
+          ],
+          "selected_arguments": {
+            "query": "has author",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "59249211f31ea343ca0c51ce9ba4b136d1bdbf20ea94a0303679435a258a0166",
+          "target_ids": [
+            "#V#assigned_supervisor"
+          ],
+          "selected_arguments": {
+            "query": "assigned",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "create_concepts",
+          "status": "ok",
+          "sha256": "d2d5a5bd7a1d3b1f1af24b9419a6b19820b9c17252569bdf15e4594408f9084e",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {}
+        },
+        {
+          "tool": "add_relationship",
+          "status": "ok",
+          "sha256": "422a3dc5dcd07be1e6ef94706e9c5675dc6e97143719e7db782267ee193db80d",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "predicate": "#V#hasowner"
+          }
+        },
+        {
+          "tool": "upsert_text_relation",
+          "status": "ok",
+          "sha256": "1e5b8778d1e94fbb61e9dc168d78065b9391a079626795ba97244fe95742af53",
+          "target_ids": [
+            "6a9c167cb312f5fd99b0ceab"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721",
+            "predicate": "hasContent"
+          }
+        },
+        {
+          "tool": "fetch_concept",
+          "status": "ok",
+          "sha256": "f0dcb8fcd02fdd0429f6811e00f60c9945d8a32e6cacc4799c5dd378ac35091f",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721"
+          }
+        },
+        {
+          "tool": "fetch_concept_content",
+          "status": "ok",
+          "sha256": "a33d883cb1c7b98c247dfc724104b9f6420fec61fb3b78da5f69870baa492a2a",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721"
+          }
+        },
+        {
+          "tool": "get_text_relations",
+          "status": "ok",
+          "sha256": "80df78d9fe65e9916501635be44a22f7b2b307faaf5d57a293fc5f0873529847",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721",
+            "predicate": "hasContent"
+          }
+        }
+      ]
+    },
+    {
+      "label": "encounter-b",
+      "turn": 1,
+      "session_id": "b9e97d77-32aa-4f3f-aae0-f3d67c3026a0",
+      "request_id": "2fd4ccbc-4cb6-4a3b-bb1c-56ab9e3ed6f6",
+      "history_index": 28,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "recovered_and_revised_with_multiple_content_rows",
+      "ui_elapsed_seconds": 219,
+      "recorded_timing": {
+        "elapsed_ms": 209403,
+        "llm_call_count": 14,
+        "llm_elapsed_ms": 79812,
+        "observed_timeline_ms": 208284,
+        "operation_elapsed_ms": 118754,
+        "phase_elapsed_ms": 208312,
+        "tool_elapsed_ms": 28124
+      },
+      "response_sha256": "14ee314ac5602a1ab4d51c1fbab5d77edd114c4789a3d21a526bdcb20c60fb79",
+      "tool_counts": {
+        "turn_capabilities": 3,
+        "resolve_concept_by_name": 1,
+        "jira_search": 2,
+        "turn_read_evidence": 9,
+        "fetch_concept": 1,
+        "fetch_concept_content": 2,
+        "get_text_relations": 2,
+        "jira_get_comments": 5,
+        "jira_get_issue": 1,
+        "upsert_text_relation": 1
+      },
+      "model_identities": [
+        {
+          "call_count": 13,
+          "connection_id": "#V#openai_provider",
+          "effective_model": "gpt-5.6-luna",
+          "effective_service_tier": "default",
+          "model_identity_source": "provider_response",
+          "provider": "openai",
+          "provider_request_sent": true,
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna"
+        },
+        {
+          "call_count": 1,
+          "connection_id": null,
+          "effective_model": null,
+          "effective_service_tier": null,
+          "model_identity_source": null,
+          "provider": "openai",
+          "provider_request_sent": true,
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna"
+        }
+      ],
+      "usage": {
+        "cache_write_input_tokens": null,
+        "cached_input_tokens": null,
+        "input_tokens": null,
+        "known_cache_write_input_tokens": 105778,
+        "known_cached_input_tokens": 305290,
+        "known_input_tokens": 411107,
+        "known_output_tokens": 8518,
+        "known_total_tokens": 419625,
+        "output_tokens": null,
+        "partial_call_count": 0,
+        "reported_call_count": 13,
+        "status": "partial",
+        "total_tokens": null,
+        "unavailable_call_count": 1
+      },
+      "estimated_cost": {
+        "amount": null,
+        "currency": "USD",
+        "known_amount": 0.0427797,
+        "partial_call_count": 0,
+        "priced_call_count": 13,
+        "pricing": {
+          "effective_at_utc": "2026-08-05T00:00:00Z",
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05"
+        },
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "status": "partial",
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ],
+        "unpriced_call_count": 1
+      },
+      "effects": [
+        {
+          "tool": "upsert_text_relation",
+          "effect_id": "effect_b12236d224a9ccb01bb6ee2d",
+          "effect_status": "succeeded",
+          "changed": true
+        }
+      ],
+      "source_receipts": [
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "62eb0f6770ad8dc8456c2337378a1adf43e23455b6a964a15f97e44e5e8b6092",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "Von replay and reliability readiness — Michael — 2721",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "f5dff8f74b76cfdb6e8dd5855b48348270bd1c05c9361ebea6b2d4ead35187b6",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "text ~ \"Von replay and reliability readiness\" OR summary ~ \"replay\" OR summary ~ \"reliability\"",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "updated",
+              "assignee",
+              "priority",
+              "issuetype",
+              "parent",
+              "labels",
+              "comment"
+            ]
+          }
+        },
+        {
+          "tool": "fetch_concept",
+          "status": "ok",
+          "sha256": "7403ffb65ee236617eca7039fd81b3db203af52bf8247202beb452546a31896b",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721"
+          }
+        },
+        {
+          "tool": "fetch_concept_content",
+          "status": "ok",
+          "sha256": "a33d883cb1c7b98c247dfc724104b9f6420fec61fb3b78da5f69870baa492a2a",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721"
+          }
+        },
+        {
+          "tool": "get_text_relations",
+          "status": "ok",
+          "sha256": "a7892cc562f027dd58bbf7c3d806c2852ae5b4b0fbc59fd23268b5051d60c940",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721"
+          }
+        },
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "134eb2275d68e6552e3360a84183e0f727153a643891a16770ac000f18cbd83c",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "issuekey in (JVNAUTOSCI-2721, JVNAUTOSCI-2722, JVNAUTOSCI-2720, JVNAUTOSCI-2568, JVNAUTOSCI-2577, JVNAUTOSCI-2578, JVNAUTOSCI-2590)",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "updated",
+              "assignee",
+              "priority",
+              "issuetype",
+              "parent",
+              "labels"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "236c257377f9e746e225e19c07ce99a6b83098c57611042e234e6abb056bfbcf",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2577"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "e45f713591b1c4576491ec774262411ff9b8f82ca528f07a80e1586a256dabb1",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2721"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "d926b9e35b1d25913fe12552df18fc06d99f5bad3ed6c003d3d47f67966d4785",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2578"
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "21283e2e6e71af77da68758cd363ec37102834ff72403faee7176cfc135c2123",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2568"
+          }
+        },
+        {
+          "tool": "jira_get_issue",
+          "status": "ok",
+          "sha256": "c1722bdf5a1fe6791836f1ed5464632dc79aab3408407455f5ffaa52e7fd0e5e",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2579",
+            "fields": [
+              "summary",
+              "description",
+              "status",
+              "updated",
+              "assignee",
+              "priority",
+              "issuetype",
+              "parent",
+              "labels"
+            ]
+          }
+        },
+        {
+          "tool": "jira_get_comments",
+          "status": "ok",
+          "sha256": "4bad923e152e05d39b052acd25fd25f80b92d265e4b2271891ead45244ea33fe",
+          "target_ids": [],
+          "selected_arguments": {
+            "issue_key": "JVNAUTOSCI-2579"
+          }
+        },
+        {
+          "tool": "upsert_text_relation",
+          "status": "ok",
+          "sha256": "c12d1ee24a2b30732093095ef27c0f059f1a575fe093d22d6c5d3c08e4c547d9",
+          "target_ids": [
+            "6a9c1aacb312f5fd99b0ceda"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721",
+            "predicate": "hasContent"
+          }
+        },
+        {
+          "tool": "get_text_relations",
+          "status": "ok",
+          "sha256": "57a4e9587b06dc1894b366a3334d1ae7a02dbb8730ca4bb7513fecf697aef36b",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721",
+            "predicate": "hasContent"
+          }
+        },
+        {
+          "tool": "fetch_concept_content",
+          "status": "ok",
+          "sha256": "1cee3f811a89202f46b9875f2cb274006d8cc2aac71286bb9304ae600f86081f",
+          "target_ids": [
+            "#V#von_replay_and_reliability_readiness_michael_2721"
+          ],
+          "selected_arguments": {
+            "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721"
+          }
+        }
+      ]
+    },
+    {
+      "label": "jira-luna",
+      "turn": 1,
+      "session_id": "1aa92c43-14c9-4b4d-9232-4e2a441ea5d9",
+      "request_id": "5ed2c659-a6db-4744-964c-4163e42304dc",
+      "history_index": 4,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 54,
+      "recorded_timing": {
+        "elapsed_ms": 50585,
+        "observed_timeline_ms": 49488,
+        "phase_elapsed_ms": 49498,
+        "llm_elapsed_ms": 11395,
+        "llm_call_count": 5,
+        "operation_elapsed_ms": 16638,
+        "tool_elapsed_ms": 1737
+      },
+      "response_sha256": "d99c2e7013c2794da85f3b408d49547baa1a7d78e2507eec308277cec37e96ed",
+      "tool_counts": {
+        "turn_capabilities": 2,
+        "jira_search": 1
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 4
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 4,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 39095,
+        "input_tokens": null,
+        "known_cached_input_tokens": 21335,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 17748,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 391,
+        "output_tokens": null,
+        "known_total_tokens": 39486,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.0053353,
+        "currency": "USD",
+        "priced_call_count": 4,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "eadbd3d7790ac661888232d2bd762cea5890ca20644bad523f73888dddeef496",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "project = JVNAUTOSCI AND issuetype = Task ORDER BY created DESC",
+            "fields": [
+              "key",
+              "summary",
+              "status",
+              "created"
+            ]
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "response_must_mention_any",
+            "outcome": "pass",
+            "expected": [
+              "JVNAUTOSCI-"
+            ],
+            "observed": "JVNAUTOSCI-"
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-luna",
+      "turn": 2,
+      "session_id": "1aa92c43-14c9-4b4d-9232-4e2a441ea5d9",
+      "request_id": "359677d2-07d7-4d7c-a258-7d1dc7eb7937",
+      "history_index": 13,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivery_failed_despite_persisted_answer",
+      "ui_elapsed_seconds": 110.741,
+      "recorded_timing": {
+        "elapsed_ms": 109236,
+        "observed_timeline_ms": 108110,
+        "phase_elapsed_ms": 108127,
+        "llm_elapsed_ms": 35054,
+        "llm_call_count": 9,
+        "operation_elapsed_ms": 68085,
+        "tool_elapsed_ms": 25477
+      },
+      "response_sha256": "d0b2064e2e2c72a37bce099a55215abe8acb38ebea1246bbf6a25d51eaff06b6",
+      "tool_counts": {
+        "turn_capabilities": 2,
+        "search_concepts": 3,
+        "turn_read_evidence": 1,
+        "resolve_concept_by_name": 1
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 8
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 8,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 142682,
+        "input_tokens": null,
+        "known_cached_input_tokens": 112732,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 29926,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 1915,
+        "output_tokens": null,
+        "known_total_tokens": 144597,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.01203894,
+        "currency": "USD",
+        "priced_call_count": 8,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "6a5683ceecc0e1beb41a52e3d436e33c58735866df6ec8e208421a1b39ec4e36",
+          "target_ids": [],
+          "selected_arguments": {
+            "query": "JVNAUTOSCI-2722",
+            "match_type": "exact"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "763d7aa4a8d18ebd98e244982fc9bc59ba0ba0080e34fd7ca25e0b7c72d469ad",
+          "target_ids": [
+            "#V#arxiv_pdf_file_46934c89efa546be9fc5fa535a562064",
+            "#V#arxiv_pdf_file_ebb7708267514045856d0e87a5c1934a",
+            "#V#arxiv_pdf_file_de5f9fe3ab184965baab0512ba951b8e",
+            "#V#computer_file_copy_444e112b2db145bda9feffe248d29333",
+            "#V#arxiv_pdf_file_2c214e49afd64ca991405b41ebb299bc",
+            "#V#arxiv_pdf_file_bb7073fa894744eb8c34fb0962afcb6f",
+            "#V#arxiv_pdf_file_e3099f892ca245fd8ecb68d026daad7a",
+            "#V#action",
+            "#V#add_affiliation_workflow",
+            "#V#anesthesia",
+            "#V#arxiv_2408_02603_a_four_step_bayesian_workflow_for_improving_ecological_science",
+            "#V#arxiv_2506_03346_negligible_effects_of_environmental_fluctuations_on_the_maintenance_of_coral_biodiversity_a_test_of_five_storage_effects",
+            "#V#arxiv_2506_03346_negligible_effects_of_environmental_fluctuations_on_the_maintenance_of_coral_biodiversity",
+            "#V#bloom_designing_for_llm_augmented_behavior_change_interactions",
+            "#V#concept_page_conversation_renderer",
+            "#V#conversation_turn_execution_workflow",
+            "#V#effective_supervisory_load_(uoa_scs)",
+            "#V#exploring_gaps_in_the_apsdirect_minimal_pair_analysis_in_llm_syntactic_assessments",
+            "#V#general_von_chat_prompt_for_witbrock",
+            "#V#external_identity_arxiv_336307fc17fd8cde_scope_cb6af932c9"
+          ],
+          "selected_arguments": {
+            "query": "Restore authorised Jira reads without import side effects",
+            "match_type": "substring"
+          }
+        },
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "3120c359ef7f27ef44b97c11106ed6fd9d70367694cac89b56de333c29946b45",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "JVNAUTOSCI-2722",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "e60dc9d5f9c42fcaceffdad9290e26559c7139fe1bcc3c64af4221c96f11ba65",
+          "target_ids": [],
+          "selected_arguments": {
+            "query": "Restore authorised Jira reads on ordinary turns without import side effects",
+            "match_type": "exact"
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "forbid_decisions",
+            "outcome": "pass",
+            "expected": "not in ['escalation_required']",
+            "observed": ""
+          },
+          {
+            "check": "forbid_unsatisfied_obligation_sources",
+            "outcome": "pass",
+            "expected": "no unsatisfied obligation sourced from ['turn_expected_outcome_conditional_required_tools']",
+            "observed": []
+          },
+          {
+            "check": "require_prior_obligation_suppression",
+            "outcome": "pass",
+            "expected": "suppression telemetry present or no inherited unsatisfied obligations",
+            "observed": {
+              "suppressed_prior_obligations": [],
+              "inherited_unsatisfied_count": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-luna",
+      "turn": 3,
+      "session_id": "1aa92c43-14c9-4b4d-9232-4e2a441ea5d9",
+      "request_id": "97b20653-95b6-4e63-ba7e-1073b81193de",
+      "history_index": 20,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 155,
+      "recorded_timing": {
+        "elapsed_ms": 133071,
+        "observed_timeline_ms": 130403,
+        "phase_elapsed_ms": 145775,
+        "llm_elapsed_ms": 43570,
+        "llm_call_count": 5,
+        "operation_elapsed_ms": 53217,
+        "tool_elapsed_ms": 3708
+      },
+      "response_sha256": "550fad10250fa39922c656485fff3c294ef780bedc2310788697719a41c7d523",
+      "tool_counts": {
+        "jira_search": 1,
+        "turn_read_evidence": 4
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 4
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 4,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 62278,
+        "input_tokens": null,
+        "known_cached_input_tokens": 41229,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 21037,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 4005,
+        "output_tokens": null,
+        "known_total_tokens": 66283,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.01089223,
+        "currency": "USD",
+        "priced_call_count": 4,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "021e04a63b0635523023d605a0dc7c7a7df513b5a73f2821ae68d24216273291",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "key = JVNAUTOSCI-2722",
+            "fields": [
+              "summary",
+              "description",
+              "assignee",
+              "status",
+              "project",
+              "issuetype",
+              "key",
+              "created",
+              "updated",
+              "reporter",
+              "priority",
+              "labels",
+              "components"
+            ]
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "response_must_mention_any",
+            "outcome": "pass",
+            "expected": [
+              "JVNAUTOSCI-"
+            ],
+            "observed": "JVNAUTOSCI-"
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-luna",
+      "turn": 4,
+      "session_id": "1aa92c43-14c9-4b4d-9232-4e2a441ea5d9",
+      "request_id": "23701987-5211-4440-8f07-39f4188fd3a6",
+      "history_index": 27,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 80,
+      "recorded_timing": {
+        "elapsed_ms": 75434,
+        "observed_timeline_ms": 74397,
+        "phase_elapsed_ms": 74406,
+        "llm_elapsed_ms": 40145,
+        "llm_call_count": 6,
+        "operation_elapsed_ms": 56879,
+        "tool_elapsed_ms": 10674
+      },
+      "response_sha256": "b92e859b8406568ba4d2e92d2d634e0c651443b9637c720c69f2d67b41c62d2e",
+      "tool_counts": {
+        "jira_search": 3,
+        "turn_read_evidence": 2
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": "gpt-5.6-luna",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 5
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-luna",
+          "selected_model": "gpt-5.6-luna",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 5,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 113921,
+        "input_tokens": null,
+        "known_cached_input_tokens": 84559,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 29347,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 2728,
+        "output_tokens": null,
+        "known_total_tokens": 116649,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.01230453,
+        "currency": "USD",
+        "priced_call_count": 5,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "aa8ad208cd92defdb3e5146abeb692f280042b60d1c98778ef512f1d110c4f66",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "key = JVNAUTOSCI-2722",
+            "fields": [
+              "summary",
+              "description",
+              "assignee",
+              "status",
+              "issuetype",
+              "project",
+              "priority",
+              "created",
+              "updated",
+              "reporter",
+              "labels",
+              "components",
+              "comment"
+            ]
+          }
+        },
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "12a406ba1ec9f55d9254217e0301f7fa7b85397efdb3d4e0b487c49323602f42",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "project = JVNAUTOSCI AND created < \"2026-09-05 15:34\" ORDER BY created DESC",
+            "fields": [
+              "summary",
+              "description",
+              "assignee",
+              "status",
+              "issuetype",
+              "project",
+              "priority",
+              "created",
+              "updated",
+              "reporter",
+              "labels",
+              "components",
+              "comment"
+            ]
+          }
+        },
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "8e1ef2e9e4cbb321904db9cee987eca1482be0cd2a42cc009458507c3f5730e4",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "key = JVNAUTOSCI-2721",
+            "fields": [
+              "summary",
+              "description",
+              "assignee",
+              "status",
+              "issuetype",
+              "project",
+              "priority",
+              "created",
+              "updated",
+              "reporter",
+              "labels",
+              "components",
+              "comment"
+            ]
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "response_must_mention_all_groups",
+            "outcome": "pass",
+            "expected": [
+              [
+                "JVNAUTOSCI-"
+              ]
+            ],
+            "observed": [
+              {
+                "group": [
+                  "JVNAUTOSCI-"
+                ],
+                "hit": "JVNAUTOSCI-"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-terra",
+      "turn": 1,
+      "session_id": "9b69af39-2a26-4a1e-9f9e-38cfbb7aeb08",
+      "request_id": "bd03d86f-4f5f-44ab-a007-07eb5eb5d236",
+      "history_index": 4,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 58,
+      "recorded_timing": {
+        "elapsed_ms": 54517,
+        "observed_timeline_ms": 53457,
+        "phase_elapsed_ms": 53466,
+        "llm_elapsed_ms": 9321,
+        "llm_call_count": 5,
+        "operation_elapsed_ms": 16150,
+        "tool_elapsed_ms": 3370
+      },
+      "response_sha256": "4873deda98319126ac8364965642ed1ec37de38ca8b06e44689b0e4fc7d8db90",
+      "tool_counts": {
+        "turn_capabilities": 2,
+        "jira_search": 1
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 4
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 4,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 38809,
+        "input_tokens": null,
+        "known_cached_input_tokens": 21179,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 17618,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 287,
+        "output_tokens": null,
+        "known_total_tokens": 39096,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.0517488,
+        "currency": "USD",
+        "priced_call_count": 4,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "740cb6d4a90434a85cf229a54f750217bc5e0e369a82e06917330351af952c55",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "project = JVNAUTOSCI ORDER BY created DESC",
+            "fields": [
+              "key",
+              "summary",
+              "status",
+              "created"
+            ]
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "response_must_mention_any",
+            "outcome": "pass",
+            "expected": [
+              "JVNAUTOSCI-"
+            ],
+            "observed": "JVNAUTOSCI-"
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-terra",
+      "turn": 2,
+      "session_id": "9b69af39-2a26-4a1e-9f9e-38cfbb7aeb08",
+      "request_id": "3b2409a8-4526-453d-94d9-541db3a8b481",
+      "history_index": 10,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 56,
+      "recorded_timing": {
+        "elapsed_ms": 52730,
+        "observed_timeline_ms": 51685,
+        "phase_elapsed_ms": 51696,
+        "llm_elapsed_ms": 13392,
+        "llm_call_count": 6,
+        "operation_elapsed_ms": 25985,
+        "tool_elapsed_ms": 8823
+      },
+      "response_sha256": "237faa8dc31af457bf245029336725306693bd5256be44cce0251b409a1daf23",
+      "tool_counts": {
+        "turn_capabilities": 2,
+        "resolve_concept_by_name": 1,
+        "search_concepts": 1
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 5
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 5,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 70361,
+        "input_tokens": null,
+        "known_cached_input_tokens": 45471,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 24875,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 483,
+        "output_tokens": null,
+        "known_total_tokens": 70844,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.0771077,
+        "currency": "USD",
+        "priced_call_count": 5,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "resolve_concept_by_name",
+          "status": "ok",
+          "sha256": "3120c359ef7f27ef44b97c11106ed6fd9d70367694cac89b56de333c29946b45",
+          "target_ids": [],
+          "selected_arguments": {
+            "name": "JVNAUTOSCI-2722",
+            "normalisation_level": "exact"
+          }
+        },
+        {
+          "tool": "search_concepts",
+          "status": "ok",
+          "sha256": "6e4954b72d6ed87e1727e35d83592bffdc665d87697db270be5756b827882491",
+          "target_ids": [],
+          "selected_arguments": {
+            "query": "Restore authorised Jira reads on ordinary turns without import side effects",
+            "match_type": "exact"
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "forbid_decisions",
+            "outcome": "pass",
+            "expected": "not in ['escalation_required']",
+            "observed": ""
+          },
+          {
+            "check": "forbid_unsatisfied_obligation_sources",
+            "outcome": "pass",
+            "expected": "no unsatisfied obligation sourced from ['turn_expected_outcome_conditional_required_tools']",
+            "observed": []
+          },
+          {
+            "check": "require_prior_obligation_suppression",
+            "outcome": "pass",
+            "expected": "suppression telemetry present or no inherited unsatisfied obligations",
+            "observed": {
+              "suppressed_prior_obligations": [],
+              "inherited_unsatisfied_count": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-terra",
+      "turn": 3,
+      "session_id": "9b69af39-2a26-4a1e-9f9e-38cfbb7aeb08",
+      "request_id": "a1902362-5d25-456a-bf16-c88bcd8ad0c3",
+      "history_index": 14,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 47,
+      "recorded_timing": {
+        "elapsed_ms": 43599,
+        "observed_timeline_ms": 42552,
+        "phase_elapsed_ms": 42562,
+        "llm_elapsed_ms": 17425,
+        "llm_call_count": 4,
+        "operation_elapsed_ms": 23815,
+        "tool_elapsed_ms": 3090
+      },
+      "response_sha256": "f3cac6e55e3437427ecbc9e92495aa29895971958c127ad105b63b7c40561da2",
+      "tool_counts": {
+        "jira_search": 1,
+        "turn_read_evidence": 1
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 3
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 3,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 37889,
+        "input_tokens": null,
+        "known_cached_input_tokens": 22451,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 15429,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 1840,
+        "output_tokens": null,
+        "known_total_tokens": 39729,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.0651607,
+        "currency": "USD",
+        "priced_call_count": 3,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "ec2c93b8c0645cf7d5bf2ab4b3e10155bca5a1730adaaa904ae37f87835b8f9f",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "key = JVNAUTOSCI-2722",
+            "fields": [
+              "key",
+              "summary",
+              "status",
+              "description",
+              "assignee",
+              "reporter",
+              "priority",
+              "issuetype",
+              "project",
+              "created",
+              "updated",
+              "resolution",
+              "labels",
+              "components",
+              "fixVersions",
+              "versions",
+              "duedate"
+            ]
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "response_must_mention_any",
+            "outcome": "pass",
+            "expected": [
+              "JVNAUTOSCI-"
+            ],
+            "observed": "JVNAUTOSCI-"
+          }
+        ]
+      }
+    },
+    {
+      "label": "jira-terra",
+      "turn": 4,
+      "session_id": "9b69af39-2a26-4a1e-9f9e-38cfbb7aeb08",
+      "request_id": "0319faa4-857c-48d9-84a0-4d7a0212c9d2",
+      "history_index": 20,
+      "canonical_terminal_status": "completed",
+      "visible_outcome": "delivered",
+      "ui_elapsed_seconds": 62,
+      "recorded_timing": {
+        "elapsed_ms": 48172,
+        "observed_timeline_ms": 47121,
+        "phase_elapsed_ms": 56986,
+        "llm_elapsed_ms": 21288,
+        "llm_call_count": 5,
+        "operation_elapsed_ms": 29667,
+        "tool_elapsed_ms": 3480
+      },
+      "response_sha256": "6cc456d3a9c12ce01db727564c9141dc9df3e8f05ad880b2257a322c949fc2a6",
+      "tool_counts": {
+        "jira_search": 1,
+        "turn_read_evidence": 3
+      },
+      "model_identities": [
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": "gpt-5.6-terra",
+          "model_identity_source": "provider_response",
+          "provider_request_sent": true,
+          "effective_service_tier": "default",
+          "connection_id": "#V#openai_provider",
+          "call_count": 4
+        },
+        {
+          "provider": "openai",
+          "requested_model": "gpt-5.6-terra",
+          "selected_model": "gpt-5.6-terra",
+          "effective_model": null,
+          "model_identity_source": null,
+          "provider_request_sent": true,
+          "effective_service_tier": null,
+          "connection_id": null,
+          "call_count": 1
+        }
+      ],
+      "usage": {
+        "status": "partial",
+        "reported_call_count": 4,
+        "partial_call_count": 0,
+        "unavailable_call_count": 1,
+        "known_input_tokens": 74005,
+        "input_tokens": null,
+        "known_cached_input_tokens": 50961,
+        "cached_input_tokens": null,
+        "known_cache_write_input_tokens": 23032,
+        "cache_write_input_tokens": null,
+        "known_output_tokens": 1550,
+        "output_tokens": null,
+        "known_total_tokens": 75555,
+        "total_tokens": null
+      },
+      "estimated_cost": {
+        "status": "partial",
+        "amount": null,
+        "known_amount": 0.0863962,
+        "currency": "USD",
+        "priced_call_count": 4,
+        "partial_call_count": 0,
+        "unpriced_call_count": 1,
+        "pricing_versions": [
+          "openai-standard-observed-2026-08-05"
+        ],
+        "pricing": {
+          "source": "https://developers.openai.com/api/docs/pricing",
+          "version": "openai-standard-observed-2026-08-05",
+          "effective_at_utc": "2026-08-05T00:00:00Z"
+        },
+        "unavailable_reasons": [
+          "effective_model_unavailable"
+        ]
+      },
+      "effects": [],
+      "source_receipts": [
+        {
+          "tool": "jira_search",
+          "status": "ok",
+          "sha256": "ba8b61fe22f8fd8b52c7504fa93acb231834ceaf75b54e840d24143fa2025631",
+          "target_ids": [],
+          "selected_arguments": {
+            "jql": "project = JVNAUTOSCI ORDER BY created DESC",
+            "fields": [
+              "summary",
+              "status",
+              "description",
+              "assignee",
+              "reporter",
+              "priority",
+              "issuetype",
+              "created",
+              "updated",
+              "resolution"
+            ]
+          }
+        }
+      ],
+      "canonical_machine_evaluation": {
+        "verdict": "pass",
+        "checks": [
+          {
+            "check": "require_completed",
+            "outcome": "pass",
+            "expected": "completed",
+            "observed": "completed"
+          },
+          {
+            "check": "response_must_mention_all_groups",
+            "outcome": "pass",
+            "expected": [
+              [
+                "JVNAUTOSCI-"
+              ]
+            ],
+            "observed": [
+              {
+                "group": [
+                  "JVNAUTOSCI-"
+                ],
+                "hit": "JVNAUTOSCI-"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "work_product": {
+    "concept_id": "#V#von_replay_and_reliability_readiness_michael_2721",
+    "snapshots": {
+      "encounter-a": [
+        {
+          "relation_id": "6a9c167cb312f5fd99b0ceab",
+          "characters": 5492,
+          "sha256": "2cee7f3f7c6691660cae0819deb80d25c6017370d17b34edfe26ad69df18556f"
+        }
+      ],
+      "encounter-b": [
+        {
+          "relation_id": "6a9c167cb312f5fd99b0ceab",
+          "characters": 5492,
+          "sha256": "2cee7f3f7c6691660cae0819deb80d25c6017370d17b34edfe26ad69df18556f"
+        },
+        {
+          "relation_id": "6a9c1aacb312f5fd99b0ceda",
+          "characters": 6411,
+          "sha256": "b2bf391e1bd214d64c8ef4fceab269914bff28dd5d6134e50b9211b0d12e0edb"
+        }
+      ]
+    }
+  },
+  "checkpoint_attempt": {
+    "inputs": {
+      "workflow_id": "#V#lab_project_status_digest_workflow",
+      "schedule_type": "once",
+      "run_at": "2026-09-05T14:50:21.000Z",
+      "user_id": "#V#michael_witbrock",
+      "org_id": "#V#university_of_auckland_strong_ai_lab",
+      "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+      "description": "2721 prospective readiness checkpoint: one operator-facilitated occurrence, 5 September 2026",
+      "default_inputs": {
+        "prompt": "Maintain the continuing responsibility 'Von replay and reliability readiness — Michael — 2721' at this checkpoint. Recover the saved brief and inspect current material sources. Revise affected conclusions, outstanding commitments, consequential unknowns and the next useful action from actual evidence, preserving unaffected context. Keep Jira as task authority and qualify unavailable evidence. Maintain only this selected internal work product; leave Jira and all other products unchanged. This is one scheduled maintenance occurrence, not a certification or authority to create further schedules.",
+        "work_product_id": "#V#von_replay_and_reliability_readiness_michael_2721",
+        "jira_jql": "key in (JVNAUTOSCI-2721, JVNAUTOSCI-2722, JVNAUTOSCI-2720, JVNAUTOSCI-2568, JVNAUTOSCI-2577, JVNAUTOSCI-2578, JVNAUTOSCI-2579, JVNAUTOSCI-2590) ORDER BY updated DESC",
+        "evidence_sources": [
+          "JVNAUTOSCI-2721",
+          "JVNAUTOSCI-2722",
+          "JVNAUTOSCI-2720",
+          "JVNAUTOSCI-2568",
+          "JVNAUTOSCI-2577",
+          "JVNAUTOSCI-2578",
+          "JVNAUTOSCI-2579",
+          "JVNAUTOSCI-2590"
+        ],
+        "requested_model": "gpt-5.6-luna",
+        "requested_client_type": "openai",
+        "prefer_default_model": true,
+        "requested_model_parameters": {
+          "reasoning_effort": "high"
+        }
+      }
+    },
+    "receipt": {
+      "success": false,
+      "error": "Workflow launch actor scope conflicts with ambient authority.",
+      "error_code": "workflow_actor_authority_required",
+      "error_details": {
+        "mismatch_fields": []
+      }
+    },
+    "schedule_created": false,
+    "scheduled_model_requests": 0
+  },
+  "limitations": [
+    "Ten foreground turns with facilitator-selected sources and prompts; not beneficiary adoption.",
+    "Live Jira changed during acquisition and the model pair; not a frozen-source randomised benchmark.",
+    "Canonical evaluator passes do not establish delivered answers; Luna turn 2 visibly failed.",
+    "The precise transport exception was not retained.",
+    "Auxiliary observed model identity and usage are unavailable; known costs are partial.",
+    "Two foreground content rows remain; scheduled replacement was not exercised.",
+    "The scheduling rejection is attached-route actor binding evidence, not global scheduler failure."
+  ]
+}
