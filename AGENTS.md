@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 18 August 2026
+- **Last reviewed:** 4 September 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -36,6 +36,14 @@ Von's near-term job is to become a reliably useful, provenance-bearing
 research-team assistant. It should produce a small set of recurring work
 products, perform bounded authorised actions, preserve continuity, and fail
 honestly at tolerable latency and human burden.
+
+The longer-term purpose is to learn and sustain useful organisational roles:
+acquire and revise knowledge, maintain competing explanations and uncertainty,
+reason and act, learn from outcomes and discussion, and transfer useful
+practice across settings. For work claiming progress towards that purpose,
+use the [role convergence guide](docs/engineering/role_learning_convergence.md)
+to connect bounded deliveries to observed improvement across successive uses;
+component completion alone does not establish role competence.
 
 Most of this work is ordinary administrative and scientific assistance, not
 safety-critical control. Within standing delegation, Von should normally make
