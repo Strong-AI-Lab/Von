@@ -217,6 +217,7 @@ def _validate_learning_advice_evaluation_evidence(
     # fully initialised.
     from .learning_advice_experiment_service import (
         LearningAdviceExperimentError,
+        build_learning_advice_evaluator_runtime_identity,
         derive_learning_advice_evaluator_verdict,
     )
 
@@ -331,15 +332,9 @@ def _validate_learning_advice_evaluation_evidence(
             "The canonical experiment evaluator model parameters are invalid"
         )
     runtime_sha256 = _stable_digest(runtime_snapshot)
-    runtime_identity = {
-        "provider": expected_provider,
-        "requested_model": expected_model_id,
-        "selected_model": expected_model_id,
-        "effective_model": expected_model_id,
-        "model_parameters_sha256": _stable_digest(parameters),
-        "code_revision": runtime_snapshot.get("code_revision"),
-        "runtime_snapshot_sha256": runtime_sha256,
-    }
+    runtime_identity = build_learning_advice_evaluator_runtime_identity(
+        model=model, runtime_snapshot=runtime_snapshot
+    )
     expected_provenance = {
         "schema_version": "learning_advice_evaluator_provenance.v1",
         "model_call_id": receipt.get("call_id"),
@@ -2595,8 +2590,7 @@ def record_learning_candidate_disposition(
                 or trial_binding.get("experiment_spec_id")
                 != result.get("experiment_spec_id")
                 or trial_binding.get("experiment_run_id") != run_id
-                or trial_binding.get("manifest_sha256")
-                != result.get("manifest_sha256")
+                or trial_binding.get("manifest_sha256") != result.get("manifest_sha256")
                 or trial_binding.get("plan_sha256") != result.get("plan_sha256")
                 or trial_binding.get("trial_id") != planned_trial.get("trial_id")
                 or trial_binding.get("pair_id") != planned_trial.get("pair_id")

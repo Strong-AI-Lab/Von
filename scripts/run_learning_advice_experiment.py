@@ -43,6 +43,7 @@ from src.backend.services.learning_advice_experiment_service import (
     LEARNING_ADVICE_EXPERIMENT_RUN_BINDING_SCHEMA_VERSION,
     LearningAdviceExperimentError,
     bind_fresh_trial_identities,
+    build_learning_advice_evaluator_runtime_identity,
     build_learning_advice_experiment_plan,
     build_learning_advice_experiment_run_binding,
     build_learning_advice_projection_for_trial,
@@ -98,9 +99,6 @@ _TRIAL_EXECUTION_DIAGNOSTIC_SCHEMA_VERSION = (
 _TRIAL_TER_BINDING_AUX_TYPE = "learning_advice_experiment_trial_binding"
 _ACTING_SUPPORT_IDENTITY_SCHEMA_VERSION = (
     "learning_advice_experiment_acting_support_identity.v1"
-)
-_EVALUATOR_RUNTIME_IDENTITY_SCHEMA_VERSION = (
-    "learning_advice_evaluator_runtime_identity.v1"
 )
 _EVALUATOR_MODEL_CONFIG_SCHEMA_VERSION = "learning_advice_evaluator_model_config.v1"
 _ADAPTIVE_MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION = (
@@ -424,16 +422,9 @@ def build_learning_advice_evaluator_model_config(
     frozen = validate_learning_advice_experiment_manifest(manifest)
     provider = str(frozen["model"]["provider"])
     model_id = str(frozen["model"]["model_id"])
-    runtime_identity = {
-        "schema_version": _EVALUATOR_RUNTIME_IDENTITY_SCHEMA_VERSION,
-        "provider": provider,
-        "requested_model": model_id,
-        "selected_model": model_id,
-        "effective_model": model_id,
-        "model_parameters_sha256": _sha256(frozen["model"]["parameters"]),
-        "code_revision": frozen["runtime_snapshot"]["code_revision"],
-        "runtime_snapshot_sha256": _sha256(frozen["runtime_snapshot"]),
-    }
+    runtime_identity = build_learning_advice_evaluator_runtime_identity(
+        model=frozen["model"], runtime_snapshot=frozen["runtime_snapshot"]
+    )
     return {
         "schema_version": _EVALUATOR_MODEL_CONFIG_SCHEMA_VERSION,
         "provider": provider,

@@ -1616,6 +1616,7 @@ def _experiment_state_for_candidate(
         }
         turn_execution_records[request_id] = trial_ter
         runtime_identity = {
+            "schema_version": "learning_advice_evaluator_runtime_identity.v1",
             "provider": "openai",
             "requested_model": "gpt-5.6-luna",
             "selected_model": "gpt-5.6-luna",

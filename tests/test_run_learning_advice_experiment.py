@@ -800,6 +800,44 @@ def _assert_confirmed_abort(
     assert harness.disposition_calls == []
 
 
+@pytest.mark.parametrize("omit_identity_version", [False, True])
+def test_runner_provenance_matches_the_disposition_reader(omit_identity_version):
+    from src.backend.services.learning_advice_experiment_service import (
+        build_learning_advice_evaluator_runtime_identity,
+    )
+    from src.backend.services.learning_candidate_vontology_service import (
+        InvalidLearningCandidateData,
+        _validate_learning_advice_evaluation_evidence,
+    )
+
+    manifest = _manifest()
+    result = _run(manifest, _Harness(manifest))
+    trial = result["observations"][0]
+    evaluation = copy.deepcopy(trial["evaluation"])
+    if omit_identity_version:
+        preimage = build_learning_advice_evaluator_runtime_identity(
+            model=manifest["model"], runtime_snapshot=manifest["runtime_snapshot"]
+        )
+        assert preimage.pop("schema_version") == (
+            "learning_advice_evaluator_runtime_identity.v1"
+        )
+        evaluation["evaluation_provenance"]["runtime_code_identity_sha256"] = (
+            _canonical_sha256(preimage)
+        )
+    arguments = {
+        "planned_trial": next(
+            case for case in manifest["cases"] if case["case_id"] == trial["case_id"]
+        ),
+        "model": manifest["model"],
+        "runtime_snapshot": manifest["runtime_snapshot"],
+    }
+    if omit_identity_version:
+        with pytest.raises(InvalidLearningCandidateData, match="provenance is invalid"):
+            _validate_learning_advice_evaluation_evidence(evaluation, **arguments)
+    else:
+        _validate_learning_advice_evaluation_evidence(evaluation, **arguments)
+
+
 def test_runner_executes_persists_blindly_evaluates_and_pairs_all_24_trials() -> None:
     manifest = _manifest()
     harness = _Harness(manifest)

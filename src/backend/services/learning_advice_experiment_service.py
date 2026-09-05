@@ -129,6 +129,28 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
+def build_learning_advice_evaluator_runtime_identity(
+    *, model: Mapping[str, Any], runtime_snapshot: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Canonical hash preimage shared by the producer and disposition reader.
+
+    Callers supply an already validated frozen model and runtime. Keep the
+    version in this preimage: omitting it changes the identity of valid stored
+    evaluations without changing their actual model or code.
+    """
+
+    return {
+        "schema_version": "learning_advice_evaluator_runtime_identity.v1",
+        "provider": str(model["provider"]),
+        "requested_model": str(model["model_id"]),
+        "selected_model": str(model["model_id"]),
+        "effective_model": str(model["model_id"]),
+        "model_parameters_sha256": _sha256(model["parameters"]),
+        "code_revision": runtime_snapshot["code_revision"],
+        "runtime_snapshot_sha256": _sha256(runtime_snapshot),
+    }
+
+
 def _body_sha256(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
