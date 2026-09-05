@@ -187,6 +187,11 @@ pilot needs an authorised source, a responsible operator and an independently
 inspectable work product; those exact identities belong in protected evidence
 and the live task, not this public design.
 
+The [test programme](role_convergence_test_programme.md) connects that development
+case to existing replay tasks, a real operational witness, prospective use and
+later learned-benefit comparisons. Its current selection and release decisions
+remain in 2721.
+
 | Increment | Smallest useful outcome | Claim left open |
 | --- | --- | --- |
 | Continuity | Recover one responsibility, observe a later change and carry unresolved work without duplication | Learned improvement and broad autonomy |

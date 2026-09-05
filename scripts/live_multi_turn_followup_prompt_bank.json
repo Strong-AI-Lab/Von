@@ -238,7 +238,7 @@
     {
       "case_id": "lab_status_digest_obligation_watch",
       "domain": "team_continuity",
-      "motivating_issues": ["JVNAUTOSCI-2590"],
+      "motivating_issues": ["JVNAUTOSCI-2590", "JVNAUTOSCI-2721"],
       "turns": [
         {
           "role": "task",
@@ -257,7 +257,7 @@
         },
         {
           "role": "explicit_continuation",
-          "prompt": "Run that digest again against current evidence. Reuse the same represented digest work product, carry forward only obligations that are still unresolved, and do not duplicate an obligation with the same source, owner, and due date. Tell me what changed since the prior digest and what evidence is unavailable. Keep every external system read-only.",
+          "prompt": "Run that digest again against current evidence. Reuse the same represented digest work product and preserve each outstanding commitment's canonical source/task identity when its owner or due date changes. Absence from a search window does not resolve it. Tell me what changed since the prior digest and what evidence is unavailable. Keep every external system read-only.",
           "expectations": {
             "expected_workflow_id": "#V#lab_project_status_digest_workflow",
             "require_completed": true,
@@ -267,7 +267,7 @@
               ["evidence gap", "unavailable"],
               ["obligation", "unresolved"]
             ],
-            "notes": "Repeated UC-06 execution checks stable work-product identity and evidence-based obligation carry-forward without duplication or external mutations."
+            "notes": "Repeated UC-06 execution checks stable work-product and commitment identity across owner/date changes. Inspect the canonical text and actual effects: keyword/tool matches alone cannot pass the outcome. This same-chat case does not establish cross-encounter continuity, autonomous noticing or real-role adoption."
           }
         }
       ]

@@ -5,8 +5,8 @@
 - **Authority:** Fictional evaluation input; not live role policy or delegation
 - **Owner:** Von maintainers through
   [JVNAUTOSCI-2011](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2011)
-- **Last reviewed:** 4 September 2026
-- **Evidence status:** Authored, not executed; no capability or efficacy claim
+- **Last reviewed:** 5 September 2026 UTC
+- **Evidence status:** A–C exercised as bounded development; see section 6. D–F remain authored inputs, without an executed learning or transfer claim
 - **Review trigger:** First execution, changed tool surfaces or a revised pilot
 - **Design:** [Role-learning convergence](role_learning_convergence.md)
 
