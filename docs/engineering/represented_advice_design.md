@@ -11,15 +11,17 @@
 - **Current implementation and retrospective:**
   [JVNAUTOSCI-2719](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2719)
   and [JVNAUTOSCI-2720](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2720)
-- **Last reviewed:** 4 September 2026
+- **Last reviewed:** 5 September 2026 UTC
 - **State or evidence as of:** Public Von
   `dc84fc1a850890b32b89bdc8b3e0da96cfce4264`, a read-only audit of the
   configured Vontology and workflow-instance store on 4 September 2026, and
   the repository subtraction, non-active candidate implementation, and isolated
-  experiment support described below. JVNAUTOSCI-2720 formed one live
-  non-active candidate and completed two 24-trial comparisons, but both were
-  evaluator-contaminated and inconclusive. No advice efficacy, learning
-  outcome, production activation, or deployment is claimed
+  experiment support described below. JVNAUTOSCI-2720 completed a bounded
+  negative learning cycle: source-derived candidate, later trial exposure,
+  canonical contrary evidence, rejection and subsequent verified absence.
+  The [experiment dossier](jvnautosci_2720_learning_cycle_2026-09-05.md)
+  records the exact result and earlier inconclusive comparisons. No positive
+  advice efficacy, production activation or deployment is claimed
 - **Supersedes / superseded by:** Nothing. This proposal owns represented-advice
   semantics, applicability, retrieval/projection, lifecycle, and retraction;
   the broader
@@ -1302,7 +1304,7 @@ independently recomputed evidence, followed by trigger and neighbouring turn
 read-back proving the rejected bytes were absent. Drift, contamination,
 unblindable evidence, or incomplete pairs remain inconclusive.
 
-#### Phase 1 live result — 4 September 2026
+#### Phase 1 interim checkpoint — 4 September 2026
 
 The implementation formed and canonically read back one source-grounded,
 Von-authored candidate while keeping it non-active. Its contributor,
@@ -1335,21 +1337,25 @@ This demonstrates evaluator self-invalidation, not observed treatment leakage.
 It is not evidence that the
 candidate helps, does not help, or should be activated or rejected.
 
-The stopping rule therefore applies. No Arm C, ordinary consumer, activation,
-rejection, or prospective later-use claim follows from these runs. The exact
-candidate remains non-active with an undecided disposition, and both complete
-runs remain immutable evidence rather than being rescored. JVNAUTOSCI-2720
-records their exact run identifiers and digests without exposing private source
-or candidate text.
+The stopping rule was applied at that checkpoint. No Arm C, ordinary consumer,
+activation, rejection or prospective later-use claim followed from those runs.
+The candidate remained non-active and undecided. Their records remain immutable,
+rather than being rescored; JVNAUTOSCI-2720 preserves the dated protocol
+registrations, run identifiers and interim delivery decision.
 
-**Merge decision changes —** the Phase 1 branch is provisional because the
-live comparison hit the issue's evaluator-contamination stop-ship condition.
-The minimum evidence that could change this decision is a separately
-pre-registered protocol correction that distinguishes treatment-correlated
-trial material from fixed common evaluation context, followed by one fresh
-comparison whose evidence supports either the existing positive path or the
-existing canonical negative-disposition path. Repeated evaluator tuning or
-additional runs in this tranche would not supply independent evidence.
+#### Completed negative learning cycle — 5 September 2026 UTC
+
+Following the user's resumed completion request, the separately registered
+evidence-projection correction produced 24 valid trials and evaluations, with
+all 12 pairs comparable. B and A each passed 5 of 8 applicable trials; B did not
+meet the unchanged use criteria. The canonical service recorded rejection
+against the exact source-derived revision, preserving its text and provenance.
+Two subsequent turns verified absence across 15 actual model requests and
+canonical execution-record read-back. The
+[frozen dossier](jvnautosci_2720_learning_cycle_2026-09-05.md) gives individual
+outcomes, identities, repairs, costs and limitations. This establishes the
+bounded negative learning loop, not a performance improvement or an active
+represented advice layer. Current publication status remains in 2720.
 
 ### Phase 2 — one bounded consumer
 
@@ -1614,11 +1620,12 @@ JVNAUTOSCI-2720. It can form one Von-authored candidate from the frozen source,
 project the exact bytes only in experimental Arm B, persist and blindly evaluate
 24 read-only trials, recompute the result, update the exact revision's
 disposition when warranted, and read the terminal state back. Live execution
-proved candidate formation, exact experimental exposure, trial persistence,
-evaluation persistence, and terminal read-back, but both complete comparisons
-were evaluator-contaminated and inconclusive. The candidate therefore remains
-non-active and undecided; no learning-outcome or advice-efficacy result is
-claimed.
+proved source-derived formation, exact experimental exposure, outcome
+evaluation, evidence-derived rejection and subsequent verified absence. The
+[completed dossier](jvnautosci_2720_learning_cycle_2026-09-05.md) records the
+negative result and preserves earlier inconclusive runs. The candidate remains
+non-active, with its text retained and use disposition rejected. No positive
+advice efficacy or broader role competence is claimed.
 
 No ordinary configured advice consumer, active binding, resolver, represented
 Arm C, maintenance worker, or general advice layer is selected. Workflow Studio
@@ -1627,14 +1634,13 @@ the MCP surface remains a human/AI deliberation and maintenance consumer for
 non-active candidates. The experiment-only sidecar does not turn either surface
 into automatic production projection.
 
-The next decision is first methodological, then empirical. A later tranche may
-make one pre-registered correction to the demonstrated evaluator contradiction
-and run a fresh immutable comparison. If valid evidence then shows that B does
-not beat A, record and preserve the negative result, reject or revise the exact
-candidate as warranted, prove its absence in subsequent eligible decisions,
-and do not build C merely to save the architecture. If B beats A, implement
-represented Arm C and a prospective later use before claiming represented
-retrieval or production value. Represented C must preserve the measured content
+The exercised candidate did not earn Arm C. Later work can inspect or revise
+the retained lesson in light of new experience without treating this bounded
+negative result as a universal prohibition. JVNAUTOSCI-2721 owns the separate
+longitudinal role pilot and reuses fitting delivered surfaces. A future positive
+content comparison would still require represented Arm C and prospective later
+use before claiming represented retrieval or production value. Represented C
+must preserve the measured content
 benefit and improve a named maintenance, scope, provenance, inspection,
 revision, or retract-to-empty outcome over the same versioned sidecar. A shared
 protocol still requires a second independently motivated consumer and measured
