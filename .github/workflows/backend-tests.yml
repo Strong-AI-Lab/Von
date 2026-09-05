@@ -1,24 +1,15 @@
-name: Nightly Backend Tests
+name: Scheduled Backend Tests
 
-# JVNAUTOSCI-2656. Backend pytest has never run in CI, so red tests accumulate
-# on main unnoticed: test_mcp_manifest_parity was failing for an unknown period
-# and was found by accident.
-#
-# This reports rather than gates. main has no branch protection, so a failing
-# check blocks nothing, and a per-pull-request gate would have cost several
-# thirty-minute jobs on every PR while being unable to prevent anything.
-# Promoting this to a required check is a small change if that is introduced.
-#
-# It runs without a database. Of 3776 cost_normal tests, 3561 pass with no
-# database in 13m48s locally; the rest are recorded in
-# ci/known_test_failures.txt along with the genuinely broken ones. Provisioning
-# a database would shrink that list by roughly half and is tracked separately.
+# Full cost_normal regression reporting, twice weekly and on demand.
+# Completed evidence is reused for unchanged scheduled commits. Notification
+# state is separate from ci/known_test_failures.txt: failures are never accepted
+# merely to silence an email. State loss safely causes another full run.
+# No live database or external-service credentials are supplied to the suite.
 
 on:
   schedule:
-    # 15:00 UTC daily, which is early morning in Pacific/Auckland, so drift
-    # introduced during the working day is reported before the next one.
-    - cron: "0 15 * * *"
+    # Monday and Thursday. Manual dispatch remains available after repairs.
+    - cron: "0 15 * * 1,4"
   workflow_dispatch:
     inputs:
       test_notification:
@@ -30,6 +21,10 @@ on:
         type: string
         default: ""
 
+concurrency:
+  group: backend-drift-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   drift-report:
     name: Backend test drift
@@ -40,6 +35,7 @@ jobs:
     timeout-minutes: 350
     permissions:
       contents: read
+      actions: read
 
     env:
       # No database is provisioned. The default 5000ms Mongo timeouts are kept
@@ -58,18 +54,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Plan full-suite execution
+        id: plan
+        if: ${{ !inputs.test_notification && inputs.pytest_path == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python scripts/backend_test_drift_schedule.py plan
+
       - name: Setup Python
+        if: ${{ inputs.test_notification || inputs.pytest_path != '' || steps.plan.outputs.run_suite == 'true' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Setup PDM
+        if: ${{ inputs.test_notification || inputs.pytest_path != '' || steps.plan.outputs.run_suite == 'true' }}
         uses: pdm-project/setup-pdm@v4
         with:
           version: "2.29.0"
           cache: true
 
       - name: Install dependencies
+        if: ${{ inputs.test_notification || inputs.pytest_path != '' || steps.plan.outputs.run_suite == 'true' }}
         run: |
           pdm lock --check
           pdm sync --clean -G dev
@@ -86,7 +93,7 @@ jobs:
           pdm run python scripts/notify_backend_test_drift.py test /tmp/drift.txt
 
       - name: Report drift against the recorded backlog
-        if: ${{ !inputs.test_notification }}
+        if: ${{ !inputs.test_notification && (inputs.pytest_path != '' || steps.plan.outputs.run_suite == 'true') }}
         id: drift
         env:
           BACKEND_TEST_PATH: ${{ inputs.pytest_path }}
@@ -103,7 +110,7 @@ jobs:
 
       - name: Retain the complete drift evidence
         id: evidence
-        if: ${{ !inputs.test_notification && always() }}
+        if: ${{ !inputs.test_notification && steps.drift.outcome != 'skipped' && always() }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -112,24 +119,26 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Notify on new failures
-        if: ${{ always() && inputs.pytest_path == '' && steps.drift.outputs.status == '1' }}
+      - name: Notify on changed failures or weekly reminder
+        if: ${{ always() && !inputs.test_notification && inputs.pytest_path == '' && github.ref_name == github.event.repository.default_branch }}
         env:
+          RAN_SUITE: ${{ steps.plan.outputs.run_suite }}
           NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
           NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
           NIGHTLY_DRIFT_ARTIFACT_AVAILABLE: ${{ steps.evidence.outcome == 'success' }}
-        run: pdm run python scripts/notify_backend_test_drift.py new_failures /tmp/drift.txt
+        run: python scripts/backend_test_drift_schedule.py finish
 
-      - name: Notify when the run itself broke
-        if: ${{ always() && inputs.pytest_path == '' && steps.drift.outputs.status == '2' }}
-        env:
-          NIGHTLY_SMTP_USERNAME: ${{ secrets.NIGHTLY_SMTP_USERNAME }}
-          NIGHTLY_SMTP_APP_PASSWORD: ${{ secrets.NIGHTLY_SMTP_APP_PASSWORD }}
-          NIGHTLY_DRIFT_ARTIFACT_AVAILABLE: ${{ steps.evidence.outcome == 'success' }}
-        run: pdm run python scripts/notify_backend_test_drift.py broken /tmp/drift.txt
+      - name: Retain schedule and notification state
+        if: ${{ always() && !inputs.test_notification && inputs.pytest_path == '' && github.ref_name == github.event.repository.default_branch }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-drift-state
+          path: /tmp/backend-drift-state.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Fail the run when there is drift
-        if: ${{ always() && !inputs.test_notification && (steps.drift.outputs.status != '0' || steps.evidence.outcome != 'success') }}
+        if: ${{ always() && !inputs.test_notification && steps.drift.outcome != 'skipped' && (steps.drift.outputs.status != '0' || steps.evidence.outcome != 'success') }}
         run: |
           echo "drift report exited ${{ steps.drift.outputs.status }}"
           echo "evidence upload outcome was ${{ steps.evidence.outcome }}"
