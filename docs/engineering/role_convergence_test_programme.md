@@ -27,6 +27,63 @@ development baseline and known failures, not prospective adoption.
 The [first deployment/witness record](jvnautosci_2721_replay_programme_2026-09-05.md)
 contains the initial observations and their limitations. Current repair selection
 remains in Jira.
+The [prospective readiness record](jvnautosci_2721_prospective_readiness_2026-09-05.md)
+retains the real first encounters and subsequent replay observations.
+
+### Selected operational tranche
+
+Michael authorised refinement and execution of this programme after delivery
+of 2722. Michael is the beneficiary and operator for this first real work
+package; Codex facilitates execution and independently inspects the evidence.
+Facilitation is recorded rather than attributed to Von. The 5 September
+portfolio review recommends this sequence; it remains a frozen audit, not
+the live delivery plan.
+
+The tranche now starts with one real actor-owned brief **before** the new
+2568 result, then an unchanged fresh encounter, the four-turn Jira family,
+publication of its actual outcome, and a bounded scheduled checkpoint. This
+makes a new result a genuine changed premise. The task is not to manufacture
+a successful lesson or to turn every existing replay into a release gate.
+
+| Delivery | Minimum useful result | Boundary |
+| --- | --- | --- |
+| Programme and first encounter | Current Jira decision, one discoverable brief with source identities and a useful next-action recommendation, exact read-back | Can publish with later encounters pending; author assistance and partial coverage remain visible |
+| Fresh encounter and first replay | Prior responsibility recovered without its transcript; complete 2568 answers reconciled with canonical sources and effects | Luna principal, one matched Terra family; repeat only a material disagreement or unresolved delivery question |
+| Changed-evidence checkpoint | The existing scheduler/worker reads the maintained responsibility and updates affected conclusions from the newly published evidence | One explicitly bounded occurrence; no unattended recurring service is claimed or enabled by default |
+| Follow-on repair | One observed material gap improved on the affected path and a relevant neighbour | Use existing repair issues; latency, authority, transport and context are distinguished from model judgement |
+| Learning and transfer | A fitting source-derived practice earns a later-use disposition; a different setting supplies local facts and authority | Separate later claim; preserve 2720's rejected candidate |
+
+The prospective product is named **Von replay and reliability readiness —
+Michael — 2721**. Resolve or create it through the authenticated actor's
+canonical tools and record its actual ID on 2721 before the scheduled checkpoint. Do not
+overwrite the existing operational default digest. Its text should retain
+the purpose, source references, unresolved commitments, evidence dates,
+decision-relevant unknowns, present recommendation and next attention
+condition. Jira remains the commitment/status authority; the brief is a
+revisable projection. A separate controlled experiment uses a separate product.
+
+Standing task scope covers source reads, this internal brief's bounded updates,
+recording execution evidence on the selected Jira issues, and one checkpoint.
+It does not create authority for mail, expenditure, submission, access changes,
+or unrelated task mutations. Creation of a schedule is recorded with its actor,
+inputs, model selection, occurrence and terminal state. A facilitator-selected
+checkpoint proves scheduled execution and source-driven revision, not that Von
+autonomously chose when to pay attention.
+The ordinary-conversation creation gap remains in
+[2698](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2698). Until its
+supported entry point is delivered, use the existing authorised operator
+schedule surface and count that setup; do not manufacture an ordinary-turn
+authority witness or replace the checkpoint with a passive task.
+
+Before encounter A, retain the source scope and outcome expectations outside
+Von's acting context. Give Von the job and accessible sources, not an authored
+brief or required recommendation. Before B, retain A's exact canonical text.
+Before the replay, retain both current Jira targets and the prompt bank version.
+Publish actual results, including failures, before C; do not seed C with the
+desired revised conclusion. Count setup, source selection, corrections and
+supervision even when the final answer is useful. Human adoption is established
+only by the beneficiary's actual use or feedback, not by Codex grading its own
+facilitated run.
 
 ## 2. Use the existing work
 
@@ -36,7 +93,7 @@ are a dated routing map; re-read the relevant issue before another cycle.
 | Existing task/surface | Use in this programme | Claim it does not supply |
 |---|---|---|
 | [2371](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2371), `run_replay_suite_report.py` | Discover available replays and report collection/adapter failures | A discovered or executed case is not a verified outcome |
-| [2577](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2577), `run_operational_certification.py` | Existing stateful adapters, canonical observations, represented evaluators and negative controls | The whole programme remains Not Certified; its historical all-family gates do not gate this bounded slice |
+| [2577](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2577), superseded into [2579](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2579); `run_operational_certification.py` | Reuse stateful adapters, canonical observations, represented evaluators and negative controls | Historical campaign remains Not Certified; its retired all-family programme does not gate this bounded slice |
 | [2568](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2568), multi-turn Jira family | Check current-source access, carried referents, changed intent and two-target separation on `/von/generate` | Same-chat continuity is not cross-encounter responsibility |
 | [2590](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2590), digest replay | Exercise the existing foreground digest capability and repeated update | Two prompted updates do not establish noticing or usefulness |
 | [2532](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2532) | Bounded stronger-model comparisons when model adequacy is a live causal question | Historical local/premium labels and timeout results are not current routing evidence |
@@ -45,13 +102,14 @@ are a dated routing map; re-read the relevant issue before another cycle.
 
 Use the existing experiment and benchmark surfaces when they consume the
 selected evidence. Do not construct another runner, dashboard, mandatory
-schema, theory store or certification gate to execute this plan. A full 2577
-campaign still uses its actual represented contract; a narrower collection
-must be labelled non-certifying, rather than weakening that contract to turn it
-green. Existing JSON banks remain development inputs/exports. Durable
+schema, theory store or certification gate to execute this plan. Any newly
+selected certification claim uses its actual represented contract; a narrower
+collection must be labelled non-certifying, rather than weakening that contract
+to turn it green. Do not restart the retired 2577 campaign by inheritance.
+Existing JSON banks remain development inputs/exports. Durable
 independently governed evaluation policy belongs on its represented surface.
 
-## 3. Establish a trustworthy first witness
+## 3. Establish a trustworthy replay witness
 
 Deploy the reviewed release through `./run.sh deploy-main` from clean primary
 `main`, then read `/health`, runtime commit/dirty state, startup-seed receipts
@@ -61,20 +119,31 @@ Record the previous runtime, selected commit and resulting state for recovery.
 Never force overwrite divergent live prompt/workflow authority merely to obtain
 a green preflight. Inspect its meaning and choose the bounded migration.
 
-Run the existing Jira family once on the selected real server. Use normal
-authenticated test-session issuance, an allowed model and the actual namespace.
-This checks a prerequisite without modifying a real lab commitment:
+2722's [owner-read evidence](jira_authorised_read_replay_2026-09-05.md) establishes
+the bounded direct-read path. It does not pass the four-turn family. Run that
+family after the initial brief and unchanged encounter, using the existing
+prompt bank and evaluator. The normal authenticated account owner must acquire
+the Jira binding; the browser-test fixture actor is not that owner.
+
+Discover the existing replay inputs with:
 
 ```sh
 pdm run python scripts/run_replay_suite_report.py --list
-pdm run python scripts/run_live_multi_turn_followup_replay.py \
-  --case jira_lookup_followup_family --model gpt-5.6-luna \
-  --base-url http://127.0.0.1:5001 --allow-non-agent-test-server \
-  --output-json tmp/role-programme-jira-witness.json
 ```
 
+Use the four exact `jira_lookup_followup_family` prompts from
+`scripts/live_multi_turn_followup_prompt_bank.json` in one fresh normal-owner
+conversation. Repeat in a different fresh conversation for Terra. The current
+CLI runner establishes a browser-test session; its user/organisation parameters
+do not themselves confer the owner's authority. Do not reuse that default as
+an authorised positive witness or copy browser credentials into a runner.
+When that runner has a supported authenticated entry for the selected actor,
+it can automate the same family. Meanwhile, browser-issued turns and canonical
+persisted records support the bounded witness; reuse its existing evaluation
+functions rather than adding another execution platform.
+
 Use GPT-5.6 Luna as the principal model, matching Michael's ordinary Von use.
-Verify the exact scoped model pool before reusing the command. Provider
+Verify the exact scoped model pool before submitting the trials. Provider
 availability alone does not establish actor eligibility. Pair the first witness
 and selected ordinary role cases with Terra using the same prompts, sources,
 tools, actor and fresh conversation state. Michael specifically wants to know
@@ -82,8 +151,8 @@ where Terra succeeds and Luna does not; retain the reverse differences too.
 Do not replace the principal workload with whichever model happened to pass an
 earlier rehearsal. Other models are diagnostic arms for a specific unresolved
 question, not an automatic matrix expansion.
-The explicit non-AgentTest flag is for the authorised local deployment. An
-isolated AgentTest run may instead use the default 5010 server. Inspect actual
+An isolated AgentTest run may use the default 5010 server for development, with
+its actual actor and authority limitations labelled. Inspect actual
 provider/model identities, including auxiliary calls; Sol remains prohibited.
 If the preflight fails, reconcile its exact typed failure before rerunning.
 Do not treat an observer deadline as cancellation or resubmit unfinished work.
@@ -165,11 +234,13 @@ Record separately:
   material to the claim, source versions, request/instance IDs, canonical
   read-back locators and any facilitator intervention.
 
-Start with one A–F development sequence and the real Jira witness, not every
-historical replay. Once runnable, use three fresh repetitions of the smallest
-ordinary family whose reliability could change the delivery decision. Five
-trials are for the represented certification claim or an unresolved decision
-that warrants them, not an automatic expansion. Report actual denominators and
+Start with the selected operational tranche and reuse the existing fictional
+A–C evidence. Exercise D–F when a real observation or a named uncertainty needs
+them; they are not all prerequisites to publishing the first useful brief.
+Repeat the smallest ordinary family only where another observation could
+change the delivery decision. Three or five trials may support a particular
+reliability or represented-certification claim, not an automatic expansion.
+Report actual denominators and
 joint successes; do not describe one perfect sequence as a reliability rate or
 derive a population pass^k claim from it. Broader corpus, multilingual and
 multi-model sweeps remain optional until a concrete question needs them.
@@ -200,9 +271,19 @@ unrelated repair or a new universal guardrail. Wrong-target effects, lost real
 commitments, invented approvals or an unqualified stale decision after the
 exercised change block the affected capability claim.
 
-The human programme decision belongs in 2721; infrastructure defects use 2577
-or an existing concrete repair issue. Briefs and dated evidence link back to
+The human programme decision belongs in 2721; defects use an existing concrete
+repair issue, and broader scientific comparison belongs in 2579. Briefs and dated evidence link back to
 that decision rather than becoming competing live repair plans.
+
+Keep portfolio housekeeping bounded alongside the operational cycle. Update
+obsolete next-action statements after verified deliveries. The concurrent
+5 September reconciliation superseded 2600/2602 into 2595 and left 2603's H4
+decision open, as verified from live Jira. Do not repeat those retirements.
+Reconcile any remaining 2595/2603 question against actual decisions and merged behaviour;
+prepare any unresolved decision for Michael without treating implementation,
+silence or this programme instruction as his historical gate decision. Do not
+restart a cutover, mass-close old tasks, or expand the pilot's release criteria
+merely to make the portfolio appear consistent.
 
 ## 7. Learned benefit and transfer: the following decision
 
