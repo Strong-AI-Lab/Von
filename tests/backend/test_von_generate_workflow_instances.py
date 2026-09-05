@@ -630,6 +630,32 @@ def test_generate_passes_authorised_workflow_inputs_to_adaptive_capabilities(
     }
 
 
+@pytest.mark.parametrize("account_owner", ["#V#michael_witbrock", "#V#someone_else"])
+def test_generate_binds_jira_from_authenticated_identity_not_body(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, account_owner: str,
+) -> None:
+    from src.backend.integrations.internal_mcp import jira_proxy_mcp as jira
+    from src.backend.services import von_user_authentication_service as identity
+
+    monkeypatch.setattr(jira, "inspect_jira_auth_config", lambda: {
+        "base_url": "https://example.atlassian.net", "email": "owner@example.com",
+        "token_present": True,
+    })
+    monkeypatch.setattr(identity, "find_user_concept_by_login_email", lambda email: {
+        "concept_id": account_owner,
+    })
+    response = app.test_client().post("/von/generate", json={
+        "prompt": "Look up the current Jira issue.",
+        "user_id": "#V#someone_else", "jira_resource_id": "forged",
+        "trusted_argument_values": {"jira_resource_id": "forged"},
+    })
+    assert response.status_code == 200
+    call = app.config["_ADAPTIVE_TURN_CALLS"][-1]
+    binding = (call["trusted_argument_values"] or {}).get("jira_resource_id")
+    assert binding == jira.jira_resource_binding_for_user("#V#michael_witbrock")
+    assert bool(binding) == (account_owner == "#V#michael_witbrock")
+
+
 def test_body_identity_cannot_override_actor_scope_passed_to_adaptive_turn(
     app: Flask,
 ) -> None:

@@ -103,8 +103,18 @@ def _parse_args() -> JiraTaskMigrationOptions:
 
 
 def main() -> None:
+    from src.backend.integrations.internal_mcp.gateway import (
+        INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+        bind_internal_mcp_actor_context_source,
+    )
+
     options = _parse_args()
-    report = run_jira_task_migration_sync(options)
+    # This explicit local CLI is an operator entry point. Keep this authority
+    # here, not in the runner also called by actor-bound durable workflows.
+    with bind_internal_mcp_actor_context_source(
+        INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
+    ):
+        report = run_jira_task_migration_sync(options)
     print(json.dumps({"report_path": str(options.report_path), "summary": report}, indent=2))
 
 

@@ -12299,6 +12299,14 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
 
     _check_background_cancellation("authentication context")
 
+    from ...integrations.internal_mcp.jira_proxy_mcp import (
+        jira_resource_binding_for_user,
+    )
+
+    # Only the authenticated actor can acquire this selector. Jira retrieval
+    # rechecks the actual proxy account and governed identity at invocation.
+    jira_resource_trusted_binding = jira_resource_binding_for_user(user_concept_id)
+
     linkedin_resource_trusted_binding: str | None = None
     if user_concept_id:
         from ...integrations.internal_mcp.linkedin_proxy_mcp import (
@@ -13694,6 +13702,10 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
         adaptive_turn_started = time.perf_counter()
         adaptive_input_context = enhanced_context
         trusted_turn_argument_values: dict[str, Any] = {}
+        if jira_resource_trusted_binding is not None:
+            trusted_turn_argument_values["jira_resource_id"] = (
+                jira_resource_trusted_binding
+            )
         if linkedin_resource_trusted_binding is not None:
             trusted_turn_argument_values["linkedin_resource_id"] = (
                 linkedin_resource_trusted_binding

@@ -25712,6 +25712,7 @@ def _jira_search_input_schema() -> Schema:
     return Schema(
         required={"jql": str},
         optional={
+            "resource_id": (str,),
             "max_results": (int,),
             "start_at": (int,),
             "next_page_token": (str,),
@@ -25730,7 +25731,7 @@ def _jira_search_input_schema() -> Schema:
 def _jira_get_issue_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str},
-        optional={"fields": (list,), "expand": (list,)},
+        optional={"fields": (list,), "expand": (list,), "resource_id": (str,)},
         allow_unknown=True,
         comma_separated_list_fields=("fields", "expand"),
         description=(
@@ -25745,6 +25746,7 @@ def _jira_get_comments_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str},
         optional={
+            "resource_id": (str,),
             "start_at": (int,),
             "max_results": (int,),
             "order_by": (str,),
@@ -32553,13 +32555,14 @@ def _jira_search(**kwargs):
             start_at=kwargs.get("start_at"),
             next_page_token=kwargs.get("next_page_token"),
             fields=kwargs.get("fields"),
+            **({"resource_id": kwargs["resource_id"]} if "resource_id" in kwargs else {}),
         )
 
     try:
         return _run_async_compat(_async_search)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -32584,13 +32587,14 @@ def _jira_get_issue(**kwargs):
             issue_key=issue_key,
             fields=kwargs.get("fields"),
             expand=kwargs.get("expand"),
+            **({"resource_id": kwargs["resource_id"]} if "resource_id" in kwargs else {}),
         )
 
     try:
         return _run_async_compat(_async_get_issue)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -32635,13 +32639,14 @@ def _jira_get_comments(**kwargs):
             max_results=kwargs.get("max_results"),
             order_by=order_by,
             body_format=body_format,
+            **({"resource_id": kwargs["resource_id"]} if "resource_id" in kwargs else {}),
         )
 
     try:
         return _run_async_compat(_async_get_comments)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -32670,7 +32675,7 @@ def _jira_get_project_issue_types(**kwargs):
         return _run_async_compat(_async_get_project_issue_types)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={
                 "exception_type": "JiraProxyError",
@@ -32704,7 +32709,7 @@ def _jira_get_bulk_operation_progress(**kwargs):
         result = _run_async_compat(_async_get_progress)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={
                 "exception_type": "JiraProxyError",
@@ -32752,7 +32757,7 @@ def _jira_get_transitions(**kwargs):
         return _run_async_compat(_async_get_transitions)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -32908,7 +32913,7 @@ def _jira_add_attachment(**kwargs):
         raw_result = _run_async_compat(_async_add_attachment)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -34304,7 +34309,7 @@ def _jira_get_myself(**kwargs):
         return _run_async_compat(_async_get_myself)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -36276,7 +36281,7 @@ def _task_import_jira_issues(**kwargs):
         fetch_payload = _run_async_compat(_fetch_jira_issues)
     except JiraProxyError as exc:
         return make_error_response(
-            "jira_proxy_error",
+            getattr(exc, "reason_code", "jira_proxy_error"),
             str(exc),
             details={"exception_type": "JiraProxyError"},
             suggestions=["Check Jira connectivity and authentication"],
@@ -42055,7 +42060,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_search_input_schema(),
             output_schema=jira_search_output_schema,
             category="read",
-            ordinary_turn_excluded_reason="deployment_global_account",
+            ordinary_turn_trusted_argument_bindings={"resource_id": "jira_resource_id"},
             timeout_sec=20.0,
             description="Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields. Requires valid ATLASSIAN_BASE_URL, ATLASSIAN_EMAIL, and ATLASSIAN_API_TOKEN in the environment. Returns the Jira search response including issues array.",
         ),
@@ -42065,7 +42070,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_issue_input_schema(),
             output_schema=jira_get_issue_output_schema,
             category="read",
-            ordinary_turn_excluded_reason="deployment_global_account",
+            ordinary_turn_trusted_argument_bindings={"resource_id": "jira_resource_id"},
             timeout_sec=15.0,
             description=(
                 "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). "
@@ -42079,7 +42084,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_comments_input_schema(),
             output_schema=jira_get_comments_output_schema,
             category="read",
-            ordinary_turn_excluded_reason="deployment_global_account",
+            ordinary_turn_trusted_argument_bindings={"resource_id": "jira_resource_id"},
             timeout_sec=15.0,
             description=(
                 "Read comments on a Jira issue one page at a time, with "
