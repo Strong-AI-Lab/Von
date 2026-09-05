@@ -237,10 +237,10 @@ export function buildWorkflowLayout(definition) {
       const node = {
         stepId,
         name: cleanText(step.name) || stepId,
-        x: 48 + (depth * 260),
-        y: 56 + (index * 148),
-        width: 208,
-        height: 92,
+        x: 24 + (depth * 292),
+        y: 36 + (index * 156),
+        width: 240,
+        height: 116,
         branch: (outgoingCounts.get(stepId) || 0) > 1 || asArray(step.control_flow?.conditions).length > 0,
         terminal: (outgoingCounts.get(stepId) || 0) === 0,
         actionId: cleanText(step.invokes_action_target || step.invokes_action),
@@ -272,11 +272,15 @@ export function buildWorkflowLayout(definition) {
     .filter(Boolean);
 
   const width = Math.max(720, ...nodes.map((node) => node.x + node.width + 80));
-  const height = Math.max(360, ...nodes.map((node) => node.y + node.height + 60));
+  const height = Math.max(260, ...nodes.map((node) => node.y + node.height + 60));
   return { width, height, nodes, edges: laidOutEdges };
 }
 
 const state = {
+  catalogueStatus: 'loading',
+  detailStatus: 'idle',
+  detailRequest: 0,
+  graphZoom: 1,
   scheduleForm: null,
   scheduleReceipt: null,
   scheduleBusy: false,
@@ -382,7 +386,11 @@ function filterCatalogue() {
 function renderCatalogue() {
   if (!elements.catalogue) return;
   filterCatalogue();
-  if (!state.filteredCatalogue.length) {
+  if (!state.catalogue.length && state.catalogueStatus === 'loading') {
+    elements.catalogue.innerHTML = '<div class="workflow-studio-empty compact" role="status">Loading workflows…</div>';
+  } else if (!state.catalogue.length && state.catalogueStatus === 'error') {
+    elements.catalogue.innerHTML = '<div class="workflow-studio-empty compact">Could not load workflows. Use Refresh to retry.</div>';
+  } else if (!state.filteredCatalogue.length) {
     elements.catalogue.innerHTML = `
       <div class="workflow-studio-empty compact">
         <h3>No workflows match</h3>
@@ -392,17 +400,19 @@ function renderCatalogue() {
   } else {
     elements.catalogue.innerHTML = state.filteredCatalogue.map((item) => {
       const selected = item.workflow_id === state.selectedWorkflowId;
-      const description = cleanText(item.description) || 'No workflow description yet.';
+      const pending = item.executability_reason === 'inspection_summary_pending';
+      const unknown = pending || item.executability_reason === 'classification_error';
+      const description = cleanText(item.description) || (pending ? 'Select to load workflow details.' : 'No workflow description yet.');
       const badges = [
         item.source ? `<span class="workflow-studio-pill">${escapeHtml(item.source)}</span>` : '',
-        item.is_executable
+        unknown ? '<span class="workflow-studio-pill muted">Not yet verified</span>' : item.is_executable
           ? '<span class="workflow-studio-pill success">Executable</span>'
           : '<span class="workflow-studio-pill muted">Design</span>'
       ].join('');
       return `
         <button type="button" class="workflow-studio-catalogue-item${selected ? ' selected' : ''}"
-          data-workflow-id="${escapeHtml(item.workflow_id)}">
-          <div class="workflow-studio-catalogue-title">${escapeHtml(item.workflow_id)}</div>
+          data-workflow-id="${escapeHtml(item.workflow_id)}" aria-pressed="${selected}">
+          <div class="workflow-studio-catalogue-title">${escapeHtml(item.workflow_id).replaceAll('_', '_<wbr>')}</div>
           <div class="workflow-studio-catalogue-description">${escapeHtml(description)}</div>
           <div class="workflow-studio-catalogue-badges">${badges}</div>
         </button>
@@ -411,7 +421,7 @@ function renderCatalogue() {
   }
 
   if (elements.catalogueMeta) {
-    elements.catalogueMeta.textContent = `${state.filteredCatalogue.length} of ${state.catalogue.length} workflows shown`;
+    elements.catalogueMeta.textContent = state.catalogueStatus === 'loading' ? 'Loading catalogue…' : `${state.filteredCatalogue.length} of ${state.catalogue.length} workflows shown`;
   }
 }
 
@@ -442,8 +452,10 @@ function ensureSelectedStep() {
 function renderSummaryHeader() {
   if (!elements.title || !elements.summary || !elements.summaryChips) return;
   if (!state.workflowDetail) {
-    elements.title.textContent = 'Select a workflow';
-    elements.summary.textContent = 'Choose a workflow from the catalogue to inspect topology, decision structure, dataflow, operations, and bounded authoring controls.';
+    elements.title.textContent = state.selectedWorkflowId || 'Select a workflow';
+    elements.summary.textContent = state.detailStatus === 'loading' ? 'Loading workflow details… You can select another workflow while this loads.'
+      : state.detailStatus === 'error' ? 'Workflow details could not be loaded. Retry below or select another workflow.'
+        : 'Choose a workflow from the catalogue to inspect its steps, inputs and operations.';
     elements.summaryChips.innerHTML = '';
     return;
   }
@@ -527,6 +539,13 @@ function renderImprovementGuidanceSection() {
   `;
 }
 
+function graphLabelLines(value, workflowId) {
+  const prefix = `#V#workflow_step_${cleanText(workflowId).replace(/^#V#/, '')}_`;
+  const label = cleanText(value).replace(prefix, '').replace(/^#V#/, '').replaceAll('_', ' ');
+  const lines = label.match(/.{1,27}(?:\s|$)|.{1,27}/g) || ['Unnamed step'];
+  return lines.slice(0, 2).map((line, index) => index === 1 && lines.length > 2 ? `${line.trim().slice(0, 25)}…` : line.trim());
+}
+
 function renderTopologyView() {
   const definition = getDefinition();
   if (!definition) {
@@ -539,7 +558,7 @@ function renderTopologyView() {
   }
   const layout = buildWorkflowLayout(definition);
   const svg = `
-    <svg class="workflow-studio-graph" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Workflow topology">
+    <svg class="workflow-studio-graph" style="width:${layout.width * state.graphZoom}px;height:${layout.height * state.graphZoom}px" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Workflow topology">
       <defs>
         <marker id="workflowStudioArrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" class="workflow-studio-graph-arrow"></path>
@@ -554,10 +573,11 @@ function renderTopologyView() {
       ${layout.nodes.map((node) => `
         <g class="workflow-studio-node ${node.branch ? 'branch' : ''} ${node.terminal ? 'terminal' : ''} ${node.stepId === state.selectedStepId ? 'selected' : ''}"
           data-step-id="${escapeHtml(node.stepId)}" tabindex="0" role="button" aria-label="Select step ${escapeHtml(node.name)}">
+          <title>${escapeHtml(node.name)} — ${escapeHtml(node.actionId || node.subworkflowId || 'No bound action')}</title>
           <rect x="${node.x}" y="${node.y}" rx="18" ry="18" width="${node.width}" height="${node.height}"></rect>
-          <text x="${node.x + 18}" y="${node.y + 28}" class="workflow-studio-node-title">${escapeHtml(node.name)}</text>
-          <text x="${node.x + 18}" y="${node.y + 48}" class="workflow-studio-node-subtitle">${escapeHtml(node.actionId || node.subworkflowId || 'No bound action')}</text>
-          <text x="${node.x + 18}" y="${node.y + 68}" class="workflow-studio-node-meta">${node.branch ? 'Branching' : node.terminal ? 'Terminal' : 'Linear step'}</text>
+          <text class="workflow-studio-node-title">${graphLabelLines(node.name, state.selectedWorkflowId).map((line, i) => `<tspan x="${node.x + 14}" y="${node.y + 26 + i * 18}">${escapeHtml(line)}</tspan>`).join('')}</text>
+          <text x="${node.x + 18}" y="${node.y + 72}" class="workflow-studio-node-subtitle">${escapeHtml((node.actionId || node.subworkflowId || 'No bound action').length > 29 ? (node.actionId || node.subworkflowId).slice(0, 28) + '…' : node.actionId || node.subworkflowId || 'No bound action')}</text>
+          <text x="${node.x + 18}" y="${node.y + 94}" class="workflow-studio-node-meta">${node.branch ? 'Branching' : node.terminal ? 'Terminal' : 'Linear step'}</text>
         </g>
       `).join('')}
     </svg>
@@ -567,7 +587,15 @@ function renderTopologyView() {
       <h3>Topology</h3>
       <p>Derived process graph from authoritative workflow relationships and runtime metadata.</p>
     </div>
-    <div class="workflow-studio-graph-shell">${svg}</div>
+    <div class="workflow-studio-graph-toolbar" role="group" aria-label="Graph zoom">
+      <button type="button" class="btn-mini" data-action="zoom-out" aria-label="Zoom out">−</button>
+      <output aria-live="polite">${Math.round(state.graphZoom * 100)}%</output>
+      <button type="button" class="btn-mini" data-action="zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" class="btn-mini" data-action="zoom-reset">Readable size</button>
+      <button type="button" class="btn-mini" data-action="zoom-fit">Fit graph</button>
+      <span class="workflow-studio-muted">Scroll to explore; select a step for details.</span>
+    </div>
+    <div class="workflow-studio-graph-shell" tabindex="0" role="region" aria-label="Scrollable workflow graph">${svg}</div>
   `;
 }
 
@@ -961,7 +989,14 @@ function renderEditView() {
 function renderCanvas() {
   if (!elements.canvas) return;
   let html;
-  if (!state.workflowDetail) {
+  elements.canvas.setAttribute('aria-busy', String(state.detailStatus === 'loading'));
+  if (state.detailStatus === 'loading' || state.detailStatus === 'error') {
+    html = `<div class="workflow-studio-empty" role="status">
+      <h3>${state.detailStatus === 'loading' ? 'Loading workflow…' : 'Could not load workflow'}</h3>
+      <p>${state.detailStatus === 'loading' ? 'Retrieving the workflow and its operational details. This may take a moment.' : 'Retry the read, or choose another workflow from the catalogue.'}</p>
+      ${state.detailStatus === 'error' ? '<button type="button" data-action="retry-detail">Retry loading</button>' : ''}
+    </div>`;
+  } else if (!state.workflowDetail) {
     html = `
       <div class="workflow-studio-empty">
         <h3>No workflow selected</h3>
@@ -979,7 +1014,11 @@ function renderCanvas() {
   } else {
     html = renderEditView();
   }
+  const previousGraph = elements.canvas.querySelector('.workflow-studio-graph-shell');
+  const scroll = previousGraph ? [previousGraph.scrollLeft, previousGraph.scrollTop] : [0, 0];
   elements.canvas.innerHTML = html;
+  const graph = elements.canvas.querySelector('.workflow-studio-graph-shell');
+  if (graph) [graph.scrollLeft, graph.scrollTop] = scroll;
 }
 
 function renderInspector() {
@@ -1095,16 +1134,21 @@ function renderAll() {
 }
 
 async function loadCatalogue({ selectFirst = false } = {}) {
+  state.catalogueStatus = 'loading';
+  renderCatalogue();
   setConnectionBadge('Loading', 'loading');
   try {
     const data = await fetchJson(`/api/workflow-studio/catalogue?include_designs=${state.showDesigns ? 'true' : 'false'}&limit=300`);
     state.catalogue = asArray(data.items);
+    state.catalogueStatus = 'ready';
     if (!state.selectedWorkflowId && selectFirst && state.catalogue[0]?.workflow_id) {
       state.selectedWorkflowId = state.catalogue[0].workflow_id;
     }
     renderCatalogue();
     setConnectionBadge('Ready', 'ready');
   } catch (error) {
+    state.catalogueStatus = 'error';
+    renderCatalogue();
     console.error('Workflow studio catalogue failed:', error);
     setConnectionBadge('Offline', 'error');
     setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not load workflow catalogue.', 'error');
@@ -1114,8 +1158,12 @@ async function loadCatalogue({ selectFirst = false } = {}) {
 async function loadWorkflowDetail(workflowId) {
   const workflowIdClean = cleanText(workflowId);
   if (!workflowIdClean) return;
+  const request = ++state.detailRequest;
+  state.workflowDetail = null;
+  state.detailStatus = 'loading';
+  state.graphZoom = 1;
+  setStatusBanner('', 'info');
   if (workflowIdClean !== state.selectedWorkflowId || !state.scheduleForm) {
-    state.workflowDetail = null;
     state.scheduleForm = { schedule_type: 'interval', interval_seconds: 3600, inputs: '{}', idempotency_key: crypto.randomUUID() };
     state.scheduleReceipt = null;
   }
@@ -1124,8 +1172,11 @@ async function loadWorkflowDetail(workflowId) {
   renderAll();
   try {
     const data = await fetchJson(`/api/workflow-studio/workflows/${encodeURIComponent(workflowIdClean)}`);
-    if (workflowIdClean !== state.selectedWorkflowId) return;
+    if (request !== state.detailRequest) return;
     state.workflowDetail = data;
+    state.detailStatus = 'ready';
+    state.catalogue = state.catalogue.map(item => item.workflow_id === workflowIdClean
+      ? { ...item, ...data.summary, workflow_id: workflowIdClean } : item);
     const draftSource = buildDraftSource(data);
     state.draftSpec = data.authoring?.available && draftSource.spec
       ? normaliseAuthoringSpecForEditor(draftSource.spec, workflowIdClean)
@@ -1139,7 +1190,9 @@ async function loadWorkflowDetail(workflowId) {
     setStatusBanner('', 'info');
     setConnectionBadge('Ready', 'ready');
   } catch (error) {
-    if (workflowIdClean !== state.selectedWorkflowId) return;
+    if (request !== state.detailRequest) return;
+    state.detailStatus = 'error';
+    renderAll();
     console.error('Workflow studio detail failed:', error);
     setConnectionBadge('Error', 'error');
     setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not load workflow detail.', 'error');
@@ -1493,7 +1546,17 @@ function handleCanvasClick(event) {
   const workflowAction = event.target.closest('[data-action]');
   if (!workflowAction) return;
   const action = cleanText(workflowAction.dataset.action);
-  if (['preview-schedule', 'create-schedule', 'toggle-schedule', 'reload-schedules'].includes(action)) {
+  if (action === 'retry-detail') {
+    void loadWorkflowDetail(state.selectedWorkflowId);
+  } else if (action.startsWith('zoom-')) {
+    const layout = buildWorkflowLayout(getDefinition());
+    const shell = elements.canvas.querySelector('.workflow-studio-graph-shell');
+    if (action === 'zoom-fit') state.graphZoom = Math.min(1, (shell?.clientWidth || 720) / layout.width);
+    else if (action === 'zoom-reset') state.graphZoom = 1;
+    else state.graphZoom = Math.max(0.1, Math.min(2, state.graphZoom + (action === 'zoom-in' ? 0.2 : -0.2)));
+    renderCanvas();
+    elements.canvas.querySelector(`[data-action="${action}"]`)?.focus();
+  } else if (['preview-schedule', 'create-schedule', 'toggle-schedule', 'reload-schedules'].includes(action)) {
     void runScheduleCommand(action, workflowAction);
   } else if (action === 'suggest-description') {
     void requestDescriptionProposal();

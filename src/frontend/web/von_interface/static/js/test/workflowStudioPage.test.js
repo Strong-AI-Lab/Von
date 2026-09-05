@@ -52,7 +52,7 @@ describe('workflowStudioPage helpers', () => {
     expect(layout.edges).toHaveLength(2);
     expect(layout.nodes[0].stepId).toBe('start');
     expect(layout.width).toBeGreaterThan(700);
-    expect(layout.height).toBeGreaterThan(300);
+    expect(layout.height).toBeGreaterThanOrEqual(Math.max(...layout.nodes.map(node => node.y + node.height)));
   });
 
   test('summarises preview diffs compactly', () => {
@@ -114,19 +114,21 @@ describe('actor schedule operations', () => {
     const api = require('../apiService.js');
     jest.spyOn(api, 'ensureUniqueWindowSessionId').mockResolvedValue(undefined);
     document.body.innerHTML = `
-      <div id="workflowStudioCatalogue"></div>
+      <div id="workflowStudioTitle"></div><div id="workflowStudioSummary"></div><div id="workflowStudioSummaryChips"></div><div id="workflowStudioCatalogue"></div>
       <div id="workflowStudioCanvas"></div>
       <div id="workflowStudioStatusBanner"></div>
       <button class="workflow-studio-view-tab" data-view="operations">Operations</button>`;
     let schedule = null;
     let firstCreate = true;
     let resolveOther;
+    const otherRequests = [];
     const creations = [];
     global.fetch = jest.fn(async (url, options = {}) => {
       const reply = data => ({ ok: true, json: async () => data });
-      if (String(url).startsWith('/api/workflow-studio/catalogue')) return reply({ items: [{ workflow_id: '#V#schedule_ui_test', is_executable: true }, { workflow_id: '#V#other_workflow', is_executable: true }] });
+      if (String(url).startsWith('/api/workflow-studio/catalogue')) return reply({ items: [{ workflow_id: '#V#schedule_ui_test', is_executable: true }, { workflow_id: '#V#other_workflow', is_executable: false, executability_reason: 'inspection_summary_pending' }] });
       if (String(url).endsWith(encodeURIComponent('#V#other_workflow'))) return new Promise(resolve => {
-        resolveOther = () => resolve(reply({ summary: { is_executable: true }, operations: { schedules: { items: [] } } }));
+        resolveOther = (summary = { is_executable: true, executability_reason: 'executable', description: 'Loaded description' }) => resolve(reply({ summary, operations: { schedules: { items: [] } } }));
+        otherRequests.push(resolveOther);
       });
       if (String(url).startsWith('/api/workflow-studio/workflows/')) return reply({
         summary: { is_executable: true }, operations: { schedules: { items: schedule ? [schedule] : [] } }
@@ -166,8 +168,12 @@ describe('actor schedule operations', () => {
       expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Paused');
       expect(document.querySelector('[data-action="toggle-schedule"]').textContent).toBe('Resume');
       expect(global.fetch.mock.calls.filter(([url]) => String(url).startsWith('/api/workflow-studio/workflows/'))).toHaveLength(1);
+      expect(document.querySelector('[data-workflow-id="#V#other_workflow"]').textContent).toContain('Not yet verified');
       document.querySelector('[data-workflow-id="#V#other_workflow"]').click();
       await flush();
+      expect(document.getElementById('workflowStudioTitle').textContent).toBe('#V#other_workflow');
+      expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Loading workflow');
+      expect(document.getElementById('workflowStudioCanvas').getAttribute('aria-busy')).toBe('true');
       expect(document.querySelector('[data-action="create-schedule"]')).toBeNull();
       expect(document.querySelector('[data-action="toggle-schedule"]')).toBeNull();
       document.querySelector('[data-workflow-id="#V#schedule_ui_test"]').click();
@@ -175,6 +181,34 @@ describe('actor schedule operations', () => {
       resolveOther();
       await flush();
       expect(document.querySelector('[data-action="toggle-schedule"]').dataset.scheduleId).toBe('#V#schedule_saved');
+      // A -> B -> A: an earlier A response must not overwrite the newer A.
+      document.querySelector('[data-workflow-id="#V#other_workflow"]').click();
+      await flush();
+      document.querySelector('[data-workflow-id="#V#schedule_ui_test"]').click();
+      await flush();
+      document.querySelector('[data-workflow-id="#V#other_workflow"]').click();
+      await flush();
+      otherRequests[2]();
+      await flush();
+      otherRequests[1]({ description: 'Stale description', is_executable: false });
+      await flush();
+      expect(document.getElementById('workflowStudioSummary').textContent).toBe('Loaded description');
+      const loadedCard = document.querySelector('[data-workflow-id="#V#other_workflow"]');
+      expect(loadedCard.textContent).toContain('Loaded description');
+      expect(loadedCard.textContent).toContain('Executable');
+      expect(loadedCard.getAttribute('aria-pressed')).toBe('true');
+      global.fetch.mockRejectedValueOnce(new Error('Temporary read failure'));
+      const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+      loadedCard.click();
+      await flush();
+      expect(document.getElementById('workflowStudioCanvas').getAttribute('aria-busy')).toBe('false');
+      expect(document.getElementById('workflowStudioCanvas').textContent).toContain('Could not load workflow');
+      document.querySelector('[data-action="retry-detail"]').click();
+      await flush();
+      resolveOther();
+      await flush();
+      expect(document.getElementById('workflowStudioSummary').textContent).toBe('Loaded description');
+      consoleError.mockRestore();
     } finally {
       jest.restoreAllMocks();
       delete global.fetch;
