@@ -37,7 +37,9 @@ from src.backend.workflows.vontology_loader import (
 from src.backend.workflows.workflow_mcp_tool_actions import (
     register_workflow_mcp_tool_actions,
 )
-from test_lab_status_digest_workflow_vontology_service import _reset_mock_db  # noqa: F401
+from test_lab_status_digest_workflow_vontology_service import (
+    _reset_mock_db,
+)  # noqa: F401
 
 ACTOR = "#V#continuity_test_operator"
 PRODUCT = "#V#continuity_test_kestrel"
@@ -69,7 +71,17 @@ class DigestWorld:
                 self.calls.append((_name, dict(kwargs)))
                 if _name == "jira_search":
                     return {
-                        "issues": self.jira_rows,
+                        "issues": [
+                            {
+                                **row,
+                                "fields": {
+                                    key: value
+                                    for key, value in row.get("fields", {}).items()
+                                    if key in kwargs["fields"]
+                                },
+                            }
+                            for row in self.jira_rows
+                        ],
                         "isLast": False,
                         "nextPageToken": "more",
                     }
@@ -205,6 +217,56 @@ def test_stale_nonempty_readback_does_not_complete(world):
     )
 
 
+def test_synthesis_receives_stored_brief_and_jira_acceptance_evidence(world):
+    from src.backend.services.jira_tool_evidence_contract_vontology_service import (
+        bootstrap_jira_tool_evidence_contract,
+    )
+
+    # Production also applies this represented projection in the MCP bridge.
+    bootstrap_jira_tool_evidence_contract()
+    # A descriptive concept header is not the maintained document. The live
+    # scheduled failure had both, unlike the earlier content-only fixture.
+    prior = "Previous checkpoint.\n" + ("Evidence and unresolved commitments.\n" * 160)
+    prior += "TASK-1 remains unaccepted; TASK-2 awaits the replication result."
+    with override_current_actor(ACTOR):
+        for predicate, text in (
+            ("hasDescription", "A source-linked readiness brief for this project."),
+            ("hasContent", prior),
+        ):
+            upsert_singleton_text_relation(
+                subject_concept_id=PRODUCT,
+                predicate=predicate,
+                text=text,
+                lang="en-NZ",
+            )
+    description = {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [
+                    {"type": "text", "text": "Candidate REJECTED despite issue Done."}
+                ],
+            }
+        ],
+    }
+    world.jira_rows = [
+        {
+            "key": "TASK-1",
+            "fields": {"status": {"name": "Done"}, "description": description},
+        }
+    ]
+    result = world.run(PRODUCT, "Updated checkpoint.", jira_jql="key = TASK-1")
+    assert result.completed, (result.error, result.data)
+    synthesis = world.syntheses[-1]
+    assert prior in [
+        row["text"] for row in synthesis["prior_digest_evidence"]["relations"]
+    ]
+    assert synthesis["jira_evidence"]["_llm_view"] == "tool_evidence_projection.v1"
+    assert synthesis["jira_evidence"]["issues"][0]["description"] == description
+
+
 def test_supplied_product_id_does_not_grant_another_actors_write_authority(world):
     private = "#V#continuity_other_actor_product"
     concept_service.create_concept(
@@ -214,7 +276,11 @@ def test_supplied_product_id_does_not_grant_another_actors_write_authority(world
     )
     result = world.run(private, "Should not be written")
     assert not result.completed
-    assert not any(tool == "upsert_singleton_text_relation" for tool, _ in world.calls)
+    # Text retrieval may return no visible rows rather than a concept lookup
+    # error. The canonical write boundary still denies the foreign product.
+    assert world.syntheses[-1]["prior_digest_evidence"]["relations"] == []
+    with override_current_actor("#V#another_actor"):
+        assert get_texts_for_concept(private, predicate="hasContent") == []
 
 
 def test_due_schedule_runs_same_capability_with_continuity_inputs(world, monkeypatch):
