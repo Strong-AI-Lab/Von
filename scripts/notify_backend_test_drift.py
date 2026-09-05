@@ -53,7 +53,7 @@ def build_message(status: str, body: str) -> EmailMessage:
         f"backend-test-drift-{run_id}"
         if (
             run_id
-            and status in {"new_failures", "broken"}
+            and status in {"new_failures", "broken", "changed", "reminder"}
             and os.environ.get("NIGHTLY_DRIFT_ARTIFACT_AVAILABLE", "true").lower()
             == "true"
         )
@@ -61,6 +61,8 @@ def build_message(status: str, body: str) -> EmailMessage:
     )
 
     subject = {
+        "changed": f"[{repo}] Backend tests: failure set changed",
+        "reminder": f"[{repo}] Backend tests: weekly unresolved-failure reminder",
         "new_failures": f"[{repo}] Nightly backend tests: new failures",
         "broken": f"[{repo}] Nightly backend tests: the run itself failed",
         "test": f"[{repo}] Nightly backend tests: notification path test",
@@ -123,6 +125,8 @@ def main() -> int:
         return 1
 
     recipients = message["To"] + (f", cc {message['Cc']}" if message["Cc"] else "")
+    if receipt := os.environ.get("NIGHTLY_NOTIFICATION_RECEIPT"):
+        Path(receipt).write_text("sent\n", encoding="utf-8")
     print(f"notified {recipients}")
     return 0
 
