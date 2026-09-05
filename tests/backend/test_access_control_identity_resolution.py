@@ -505,7 +505,9 @@ def test_access_controlled_cursor_resolves_actor_scope_once_per_batch(
     assert calls == {"user": 3, "organisation": 3}
 
 
-def test_window_session_organisation_context_controls_visibility(monkeypatch) -> None:
+def test_window_session_organisation_context_controls_visibility(
+    monkeypatch, isolated_window_session_db
+) -> None:
     mongomock = pytest.importorskip("mongomock")
     from flask import session
 

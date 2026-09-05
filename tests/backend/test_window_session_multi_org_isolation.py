@@ -10,6 +10,8 @@ from __future__ import annotations
 import types
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_window_session_db")
+
 
 @pytest.fixture
 def app_client(monkeypatch):
@@ -529,9 +531,7 @@ class TestCreateChatSessionUsesWindowContext:
             sess["namespace"] = (
                 "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
             )
-            sess["organisation_concept_id"] = (
-                "university_of_auckland_strong_ai_lab"
-            )
+            sess["organisation_concept_id"] = "university_of_auckland_strong_ai_lab"
             sess["role_in_org"] = "owner"
 
         resp = client.post(

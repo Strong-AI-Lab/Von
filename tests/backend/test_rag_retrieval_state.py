@@ -193,9 +193,7 @@ def test_filtered_saturated_window_preserves_rows_but_reports_partial_recovery(
         SimpleNamespace(
             node=SimpleNamespace(
                 metadata={
-                    "user_id": (
-                        "#V#target_user" if index == 49 else "#V#other_user"
-                    )
+                    "user_id": ("#V#target_user" if index == 49 else "#V#other_user")
                 },
                 ref_doc_id=f"doc-{index}",
                 node_id=f"node-{index}",
@@ -270,10 +268,10 @@ def test_hidden_scoped_candidates_are_absent_from_retrieval_diagnostics(
         ),
         SimpleNamespace(
             node=SimpleNamespace(
-                    metadata={
-                        "type": "text_relation",
-                        "relation_id": "visible",
-                        "user_id": "#V#target_user",
+                metadata={
+                    "type": "text_relation",
+                    "relation_id": "visible",
+                    "user_id": "#V#target_user",
                     "organisation_concept_id": "#V#org",
                 },
                 ref_doc_id="text_relation:visible",
@@ -284,10 +282,10 @@ def test_hidden_scoped_candidates_are_absent_from_retrieval_diagnostics(
         ),
         SimpleNamespace(
             node=SimpleNamespace(
-                    metadata={
-                        "type": "text_relation",
-                        "relation_id": "filtered",
-                        "user_id": "#V#other_user",
+                metadata={
+                    "type": "text_relation",
+                    "relation_id": "filtered",
+                    "user_id": "#V#other_user",
                     "organisation_concept_id": "#V#org",
                 },
                 ref_doc_id="text_relation:filtered",
@@ -590,3 +588,49 @@ def test_llm_projection_keeps_typed_state_when_no_rows_are_returned() -> None:
 
     assert payload["retrieval_state"] == state
     assert "authoritative" in payload["retrieval_diagnostics"]["note"]
+
+
+def test_search_knowledge_base_keeps_attempt_state_while_filtering_private_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StatefulRAG:
+        last_state_reads = 0
+
+        def query(self, **_kwargs: Any) -> RAGQueryResults:
+            return RAGQueryResults(
+                [
+                    {"id": "public", "text": "Visible research result"},
+                    {
+                        "id": "private",
+                        "text": "Private login identity",
+                        "metadata": {"predicate": "#V#hasVonLoginEmail"},
+                    },
+                ],
+                retrieval_state=build_rag_retrieval_state(
+                    "results_available",
+                    result_count=2,
+                    candidate_count=2,
+                ),
+            )
+
+        def get_last_retrieval_state(self, _namespace):
+            self.last_state_reads += 1
+            # This mutable getter may describe a different concurrent request.
+            return build_rag_retrieval_state("embedding_signature_mismatch")
+
+    service = _StatefulRAG()
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        lambda *_args, **_kwargs: service,
+    )
+    payload = catalogue._search_knowledge_base(
+        query="synthetic query",
+        namespace="#V#test_user@org",
+    )
+
+    assert payload["success"] is True
+    assert [row["id"] for row in payload["results"]] == ["public"]
+    assert payload["retrieval_state"]["status"] == "results_available"
+    assert payload["retrieval_state"]["result_count"] == 1
+    assert payload["retrieval_state"]["candidate_count"] == 1
+    assert service.last_state_reads == 0

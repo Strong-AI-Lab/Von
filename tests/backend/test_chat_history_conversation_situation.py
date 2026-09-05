@@ -153,6 +153,15 @@ def test_session_state_returns_history_and_optional_situation_without_changing_h
     )
 
     assert state == {
+        "mode": None,
+        "origin_kind": None,
+        "created_by_actor_concept_id": None,
+        "created_by_actor_type": None,
+        "is_agent_created": False,
+        "test_artifact_kind": None,
+        "focal_concept_ids": [],
+        "focal_concept_ids_source": None,
+        "focal_concept_ids_updated_at": None,
         "session_id": "session-1",
         "history": history,
         "conversation_situation": {
@@ -174,15 +183,21 @@ def test_session_state_returns_history_and_optional_situation_without_changing_h
         },
     }
     assert collection.find_calls[0][1] == {
+        "mode": 1,
+        "origin_kind": 1,
+        "concept_q_and_a.schema_version": 1,
+        "concept_q_and_a.concept": 1,
+        "concept_q_and_a.lifecycle": 1,
+        "concept_q_and_a.initial_question": 1,
         "_id": 0,
         "session_id": 1,
         "history": 1,
-            "conversation_situation": 1,
-            "conversation_observations": 1,
-            "conversation_observation_total": 1,
-            "focal_concept_ids": 1,
-            "focal_concept_ids_source": 1,
-            "focal_concept_ids_updated_at": 1,
+        "conversation_situation": 1,
+        "conversation_observations": 1,
+        "conversation_observation_total": 1,
+        "focal_concept_ids": 1,
+        "focal_concept_ids_source": 1,
+        "focal_concept_ids_updated_at": 1,
     }
 
     legacy_history = chat_history_service.get_chat_history(
@@ -228,18 +243,22 @@ def test_session_state_can_read_carrier_metadata_without_loading_history(
     assert state is not None
     assert state["history"] == []
     assert state["conversation_situation"]["revision"] == 2
-    assert state["conversation_observations"][0]["observation_id"] == (
-        "observation-1"
-    )
+    assert state["conversation_observations"][0]["observation_id"] == ("observation-1")
     assert collection.find_calls[0][1] == {
+        "mode": 1,
+        "origin_kind": 1,
+        "concept_q_and_a.schema_version": 1,
+        "concept_q_and_a.concept": 1,
+        "concept_q_and_a.lifecycle": 1,
+        "concept_q_and_a.initial_question": 1,
         "_id": 0,
         "session_id": 1,
-            "conversation_situation": 1,
-            "conversation_observations": 1,
-            "conversation_observation_total": 1,
-            "focal_concept_ids": 1,
-            "focal_concept_ids_source": 1,
-            "focal_concept_ids_updated_at": 1,
+        "conversation_situation": 1,
+        "conversation_observations": 1,
+        "conversation_observation_total": 1,
+        "focal_concept_ids": 1,
+        "focal_concept_ids_source": 1,
+        "focal_concept_ids_updated_at": 1,
     }
 
 
@@ -379,6 +398,15 @@ def test_malformed_optional_situation_does_not_hide_history_or_get_overwritten(
     )
 
     assert state == {
+        "mode": None,
+        "origin_kind": None,
+        "created_by_actor_concept_id": None,
+        "created_by_actor_type": None,
+        "is_agent_created": False,
+        "test_artifact_kind": None,
+        "focal_concept_ids": [],
+        "focal_concept_ids_source": None,
+        "focal_concept_ids_updated_at": None,
         "session_id": "session-1",
         "history": [{"role": "user", "content": "Still available"}],
         "conversation_situation": None,
@@ -440,10 +468,9 @@ def test_malformed_optional_observation_does_not_hide_transcript(
 
     assert state is not None
     assert state["history"] == history
-    assert [
-        item["observation_id"]
-        for item in state["conversation_observations"]
-    ] == ["valid-observation"]
+    assert [item["observation_id"] for item in state["conversation_observations"]] == [
+        "valid-observation"
+    ]
     assert state["conversation_observation_state"]["total_count"] == 2
     assert state["conversation_observation_state"]["omitted_count"] == 1
 
@@ -605,16 +632,10 @@ def test_conversation_observations_are_bounded_and_resettable(
     assert "error_step" not in observations[-1]
     assert state["conversation_observation_state"] == {
         "schema_version": "conversation_observation_state.v1",
-        "retained_count": (
-            chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
-        ),
-        "total_count": (
-            chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS + 3
-        ),
+        "retained_count": (chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS),
+        "total_count": (chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS + 3),
         "omitted_count": 3,
-        "retention_limit": (
-            chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
-        ),
+        "retention_limit": (chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS),
     }
 
     cleared = chat_history_service.clear_chat_history_conversation_observations(
@@ -648,9 +669,7 @@ def test_observation_append_self_heals_legacy_or_malformed_total(
                 "observation_id": f"legacy-{index}",
                 "kind": "durable_workflow_terminal",
             }
-            for index in range(
-                chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
-            )
+            for index in range(chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS)
         ],
     }
     if stored_total is not _MISSING:
@@ -687,9 +706,7 @@ def test_observation_append_self_heals_legacy_or_malformed_total(
     )
     assert state["conversation_observation_state"]["omitted_count"] == 1
     assert state["conversation_observations"][0]["observation_id"] == "legacy-1"
-    assert state["conversation_observations"][-1]["observation_id"] == (
-        "new-terminal"
-    )
+    assert state["conversation_observations"][-1]["observation_id"] == ("new-terminal")
 
 
 def test_session_state_tail_projection_avoids_loading_unrequested_history(
@@ -703,8 +720,7 @@ def test_session_state_tail_projection_avoids_loading_unrequested_history(
             "user_id": "#V#user",
             "session_id": "session-1",
             "history": [
-                {"role": "user", "content": f"message-{index}"}
-                for index in range(20)
+                {"role": "user", "content": f"message-{index}"} for index in range(20)
             ],
             "conversation_situation": {
                 "text": "The conversation continues.",

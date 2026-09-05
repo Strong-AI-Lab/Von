@@ -21819,6 +21819,10 @@ def _search_knowledge_base(**kwargs):
             namespace=ns,
             permissions_context=permissions_context if permissions_context else None,
         )
+        # Keep the state attached to this exact query before list filtering
+        # discards the RAGQueryResults subclass. A mutable last-query getter is
+        # only a compatibility fallback, not the authority for this attempt.
+        raw_retrieval_state = getattr(results, "retrieval_state", None)
         hidden_result_count = 0
         if isinstance(results, list):
             visible_results = []
@@ -21830,7 +21834,6 @@ def _search_knowledge_base(**kwargs):
             results = visible_results
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-        raw_retrieval_state = getattr(results, "retrieval_state", None)
         if not isinstance(raw_retrieval_state, Mapping):
             get_last_retrieval_state = getattr(
                 service,
