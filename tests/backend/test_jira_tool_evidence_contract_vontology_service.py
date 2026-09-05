@@ -217,7 +217,7 @@ def test_jira_get_issue_projection_preserves_required_answer_fields_and_omits_ra
     assert telemetry["missing_required_fields"] == []
 
 
-def test_jira_search_projection_preserves_required_rows_and_omits_detail_only_fields(
+def test_jira_search_projection_preserves_returned_descriptions_and_omits_raw_fields(
     _reset_mock_db: Any,
 ) -> None:
     service.bootstrap_jira_tool_evidence_contract()
@@ -237,7 +237,7 @@ def test_jira_search_projection_preserves_required_rows_and_omits_detail_only_fi
                         "issuetype": {"name": "Task"},
                         "created": "2026-06-20T00:00:00.000+0000",
                         "updated": "2026-06-21T00:00:00.000+0000",
-                        "description": "Detail-only field must not leak into search rows.",
+                        "description": "Candidate rejected despite issue completion.",
                     },
                     "raw": "not selected by the represented view",
                 }
@@ -261,9 +261,10 @@ def test_jira_search_projection_preserves_required_rows_and_omits_detail_only_fi
             "issue_type": "Task",
             "created": "2026-06-20T00:00:00.000+0000",
             "updated": "2026-06-21T00:00:00.000+0000",
+            "description": "Candidate rejected despite issue completion.",
         }
     ]
-    assert "description" not in projected["issues"][0]
+    assert "raw" not in projected["issues"][0]
     assert "raw" not in projected
 
     telemetry = projected["_tool_evidence_projection"]

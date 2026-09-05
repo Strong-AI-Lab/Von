@@ -218,6 +218,12 @@ def test_stale_nonempty_readback_does_not_complete(world):
 
 
 def test_synthesis_receives_stored_brief_and_jira_acceptance_evidence(world):
+    from src.backend.services.jira_tool_evidence_contract_vontology_service import (
+        bootstrap_jira_tool_evidence_contract,
+    )
+
+    # Production also applies this represented projection in the MCP bridge.
+    bootstrap_jira_tool_evidence_contract()
     # A descriptive concept header is not the maintained document. The live
     # scheduled failure had both, unlike the earlier content-only fixture.
     prior = "Previous checkpoint.\n" + ("Evidence and unresolved commitments.\n" * 160)
@@ -257,9 +263,8 @@ def test_synthesis_receives_stored_brief_and_jira_acceptance_evidence(world):
     assert prior in [
         row["text"] for row in synthesis["prior_digest_evidence"]["relations"]
     ]
-    assert (
-        synthesis["jira_evidence"]["issues"][0]["fields"]["description"] == description
-    )
+    assert synthesis["jira_evidence"]["_llm_view"] == "tool_evidence_projection.v1"
+    assert synthesis["jira_evidence"]["issues"][0]["description"] == description
 
 
 def test_supplied_product_id_does_not_grant_another_actors_write_authority(world):

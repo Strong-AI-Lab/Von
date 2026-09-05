@@ -374,6 +374,9 @@ _PAYLOAD_PATH_SPECS: tuple[JiraConceptSpec, ...] = (
     _payload_path(
         "#V#jira_payload_path_issues_fields_updated", "issues[].fields.updated"
     ),
+    _payload_path(
+        "#V#jira_payload_path_issues_fields_description", "issues[].fields.description"
+    ),
     _payload_path("#V#jira_payload_path_next_page_token", "nextPageToken"),
     _payload_path("#V#jira_payload_path_is_last", "isLast"),
 )
@@ -459,7 +462,10 @@ def _field_payload_path_relationships() -> tuple[JiraRelationshipSpec, ...]:
             "#V#jira_payload_path_fields_updated",
             "#V#jira_payload_path_issues_fields_updated",
         ),
-        JIRA_DESCRIPTION_FIELD_ID: ("#V#jira_payload_path_fields_description",),
+        JIRA_DESCRIPTION_FIELD_ID: (
+            "#V#jira_payload_path_fields_description",
+            "#V#jira_payload_path_issues_fields_description",
+        ),
         JIRA_NEXT_PAGE_TOKEN_FIELD_ID: ("#V#jira_payload_path_next_page_token",),
         JIRA_IS_LAST_FIELD_ID: ("#V#jira_payload_path_is_last",),
     }
@@ -537,6 +543,7 @@ def _tool_field_relationships() -> tuple[JiraRelationshipSpec, ...]:
         JIRA_PARENT_FIELD_ID,
         JIRA_CREATED_FIELD_ID,
         JIRA_UPDATED_FIELD_ID,
+        JIRA_DESCRIPTION_FIELD_ID,
         JIRA_TOTAL_FIELD_ID,
         JIRA_JQL_FIELD_ID,
         JIRA_NEXT_PAGE_TOKEN_FIELD_ID,
@@ -587,6 +594,7 @@ def _evidence_view_relationships() -> tuple[JiraRelationshipSpec, ...]:
         JIRA_PARENT_FIELD_ID,
         JIRA_CREATED_FIELD_ID,
         JIRA_UPDATED_FIELD_ID,
+        JIRA_DESCRIPTION_FIELD_ID,
         JIRA_TOTAL_FIELD_ID,
         JIRA_JQL_FIELD_ID,
         JIRA_NEXT_PAGE_TOKEN_FIELD_ID,
