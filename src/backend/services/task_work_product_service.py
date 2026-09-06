@@ -42,7 +42,7 @@ def resolve_task_work_product(
         reference = {"concept_id": product_id}
         rows = get_texts_for_concept(
             product_id,
-            predicate="#V#hasContent",
+            predicate="hasContent",
             limit=2,
             context_view="actor_effective",
         )
@@ -56,7 +56,7 @@ def resolve_task_work_product(
             **reference,
             "status": "ready",
             "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-            "predicate": "#V#hasContent",
+            "predicate": "hasContent",
             "language": row.get("lang"),
             "context_view": "actor_effective",
             "row_kind": row.get("row_kind", "base_text_relation"),

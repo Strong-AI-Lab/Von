@@ -41,7 +41,7 @@ def test_selected_product_is_read_fresh_without_neighbour_substitution(reads):
     assert product["content"] == "Revised A"
     assert product["content_sha256"] == hashlib.sha256(b"Revised A").hexdigest()
     texts.assert_called_with(
-        "#V#brief_a", predicate="#V#hasContent", limit=2, context_view="actor_effective"
+        "#V#brief_a", predicate="hasContent", limit=2, context_view="actor_effective"
     )
 
 
