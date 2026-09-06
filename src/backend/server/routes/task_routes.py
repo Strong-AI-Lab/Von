@@ -4,6 +4,7 @@ Provides endpoints for creating, reading, updating, and deleting tasks.
 Tasks are stored as Vontology concepts.
 """
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -347,18 +348,26 @@ def _resolve_task_execution_conversation(
 
 
 def _build_task_execution_prompt(task: dict[str, Any]) -> str:
-    """Project the represented task intent into the queued conversation turn."""
-
-    task_id = str(task.get("task_concept_id") or "").strip()
-    title = str(task.get("title") or "Untitled task").strip()
-    description = str(task.get("description") or "").strip()
-    prompt = (
-        "Execute the task assigned to Von.\n"
-        f"Task concept ID: {task_id}\n"
-        f"Title: {title}\n"
-        f"Description: {description}"
+    """Project the selected task and canonical references, not a shadow product."""
+    product = task.get("current_work_product") or {"status": "missing"}
+    instruction = task.get("continuation_instruction", "")
+    parts = [
+        "Execute the task assigned to Von.",
+        f"Task concept ID: {task.get('task_concept_id', '')}",
+        f"Title: {task.get('title') or 'Untitled task'}",
+    ]
+    if instruction:
+        parts.append(f"New user instruction: {instruction}")
+    parts.extend(
+        [
+            f"Current work product: {json.dumps(product, ensure_ascii=False)}",
+            f"Next checkpoint / unresolved questions: {task.get('next_checkpoint') or ''}",
+            f"Evidence: {task.get('evidence') or ''}",
+            f"Notes: {task.get('notes') or ''}",
+            f"Description: {task.get('description') or ''}",
+        ]
     )
-    return prompt[: chat_prompt_queue_service.MAX_PROMPT_RAW_CHARS]
+    return "\n".join(parts)[: chat_prompt_queue_service.MAX_PROMPT_RAW_CHARS]
 
 
 def _enqueue_task_execution(
@@ -453,6 +462,12 @@ def execute_task_with_von_route(task_concept_id: str) -> ResponseReturnValue:
         )
         payload = request.get_json(silent=True)
         payload = payload if isinstance(payload, dict) else {}
+        instruction = payload.get("continuation_instruction", "")
+        if not isinstance(instruction, str) or len(instruction) > 4000:
+            raise InvalidTaskExecutionData(
+                "continuation_instruction must be text of at most 4000 characters"
+            )
+        task["continuation_instruction"] = instruction.strip()
         requested_session_id = payload.get("originating_session_id")
         if requested_session_id is not None and requested_session_id != task.get(
             "conversation_session_id"
@@ -686,6 +701,19 @@ def get_task_taxonomy_route() -> ResponseReturnValue:
     except Exception as e:
         logger.error(f"Unexpected error getting task taxonomy: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/work-product", methods=["GET"])
+def get_task_work_product_route(task_concept_id: str) -> ResponseReturnValue:
+    """Read the selected product through the same actor-visible task boundary."""
+    from ...services.task_work_product_service import resolve_task_work_product
+    from ...services.task_management_service import _get_task_doc
+
+    try:
+        _, task_doc = _get_task_doc(task_concept_id)
+        return jsonify(resolve_task_work_product(task_doc, include_content=True)), 200
+    except TaskNotFoundError:
+        return jsonify({"status": "unavailable"}), 404
 
 
 @task_bp.route("/<task_concept_id>", methods=["GET"])

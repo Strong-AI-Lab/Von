@@ -80,6 +80,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Enduring role competence, organisational continuity, active acquisition, learned reuse or transfer | [Role-learning convergence](engineering/role_learning_convergence.md), with the [staged development rehearsal](engineering/role_convergence_rehearsal.md); live Jira owns delivery status and the next integrating increment |
 | Material security exposure: authentication/authorisation, private or cross-namespace data, secrets, untrusted content with tool authority, effects outside ordinary bounded and recoverable delegation, deployment, or administrator surfaces | [Security considerations](engineering/security_considerations.md) |
 | Substantial agent-behaviour implementation | Relevant sections of the [modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) |

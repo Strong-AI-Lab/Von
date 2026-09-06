@@ -65,7 +65,7 @@ def test_execute_with_von_creates_one_linked_server_dispatch(monkeypatch) -> Non
 
     monkeypatch.setattr(
         "src.backend.server.routes.task_routes.get_task",
-        lambda _task_id: _task(),
+        lambda _task_id: {**_task(), "current_work_product": {"status": "ready", "concept_id": "#V#brief_selected"}},
     )
     monkeypatch.setattr(
         "src.backend.server.routes.task_routes.get_conversation_concept",
@@ -123,9 +123,12 @@ def test_execute_with_von_creates_one_linked_server_dispatch(monkeypatch) -> Non
 
     response = client.post(
         "/api/tasks/%23V%23task_prepare_brief/execute-with-von",
-        json={"launch_request_id": "launch-1"},
+        json={"launch_request_id": "launch-1", "continuation_instruction": "Check the new evidence", "current_work_product": {"concept_id": "#V#wrong_brief"}},
     )
 
+    assert "Check the new evidence" in queue_call["prompt_raw"]
+    assert "#V#brief_selected" in queue_call["prompt_raw"]
+    assert "#V#wrong_brief" not in queue_call["prompt_raw"]
     assert response.status_code == 201
     assert response.get_json()["task_execution"]["queue_id"] == "queue-1"
     assert reconciliation_call["user_concept_id"] == "#V#alice"
@@ -459,9 +462,8 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
         assert duplicate.get_json()["reason_code"] == ("task_execution_already_active")
         first_payload = first.get_json()
         assert first_payload["queue_item"]["dispatch_ready"] is True
-        assert (
-            first_payload["task_execution"]["queue_id"]
-            == (first_payload["queue_item"]["queue_id"])
+        assert first_payload["task_execution"]["queue_id"] == (
+            first_payload["queue_item"]["queue_id"]
         )
 
         queue = mongo_client.get_chat_prompt_queue_collection()
@@ -480,3 +482,21 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
         )
     finally:
         mongo_client.close_connection()
+
+
+def test_continuation_projects_selected_task_product_and_new_instruction():
+    from src.backend.server.routes.task_routes import _build_task_execution_prompt
+
+    selected = _task()
+    selected.update(
+        current_work_product={"status": "ready", "concept_id": "#V#selected_brief"},
+        continuation_instruction="Resolve the remaining discrepancy.",
+        next_checkpoint="Check the missing evidence",
+        evidence="Canonical receipt",
+    )
+    prompt = _build_task_execution_prompt(selected)
+    assert "#V#task_prepare_brief" in prompt
+    assert "#V#selected_brief" in prompt
+    assert "Resolve the remaining discrepancy." in prompt
+    assert "Check the missing evidence" in prompt
+    assert "Canonical receipt" in prompt
