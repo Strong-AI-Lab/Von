@@ -126,3 +126,46 @@ projection facts from `JVNAUTOSCI-2421`. A local run may still be acceptable
 evidence for `JVNAUTOSCI-2422` when it emits a precise Gmail profile/OAuth
 blocker, because the harness itself has then proven the authenticated replay
 path and identified the missing external precondition.
+
+## Multi-turn outcome rebaselines
+
+The companion `run_live_multi_turn_followup_replay.py` and its JSON bank retain
+useful task families independently of older routing and telemetry designs.
+The bank's `assessment_scope: outcome` keeps expected workflow identity and
+observed action failures in `integration_checks`, separate from outcome checks.
+A competent alternative route or successful recovery does not by itself fail
+the user job. Callers explicitly testing workflow integration can retain the
+legacy default `workflow_integration` scope. Completion-gate rejection still
+fails the outcome checks.
+
+The shipped bank requires a separate source-grounded review. Its automated
+verdict is therefore `inconclusive` when its checks pass but that review is
+outstanding, and `fail` when a checked requirement fails. Preserve both the
+machine result and the review disposition; do not rewrite inconclusive machine
+results as automated passes. Keyword or distinct-ID coverage alone cannot prove
+that the intended targets were accurately described or that effects persisted.
+For the dynamic two-issue Jira case, two distinct issue keys are necessary;
+review must additionally confirm the requested issue and its immediate
+predecessor against Jira, and assess each summary.
+
+Legacy obligation-suppression probes remain available for historical integration
+replays. An absent ledger or decision is unavailable evidence, not a successful
+negative check. The current outcome bank no longer requires the retired ledger
+shape. Retire obsolete implementation expectations rather than useful jobs;
+retain failed current jobs in the results.
+
+`visible_answer` is retained as a compatibility field. Its source is a server
+turn record or task result; it does **not** prove browser delivery. Reports name
+that surface and report `browser_delivery: not_observed`. A completed transport
+without an answer fails, and saved prose cannot establish that the UI displayed
+it. Browser acceptance needs a separate actual browser observation. Likewise,
+browser-test fixture authentication does not establish normal owner authority
+for integrations such as Jira.
+
+For a bounded rebaseline, freeze a small selection of existing jobs, the model,
+entry surface, effect scope and review criteria before submission. Use fresh
+sessions for independent families, preserve context within each family, and
+reconcile pending requests before any retry. Verify source facts and canonical
+read-back for effects, record model identity and release, and report pass,
+failure, blocked or unassessed outcomes separately. A single representative
+sample is not a reliability rate, a model ranking or broad certification.

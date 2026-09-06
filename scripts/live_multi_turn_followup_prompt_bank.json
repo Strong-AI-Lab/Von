@@ -9,15 +9,18 @@
     "multi_target": "A question about the current target AND earlier ones together. The answer must address each target distinctly and must not collapse to a single concept (JVNAUTOSCI-2564 anti-over-constraint guardrail)."
   },
   "expectation_keys": {
-    "expected_workflow_id": "Optional workflow concept ID expected to be selected for this turn.",
-    "require_completed": "Background task must reach terminal status completed.",
+    "assessment_scope": "outcome separates route/action diagnostics from outcome checks; workflow_integration (legacy default) includes them in the verdict.",
+    "requires_manual_review": "Reason canonical outcome review is needed. The runner reports inconclusive until reviewed separately; never infer correctness from keyword checks.",
+    "response_distinct_match": "Regex pattern and minimum number of distinct full matches. Textual coverage only; does not prove identity or correctness.",
+    "expected_workflow_id": "Optional workflow concept ID expected in execution evidence; diagnostic only for outcome cases.",
+    "require_completed": "Background task must reach terminal status completed and a non-empty answer must be available; browser delivery remains unobserved.",
     "forbid_decisions": "Turn execution record decision must not be one of these (e.g. escalation_required on a bare follow-up).",
-    "require_prior_obligation_suppression": "The turn record must show prior-contract conditional obligations suppressed (execution.summary.expected_outcome_obligation_carry_forward.suppressed_prior_obligations non-empty) OR carry no unsatisfied obligation sourced from the prior turn's contract.",
+    "require_prior_obligation_suppression": "Legacy integration probe only. Requires explicit suppression or an observed obligation ledger, and no inherited unsatisfied obligations. Missing telemetry is inconclusive.",
     "forbid_unsatisfied_obligation_sources": "No UNSATISFIED required-tool obligation may cite one of these sources (default probe: turn_expected_outcome_conditional_required_tools).",
     "allow_obligation_carry_forward": "Explicit continuation: obligation inheritance is legitimate; no suppression requirement.",
     "response_must_mention_any": "Visible answer must contain at least one of these strings (target grounding).",
     "response_must_not_mention": "Visible answer must contain none of these strings (stale-referent grounding guard).",
-    "response_must_mention_all_groups": "For multi-target turns: for EACH group (list of alternative strings), the answer must mention at least one entry; proves per-target coverage without forcing a single binding.",
+    "response_must_mention_all_groups": "For multi-target turns: for EACH group (list of alternative strings), the answer must mention at least one entry; checks textual coverage only; source-grounded review is still required.",
     "notes": "Free-text reviewer guidance; not machine-checked."
   },
   "cases": [
@@ -30,6 +33,8 @@
           "role": "task",
           "prompt": "Please ingest https://arxiv.org/abs/2406.15341 into Von, including the normal download/file-copy path if available, then read back the represented paper concept so I can see what was stored.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
             "require_completed": true,
             "response_must_mention_any": ["2406.15341", "GenoTEX", "genotex"],
@@ -40,10 +45,10 @@
           "role": "bare_followup",
           "prompt": "Do you have a concept for https://arxiv.org/abs/2406.15341",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "forbid_decisions": ["escalation_required"],
-            "require_prior_obligation_suppression": true,
-            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
             "response_must_mention_any": ["2406.15341", "GenoTEX", "genotex"],
             "notes": "Exact JVNAUTOSCI-2563 motivating shape. Prior paper/file-copy referents may be reused for a direct existence answer; the prior ingestion/read-back tool family must not become this turn's obligations."
           }
@@ -52,6 +57,8 @@
           "role": "different_target_followup",
           "prompt": "Is this paper represented? https://arxiv.org/pdf/2603.22519v2",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "response_must_mention_any": ["2603.22519", "LLMon", "llmon"],
             "response_must_not_mention": ["genotex_an_llm_agent_benchmark", "arxiv_pdf_file_46934c89"],
@@ -62,8 +69,9 @@
           "role": "explicit_continuation",
           "prompt": "Please verify the representation of the paper you ingested at the start of this conversation and confirm its stored concept is still retrievable.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
-            "allow_obligation_carry_forward": true,
             "response_must_mention_any": ["2406.15341", "GenoTEX", "genotex"],
             "notes": "Legitimate continuation: verification obligations for the earlier operation may carry; the answer must address the T1 paper, resolved through prior referents."
           }
@@ -72,6 +80,8 @@
           "role": "multi_target",
           "prompt": "Is 2603.22519 represented, and what about the paper we ingested earlier? Answer for each separately.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "response_must_mention_all_groups": [
               ["2603.22519", "LLMon", "llmon"],
@@ -91,6 +101,8 @@
           "role": "task",
           "prompt": "List my three most recent Gmail messages with sender, subject, and received time. Read-only: do not modify, label, or send anything.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "notes": "Establishes mailbox referents (message IDs/subjects) with a read-only contract shape."
           }
@@ -99,10 +111,10 @@
           "role": "bare_followup",
           "prompt": "Which Gmail profile did you just use for that listing?",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "forbid_decisions": ["escalation_required"],
-            "require_prior_obligation_suppression": true,
-            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
             "notes": "A narrow status question sharing the mail topic. It must not inherit the prior turn's mail retrieval/detail tool family as fresh obligations; the profile referent from T1 may be reused directly."
           }
         },
@@ -110,8 +122,9 @@
           "role": "explicit_continuation",
           "prompt": "Show me the full details of the most recent message from that list, including its body.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
-            "allow_obligation_carry_forward": true,
             "notes": "Legitimate continuation: reuses the message referent from T1 and may carry per-message detail obligations (gmail_get_message grounded in a listed message ID)."
           }
         }
@@ -126,6 +139,8 @@
           "role": "task",
           "prompt": "What is the most recently created Task in the JVNAUTOSCI Jira project? Give me its key, summary, and status.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "response_must_mention_any": ["JVNAUTOSCI-"],
             "notes": "Establishes a concrete Jira issue-key referent via read-only jira_search."
@@ -135,10 +150,10 @@
           "role": "bare_followup",
           "prompt": "Do you have a represented Vontology concept for that Jira issue?",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "forbid_decisions": ["escalation_required"],
-            "require_prior_obligation_suppression": true,
-            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
             "notes": "Narrow concept-existence question. The issue-key referent from T1 must be reusable; the prior Jira search/read tool family must not be inherited as obligations, and no Jira import/reconciliation path may activate."
           }
         },
@@ -146,8 +161,9 @@
           "role": "explicit_continuation",
           "prompt": "Fetch the full details of that issue directly from Jira, including description and assignee.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
-            "allow_obligation_carry_forward": true,
             "response_must_mention_any": ["JVNAUTOSCI-"],
             "notes": "Legitimate continuation: jira_get_issue on the carried issue-key referent."
           }
@@ -156,11 +172,11 @@
           "role": "multi_target",
           "prompt": "Summarise both that issue and the one created immediately before it, separately.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
-            "response_must_mention_all_groups": [
-              ["JVNAUTOSCI-"]
-            ],
-            "notes": "Two-target coverage; the runner cannot know the keys in advance so machine checks are weak here — the reviewer must confirm two distinct issue keys appear and are summarised separately."
+            "response_distinct_match": {"pattern": "\\bJVNAUTOSCI-[0-9]+\\b", "minimum": 2},
+            "notes": "Two distinct issue keys are necessary. Review canonical Jira sources to confirm these are the intended issue and its immediate predecessor, each summarised accurately."
           }
         }
       ]
@@ -174,6 +190,8 @@
           "role": "task",
           "prompt": "On Jira issue JVNAUTOSCI-2591, add the label uc05-live-validated if it is absent, without changing any other field. Then fetch that exact issue directly from Jira and report its key, status, and complete label list so the change is verified by read-back.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "response_must_mention_all_groups": [
               ["JVNAUTOSCI-2591"],
@@ -186,8 +204,9 @@
           "role": "explicit_continuation",
           "prompt": "Repeat that exact operation for JVNAUTOSCI-2591. Do not create a duplicate label or change another field. Fetch the issue again and report the complete label list from Jira.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
-            "allow_obligation_carry_forward": true,
             "response_must_mention_all_groups": [
               ["JVNAUTOSCI-2591"],
               ["uc05-live-validated"]
@@ -206,6 +225,8 @@
           "role": "task",
           "prompt": "Create a represented note concept containing exactly this text: 'Multi-turn replay checkpoint for the follow-up family.' Then read it back so I can see the stored concept.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "response_must_mention_any": ["Multi-turn replay checkpoint"],
             "notes": "Establishes a freshly created concept referent through the generic representation path (create + text relation + read-back)."
@@ -215,10 +236,10 @@
           "role": "bare_followup",
           "prompt": "Do you have a concept for that note?",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
             "forbid_decisions": ["escalation_required"],
-            "require_prior_obligation_suppression": true,
-            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
             "response_must_mention_any": ["Multi-turn replay checkpoint", "note"],
             "notes": "Deictic narrow lookup: the note referent must resolve from prior context; the prior mutation/read-back tool family must not be inherited as fresh obligations."
           }
@@ -227,8 +248,9 @@
           "role": "explicit_continuation",
           "prompt": "Verify the note concept you created is still retrievable and show me its stored content.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "require_completed": true,
-            "allow_obligation_carry_forward": true,
             "response_must_mention_any": ["Multi-turn replay checkpoint"],
             "notes": "Legitimate verification continuation: read-back obligations for the earlier mutation may carry."
           }
@@ -244,6 +266,8 @@
           "role": "task",
           "prompt": "Create today's operational-reliability programme status digest from current JVNAUTOSCI Jira evidence, current repository evidence, and the prior represented digest. Persist it as the canonical digest work product. Include verified changes, milestones, blockers, unresolved or stale obligations, decisions needed, deadlines, and evidence gaps. Keep Jira Done, workflow completed, and capability passed distinct. Read-only outside the digest work product: do not transition, comment on, close, assign, or otherwise change Jira, GitHub, mail, or workflow instances.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "expected_workflow_id": "#V#lab_project_status_digest_workflow",
             "require_completed": true,
             "response_must_mention_all_groups": [
@@ -259,9 +283,10 @@
           "role": "explicit_continuation",
           "prompt": "Run that digest again against current evidence. Reuse the same represented digest work product and preserve each outstanding commitment's canonical source/task identity when its owner or due date changes. Absence from a search window does not resolve it. Tell me what changed since the prior digest and what evidence is unavailable. Keep every external system read-only.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "expected_workflow_id": "#V#lab_project_status_digest_workflow",
             "require_completed": true,
-            "allow_obligation_carry_forward": true,
             "response_must_mention_all_groups": [
               ["#V#operational_reliability_status_digest"],
               ["evidence gap", "unavailable"],
@@ -281,6 +306,8 @@
           "role": "task",
           "prompt": "Please ingest https://arxiv.org/abs/2408.12065 into Von. Include the PDF download/file-copy path if it works, but if the PDF cannot be fetched, still represent the paper from its metadata and tell me explicitly what was skipped.",
           "expectations": {
+            "assessment_scope": "outcome",
+            "requires_manual_review": "Verify the requested outcome against canonical sources and effects; keyword checks alone do not establish correctness.",
             "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
             "require_completed": true,
             "response_must_mention_any": ["2408.12065"],

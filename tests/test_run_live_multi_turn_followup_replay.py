@@ -131,9 +131,7 @@ def test_bare_followup_fails_when_prior_contract_obligation_unsatisfied() -> Non
     )
     assert _verdict(result) == "fail"
     assert _check(result, "forbid_decisions")["outcome"] == "fail"
-    assert (
-        _check(result, "forbid_unsatisfied_obligation_sources")["outcome"] == "fail"
-    )
+    assert _check(result, "forbid_unsatisfied_obligation_sources")["outcome"] == "fail"
 
 
 def test_missing_turn_record_is_inconclusive_not_silent_pass() -> None:
@@ -159,9 +157,7 @@ def test_different_target_grounding_fails_on_stale_concept_leak() -> None:
             "response_must_mention_any": ["target_b_token"],
             "response_must_not_mention": ["stale_concept_from_target_a"],
         },
-        visible_answer=(
-            "Verified: stale_concept_from_target_a is represented."
-        ),
+        visible_answer=("Verified: stale_concept_from_target_a is represented."),
         terminal_status="completed",
         selected_workflow_ids=[],
         turn_record={"decision": "completed"},
@@ -255,8 +251,7 @@ def test_visible_answer_prose_does_not_trigger_raw_payload_check() -> None:
     )
     assert _verdict(result) == "pass"
     assert all(
-        check["check"] != "visible_answer_not_raw_payload"
-        for check in result["checks"]
+        check["check"] != "visible_answer_not_raw_payload" for check in result["checks"]
     )
 
 
@@ -280,8 +275,7 @@ def test_completed_transport_task_fails_when_completion_gate_rejects_success() -
     assert _verdict(result) == "fail"
     assert _check(result, "require_completed")["outcome"] == "pass"
     assert (
-        _check(result, "completion_gate_safe_to_claim_completion")["outcome"]
-        == "fail"
+        _check(result, "completion_gate_safe_to_claim_completion")["outcome"] == "fail"
     )
 
 
@@ -316,8 +310,7 @@ def test_recovery_answer_cannot_hide_selected_workflow_action_failure() -> None:
 
     assert _verdict(result) == "fail"
     assert (
-        _check(result, "selected_workflow_has_no_failed_actions")["outcome"]
-        == "fail"
+        _check(result, "selected_workflow_has_no_failed_actions")["outcome"] == "fail"
     )
 
 
@@ -365,9 +358,7 @@ def test_nested_workflow_evidence_can_satisfy_expected_workflow_check() -> None:
     )
 
     result = runner.evaluate_turn_expectations(
-        expectations={
-            "expected_workflow_id": "#V#arxiv_paper_representation_workflow"
-        },
+        expectations={"expected_workflow_id": "#V#arxiv_paper_representation_workflow"},
         visible_answer="Paper representation completed and read back.",
         terminal_status="completed",
         selected_workflow_ids=workflow_evidence_ids,
@@ -482,3 +473,93 @@ def test_extract_visible_answer_prefers_turn_record_checked_final_response() -> 
 
     assert answer == "Current target could not be verified yet."
     assert source == "requested_evidence_lineage.final_response.text_checked_preview"
+
+
+def test_absent_legacy_fields_do_not_prove_suppression_or_decision():
+    result = runner.evaluate_turn_expectations(
+        expectations={
+            "require_prior_obligation_suppression": True,
+            "forbid_decisions": ["escalation_required"],
+        },
+        visible_answer="Yes.",
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record={"execution": {"summary": {}}},
+    )
+    assert result["verdict"] == "inconclusive"
+    assert all(c["outcome"] == "inconclusive" for c in result["checks"])
+
+
+def test_recorded_suppression_cannot_hide_an_unsatisfied_inherited_obligation():
+    result = runner.evaluate_turn_expectations(
+        expectations={"require_prior_obligation_suppression": True},
+        visible_answer="Done.",
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record=_record_with_obligation(
+            sources=["turn_expected_outcome_conditional_required_tools"],
+            satisfied=False,
+            suppressed=["another obligation"],
+        ),
+    )
+    assert _check(result, "require_prior_obligation_suppression")["outcome"] == "fail"
+
+
+def test_two_target_bank_case_rejects_repeated_single_key_and_requires_review():
+    case = next(
+        c
+        for c in runner.load_bank()["cases"]
+        if c["case_id"] == "jira_lookup_followup_family"
+    )
+    expectations = case["turns"][-1]["expectations"]
+
+    def evaluate(answer):
+        return runner.evaluate_turn_expectations(
+            expectations=expectations,
+            visible_answer=answer,
+            terminal_status="completed",
+            selected_workflow_ids=[],
+            turn_record={"decision": "completed"},
+        )
+
+    assert evaluate("JVNAUTOSCI-12 and JVNAUTOSCI-12")["verdict"] == "fail"
+    both = evaluate("JVNAUTOSCI-12 and JVNAUTOSCI-13")
+    assert _check(both, "response_distinct_match")["outcome"] == "pass"
+    assert both["verdict"] == "inconclusive"  # Two invented keys are not success.
+
+
+def test_completed_transport_without_answer_is_not_a_pass():
+    result = runner.evaluate_turn_expectations(
+        expectations={"require_completed": True},
+        visible_answer=None,
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record={},
+    )
+    assert result["verdict"] == "fail"
+
+
+def test_outcome_scope_preserves_route_mismatch_as_separate_diagnostic():
+    result = runner.evaluate_turn_expectations(
+        expectations={
+            "assessment_scope": "outcome",
+            "expected_workflow_id": "expected",
+            "requires_manual_review": "Canonical read-back",
+        },
+        visible_answer="Completed using a direct tool and read-back.",
+        terminal_status="completed",
+        selected_workflow_ids=["direct"],
+        turn_record={},
+    )
+    assert result["verdict"] == "inconclusive"
+    assert result["integration_checks"][0]["outcome"] == "fail"
+
+
+def test_bank_retires_obligation_telemetry_from_outcome_cases():
+    for case in runner.load_bank()["cases"]:
+        for turn in case["turns"]:
+            ex = turn["expectations"]
+            assert ex["assessment_scope"] == "outcome"
+            assert ex["requires_manual_review"]
+            assert "require_prior_obligation_suppression" not in ex
+            assert "forbid_unsatisfied_obligation_sources" not in ex
