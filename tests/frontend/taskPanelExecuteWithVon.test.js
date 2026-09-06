@@ -210,6 +210,10 @@ describe('explicit Execute with Von task control', () => {
                 expectedMessage,
                 expectedToastType,
             );
+            postJson.mockResolvedValueOnce({success: true, task: {conversation_name: 'Research planning'}, queue_item: {status: 'queued'}});
+            document.querySelector('.task-execute-with-von-btn').click();
+            await flushRenderQueue();
+            expect(postJson.mock.calls[2][1].launch_request_id).not.toBe(firstLaunchId);
         },
     );
 

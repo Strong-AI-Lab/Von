@@ -813,6 +813,9 @@ async function openGlobalTasks() {
     _globalTaskHasMore = false;
     _globalTaskTotal = null;
     _globalTaskLoadGeneration += 1;
+    // The previous generation may still be loading after an auth/scope refresh.
+    // Its response is obsolete; it must not suppress this new workspace load.
+    _isLoading = false;
     _tasks = [];
     _taskDetailState = {};
     _selectedTaskId = '';

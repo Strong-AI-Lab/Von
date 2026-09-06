@@ -85,3 +85,29 @@ test('an active task is observed without a second launch after loading Tasks', a
     expect(api.postJson).not.toHaveBeenCalled();
     expect(require('../../src/frontend/web/von_interface/static/js/chatTab.js').switchToChatSession).toHaveBeenCalledWith('session-a');
 });
+
+
+test('reopening Tasks during an auth/scope reload cannot leave the workspace permanently loading', async () => {
+    const api = require(apiPath);
+    const requests = [];
+    api.getJson.mockImplementation(url => {
+        if (url.startsWith('/api/tasks/?')) return new Promise(resolve => requests.push(resolve));
+        return Promise.resolve({});
+    });
+    const {showGlobalTasks} = require(panelPath);
+    const firstOpen = showGlobalTasks();
+    await flush();
+    document.dispatchEvent(new CustomEvent('orgSwitched', {detail: {organisation_id: '#V#lab'}}));
+    await flush();
+    expect(requests).toHaveLength(2);
+    requests[0]({tasks: [], count: 0});
+    await firstOpen;
+    const reopened = showGlobalTasks();
+    await flush();
+    expect(requests).toHaveLength(3);
+    requests[2]({tasks: [selected], count: 1});
+    await reopened;
+    requests[1]({tasks: [], count: 0});
+    await flush();
+    expect(document.querySelector('#globalTaskInspector').textContent).toContain('Maintain brief A');
+});
