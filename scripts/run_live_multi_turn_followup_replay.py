@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -39,6 +41,9 @@ import requests
 
 from scripts.run_authenticated_browser_workflow_replay import (
     ReplayCase,
+    _as_mapping,
+    _request_json,
+    _safe_text,
     apply_target_session_context,
     build_workflow_capability_preflight,
     collect_run_environment,
@@ -50,9 +55,6 @@ from scripts.run_authenticated_browser_workflow_replay import (
     poll_replay_task,
     require_agent_test_server,
     submit_background_generate,
-    _as_mapping,
-    _request_json,
-    _safe_text,
 )
 
 BANK_PATH = Path(__file__).with_name("live_multi_turn_followup_prompt_bank.json")
@@ -78,6 +80,9 @@ KNOWN_EXPECTATION_KEYS = frozenset(
         "response_must_not_mention",
         "response_must_mention_all_groups",
         "notes",
+        "assessment_scope",
+        "response_distinct_match",
+        "requires_manual_review",
     }
 )
 DEFAULT_FORBIDDEN_OBLIGATION_SOURCES = (
@@ -113,10 +118,32 @@ def validate_bank(payload: Mapping[str, Any]) -> None:
         for index, turn in enumerate(turns):
             role = _safe_text(turn.get("role"))
             if role not in KNOWN_TURN_ROLES:
-                raise ValueError(f"Case {case_id} turn {index} has unknown role {role!r}.")
+                raise ValueError(
+                    f"Case {case_id} turn {index} has unknown role {role!r}."
+                )
             if not _safe_text(turn.get("prompt")):
                 raise ValueError(f"Case {case_id} turn {index} has an empty prompt.")
             expectations = turn.get("expectations") or {}
+            if expectations.get("assessment_scope", "workflow_integration") not in {
+                "outcome",
+                "workflow_integration",
+            }:
+                raise ValueError(
+                    f"Case {case_id} turn {index}: invalid assessment_scope"
+                )
+            distinct_match = expectations.get("response_distinct_match")
+            if distinct_match is not None:
+                if (
+                    not isinstance(distinct_match, Mapping)
+                    or not isinstance(distinct_match.get("pattern"), str)
+                    or not distinct_match["pattern"]
+                    or type(distinct_match.get("minimum")) is not int
+                    or distinct_match["minimum"] < 1
+                ):
+                    raise ValueError(
+                        f"Case {case_id} turn {index}: invalid response_distinct_match"
+                    )
+                re.compile(distinct_match["pattern"])
             unknown = set(expectations) - KNOWN_EXPECTATION_KEYS
             if unknown:
                 raise ValueError(
@@ -403,6 +430,16 @@ def _carry_forward_projection(turn_record: Mapping[str, Any]) -> dict[str, Any]:
     return _as_mapping(summary.get("expected_outcome_obligation_carry_forward"))
 
 
+def _has_obligation_ledger(turn_record: Mapping[str, Any]) -> bool:
+    """An absent retired ledger is not evidence of an empty obligation set."""
+    return any(
+        isinstance(effect, Mapping)
+        and isinstance(effect.get("required_tool_obligations"), Mapping)
+        and isinstance(effect["required_tool_obligations"].get("obligations"), list)
+        for effect in turn_record.get("required_effects") or []
+    )
+
+
 def _selected_workflow_execution_summary(
     turn_record: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -426,9 +463,9 @@ def evaluate_turn_expectations(
 ) -> dict[str, Any]:
     """Evaluate one turn's evidence against its bank expectations.
 
-    Returns {verdict: pass|fail|inconclusive, checks: [...]} where every check
-    records what was expected, what was observed, and whether it held. Checks
-    that need evidence the run could not capture are inconclusive, not silent.
+    Returns verdict, checks and separate integration_checks. Every check records
+    what was expected, observed and whether it held. Unavailable evidence and
+    outstanding source-grounded review are inconclusive, not silent passes.
     """
 
     checks: list[dict[str, Any]] = []
@@ -457,9 +494,10 @@ def evaluate_turn_expectations(
             except ValueError:
                 parsed_answer = None
             looks_like_raw_payload = isinstance(parsed_answer, (dict, list)) or (
-                raw_answer_text[:80].replace(" ", "").replace("\n", "").startswith(
-                    ('{"', "[{", "['", '["')
-                )
+                raw_answer_text[:80]
+                .replace(" ", "")
+                .replace("\n", "")
+                .startswith(('{"', "[{", "['", '["'))
             )
         if looks_like_raw_payload:
             add(
@@ -472,6 +510,7 @@ def evaluate_turn_expectations(
     if expectations.get("require_completed"):
         status = (_safe_text(terminal_status) or "").lower()
         add("require_completed", status == "completed", status, "completed")
+        add("answer_available", bool(raw_answer_text), bool(raw_answer_text), True)
 
     # A background task can reach its transport-level ``completed`` state after
     # Von has safely returned a grounded non-success.  That is not capability
@@ -480,9 +519,7 @@ def evaluate_turn_expectations(
     # failure cannot be reported green merely because polling terminated.
     completion_gate = _as_mapping(turn_record.get("completion_gate"))
     if completion_gate:
-        safe_to_claim_completion = completion_gate.get(
-            "safe_to_claim_completion"
-        )
+        safe_to_claim_completion = completion_gate.get("safe_to_claim_completion")
         add(
             "completion_gate_safe_to_claim_completion",
             safe_to_claim_completion is True,
@@ -498,11 +535,9 @@ def evaluate_turn_expectations(
             "persisted completion gate safe_to_claim_completion=true",
         )
 
-    # A recovery stage must not turn a failed selected workflow into a green
-    # capability result merely by producing plausible prose.  When the
-    # persisted selected-workflow execution summary is available, require all
-    # of its observed actions to have succeeded.  This is deliberately generic:
-    # it applies to every workflow and does not encode domain-specific policy.
+    # Preserve the stricter historical workflow-integration observation. Outcome
+    # cases separate this diagnostic below: a recovered action failure is not
+    # itself evidence that the requested end state failed.
     selected_execution_summary = _selected_workflow_execution_summary(turn_record)
     if selected_execution_summary:
         failed_action_ids = [
@@ -551,8 +586,8 @@ def evaluate_turn_expectations(
     ]
     if forbid_decisions:
         decision = (_safe_text(turn_record.get("decision")) or "").lower()
-        if not turn_record:
-            add("forbid_decisions", None, "turn record unavailable", forbid_decisions)
+        if not decision:
+            add("forbid_decisions", None, "decision unavailable", forbid_decisions)
         else:
             add(
                 "forbid_decisions",
@@ -574,11 +609,11 @@ def evaluate_turn_expectations(
         if _safe_text(item)
     )
     if forbidden_sources:
-        if not turn_record:
+        if not _has_obligation_ledger(turn_record):
             add(
                 "forbid_unsatisfied_obligation_sources",
                 None,
-                "turn record unavailable",
+                "obligation ledger unavailable",
                 list(forbidden_sources),
             )
         else:
@@ -601,11 +636,13 @@ def evaluate_turn_expectations(
             )
 
     if expectations.get("require_prior_obligation_suppression"):
-        if not turn_record:
+        if not _has_obligation_ledger(turn_record) and not _carry_forward_projection(
+            turn_record
+        ).get("suppressed_prior_obligations"):
             add(
                 "require_prior_obligation_suppression",
                 None,
-                "turn record unavailable",
+                "suppression and obligation ledger unavailable",
                 "suppression recorded or no inherited unsatisfied obligations",
             )
         else:
@@ -621,7 +658,7 @@ def evaluate_turn_expectations(
             ]
             add(
                 "require_prior_obligation_suppression",
-                bool(suppressed) or not inherited_unsatisfied,
+                not inherited_unsatisfied,
                 {
                     "suppressed_prior_obligations": suppressed,
                     "inherited_unsatisfied_count": len(inherited_unsatisfied),
@@ -659,13 +696,56 @@ def evaluate_turn_expectations(
                 all_ok = False
         add("response_must_mention_all_groups", all_ok, group_results, groups)
 
+    distinct_match = expectations.get("response_distinct_match")
+    if distinct_match:
+        matches = sorted(
+            {
+                match.group(0).casefold()
+                for match in re.finditer(
+                    distinct_match["pattern"], raw_answer_text, re.IGNORECASE
+                )
+            }
+        )
+        add(
+            "response_distinct_match",
+            len(matches) >= distinct_match["minimum"],
+            matches,
+            distinct_match,
+        )
+
+    if expectations.get("requires_manual_review"):
+        add(
+            "manual_outcome_review",
+            None,
+            "not assessed by this runner",
+            expectations["requires_manual_review"],
+        )
+
+    # An outcome case may succeed using another route or recover after a failed
+    # action. Preserve those integration observations without making them the
+    # outcome oracle. Existing integration callers retain their old contract.
+    integration_checks = []
+    if expectations.get("assessment_scope") == "outcome":
+        integration_names = {
+            "expected_workflow_id",
+            "selected_workflow_has_no_failed_actions",
+        }
+        integration_checks = [
+            check for check in checks if check["check"] in integration_names
+        ]
+        checks = [check for check in checks if check["check"] not in integration_names]
+
     outcomes = {check["outcome"] for check in checks}
     verdict = (
         "fail"
         if "fail" in outcomes
         else ("inconclusive" if "inconclusive" in outcomes else "pass")
     )
-    return {"verdict": verdict, "checks": checks}
+    return {
+        "verdict": verdict,
+        "checks": checks,
+        "integration_checks": integration_checks,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -811,12 +891,12 @@ def run_case(
                 "client_request_id": client_request_id,
                 "task_id": task_id,
                 "observation_pending": observation_pending,
-                "reconciliation": dict(
-                    _as_mapping(evidence.get("reconciliation"))
-                ),
+                "reconciliation": dict(_as_mapping(evidence.get("reconciliation"))),
                 "terminal_status": terminal_status,
                 "visible_answer": visible_answer,
                 "visible_answer_source": visible_answer_source,
+                "answer_evidence_surface": "server_record_or_task_result",
+                "browser_delivery": "not_observed",
                 "selected_workflow_ids": selected_workflow_ids,
                 "observed_workflow_ids": observed_workflow_ids,
                 "workflow_evidence_ids": workflow_evidence_ids,
@@ -862,6 +942,7 @@ def run_case(
         "turn_count": len(turn_reports),
         "turns": turn_reports,
         "overall_verdict": overall,
+        "claim_scope": "bank expectations over server evidence; not browser delivery or reliability certification",
     }
 
 
@@ -1008,9 +1089,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     return (
         0
-        if all(
-            r["overall_verdict"] in {"pass", "inconclusive"} for r in reports
-        )
+        if all(r["overall_verdict"] in {"pass", "inconclusive"} for r in reports)
         else 1
     )
 
