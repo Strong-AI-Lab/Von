@@ -42,7 +42,9 @@ from .effort_unit_ontology_service import (
     resolve_successor_effort_unit_type_ids,
 )
 from .organisation_membership_service import is_user_member_of_organisation
+from .task_work_product_service import resolve_task_work_product
 from .task_ontology_service import (
+    PREDICATE_HAS_CURRENT_WORK_PRODUCT,
     DEFAULT_TASK_SOURCE_ID,
     EVIDENCE_TEXT_PREDICATES,
     JIRA_IMPORTED_TASK_SOURCE_ID,
@@ -1671,7 +1673,7 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
     """
     task_concept_id, doc = _get_task_doc(task_concept_id)
-    return _build_task_response(doc)
+    return {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
 
 
 def find_task_by_agent_creation_fingerprint(
@@ -4534,6 +4536,21 @@ def update_task_fields(
         raise InvalidTaskDataError("fields must be a non-empty dict")
 
     existing_task = _build_task_response(task_doc)
+    # An explicit reference is validated before any other requested edits.
+    product_field_present = "current_work_product_concept_id" in fields
+    product_id = None
+    if product_field_present:
+        raw_product_id = fields["current_work_product_concept_id"]
+        product_id = _normalise_optional_concept_id(raw_product_id)
+        if raw_product_id not in (None, "") and not product_id:
+            raise InvalidTaskDataError("Invalid current work product reference")
+        if product_id and (
+            not can_access_concept(product_id)
+            or not ConceptsRepository.find_one(
+                {"concept_id": product_id}, projection={"_id": 1}
+            )
+        ):
+            raise InvalidTaskDataError("Current work product is not accessible")
     changed_fields: list[str] = []
     warnings: list[str] = []
     existing_task_type_ids = set(existing_task.get("task_type_ids") or [])
@@ -4610,6 +4627,14 @@ def update_task_fields(
 
     if next_start is not None and next_due is not None and next_start > next_due:
         raise InvalidTaskDataError("start_date must be before or equal to due_date")
+
+    if product_field_present:
+        _replace_single_relationship_target(
+            task_concept_id=task_concept_id,
+            predicate=PREDICATE_HAS_CURRENT_WORK_PRODUCT,
+            new_target_id=product_id,
+        )
+        changed_fields.append("current_work_product_concept_id")
 
     if "status" in fields:
         update_task_status(task_concept_id, str(fields.get("status") or ""))
@@ -5076,6 +5101,7 @@ def update_task_fields(
         if key
         not in {
             "status",
+            "current_work_product_concept_id",
             "assignee_concept_id",
             "assignee_id",
             "created_by_concept_id",

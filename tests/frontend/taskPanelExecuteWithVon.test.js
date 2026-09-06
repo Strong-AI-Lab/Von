@@ -145,8 +145,11 @@ describe('explicit Execute with Von task control', () => {
         });
         await flushRenderQueue();
 
-        expect(inspectorButton.disabled).toBe(true);
-        expect(inspectorButton.textContent).toBe('Von work active');
+        expect(inspectorButton.disabled).toBe(false);
+        expect(inspectorButton.textContent).toBe('Observe Von work');
+        inspectorButton.click();
+        await flushRenderQueue();
+        expect(postJson).toHaveBeenCalledTimes(1);
         expect(require(toastModulePath).showToast).toHaveBeenCalledWith(
             'Von work queued in Research planning',
             'success',

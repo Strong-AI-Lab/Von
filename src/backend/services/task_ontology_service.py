@@ -21,6 +21,7 @@ TASK_SOURCE_TYPE_ID = "#V#task_source"
 # Keep these predicate IDs in canonical slug form. ``create_concept()`` lowercases
 # concept IDs during canonicalisation, so mixed-case identifiers would bootstrap
 # under a different persisted ID than the one later used for relationship writes.
+PREDICATE_HAS_CURRENT_WORK_PRODUCT = "#V#hascurrentworkproduct"
 PREDICATE_HAS_TASK_SOURCE = "#V#hastasksource"
 PREDICATE_REPORTS_TO = "#V#reportsto"
 PREDICATE_HAS_TASK_ROLE = "#V#hastaskrole"
@@ -167,6 +168,11 @@ _TASK_SOURCE_BY_SLUG.update(
 _PREDICATE_PARENT_CANDIDATES: tuple[str, ...] = ("#V#binary_predicate", "#V#predicate")
 
 _PREDICATE_SPECS: tuple[tuple[str, str, str], ...] = (
+    (
+        PREDICATE_HAS_CURRENT_WORK_PRODUCT,
+        "has current work product",
+        "Links a task to its explicitly selected current work product. The product owns its content and revision; the link grants no access or execution authority.",
+    ),
     (
         PREDICATE_HAS_TASK_SOURCE,
         "has task source",

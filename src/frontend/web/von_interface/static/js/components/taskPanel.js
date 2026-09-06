@@ -8,6 +8,7 @@
 import { deleteJson, getJson, patchJson, postJson, getUserContext } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
 import { showToast } from '../utils/toast.js';
+import { renderMarkdownViaServer } from '../markdownUtils.js';
 import { selectBestNameForContext } from '../utils/nameSelection.js';
 
 // Task panel state
@@ -1827,7 +1828,7 @@ function renderTaskExecuteWithVonButton(task, className = '') {
     return `<button type="button" class="task-execute-with-von-btn ${className}"
         data-task-id="${escapeHtml(taskId)}"
         title="${executionActive ? 'Von work is already active' : `Execute with Von in ${escapeHtml(conversationLabel)}`}"
-        ${executionActive ? 'disabled aria-busy="true"' : ''}>${executionActive ? 'Von work active' : 'Execute with Von'}</button>`;
+        ${_taskExecutionLaunchesInFlight.has(taskId) ? 'disabled aria-busy="true"' : ''}>${executionActive ? 'Observe Von work' : 'Execute with Von'}</button>`;
 }
 
 function createTaskLaunchRequestId() {
@@ -2011,8 +2012,8 @@ function refreshTaskExecutionButtonStates() {
     document.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
         const taskId = String(button.dataset.taskId || '').trim();
         const suppressed = taskId && isTaskExecutionLaunchSuppressed(taskId);
-        button.disabled = Boolean(suppressed);
-        button.textContent = suppressed ? 'Von work active' : 'Execute with Von';
+        button.disabled = _taskExecutionLaunchesInFlight.has(taskId);
+        button.textContent = suppressed ? 'Observe Von work' : (button.dataset.continue === 'true' ? 'Continue with Von' : 'Execute with Von');
         button.setAttribute('aria-busy', suppressed ? 'true' : 'false');
     });
 }
@@ -2021,17 +2022,23 @@ function setTaskExecutionButtonsDisabled(taskId, disabled) {
     document.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
         if (button.dataset.taskId !== taskId) return;
         const suppressed = disabled || isTaskExecutionLaunchSuppressed(taskId);
-        button.disabled = suppressed;
+        button.disabled = disabled;
         button.textContent = disabled
             ? 'Queuing…'
-            : (suppressed ? 'Von work active' : 'Execute with Von');
+            : (suppressed ? 'Observe Von work' : (button.dataset.continue === 'true' ? 'Continue with Von' : 'Execute with Von'));
         button.setAttribute('aria-busy', suppressed ? 'true' : 'false');
     });
 }
 
-async function executeTaskWithVon(taskId) {
+async function executeTaskWithVon(taskId, { continuation = false } = {}) {
     const cleanedTaskId = String(taskId || '').trim();
     if (!cleanedTaskId || _taskExecutionLaunchesInFlight.has(cleanedTaskId)) return;
+    const active = _taskQueueActivity.find(item => item.task_concept_id === cleanedTaskId
+        && ['queued', 'in_progress'].includes(item.status));
+    if (active?.session_id) {
+        await openTaskConversation(active.session_id);
+        return;
+    }
     _taskExecutionLaunchesInFlight.add(cleanedTaskId);
     setTaskExecutionButtonsDisabled(cleanedTaskId, true);
     const launchRequestId = getOrCreateTaskLaunchRequestId(cleanedTaskId);
@@ -2039,7 +2046,10 @@ async function executeTaskWithVon(taskId) {
     try {
         const response = await postJson(
             `/api/tasks/${encodeURIComponent(cleanedTaskId)}/execute-with-von`,
-            { launch_request_id: launchRequestId },
+            {
+                launch_request_id: launchRequestId,
+                ...(continuation ? { continuation_instruction: getTaskDetailState(cleanedTaskId).continuationInstruction || '' } : {}),
+            },
         );
         if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
         const queueStatus = String(response?.queue_item?.status || '').trim().toLowerCase();
@@ -2074,8 +2084,19 @@ async function executeTaskWithVon(taskId) {
             );
         }
         await loadTaskQueueActivity();
+        if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
+        if (continuation && response?.task?.conversation_session_id) {
+            await openTaskConversation(response.task.conversation_session_id);
+        }
     } catch (err) {
         if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
+        if (err?.payload?.reason_code === 'task_execution_already_active') {
+            await loadTaskQueueActivity();
+            const active = _taskQueueActivity.find(item => item.task_concept_id === cleanedTaskId && ['queued', 'in_progress'].includes(item.status));
+            if (active?.session_id) await openTaskConversation(active.session_id);
+            showToast('Observing the existing Von execution', 'info');
+            return;
+        }
         console.error('[taskPanel] Failed to execute task with Von:', err);
         showToast('Failed to queue Von task execution', 'error');
     } finally {
@@ -2503,6 +2524,62 @@ function renderTaskOrganisationField(task) {
     `;
 }
 
+function renderTaskWorkProduct(task, detailState) {
+    const product = detailState?.product || task.current_work_product;
+    const messages = {
+        missing: 'No current work product linked. Select its concept below.',
+        unavailable: 'The current work product is unavailable in this context. Refresh or select an accessible product.',
+        ambiguous_link: 'More than one product is linked. Select the intended current product below.',
+        ambiguous_content: 'This product has multiple content assertions; none has been selected as current. Resolve the revision on the product before relying on it.',
+        missing_content: 'The linked product has no current content. You can inspect its concept or continue with this limitation.',
+    };
+    const taskId = getTaskId(task);
+    const productId = product?.concept_id || '';
+    const execute = canExecuteTaskWithVon(task);
+    const active = isTaskExecutionLaunchSuppressed(taskId);
+    return `<section class="task-work-product" aria-label="Current work product">
+        <h4>Current work product</h4>
+        <p>${product?.status === 'ready' ? escapeHtml(productId) : escapeHtml(messages[product?.status] || 'Open task details to check its current product.')}</p>
+        ${product?.status === 'ready' ? `<button type="button" class="task-open-product-btn" data-task-id="${escapeHtml(taskId)}" ${detailState.productLoading ? 'disabled' : ''}>${detailState.productLoading ? 'Opening…' : 'Open current work product'}</button>` : ''}
+        ${productId ? `<button type="button" class="task-concept-link" data-concept-id="${escapeHtml(productId)}" data-concept-name="${escapeHtml(productId)}">Inspect product concept</button>` : ''}
+        ${detailState.productError ? `<p role="status">${escapeHtml(detailState.productError)}</p>` : ''}
+        ${detailState.productHtml ? `<div class="task-current-product-content">${detailState.productHtml}</div>` : ''}
+        <label class="task-detail-label">Current work product concept ID
+          <input class="task-detail-input task-current-product-input" value="${escapeHtml(productId)}" placeholder="#V#…" />
+        </label>
+        <button type="button" class="task-save-product-btn" data-task-id="${escapeHtml(taskId)}">Save product link</button>
+        ${execute ? `<label class="task-detail-label">New instruction for Von
+          <textarea class="task-continuation-instruction task-detail-input" data-task-id="${escapeHtml(taskId)}" maxlength="4000" placeholder="What should Von do next?">${escapeHtml(detailState.continuationInstruction || '')}</textarea>
+        </label>
+        <button type="button" class="task-execute-with-von-btn" data-continue="true" data-task-id="${escapeHtml(taskId)}">${active ? 'Observe Von work' : 'Continue with Von'}</button>` : ''}
+    </section>`;
+}
+
+async function openTaskWorkProduct(taskId) {
+    const detailState = getTaskDetailState(taskId);
+    const generation = _taskQueueActivityGeneration;
+    detailState.productLoading = true;
+    detailState.productError = '';
+    detailState.productHtml = '';
+    renderTaskList();
+    try {
+        const product = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/work-product`);
+        if (generation !== _taskQueueActivityGeneration) return;
+        detailState.product = product;
+        if (product.status === 'ready') {
+            const html = await renderMarkdownViaServer(product.content);
+            if (generation !== _taskQueueActivityGeneration) return;
+            detailState.productHtml = html;
+        }
+    } catch (_error) {
+        if (generation !== _taskQueueActivityGeneration) return;
+        detailState.productError = 'Could not open the current product. Try again.';
+    } finally {
+        detailState.productLoading = false;
+        if (generation === _taskQueueActivityGeneration) renderTaskList();
+    }
+}
+
 function renderTaskDetailsPanel(task, detailState) {
     const taskId = getTaskId(task);
     const detailTask = detailState.task || task;
@@ -2536,6 +2613,7 @@ function renderTaskDetailsPanel(task, detailState) {
 
     return `
         <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+            ${renderTaskWorkProduct(detailTask, detailState)}
             <div class="task-detail-section">
                 <h4>Editable task context</h4>
                 <div class="task-detail-grid">
@@ -2818,6 +2896,7 @@ function renderTaskInspector(task, detailState) {
                 </div>
             </div>
 
+            ${renderTaskWorkProduct(detailTask, detailState)}
             ${renderTaskTimeline(detailState, detailTask)}
 
             <div class="task-inspector-table">
@@ -3211,6 +3290,7 @@ function replaceCachedTask(updatedTask) {
 
 async function loadTaskDetails(taskId, { refreshList = false } = {}) {
     const detailState = getTaskDetailState(taskId);
+    const scopeGenerationAtStart = _taskQueueActivityGeneration;
     detailState.loading = true;
     detailState.error = null;
     renderTaskList();
@@ -3222,6 +3302,7 @@ async function loadTaskDetails(taskId, { refreshList = false } = {}) {
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/attachments?limit=100`),
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`),
         ]);
+        if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
         detailState.task = task;
         detailState.comments = commentsResult.comments || [];
         detailState.attachments = attachmentsResult.attachments || [];
@@ -3400,7 +3481,7 @@ function attachTaskEventListeners() {
             button.addEventListener('click', async (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                await executeTaskWithVon(event.currentTarget.dataset.taskId);
+                await executeTaskWithVon(event.currentTarget.dataset.taskId, { continuation: event.currentTarget.dataset.continue === 'true' });
             });
         });
 
@@ -3535,6 +3616,36 @@ function attachTaskEventListeners() {
             });
         });
 
+        root.querySelectorAll('.task-continuation-instruction').forEach(input => {
+            input.addEventListener('input', () => {
+                getTaskDetailState(input.dataset.taskId).continuationInstruction = input.value;
+            });
+        });
+        root.querySelectorAll('.task-open-product-btn').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                void openTaskWorkProduct(button.dataset.taskId);
+            });
+        });
+        root.querySelectorAll('.task-save-product-btn').forEach(button => {
+            button.addEventListener('click', async event => {
+                event.stopPropagation();
+                const taskId = button.dataset.taskId;
+                const input = button.closest('.task-work-product').querySelector('.task-current-product-input');
+                button.disabled = true;
+                try {
+                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: input.value.trim() || null });
+                    const detail = getTaskDetailState(taskId);
+                    detail.product = null;
+                    detail.productHtml = '';
+                    await loadTaskDetails(taskId);
+                    showToast('Current product link saved', 'success');
+                } catch (error) {
+                    showToast(error?.message || 'Could not save product link', 'error');
+                    button.disabled = false;
+                }
+            });
+        });
         root.querySelectorAll('.task-discuss-btn').forEach((button) => {
             button.addEventListener('click', (event) => {
                 event.preventDefault();
@@ -3545,6 +3656,7 @@ function attachTaskEventListeners() {
                     detail: {
                         conceptId,
                         conceptName: String(event.currentTarget.dataset.conceptName || '').trim() || conceptId,
+                        focalConceptIds: [conceptId, getTaskDetailState(conceptId)?.task?.current_work_product?.concept_id].filter(Boolean),
                         source: 'task'
                     }
                 }));

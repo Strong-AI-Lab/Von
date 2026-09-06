@@ -17975,3 +17975,24 @@ body.settings-body {
         grid-template-columns: 1fr;
     }
 }
+
+/* The product body is a current canonical read, contained within task detail. */
+.task-work-product {
+    padding: 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    margin: 12px 0;
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+.task-work-product > button { margin: 6px 6px 10px 0; }
+.task-work-product .task-detail-label { margin-top: 12px; }
+.task-current-product-content {
+    max-height: 60vh;
+    overflow: auto;
+    background: #f8fafc;
+    padding: 12px;
+    margin: 10px 0;
+}
+.task-current-product-content pre { white-space: pre-wrap; }
+.task-continuation-instruction { min-height: 80px; resize: vertical; }

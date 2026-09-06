@@ -192,6 +192,7 @@ describe('task panel concept links', () => {
         expect(seen).toEqual([{
             conceptId: '#V#task_2675',
             conceptName: 'Focused discussions',
+            focalConceptIds: ['#V#task_2675'],
             source: 'task',
         }]);
         document.removeEventListener('von:discussConcept', handler);
