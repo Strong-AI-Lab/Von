@@ -1615,7 +1615,7 @@ class TestTaskParityDatesAndEpic:
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
-    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service.upsert_singleton_text_relation")
     def test_update_task_fields_supports_task_taxonomy_context(
         self,
         mock_upsert: MagicMock,

@@ -30,6 +30,7 @@ from ..security.visibility_predicates import (
 from ..services.text_value_service import (
     get_texts_for_concept,
     get_texts_for_concepts,
+    upsert_singleton_text_relation,
     upsert_text_for_concept,
 )
 from ..utils.concept_id_utils import (
@@ -461,11 +462,15 @@ def _upsert_optional_task_text(
             log_field_name=predicate,
         )
 
-    upsert_text_for_concept(
+    # These are current task fields, not an additive collection of notes.
+    # Otherwise repeated revisions eventually push the current checkpoint
+    # beyond the bounded task reader. Keep replaced values recoverable.
+    upsert_singleton_text_relation(
         subject_concept_id=task_concept_id,
         predicate=predicate,
         text=value,
         lang=lang,
+        garbage_collect=False,
     )
 
 
