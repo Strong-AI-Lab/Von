@@ -64,6 +64,18 @@ class TextValuesRepository:
         return None
 
     @staticmethod
+    def find_one_by_fingerprint(
+        fingerprint: str, lang: str
+    ) -> Optional[Dict[str, Any]]:
+        """Use the partial fingerprint index without changing text identity."""
+
+        # Equality alone can choose lang_1 and scan every value in a language.
+        # Explicitly imply fingerprint_lang_unique's string partial predicate.
+        return TextValuesRepository.find_one(
+            {"fingerprint": {"$eq": fingerprint, "$type": "string"}, "lang": lang}
+        )
+
+    @staticmethod
     def find(
         filter: Dict[str, Any],
         projection: Optional[Dict[str, Any]] = None,
