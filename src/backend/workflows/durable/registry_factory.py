@@ -2075,6 +2075,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .testing_workflow_actions import register_testing_workflow_actions
     from .tool_result_hint_actions import register_tool_result_hint_actions
     from .turn_execution_actions import register_turn_execution_actions
+    from .task_execution_actions import register_task_execution_actions
     from .workflow_creation_workflow import register_workflow_creation_actions
     from .workflow_introspection_maintenance_workflow import (
         register_workflow_introspection_maintenance_actions,
@@ -2121,6 +2122,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_tool_result_hint_actions(registry)
     register_workflow_mcp_tool_actions(registry)
     register_turn_execution_actions(registry)
+    register_task_execution_actions(registry)
 
 
 def build_durable_action_registry() -> ActionRegistry:
