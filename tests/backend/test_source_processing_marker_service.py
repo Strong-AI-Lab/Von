@@ -6,6 +6,132 @@ from typing import Any
 import pytest
 
 
+@pytest.fixture
+def authorised_mail_marker_store(monkeypatch):
+    from src.backend.security import access_control
+    from src.backend.services import mail_profile_resource_vontology_service as profiles
+    from src.backend.services import source_processing_marker_service as service
+
+    resource, alias = "#V#gmail_profile_lab", "lab-mail"
+    payloads = {}
+    existing = {str(spec["concept_id"]) for spec in service._SUPPORT_TYPE_SPECS}
+    monkeypatch.setattr(
+        access_control, "get_effective_user_concept_id", lambda: "#V#alice"
+    )
+
+    def resolve(*, user_concept_id, requested_profile_id):
+        assert user_concept_id == "#V#alice"
+        return {
+            "success": requested_profile_id in {resource, alias},
+            "profile_resource_concept_id": resource,
+            "profile_id": alias,
+        }
+
+    monkeypatch.setattr(profiles, "resolve_authorised_gmail_profile_for_user", resolve)
+    monkeypatch.setattr(
+        service, "_find_existing_concept_ids", lambda ids: set(ids) & existing
+    )
+    monkeypatch.setattr(service, "_concept_exists", lambda cid: cid in existing)
+    monkeypatch.setattr(service, "_load_marker_payload", lambda cid: payloads.get(cid))
+    monkeypatch.setattr(
+        service.concept_service,
+        "create_concept",
+        lambda **kw: existing.add(kw["concept_id"]),
+    )
+
+    def write(**kwargs):
+        payloads[kwargs["subject_concept_id"]] = json.loads(kwargs["text"])
+        return {"success": True}
+
+    monkeypatch.setattr(service, "upsert_singleton_text_relation", write)
+    return service, resource, alias, existing, payloads
+
+
+@pytest.mark.parametrize("existing_spelling", [None, "alias", "resource"])
+def test_mail_profile_spellings_reuse_one_marker_on_read_and_write(
+    authorised_mail_marker_store, existing_spelling
+):
+    service, resource, alias, existing, payloads = authorised_mail_marker_store
+    profile = alias if existing_spelling == "alias" else resource
+    expected_id = service.source_processing_marker_concept_id(
+        source_system="gmail", source_profile=profile, source_item_id="message-1"
+    )
+    if existing_spelling:
+        existing.add(expected_id)
+        payloads[expected_id] = {
+            "processing_status": "completed",
+            "source_fingerprint": "source-1",
+        }
+        for spelling in (resource, alias):
+            read = service.get_source_processing_marker(
+                source_system="gmail",
+                source_profile=spelling,
+                source_item_id="message-1",
+                source_fingerprint="source-1",
+            )
+            assert read["source_processing_marker"] == expected_id
+            assert read["source_processing_current"] is True
+    for spelling in (resource, alias):
+        written = service.record_source_processing_marker(
+            source_system="gmail",
+            source_profile=spelling,
+            source_item_id="message-1",
+            processing_status="completed",
+            source_fingerprint="source-1",
+        )
+        assert written["source_processing_marker"] == expected_id
+        assert written["source_processing_current"] is True
+    assert set(payloads) == {expected_id}
+    assert payloads[expected_id]["source_profile"] == profile
+
+
+def test_existing_duplicate_marker_evidence_is_exposed_without_merging(
+    authorised_mail_marker_store,
+):
+    service, resource, alias, existing, payloads = authorised_mail_marker_store
+    ids = [
+        service.source_processing_marker_concept_id(
+            source_system="gmail", source_profile=spelling, source_item_id="message-1"
+        )
+        for spelling in (resource, alias)
+    ]
+    existing.update(ids)
+    payloads.update(
+        {
+            cid: {"processing_status": "completed", "source_fingerprint": str(i)}
+            for i, cid in enumerate(ids)
+        }
+    )
+    for spelling in (resource, alias):
+        result = service.get_source_processing_marker(
+            source_system="gmail",
+            source_profile=spelling,
+            source_item_id="message-1",
+            source_fingerprint="0",
+        )
+        assert result["source_processing_marker"] == ids[0]
+        assert result["alternate_marker_concept_ids"] == [ids[1]]
+        assert result["source_profile_resolution"]["runtime_profile_alias"] == alias
+    assert payloads[ids[1]]["source_fingerprint"] == "1"
+
+
+def test_marker_alias_resolution_does_not_infer_other_mailbox_authority(
+    authorised_mail_marker_store,
+):
+    service, resource, alias, existing, payloads = authorised_mail_marker_store
+    marker_id = service.source_processing_marker_concept_id(
+        source_system="gmail", source_profile=alias, source_item_id="message-1"
+    )
+    existing.add(marker_id)
+    payloads[marker_id] = {"processing_status": "completed"}
+    for system, profile in [("gmail", "someone-elses-mail"), ("dataset", resource)]:
+        read = service.get_source_processing_marker(
+            source_system=system, source_profile=profile, source_item_id="message-1"
+        )
+        assert read["source_processing_marker_exists"] is False
+        assert read["source_profile_resolution"] == {}
+
+
 @pytest.mark.parametrize(
     "exists,stored,expected,comparison,current",
     [

@@ -102,8 +102,13 @@ workflow ran. Bibliographic acquisition, document retrieval, scientific
 interpretation, identity reconciliation and source disposition remain
 separable capabilities. Choose and improve them against the current job.
 
-Keep the initial expectation as inspectable, revisable text in the working
-account. When acquisition, assessment and later audit need a shared independent
+Keep current requirements and the adequacy expectation as inspectable, revisable
+task guidance (the task description is the existing smallest adequate surface).
+Keep changing progress and encounter evidence in the working account and
+checkpoint. Replacing a progress brief must not erase the current requirements.
+An assessment can quote the expectation it applied, with its revision or source,
+without becoming a second authority for it. When acquisition, assessment and
+later audit need a shared independent
 reference, give that expectation a represented profile identity and read its
 current actor-effective body. Existing representation-contract profiles are
 worth inspecting, but their historical tool-requirement contracts do not by
@@ -125,6 +130,14 @@ Supply current source evidence for that comparison, independently of whether
 the earlier representation meets the current user expectation.
 Privacy scope remains distinct from semantic applicability; see
 [contextual knowledge evolution](contextual_knowledge_evolution.md).
+
+For an authorised Gmail profile, marker reads and writes resolve its represented
+resource ID and runtime alias to the same existing marker. A sole legacy marker
+is reused; new markers use the represented resource identity. If both spellings
+already have records, the resource-keyed record is selected and alternate IDs
+are exposed for inspection without deleting or merging their evidence. Opaque
+source fingerprints are still compared exactly. None of this identity handling
+establishes adequacy under the current task guidance.
 
 Other guidance that may need revision includes mailbox selection and intent,
 coverage and backlog priority, effort per encounter, retry/audit cadence,
