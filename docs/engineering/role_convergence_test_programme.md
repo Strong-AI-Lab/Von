@@ -200,6 +200,43 @@ people, evidence format and relevant constraints, not merely the nouns. An
 explicitly settled, unchanged responsibility is the non-applicability control:
 Von should avoid unnecessary searches, questions and work-product churn.
 
+### Paper-email responsibility encounters
+
+The email-paper encounter under [2244](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2244)
+tests a second real responsibility alongside the readiness brief. Michael has
+authorised periodic processing, historical coverage, representation improvement
+and completion labels. This is a separate effect scope from the brief-only
+cycle above. Preserve private email provenance and the current Inbox-disposition
+preference. Current activation decisions and actual run evidence belong in Jira;
+these encounters are a reusable evaluation design, not another delivery ledger.
+The [task continuity guide](task_responsibility_continuation.md) owns the
+mechanism and contextual-completeness guidance.
+
+| Encounter | Ordinary instruction or situation | Evidence to inspect |
+| --- | --- | --- |
+| Assume the job | “Keep up with papers people email to Von, including the older ones, and mark each email done when its papers are represented.” | Resolve the connected mailbox and existing work; save one responsibility, useful current guidance and progress. Count questions, setup choices and any operator-supplied component identities. |
+| Continue after interruption | “Please finish the paper trial we were working on.” | Recover the same task, source and partial artefacts; inspect actual prior outcomes; repair the outstanding gap without another task or overlapping launch. A same-conversation success does not establish fresh-context recovery. |
+| Revise the expectation | A real new use is introduced, for example “I want to compare this paper's evaluation with our planned experiment.” | Identify what that use requires, inspect the existing representation and source, and enrich the relevant missing evidence. Preserve the earlier assessment with its expectation and revision; an old completion label alone cannot pass. Do not supply the desired assessment or extraction plan. |
+| Work through history | An intended paper email is outside Inbox or predates recent processing. | Reach it through bounded whole-mailbox traversal and retained progress. A successful newest-Inbox query cannot establish historical coverage. |
+| Revisit completion | Previously completed mail is encountered under a changed expectation, or its linked paper has a demonstrated missing part. | Reassess current evidence, preserve useful work and repair the gap. Distinguish assessment currency from email labels and from a workflow merely terminating. |
+| Repeat or overlap | Resume through Tasks while a scheduled execution of that task is active; later resume after it terminates. | Active work coalesces with its existing queue/execution. A later encounter remains possible and reconciles prior effects. Unchanged adequate work should not cause duplicate artefacts or repeated acquisition. |
+
+Use one real paper and an appropriate neighbouring case to support a bounded
+delivery claim; do not make every encounter a release gate by default. Record
+the minimum evidence for the current claim before running it. All-history
+coverage is a continuing outcome requiring a traversal/completion account,
+not a conclusion from a single successful paper. Report partial work honestly
+and keep incomplete mail eligible for recovery.
+
+Separate engineering-assisted runs from ordinary-language runs. Record supplied
+workflow/tool identifiers, exact repair instructions, manual state corrections,
+repeated briefing, latency and model cost. A short prompt that depends on an
+earlier technical briefing proves continuation from that briefing, not natural
+setup from scratch. When an ordinary run fails, first distinguish missing
+capability, inaccessible context, transport and authority from model judgement.
+Use a bounded matched Luna/Terra comparison only when model adequacy remains a
+decision-relevant explanation; a stronger model cannot supply a missing tool.
+
 ## 5. What counts as evidence
 
 Freeze the outcome expectation and available source snapshot before each new

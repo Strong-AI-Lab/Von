@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
+
+import mongomock
+import pytest
 
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
@@ -98,7 +103,7 @@ def _install_relationship_state(monkeypatch):
         if not projection:
             return {"concept_id": concept_id, "relationships": dict(relationships)}
         projected_rels: dict[str, Any] = {}
-        for key in projection.keys():
+        for key in projection:
             if not isinstance(key, str):
                 continue
             if key == "concept_id":
@@ -134,7 +139,7 @@ def _install_relationship_state(monkeypatch):
                 inv_values = target.setdefault(inv_kind, [])
                 if source_id in inv_values:
                     inv_values.remove(source_id)
-                    changed = True or changed
+                    changed = True
         elif action == "add":
             if target_id not in source_values:
                 source_values.append(target_id)
@@ -145,7 +150,7 @@ def _install_relationship_state(monkeypatch):
                 inv_values = target.setdefault(inv_kind, [])
                 if source_id not in inv_values:
                     inv_values.append(source_id)
-                    changed = True or changed
+                    changed = True
         return changed
 
     monkeypatch.setattr(
@@ -178,6 +183,146 @@ def test_relationship_removal_methods_registered() -> None:
     assert "preview_remove_relationship" in methods
     assert "remove_relationships_bulk" in methods
     assert "undo_relationship_removal" in methods
+
+
+def test_ordinary_turn_can_discover_a_reversible_relationship_correction():
+    from src.backend.services.adaptive_turn_service import (
+        _model_visible_input_schema,
+        _trusted_tool_payload,
+        ordinary_turn_capability_delegation,
+    )
+
+    gateway = _build_gateway()
+    delegated = ordinary_turn_capability_delegation(gateway, user_concept_id="#V#alice")
+    assert "remove_relationship" in delegated
+    assert "remove_relationships_bulk" not in delegated
+    assert "remove_relationship" not in ordinary_turn_capability_delegation(
+        gateway, user_concept_id=None
+    )
+    definition = gateway.get_method_definition("remove_relationship")
+    schema = _model_visible_input_schema(definition)
+    assert {"source_id", "predicate", "target", "reason"} <= set(schema["properties"])
+    assert not {"mode", "cascade", "confirmed", "operator_override"}.intersection(
+        schema["properties"]
+    )
+
+    # A caller cannot turn this ordinary correction into permanent removal or
+    # cascade deletion. The general explicitly delegated editor is unchanged.
+    payload = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="remove_relationship",
+        model_payload={
+            "source_id": "#V#source",
+            "predicate": "#V#authored_by",
+            "target": "#V#duplicate_occurrence",
+            "reason": "Source author list and occurrence provenance reconciled",
+            "mode": "hard_delete",
+            "cascade": "delete_dependent",
+            "confirmed": True,
+            "operator_override": True,
+        },
+        trusted_argument_values={},
+    )
+    assert payload["mode"] == "soft_delete"
+    assert payload["cascade"] == "warn"
+    assert payload["confirmed"] is False
+    assert payload["operator_override"] is False
+    assert payload["source_id"] == "#V#source"
+    assert payload["target"] == "#V#duplicate_occurrence"
+
+
+@pytest.mark.parametrize("has_semantic_role", [True, False])
+def test_same_turn_correction_issues_authority_and_reads_back_exact_effect(
+    monkeypatch, has_semantic_role
+):
+    from src.backend.services import ontology_mutation_command_service as command
+    from src.backend.services import ontology_publication_authority_service as authority
+    from src.backend.services.adaptive_turn_service import _trusted_tool_payload
+
+    gateway = _build_gateway()
+    audit_db = _install_fake_db(monkeypatch)
+    state, mutations = _install_relationship_state(monkeypatch)
+    database = mongomock.MongoClient()["ordinary_correction"]
+    monkeypatch.setattr(
+        authority,
+        "get_ontology_authority_delegations_collection",
+        lambda: database["delegations"],
+    )
+    monkeypatch.setattr(
+        authority,
+        "get_ontology_mutation_receipts_collection",
+        lambda: database["receipts"],
+    )
+    monkeypatch.setattr(
+        command, "ontology_mutation_resource_lock", lambda _: nullcontext()
+    )
+    monkeypatch.setattr(command, "can_access_concept", lambda _: True)
+    monkeypatch.setattr(authority, "can_access_concept", lambda _: True)
+    monkeypatch.setattr(
+        command,
+        "concept_publication_context",
+        lambda _: authority.PublicationContext.global_context(),
+    )
+    role = authority.AuthorityRoleEvidence(
+        role=authority.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE,
+        actor_concept_id="#V#alice",
+        organisation_concept_id=None,
+        relation_id="role-alice-global",
+        revision="test-revision",
+    )
+    monkeypatch.setattr(
+        authority,
+        "resolve_live_semantic_roles",
+        lambda _: (role,) if has_semantic_role else (),
+    )
+    arguments = _trusted_tool_payload(
+        gateway=gateway,
+        tool_name="remove_relationship",
+        model_payload={
+            "source_id": "#V#source",
+            "predicate": "is_a_type_of",
+            "target": "#V#target",
+            "reason": "Correct the source-supported relationship",
+        },
+        trusted_argument_values={},
+    )
+    with authority.override_current_actor("#V#alice", None):
+        # Exercise production same-turn issuance, not a manually injected grant.
+        grant = command.issue_same_turn_method_delegation(
+            method_name="remove_relationship",
+            arguments=arguments,
+            actor_concept_id="#V#alice",
+            organisation_concept_id=None,
+            delegate_concept_id="#V#von_system",
+            audience="adaptive_turn",
+            effect_id="correction-effect",
+            turn_id="correction-turn",
+        )
+        if not has_semantic_role:
+            assert not grant.get("delegation_id")
+            assert grant["effect_status"] == "not_started"
+            assert mutations == [] and audit_db.audit.rows == []
+            return
+        assert grant.get("delegation_id"), json.dumps(grant)
+        with authority.bind_ontology_invocation(
+            surface="adaptive_turn",
+            executing_agent_concept_id="#V#von_system",
+            audience="adaptive_turn",
+            delegation_id=grant["delegation_id"],
+            effect_id="correction-effect",
+            turn_id="correction-turn",
+        ):
+            first = gateway.invoke("remove_relationship", arguments).payload
+            repeated = gateway.invoke("remove_relationship", arguments).payload
+    assert first["authority_receipt"]["status"] == "succeeded", first
+    assert first["canonical_read_back"]["relationship_present"] is False
+    assert first["canonical_read_back"]["inverse_relationship_present"] is False
+    assert first["undo_token"]
+    assert state["#V#source"]["is_a_type_of"] == []
+    assert state["#V#target"]["has_subtype"] == []
+    assert repeated["authority_receipt"]["status"] == "succeeded"
+    assert len(mutations) == 1
+    assert len(audit_db.tombstone.rows) == 1
 
 
 def test_sessionless_remove_relationship_gateway_fails_before_audit(monkeypatch):
