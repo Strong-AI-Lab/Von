@@ -267,6 +267,52 @@ def source_processing_marker_concept_id(
     return f"#V#source_processing_marker_{slug}_{digest}"
 
 
+def _source_profile_identities(
+    source_system: str, source_profile: str | None
+) -> tuple[list[str], dict[str, Any]]:
+    """Resolve authorised mailbox aliases without changing opaque source keys."""
+    profile = _clean_text(source_profile)
+    if source_system.lower() != "gmail" or not profile:
+        return [profile], {}
+
+    from ..security.access_control import get_effective_user_concept_id
+    from .mail_profile_resource_vontology_service import (
+        resolve_authorised_gmail_profile_for_user,
+    )
+
+    actor = get_effective_user_concept_id()
+    if not actor:
+        return [profile], {}
+    resolved = resolve_authorised_gmail_profile_for_user(
+        user_concept_id=actor, requested_profile_id=profile
+    )
+    if not resolved.get("success"):
+        # Reading an accessible historical marker does not itself require
+        # access to the mailbox. Do not infer aliases outside actor authority.
+        return [profile], {}
+    identities = _ordered_unique(
+        [resolved.get("profile_resource_concept_id"), resolved.get("profile_id")]
+    )
+    return identities, {
+        "requested_profile": profile,
+        "profile_resource_concept_id": resolved.get("profile_resource_concept_id"),
+        "runtime_profile_alias": resolved.get("profile_id"),
+    }
+
+
+def _profile_marker_candidates(
+    source_system: str, source_profile: str | None, source_item_id: str
+) -> tuple[dict[str, str], dict[str, Any]]:
+    profiles, resolution = _source_profile_identities(source_system, source_profile)
+    return {
+        source_processing_marker_concept_id(
+            source_system=source_system, source_profile=profile,
+            source_item_id=source_item_id,
+        ): profile
+        for profile in profiles
+    }, resolution
+
+
 def _extract_concept_ids_from_outputs(value: Any) -> tuple[list[str], list[str]]:
     represented_ids: list[str] = []
     file_copy_ids: list[str] = []
@@ -467,14 +513,19 @@ def get_source_processing_marker(
             "error_code": "missing_source_processing_marker_key",
             "error": "source_system and source_item_id are required.",
         }
-    marker_concept_id = source_processing_marker_concept_id(
-        source_system=source_system_clean,
-        source_profile=source_profile,
-        source_item_id=source_item_clean,
+    candidates, profile_resolution = _profile_marker_candidates(
+        source_system_clean, source_profile, source_item_clean
     )
-    marker_exists = _concept_exists(marker_concept_id)
+    if len(candidates) == 1:
+        existing_ids = {cid for cid in candidates if _concept_exists(cid)}
+    else:
+        existing_ids = _find_existing_concept_ids(list(candidates))
+    marker_concept_id = next(
+        (cid for cid in candidates if cid in existing_ids), next(iter(candidates))
+    )
+    marker_exists = marker_concept_id in existing_ids
     payload = _load_marker_payload(marker_concept_id) if marker_exists else None
-    return _marker_response_from_payload(
+    result = _marker_response_from_payload(
         marker_concept_id=marker_concept_id,
         source_item_id=source_item_clean,
         marker_exists=marker_exists,
@@ -485,6 +536,11 @@ def get_source_processing_marker(
         ),
         require_represented_artifacts=require_represented_artifacts,
     )
+    result["source_profile_resolution"] = profile_resolution
+    result["alternate_marker_concept_ids"] = [
+        cid for cid in candidates if cid in existing_ids and cid != marker_concept_id
+    ]
+    return result
 
 
 def record_source_processing_marker(
@@ -581,13 +637,15 @@ def record_source_processing_marker(
                 ),
             }
 
-    marker_concept_id = source_processing_marker_concept_id(
-        source_system=source_system_clean,
-        source_profile=source_profile_clean,
-        source_item_id=source_item_clean,
+    candidates, profile_resolution = _profile_marker_candidates(
+        source_system_clean, source_profile_clean, source_item_clean
     )
     support_ids = [str(spec["concept_id"]) for spec in _SUPPORT_TYPE_SPECS]
-    existing_ids = _find_existing_concept_ids([*support_ids, marker_concept_id])
+    existing_ids = _find_existing_concept_ids([*support_ids, *candidates])
+    marker_concept_id = next(
+        (cid for cid in candidates if cid in existing_ids), next(iter(candidates))
+    )
+    source_profile_clean = candidates[marker_concept_id]
     support_created = _ensure_support_concepts(existing_ids=existing_ids)
     marker_exists = marker_concept_id in existing_ids
     previous_payload = _load_marker_payload(marker_concept_id) if marker_exists else None
@@ -674,7 +732,7 @@ def record_source_processing_marker(
         context={"source": "source_processing_marker_service"},
         garbage_collect=True,
     )
-    return _marker_response_from_payload(
+    result = _marker_response_from_payload(
         marker_concept_id=marker_concept_id,
         source_item_id=source_item_clean,
         marker_exists=True,
@@ -688,6 +746,11 @@ def record_source_processing_marker(
         ),
         require_represented_artifacts=require_represented_artifacts,
     )
+    result["source_profile_resolution"] = profile_resolution
+    result["alternate_marker_concept_ids"] = [
+        cid for cid in candidates if cid in existing_ids and cid != marker_concept_id
+    ]
+    return result
 
 
 __all__ = [

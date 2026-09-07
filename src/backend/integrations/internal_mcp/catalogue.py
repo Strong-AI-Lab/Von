@@ -40170,7 +40170,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "evidence and, where relevant, processing_authority_fingerprint. "
                 "Omitting the expected source fingerprint returns comparison="
                 "not_requested, not evidence of a changed source. Marker existence "
-                "does not prove adequacy under a revised user expectation."
+                "does not prove adequacy under a revised user expectation. "
+                "An authorised Gmail profile's resource ID and runtime alias "
+                "resolve to the same existing marker; alternate historical marker "
+                "IDs are exposed for inspection."
             ),
         ),
         MethodDefinition(
@@ -40190,7 +40193,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "item as processed into represented artefacts. This is additive "
                 "Vontology state and should be called only after durable "
                 "representation and read-back have verified processing success. It "
-                "does not mutate the source system."
+                "does not mutate the source system. Authorised Gmail profile IDs "
+                "and runtime aliases reuse the same marker identity."
             ),
         ),
         *build_spreadsheet_record_tool_definitions(),
