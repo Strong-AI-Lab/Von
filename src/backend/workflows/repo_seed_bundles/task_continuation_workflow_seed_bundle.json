@@ -1,0 +1,55 @@
+{
+  "family_id": "task_continuation_workflow_seed_bundle",
+  "managed_by": "workflow_repo_seed_bootstrap",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "JVNAUTOSCI-2244",
+  "supported_action_ids": ["task.submit_execution"],
+  "workflows": [{
+    "workflow_id": "#V#task_continuation_workflow",
+    "display_name": "Continue a Task with Von",
+    "description": "Resume an existing task assigned to Von through its canonical conversation and Tasks execution queue. Suitable for a recurring responsibility whose current work product, guidance and checkpoints evolve between encounters. Accepting a launch does not establish completion of the task's work.",
+    "content": "Read the current actor-owned task and its current work-product reference, validate its originating conversation, and submit one continuation through the same deduplicated queue as Continue with Von in Tasks. Repeated attempts of one durable instance reuse its launch; a later occurrence coalesces with any active execution of this task, including a launch from Tasks. The task, work product and conversation carry domain requirements, chosen components, preferences, unfinished work and outcome evidence. This workflow adds no domain policy or copied work-product store. Inspect the returned queue and TaskExecution for the actual work outcome.",
+    "type_ids": ["#V#ai_workflow", "#V#durable_workflow"],
+    "launch_input_contract": {
+      "schema_version": "workflow_launch_input_contract.v1",
+      "required_inputs": ["task_concept_id", "model", "model_provider"],
+      "input_mappings": [
+        {"target_context_key": "task_concept_id", "source_expression": "inputs.task_concept_id", "extractor": "identity", "required": true},
+        {"target_context_key": "model", "source_expression": "inputs.model", "extractor": "identity", "required": true},
+        {"target_context_key": "model_provider", "source_expression": "inputs.model_provider", "extractor": "identity", "required": true},
+        {"target_context_key": "model_parameters", "source_expression": "inputs.model_parameters", "extractor": "identity", "required": false},
+        {"target_context_key": "continuation_instruction", "source_expression": "inputs.continuation_instruction", "extractor": "identity", "required": false}
+      ]
+    },
+    "text_relations": [{
+      "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+      "lang": "en-NZ",
+      "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"continue a task\",\"recurring responsibility\",\"resume saved work\",\"schedule task continuation\"],\"examples\":[\"Keep this responsibility up to date every few hours.\",\"Continue the work from this task and its current brief.\",\"Schedule Von to resume an existing task regularly.\"],\"routing_notes\":[\"Reuse an existing task assigned to Von; its creator must be the authenticated actor.\",\"Keep changing domain requirements and progress in the task and its current work product.\",\"This workflow submits or coalesces a task execution; follow the returned queue and TaskExecution to inspect the work.\"]}"
+    }],
+    "publication_spec": {
+      "initial_state": "submit_task",
+      "steps": [{
+        "state_id": "submit_task",
+        "action_id": "task.submit_execution",
+        "execution_mode": "deterministic",
+        "context_input_mapping_specs": [
+          {"concept_id": "#V#workflow_mapping_task_continuation_task_id", "context_key": "task_concept_id", "tool_param": "task_concept_id", "required": true},
+          {"concept_id": "#V#workflow_mapping_task_continuation_model", "context_key": "model", "tool_param": "model", "required": true},
+          {"concept_id": "#V#workflow_mapping_task_continuation_provider", "context_key": "model_provider", "tool_param": "model_provider", "required": true},
+          {"concept_id": "#V#workflow_mapping_task_continuation_parameters", "context_key": "model_parameters", "tool_param": "model_parameters", "required": false},
+          {"concept_id": "#V#workflow_mapping_task_continuation_instruction", "context_key": "continuation_instruction", "tool_param": "continuation_instruction", "required": false}
+        ],
+        "tool_output_mapping_specs": [
+          {"concept_id": "#V#workflow_mapping_task_continuation_queue", "context_key": "queue_id", "tool_output_field": "queue_id"},
+          {"concept_id": "#V#workflow_mapping_task_continuation_execution", "context_key": "task_execution_concept_id", "tool_output_field": "task_execution_concept_id"},
+          {"concept_id": "#V#workflow_mapping_task_continuation_launch_status", "context_key": "task_launch_status", "tool_output_field": "task_launch_status"},
+          {"concept_id": "#V#workflow_mapping_task_continuation_domain_claim", "context_key": "domain_completion_claim", "tool_output_field": "domain_completion_claim"}
+        ],
+        "writes_context_keys": ["queue_id", "task_execution_concept_id", "task_launch_status", "domain_completion_claim"],
+        "next_state": "done",
+        "on_failure_state": "failed"
+      }, {"state_id": "done"}, {"state_id": "failed"}]
+    }
+  }]
+}

@@ -36519,13 +36519,104 @@ def _task_update_fields(**kwargs):
             suggestions=["Provide fields to update, e.g. {'status': 'in_progress'}"],
         )
 
+    actor_id = kwargs.get("actor_concept_id") or kwargs.get("namespace")
+    if kwargs.get("actor_bound_continuation") is True:
+        actor_scope, current_task, authority_error = _authorise_task_actor_mutation(
+            kwargs, surface="task_update_fields"
+        )
+        if authority_error is not None:
+            return authority_error
+        assert actor_scope is not None and current_task is not None
+        actor_id = actor_scope.user_concept_id
+        # Ordinary continuation may revise the work, but cannot transfer its
+        # ownership or widen its audience through the general parity editor.
+        continuation_fields = {
+            "status",
+            "title",
+            "description",
+            "priority",
+            "task_type_ids",
+            "task_role",
+            "next_checkpoint",
+            "progress_signal",
+            "evidence",
+            "notes",
+            "start_date",
+            "due_date",
+            "current_work_product_concept_id",
+            "assignee_concept_id",
+            "report_to_concept_id",
+        }
+        unsupported = sorted(set(fields) - continuation_fields)
+        if unsupported:
+            return make_error_response(
+                "task_continuation_fields_denied",
+                f"Fields outside ordinary task continuation: {unsupported}",
+            )
+        from ...services.task_execution_service import VON_SYSTEM_CONCEPT_ID
+
+        if "assignee_concept_id" in fields:
+            if (
+                fields["assignee_concept_id"] not in (actor_id, VON_SYSTEM_CONCEPT_ID)
+                or current_task.get("created_by_concept_id") != actor_id
+            ):
+                return make_error_response(
+                    "task_assignment_scope_denied",
+                    "The task creator may assign continuing work to themselves or Von.",
+                )
+        if "report_to_concept_id" in fields and fields["report_to_concept_id"] not in (
+            None,
+            "",
+            actor_id,
+        ):
+            return make_error_response(
+                "task_report_scope_denied",
+                "Ordinary task continuation may report to the authenticated actor.",
+            )
+        # Do not append another history event or replace an unchanged relation
+        # when a model retries an already successful continuation update.
+        product = current_task.get("current_work_product") or {}
+        current_product_id = (
+            object()
+            if product.get("status") in {"unavailable", "ambiguous_link"}
+            else product.get("concept_id")
+        )
+        fields = {
+            key: value
+            for key, value in fields.items()
+            if value
+            != (
+                current_product_id
+                if key == "current_work_product_concept_id"
+                else current_task.get(key)
+            )
+        }
+        if not fields:
+            return {
+                "success": True,
+                "task": current_task,
+                "changed_fields": [],
+                "warnings": [],
+                "effect_status": "succeeded",
+                "changed": False,
+                "idempotent_replay": True,
+                "canonical_read_back": current_task,
+            }
+
     try:
         result = update_task_fields(
             task_id,
             fields=fields,
-            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+            actor_concept_id=actor_id,
         )
         result["success"] = True
+        if kwargs.get("actor_bound_continuation") is True:
+            result.update(
+                effect_status="succeeded",
+                changed=bool(result.get("changed_fields")),
+                idempotent_replay=not bool(result.get("changed_fields")),
+                canonical_read_back=result["task"],
+            )
         return result
     except TaskNotFoundError as exc:
         return make_error_response("NOT_FOUND", str(exc))
@@ -44392,6 +44483,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "fields": (dict,),
                     "actor_concept_id": (str, type(None)),
                     "namespace": (str, type(None)),
+                    "acting_user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "actor_bound_continuation": (bool,),
                 },
                 allow_unknown=True,
                 scalar_source_fields={
@@ -44406,14 +44500,35 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "evidence, notes, reference_code, start_date, due_date, labels, "
                     "components, fix_versions, sprint_values, backlog_rank, "
                     "reporter_concept_id, watcher_concept_ids, parent_task_concept_id, "
-                    "epic_task_concept_id."
+                    "epic_task_concept_id, current_work_product_concept_id. "
+                    "For ordinary continuation use title, description, status, priority, "
+                    "task_type_ids, task_role, next_checkpoint, progress_signal, evidence, "
+                    "notes, start_date, due_date, current_work_product_concept_id, "
+                    "assignee_concept_id (self or #V#von_system, creator only), and "
+                    "report_to_concept_id (self)."
                 ),
             ),
             output_schema=task_update_fields_output_schema,
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "actor_concept_id": "actor_user_concept_id",
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_fixed_arguments={"actor_bound_continuation": True},
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="task_concept_id",
             description=(
-                "Update multiple task fields atomically from an MCP perspective. "
-                "Useful for Jira-style edit operations."
+                "Revise an existing task and its next checkpoint, evidence, or notes. "
+                "Attach the canonical current work product with "
+                "current_work_product_concept_id so it opens from Tasks; its readable "
+                "body belongs in the product's actor-effective hasContent. For a "
+                "continuing responsibility delegated to Von, the creator can assign "
+                "it to #V#von_system and set report_to_concept_id to themselves. "
+                "This preserves the task and does not launch execution or a schedule. "
+                "Ordinary chat edits only tasks created by or assigned to the "
+                "authenticated actor in the same organisation."
             ),
         ),
         MethodDefinition(

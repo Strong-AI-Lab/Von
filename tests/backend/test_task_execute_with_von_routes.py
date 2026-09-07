@@ -64,15 +64,21 @@ def test_execute_with_von_creates_one_linked_server_dispatch(monkeypatch) -> Non
     reconciliation_call: dict = {}
 
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
-        lambda _task_id: {**_task(), "current_work_product": {"status": "ready", "concept_id": "#V#brief_selected"}},
+        "src.backend.services.task_execution_submission_service.get_task",
+        lambda _task_id: {
+            **_task(),
+            "current_work_product": {
+                "status": "ready",
+                "concept_id": "#V#brief_selected",
+            },
+        },
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_conversation_concept",
+        "src.backend.services.task_execution_submission_service.get_conversation_concept",
         lambda _conversation_id: _conversation(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_history_service.has_chat_history_session",
+        "src.backend.services.task_execution_submission_service.chat_history_service.has_chat_history_session",
         lambda *_args, **_kwargs: True,
     )
 
@@ -101,15 +107,15 @@ def test_execute_with_von_creates_one_linked_server_dispatch(monkeypatch) -> Non
         }
 
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.create_queue_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.create_queue_record",
         _create_queue_record,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.reconcile_task_execution_queue_record",
+        "src.backend.services.task_execution_submission_service.reconcile_task_execution_queue_record",
         _reconcile_execution,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.activate_server_dispatch_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.activate_server_dispatch_record",
         lambda **_kwargs: {
             **_create_queue_record(**queue_call),
             "dispatch_ready": True,
@@ -117,13 +123,17 @@ def test_execute_with_von_creates_one_linked_server_dispatch(monkeypatch) -> Non
     )
     wake_dispatcher = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.wake_chat_prompt_queue_dispatcher",
+        "src.backend.services.task_execution_submission_service.wake_chat_prompt_queue_dispatcher",
         wake_dispatcher,
     )
 
     response = client.post(
         "/api/tasks/%23V%23task_prepare_brief/execute-with-von",
-        json={"launch_request_id": "launch-1", "continuation_instruction": "Check the new evidence", "current_work_product": {"concept_id": "#V#wrong_brief"}},
+        json={
+            "launch_request_id": "launch-1",
+            "continuation_instruction": "Check the new evidence",
+            "current_work_product": {"concept_id": "#V#wrong_brief"},
+        },
     )
 
     assert "Check the new evidence" in queue_call["prompt_raw"]
@@ -153,20 +163,20 @@ def test_execute_with_von_replays_an_already_linked_launch_without_rebinding(
     client = _build_client()
     _set_actor(client)
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         lambda _task_id: _task(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_conversation_concept",
+        "src.backend.services.task_execution_submission_service.get_conversation_concept",
         lambda _conversation_id: _conversation(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_history_service.has_chat_history_session",
+        "src.backend.services.task_execution_submission_service.chat_history_service.has_chat_history_session",
         lambda *_args, **_kwargs: True,
     )
     execution_id = "#V#task_execution_replayed"
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.create_queue_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.create_queue_record",
         lambda **kwargs: {
             "queue_id": "queue-original",
             "status": "in_progress",
@@ -188,15 +198,15 @@ def test_execute_with_von_replays_an_already_linked_launch_without_rebinding(
     )
     activate = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.reconcile_task_execution_queue_record",
+        "src.backend.services.task_execution_submission_service.reconcile_task_execution_queue_record",
         reconcile,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.activate_server_dispatch_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.activate_server_dispatch_record",
         activate,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.wake_chat_prompt_queue_dispatcher",
+        "src.backend.services.task_execution_submission_service.wake_chat_prompt_queue_dispatcher",
         MagicMock(),
     )
 
@@ -215,7 +225,7 @@ def test_execute_with_von_requires_authenticated_actor(monkeypatch) -> None:
     client = _build_client()
     get_task = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         get_task,
     )
 
@@ -237,7 +247,7 @@ def test_execute_with_von_rejects_legacy_identity_header_actor(monkeypatch) -> N
         lambda: ("#V#alice", "legacy_identity_header"),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         get_task,
     )
 
@@ -257,7 +267,7 @@ def test_execute_with_von_deliberately_requires_active_org_scope(monkeypatch) ->
     _set_actor(client, include_org=False)
     get_task = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         get_task,
     )
 
@@ -278,11 +288,11 @@ def test_execute_with_von_rejects_non_creator_even_when_task_is_visible(
     _set_actor(client)
     create_queue = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         lambda _task_id: _task(creator="#V#bob"),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.create_queue_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.create_queue_record",
         create_queue,
     )
 
@@ -301,11 +311,11 @@ def test_execute_with_von_rejects_terminal_task(monkeypatch) -> None:
     _set_actor(client)
     create_queue = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         lambda _task_id: _task(status="completed"),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.create_queue_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.create_queue_record",
         create_queue,
     )
 
@@ -323,15 +333,15 @@ def test_execute_with_von_requires_client_launch_identity(monkeypatch) -> None:
     client = _build_client()
     _set_actor(client)
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         lambda _task_id: _task(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_conversation_concept",
+        "src.backend.services.task_execution_submission_service.get_conversation_concept",
         lambda _conversation_id: _conversation(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_history_service.has_chat_history_session",
+        "src.backend.services.task_execution_submission_service.chat_history_service.has_chat_history_session",
         lambda *_args, **_kwargs: True,
     )
 
@@ -362,20 +372,20 @@ def test_durable_queue_is_not_relabelled_failed_when_execution_binding_needs_rec
     client = _build_client()
     _set_actor(client)
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         lambda _task_id: _task(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_conversation_concept",
+        "src.backend.services.task_execution_submission_service.get_conversation_concept",
         lambda _conversation_id: _conversation(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_history_service.has_chat_history_session",
+        "src.backend.services.task_execution_submission_service.chat_history_service.has_chat_history_session",
         lambda *_args, **_kwargs: True,
     )
 
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_prompt_queue_service.create_queue_record",
+        "src.backend.services.task_execution_submission_service.chat_prompt_queue_service.create_queue_record",
         lambda **kwargs: {
             "queue_id": "queue-durable",
             "status": "queued",
@@ -386,12 +396,12 @@ def test_durable_queue_is_not_relabelled_failed_when_execution_binding_needs_rec
         },
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.reconcile_task_execution_queue_record",
+        "src.backend.services.task_execution_submission_service.reconcile_task_execution_queue_record",
         MagicMock(side_effect=RuntimeError("execution binding must be reconciled")),
     )
     wake = MagicMock()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.wake_chat_prompt_queue_dispatcher",
+        "src.backend.services.task_execution_submission_service.wake_chat_prompt_queue_dispatcher",
         wake,
     )
 
@@ -416,7 +426,7 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
     _set_actor(client)
     task = _task()
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_task",
+        "src.backend.services.task_execution_submission_service.get_task",
         lambda _task_id: dict(task),
     )
     monkeypatch.setattr(
@@ -424,11 +434,11 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
         lambda _task_id: dict(task),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.get_conversation_concept",
+        "src.backend.services.task_execution_submission_service.get_conversation_concept",
         lambda _conversation_id: _conversation(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.chat_history_service.has_chat_history_session",
+        "src.backend.services.task_execution_submission_service.chat_history_service.has_chat_history_session",
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
@@ -437,7 +447,7 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.wake_chat_prompt_queue_dispatcher",
+        "src.backend.services.task_execution_submission_service.wake_chat_prompt_queue_dispatcher",
         lambda: None,
     )
 
@@ -466,6 +476,41 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
             first_payload["queue_item"]["queue_id"]
         )
 
+        # A schedule uses the same atomic active-task key as the UI, even
+        # though its short launch workflow has a different instance identity.
+        from types import SimpleNamespace
+        from src.backend.security.access_control import override_current_actor
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.task_execution_actions import (
+            submit_task_execution_action,
+        )
+
+        monkeypatch.setattr(
+            "src.backend.languagemodels.llm_interface.assert_model_execution_allowed",
+            lambda **_kwargs: {"allowed": True},
+        )
+        with override_current_actor("#V#alice", "#V#research_lab"):
+            scheduled = submit_task_execution_action(
+                WorkflowActionRequest(
+                    action_id="task.submit_execution",
+                    inputs={
+                        "task_concept_id": task["task_concept_id"],
+                        "model": "gpt-5.6-luna",
+                        "model_provider": "openai",
+                    },
+                    data={},
+                    environment=WorkflowEnvironment(llm_client=None),
+                    trace=SimpleNamespace(instance_id="scheduled-encounter-1"),
+                )
+            )
+        assert scheduled.status == "success"
+        assert scheduled.outputs["task_launch_status"] == "already_active"
+        assert scheduled.outputs["queue_id"] == first_payload["queue_item"]["queue_id"]
+        assert scheduled.outputs["domain_completion_claim"] is False
+
         queue = mongo_client.get_chat_prompt_queue_collection()
         assert queue is not None
         assert queue.count_documents({"task_concept_id": task["task_concept_id"]}) == 1
@@ -485,7 +530,9 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
 
 
 def test_continuation_projects_selected_task_product_and_new_instruction():
-    from src.backend.server.routes.task_routes import _build_task_execution_prompt
+    from src.backend.services.task_execution_submission_service import (
+        _build_task_execution_prompt,
+    )
 
     selected = _task()
     selected.update(
