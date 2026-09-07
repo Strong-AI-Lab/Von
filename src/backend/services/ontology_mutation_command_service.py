@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -68,6 +69,56 @@ from .text_relation_read_policy import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Acquisition only: do not occupy a request worker indefinitely behind a busy
+# lease. Recent successful relationship handlers took about 42 seconds; allow
+# twice that duration with headroom. This does not time out an executing effect.
+_MUTATION_CONTENTION_WAIT_SECONDS = 90.0
+
+
+@contextmanager
+def _acquire_mutation_resource_locks(resource_keys: Sequence[str]) -> Iterator[None]:
+    """Wait for the existing lock set without retrying any mutation body.
+
+    Release partial acquisitions before waiting, so contenders never retain one
+    resource while waiting for another. The caller must recheck live scope and
+    authority after acquisition, as it does for an uncontended command.
+    """
+    started = time.monotonic()
+    deadline = started + _MUTATION_CONTENTION_WAIT_SECONDS
+    delay = 0.25
+    attempts = 0
+    while True:
+        locks = ExitStack()
+        attempts += 1
+        try:
+            for resource_key in sorted(set(resource_keys)):
+                locks.enter_context(ontology_mutation_resource_lock(resource_key))
+        except OntologyMutationResourceBusy:
+            locks.close()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("Ontology mutation lock contention wait exhausted")
+                raise
+            if attempts == 1:
+                logger.info("Waiting for contended ontology mutation resources")
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 1.0)
+        except BaseException:
+            locks.close()
+            raise
+        else:
+            break
+    with locks:
+        if attempts > 1:
+            logger.info(
+                "Ontology mutation locks acquired after contention: attempts=%s wait_ms=%.0f",
+                attempts,
+                (time.monotonic() - started) * 1000,
+            )
+        # Deliberately outside the acquisition retry handler. Once the effect
+        # begins, even a retryable exception must follow receipt reconciliation.
+        yield
 
 
 @dataclass
@@ -3565,8 +3616,9 @@ def execute_governed_ontology_method(
                         resource_keys.add(
                             f"ontology-publication-scope:{expected_concept_id}"
                         )
-                for resource_key in sorted(resource_keys):
-                    locks.enter_context(ontology_mutation_resource_lock(resource_key))
+                locks.enter_context(
+                    _acquire_mutation_resource_locks(tuple(resource_keys))
+                )
                 for concept_id, expected_fingerprint in expected.items():
                     try:
                         current = scope_read_back(concept_id)
