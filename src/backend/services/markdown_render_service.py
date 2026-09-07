@@ -126,6 +126,10 @@ def sanitise_rendered_html(html: str) -> str:
 
         if tag.name == "a":
             href = _normalise_bs4_attr_to_str(tag.get("href"))
+            archive_citation = re.fullmatch(r"otter-archive://artifact/([a-f0-9]{64})", href or "")
+            if archive_citation:
+                href = "/von/api/otter-archive/artifacts/" + archive_citation[1]
+                tag["href"] = href
             if not _is_safe_href(href):
                 if "href" in tag.attrs:
                     del tag.attrs["href"]

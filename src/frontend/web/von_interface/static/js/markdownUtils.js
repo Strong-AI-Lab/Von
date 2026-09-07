@@ -75,6 +75,9 @@ function sanitiseHref(rawHref) {
     const href = String(rawHref).trim();
     const lower = href.toLowerCase();
 
+    const archiveCitation = /^otter-archive:\/\/artifact\/([a-f0-9]{64})$/.exec(href);
+    if (archiveCitation) return `/von/api/otter-archive/artifacts/${archiveCitation[1]}`;
+
     // Block common XSS vectors.
     if (lower.startsWith('javascript:') || lower.startsWith('data:') || lower.startsWith('vbscript:')) {
         return null;

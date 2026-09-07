@@ -2236,6 +2236,26 @@ class _FieldEqualsHydrationClient(_RootAliasHydrationClient):
         raise AssertionError("unexpected model call")
 
 
+def test_retrieved_images_survive_evidence_envelope_for_next_model_and_history() -> None:
+    images = [{"concept_id": "#V#private_image", "sha256": "fixture"}]
+    client = _SequenceClient(
+        LLMResponse(text_response="", tool_calls=[ToolCall(
+            tool_name="turn_invoke_capability", call_id="image-read",
+            payload={"name": "general_read", "arguments": {}},
+        )]),
+        LLMResponse(text_response="I inspected the source image."),
+    )
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **kwargs: {"success": True, "image_attachments": images}),
+        prompt="Inspect the retrieved image.", context=[], llm_client=client,
+        model="test-model", user_namespace="#V#person@org",
+        user_concept_id="#V#person", org_concept_id="#V#org", turn_id="image-turn",
+    )
+    assert result.terminal_status == "completed"
+    assert any(message.get("image_attachments") == images for message in client.calls[1]["context"])
+    assert any(json.loads(message["content"]).get("image_attachments") == images for message in result.extra_messages)
+
+
 def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     client = _SequenceClient(LLMResponse(text_response="A useful answer."))
     gateway = _gateway(lambda **_kwargs: {"success": True})

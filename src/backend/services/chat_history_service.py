@@ -1794,6 +1794,8 @@ def _split_history_into_segments_with_locations(
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
         }
+        if isinstance(entry.get("image_attachments"), list):
+            copied["image_attachments"] = list(entry["image_attachments"])
         turn_id = entry.get("turn_id")
         if isinstance(turn_id, str) and turn_id.strip():
             copied["turn_id"] = turn_id.strip()

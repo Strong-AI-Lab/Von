@@ -1,3 +1,4 @@
+import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -6657,6 +6658,7 @@ function updateSendButtonForCurrentChatState() {
     }
     const chatCreationInFlight = Boolean(newChatCreationInFlight);
     const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
+    const imagePreparationBlocked = imagesBlocked(activeChatSessionId);
     const queueSubmissionInFlight = !!getQueuedChatPromptSubmissionInFlight(
         activeChatSessionId
     );
@@ -6682,6 +6684,7 @@ function updateSendButtonForCurrentChatState() {
     );
     sendButton.disabled = chatCreationInFlight
         || uploadInFlight
+        || imagePreparationBlocked
         || queueSubmissionInFlight
         || readOnly
         || conceptQaBusy
@@ -6723,6 +6726,8 @@ function updateSendButtonForCurrentChatState() {
         : (sessionBusy ? 'Queue Prompt' : 'Send Prompt');
     if (queueSubmissionInFlight) {
         sendButton.title = 'Saving this prompt to the conversation queue.';
+    } else if (imagePreparationBlocked && !uploadInFlight) {
+        sendButton.title = 'Remove the failed image attachment before sending.';
     } else if (uploadInFlight) {
         sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
     } else {
@@ -21463,7 +21468,19 @@ function refreshAttachmentStatusRegionVisibility() {
     );
 }
 
+function refreshConversationImages() {
+    let panel = document.getElementById('conversationImageComposer');
+    if (!panel) {
+        panel = document.createElement('div'); panel.id = 'conversationImageComposer';
+        panel.setAttribute('aria-label', 'Pending image attachments');
+        document.getElementById('chatAttachmentStatus')?.parentElement?.appendChild(panel);
+    }
+    renderImageComposer(panel, activeChatSessionId, refreshConversationImages);
+    updateSendButtonForCurrentChatState();
+}
+
 function renderPendingAttachmentState() {
+    refreshConversationImages();
     const el = resolveUploadUiElement(
         'pendingAttachmentEl',
         'pendingAttachmentStatus'
@@ -21549,6 +21566,10 @@ function restorePendingUploadedFileCopyConceptId(
 }
 
 function releaseRequestFileCopyBinding(request) {
+    if (request && !request.attachmentBindingAccepted && !request.attachmentBindingTransferred) {
+        restoreImages(request.sessionId, request.executionEnvelope?.image_attachment_ids);
+        refreshConversationImages();
+    }
     if (
         !request
         || request.attachmentBindingAccepted
@@ -21919,6 +21940,12 @@ async function performUploadFilesToVon(list, uploadState) {
     let index = 0;
 
     for (const file of list) {
+        if (file.type?.startsWith('image/')) {
+            index += 1;
+            const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), refreshConversationImages);
+            if (uploaded) successCount += 1; else failureCount += 1;
+            continue;
+        }
         index += 1;
         const sizeLabel = formatBytesForUi(file.size);
         appendUploadMessageForSession(
@@ -29779,6 +29806,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             }
 
             const historyMessageOptions = {
+                imageAttachments: msg.image_attachments,
                 ...(externalActor ? {
                     assistantMessage: msg.role === 'assistant',
                     externalActor,
@@ -33996,7 +34024,7 @@ export function initializeChatTab() {
         });
 
         uploadFileInput.addEventListener('change', async () => {
-            const files = uploadFileInput.files;
+            const files = Array.from(uploadFileInput.files || []);
             // Clear the input so selecting the same file again triggers change.
             uploadFileInput.value = '';
             await uploadFilesToVon(files);
@@ -35873,6 +35901,7 @@ async function refreshChatPromptQueueFromServer(options = {}) {
 
 function buildChatPromptExecutionEnvelope({
     fileCopyConceptId = null,
+    imageAttachmentIds = [],
     turnKind = null,
     initiationId = null
 } = {}) {
@@ -35881,6 +35910,7 @@ function buildChatPromptExecutionEnvelope({
         resolveLocalRequestedLlm()
     );
     return {
+        ...(imageAttachmentIds.length ? { image_attachment_ids: imageAttachmentIds } : {}),
         ...(turnKind ? { turn_kind: turnKind } : {}),
         ...(initiationId ? { initiation_id: initiationId } : {}),
         language: (typeof userContext.language === 'string' && userContext.language.trim())
@@ -37229,7 +37259,7 @@ async function handleSendPrompt(options = {}) {
     const allowEmptyPrompt = assistantOpening && options?.allowEmptyPrompt === true;
     if (
         directComposerSubmission
-        && getInFlightUploadStateForSession(targetSessionId)
+        && (getInFlightUploadStateForSession(targetSessionId) || imagesBlocked(targetSessionId))
     ) {
         showToast(ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE, 'info');
         updateSendButtonForCurrentChatState();
@@ -37317,8 +37347,10 @@ async function handleSendPrompt(options = {}) {
             targetSessionId
         );
         const executionEnvelope = buildChatPromptExecutionEnvelope({
-            fileCopyConceptId: queuedFileCopyConceptId
+            fileCopyConceptId: queuedFileCopyConceptId,
+            imageAttachmentIds: takeImages(targetSessionId)
         });
+        refreshConversationImages();
         rememberLastSubmittedUserPrompt(promptRaw);
         setPromptComposerValue('', { promptInput });
         updateSendButtonForCurrentChatState();
@@ -37386,9 +37418,11 @@ async function handleSendPrompt(options = {}) {
         : null;
     const executionEnvelope = buildChatPromptExecutionEnvelope({
         fileCopyConceptId: pendingFileCopyConceptId,
+        imageAttachmentIds: options?.executionEnvelope?.image_attachment_ids || (fromQueue ? [] : takeImages(targetSessionId)),
         turnKind,
         initiationId
     });
+    refreshConversationImages();
     const claimedAtMs = Date.parse(String(options?.claimedAt || ''));
     const request = {
         abortController: new AbortController(),
@@ -37648,7 +37682,7 @@ async function handleSendPrompt(options = {}) {
         // Append assistant message with turnId and llm_debug flag
         request.resultTurnId = assistantTurnId;
         if (isRequestVisible()) {
-            appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
+            appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText, {imageAttachments: data.image_attachments});
             // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
             const annotationToggle = document.getElementById('annotationToggle');
             if (annotationToggle && annotationToggle.checked) {
@@ -38819,6 +38853,12 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             scrollableField.appendChild(messageContainer);
         }
 
+        const renderedTurn = turnId ? Array.from(scrollableField.querySelectorAll('[data-turn-id]')).find(el => el.dataset.turnId === turnId) : null;
+        if (renderedTurn) {
+            const liveRequest = liveChatRequestsBySession.get(getChatRequestSessionKey(activeChatSessionId));
+            const attachments = options.imageAttachments || (sender === 'User' ? descriptorsForIds(liveRequest?.executionEnvelope?.image_attachment_ids) : []);
+            renderImageAttachments(renderedTurn, attachments);
+        }
         recordTranscriptTurn(sender, message, { turnId, isHistory, timestamp: timestampStr || new Date().toISOString() });
 
         // Follow new output only when the reader had not deliberately moved away.

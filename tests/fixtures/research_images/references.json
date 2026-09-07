@@ -1,0 +1,72 @@
+{
+  "licence": "CC0 synthetic fixtures generated for Von; no private source content",
+  "criteria": "Each fixture must pass its task-specific review. Exact values/labels checked mechanically where applicable; independently inspect visual relationships and unsupported claims. Record first failures and any bounded retry. One successful crop recovery and one honest unresolved region required. No claim beyond this set and bounded private slides.",
+  "cases": [
+    {
+      "id": "dense_columns",
+      "question": "Compare sampling interval, noise and estimator in regimes A and B. Transcribe the shared β constraint.",
+      "required": [
+        "2",
+        "5",
+        "0.04",
+        "0.09",
+        "mean",
+        "median",
+        "β"
+      ],
+      "review": "Preserve column associations, units and β ≥ 0; no pooled n or invented causal claim."
+    },
+    {
+      "id": "equation",
+      "question": "Transcribe the update equation, including signs, indices and exponent. What coefficient multiplies the delayed state when β = 0.2?",
+      "required": [
+        "0.04",
+        "0.05"
+      ],
+      "review": "Exact x_(t+1)=x_t−η∇L(x_t)+β²x_(t−1); delayed coefficient 0.04, no sign/index error."
+    },
+    {
+      "id": "log_chart",
+      "question": "Identify both axes, units and scales, series and error-bar meaning. Which series is highest at 30 minutes? Can statistical significance be concluded?",
+      "required": [
+        "min",
+        "log",
+        "Control",
+        "Drug A",
+        "Drug B",
+        "SD"
+      ],
+      "review": "Y fluorescence a.u. log10, X time min linear; Drug A highest; SD of triplicates, no statistical significance claim."
+    },
+    {
+      "id": "table_code",
+      "question": "Preserve the table rows/columns and code indentation. What are No memory accuracy and latency, and is report inside the loop?",
+      "required": [
+        "76.5",
+        "18",
+        "outside"
+      ],
+      "review": "All rows correctly associated; append inside if, if inside loop, report outside loop."
+    },
+    {
+      "id": "feedback_diagram",
+      "question": "List the directed connections and identify the logging branch and feedback path. Does Archive control Actuator?",
+      "required": [
+        "Sensor",
+        "Filter",
+        "Controller",
+        "Actuator",
+        "Archive"
+      ],
+      "review": "Sensor→Filter→Controller→Actuator→Sensor; Filter→Archive branch; no Archive→Actuator edge."
+    },
+    {
+      "id": "degraded",
+      "question": "Read the lower-right calibration note, using a crop if needed, and report whether the destroyed central label is readable. Do not guess the central text.",
+      "required": [
+        "0.037"
+      ],
+      "review": "κ = 0.037 s⁻¹ recovered with original-region citation; central label explicitly unreadable. Crop [1050,780,500,170] is available."
+    }
+  ]
+}

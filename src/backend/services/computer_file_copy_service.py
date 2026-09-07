@@ -432,13 +432,16 @@ def create_computer_file_copy_instance(
     blob_backend: str,
     blob_key: str,
     blob_uri: str,
+    visibility_scope_mode: str | None = None,
+    metadata_in_attributes: bool = False,
     metadata: Mapping[str, Any] | None = None,
     logger: Any | None = None,
 ) -> ComputerFileCopyRecord:
     """Create a Computer File Copy instance with explicit visibility provenance.
 
     This matches the existing upload flow behaviour (text relations are treated
-    as authoritative metadata for retrieval).
+    as authoritative metadata for retrieval). New bounded image records can opt
+    into attributes as the authoritative metadata, avoiding duplicate text writes.
     """
 
     if type_concept_id == "#V#computer_file_copy":
@@ -504,6 +507,10 @@ def create_computer_file_copy_instance(
     else:
         attributes.pop("namespace_source", None)
 
+    if metadata_in_attributes:
+        attributes["file_copy_metadata_storage"] = "attributes.v1"
+        attributes["original_filename"] = name
+
     tags = ["file", "blob_store"]
     if type_concept_id == "#V#arxiv_pdf_file":
         tags.extend(["arxiv", "pdf"])
@@ -520,7 +527,15 @@ def create_computer_file_copy_instance(
         created_by_concept_id=effective_user_concept_id,
         organisation_concept_id=effective_organisation_concept_id,
         event_namespace=canonical_namespace,
+        visibility_scope_mode=visibility_scope_mode,
     )
+
+    if metadata_in_attributes:
+        return ComputerFileCopyRecord(
+            concept_id=instance_concept_id,
+            type_concept_id=type_concept_id,
+            uploaded_at=uploaded_at,
+        )
 
     upsert_text_for_concept(
         subject_concept_id=instance_concept_id,
@@ -681,6 +696,20 @@ def resolve_file_copy_blob_info(
     if not isinstance(loaded_doc, Mapping):
         return None
 
+    attrs = loaded_doc.get("attributes") or {}
+    if attrs.get("file_copy_metadata_storage") == "attributes.v1":
+        if not isinstance(attrs.get("blob_key"), str) or not attrs["blob_key"]:
+            return None
+        return FileCopyBlobInfo(
+            concept_id=concept_id,
+            blob_key=attrs["blob_key"],
+            blob_backend=attrs.get("blob_backend"),
+            blob_uri=attrs.get("blob_uri"),
+            content_type=attrs.get("content_type"),
+            original_filename=attrs.get("original_filename"),
+            size_bytes=attrs.get("size_bytes"),
+        )
+
     blob_key = _first_text_value(concept_id, "#V#has_blob_key")
     if not blob_key:
         return None
@@ -726,6 +755,21 @@ def fetch_file_copy_bytes(
     concept_doc = _load_file_copy_concept_doc(file_copy_concept_id=file_copy_concept_id)
     if not isinstance(concept_doc, Mapping):
         return {"success": False, "error": "not_found"}
+
+    image_attrs = concept_doc.get("attributes") or {}
+    if image_attrs.get("conversation_image"):
+        if not user_concept_id or image_attrs.get("user_concept_id") != user_concept_id:
+            return {"success": False, "error": "not_found"}
+        source = image_attrs.get("image_provenance") or {}
+        if source.get("kind") == "otter_archive":
+            from ..integrations.internal_mcp.otter_archive_proxy_mcp import (
+                otter_archive_resource_binding_for_user,
+            )
+
+            if otter_archive_resource_binding_for_user(user_concept_id) != source.get(
+                "resource_id"
+            ):
+                return {"success": False, "error": "not_found"}
 
     if not _file_copy_visible_to_actor(
         concept_doc=concept_doc,

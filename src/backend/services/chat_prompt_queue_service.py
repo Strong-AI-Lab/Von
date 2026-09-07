@@ -67,6 +67,7 @@ EXECUTION_ENVELOPE_ALLOWED_FIELDS = frozenset(
         "thinking_card_mode",
         "turn_kind",
         "workflow_inputs",
+        "image_attachment_ids",
     }
 )
 STALE_IN_PROGRESS_ADVISORY_REASON = (
