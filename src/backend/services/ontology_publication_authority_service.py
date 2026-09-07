@@ -2316,6 +2316,14 @@ def execute_authorised_ontology_mutation(
             postcondition_verified = bool(verify_read_back(result, canonical_state))
         except Exception:  # noqa: BLE001 - a verifier failure cannot imply success
             postcondition_verified = False
+        if isinstance(canonical_state, Mapping):
+            # Preserve the exact verifier's result through evidence projection
+            # and finality reporting; handler success alone is not this proof.
+            canonical_state = {
+                **canonical_state,
+                "verified": postcondition_verified,
+                "status": "verified" if postcondition_verified else "unverified",
+            }
         if not postcondition_verified:
             result = {
                 **result,
