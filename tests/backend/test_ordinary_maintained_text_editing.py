@@ -17,10 +17,14 @@ from src.backend.services import ontology_mutation_command_service as command
 from src.backend.services import ontology_publication_authority_service as authority
 from src.backend.services import text_value_service as texts
 from src.backend.services.adaptive_turn_service import (
+    _build_effect_outcome_report,
+    _canonical_effect_readback_receipt,
+    _canonically_verified_material_effect_ids,
     _model_visible_input_schema,
     _trusted_tool_payload,
     ordinary_turn_capability_delegation,
 )
+from src.backend.services.turn_evidence_store import TrustedTurnScope
 
 
 @pytest.fixture
@@ -161,11 +165,51 @@ def test_edit_consolidates_only_authorised_group_with_readback_and_recovery(
             repeated = gateway.invoke("upsert_singleton_text_relation", args).payload
     assert result["success"] is True, result
     assert result["authority_receipt"]["status"] == "succeeded"
+    assert result["authority_receipt"]["canonical_read_back"]["verified"] is True
+    receipt = _canonical_effect_readback_receipt(result)
+    material, verified = _canonically_verified_material_effect_ids(
+        [
+            {
+                "effect_id": "edit-brief",
+                "status": "ok",
+                "execution_method": "upsert_singleton_text_relation",
+            }
+        ],
+        {
+            "edit-brief": {
+                "effect_status": "succeeded",
+                "changed": True,
+                "turn_finality_required": True,
+                "canonical_readback": receipt,
+            }
+        },
+    )
+    assert material == verified == {"edit-brief"}
+    screen, report = _build_effect_outcome_report(
+        terminal_status="effect_partially_completed",
+        effect_snapshot={
+            "edit-brief": {
+                "effect_status": "succeeded",
+                "changed": True,
+                "canonical_readback": receipt,
+            }
+        },
+        tool_invocations=[
+            {"effect_id": "edit-brief", "tool": "upsert_singleton_text_relation"}
+        ],
+        trusted_scope=TrustedTurnScope(
+            user_concept_id=actor, organisation_concept_id=None, namespace=actor
+        ),
+    )
+    assert report["facts"][0]["canonical_readback_verified"] is True
+    assert "succeeded with canonical read-back" in screen
+    assert "did not verify" not in screen
     assert result["canonical_read_back"]["matching_relation_count"] == 1
     assert result["canonical_read_back"]["relation_id"] == result["kept_relation_id"]
     assert result["replaced_count"] == 2
     assert result["replaced_text_values_retained"] is True
     assert repeated["authority_receipt"]["status"] == "succeeded"
+    assert repeated["canonical_read_back"]["verified"] is True
     assert db.relations.count_documents({}) == 3
     assert db.values.count_documents({}) == 5
     for original in originals[2:]:

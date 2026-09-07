@@ -475,7 +475,11 @@ def test_global_admin_can_adopt_historical_scope_with_canonical_read_back(
 
     assert result["success"] is True
     assert result["authority_decision"]["allowed"] is True
-    assert result["canonical_read_back"] == after
+    assert result["canonical_read_back"] == {
+        **after,
+        "verified": True,
+        "status": "verified",
+    }
     assert removed == [
         {
             "source_id": "#V#legacy_concept",

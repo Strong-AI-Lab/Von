@@ -632,6 +632,52 @@ def test_mutation_receipt_reconciles_and_replays_idempotently(
     assert receipts.count_documents({}) == 1
 
 
+@pytest.mark.parametrize(
+    "case", ["verified", "contradictory", "raises", "no_verifier", "preview"]
+)
+def test_receipt_exposes_only_actual_postcondition_verification(
+    authority_stores, monkeypatch, case
+):
+    service, _delegations, receipts = authority_stores
+    role = _evidence(service, role=service.GLOBAL_ONTOLOGY_ADMINISTRATOR_ROLE)
+    monkeypatch.setattr(service, "resolve_live_semantic_roles", lambda _actor: (role,))
+    canonical = {"relationship_present": case != "contradictory"}
+    calls = []
+
+    def verify(result, state):
+        calls.append(state)
+        if case == "raises":
+            raise RuntimeError("read-back proof unavailable")
+        return state["relationship_present"] is True
+
+    with service.override_current_actor("#V#admin", None):
+        result = service.execute_authorised_ontology_mutation(
+            intent=_intent(service, idempotency_key="receipt-proof-" + case),
+            mutate=lambda: {"success": True, "changed": True},
+            read_back=lambda: dict(canonical),
+            verify_read_back=None if case == "no_verifier" else verify,
+            preview=case == "preview",
+        )
+    expected = None if case in {"no_verifier", "preview"} else case == "verified"
+    assert result["canonical_read_back"].get("verified") is expected
+    assert (
+        result["authority_receipt"]["canonical_read_back"].get("verified") is expected
+    )
+    assert result["canonical_read_back"].get("status") == (
+        None if expected is None else "verified" if expected else "unverified"
+    )
+    assert len(calls) == (0 if expected is None else 1)
+    if expected is False:
+        assert result["success"] is False
+        assert result["authority_receipt"]["status"] == "indeterminate"
+        assert result["error_code"] == "ontology_mutation_postcondition_failed"
+    elif case == "preview":
+        assert result["authority_receipt"]["status"] == "previewed"
+    else:
+        assert result["authority_receipt"]["status"] == "succeeded"
+    assert receipts.count_documents({}) == 1
+
+
 def test_indeterminate_receipt_can_be_finalised_by_exact_later_reconciliation(
     authority_stores,
 ) -> None:
