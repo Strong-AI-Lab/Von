@@ -4,6 +4,11 @@
   "schema_version": "repo_seed_workflow_bundle.v1",
   "seed_version": "1",
   "source_tag": "JVNAUTOSCI-2244",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#task_continuation_workflow": {
+      "unversioned": ["595b29efc45198f316b0e64b1fee3a5fb017929ce6690f2972b228a1eb4805f2"]
+    }
+  },
   "supported_action_ids": ["task.submit_execution"],
   "workflows": [{
     "workflow_id": "#V#task_continuation_workflow",

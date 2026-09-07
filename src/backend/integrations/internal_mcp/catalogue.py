@@ -40614,7 +40614,23 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_remove_relationship_input_schema(),
             output_schema=_remove_relationship_output_schema(),
             category="write",
-            description="Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates. Text relation removal is not supported in this tool.",
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="source_id",
+            ordinary_turn_fixed_arguments={
+                "mode": "soft_delete",
+                "cascade": "warn",
+                "confirmed": False,
+                "operator_override": False,
+            },
+            description=(
+                "Correct one unsupported or duplicate concept-to-concept "
+                "relationship using its exact source, predicate and target, or "
+                "its relation identity. This removes the relationship, not the "
+                "concepts. Ordinary chat uses audited soft deletion with an "
+                "undo token; canonical source and inverse-target authority "
+                "checks still apply. Inspect source evidence and the resulting "
+                "relationships. Text relation removal is not supported."
+            ),
         ),
         MethodDefinition(
             name="preview_remove_relationship",

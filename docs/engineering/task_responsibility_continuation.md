@@ -59,10 +59,19 @@ explicitly delegated surface.
 
 `#V#task_continuation_workflow` submits the same task operation as **Continue
 with Von**, through `task_execution_submission_service`. Its release input is
-`src/backend/workflows/repo_seed_bundles/task_continuation_workflow_seed_bundle.json`;
-publish it with the existing `bootstrap_repo_seed_workflow_bundle` operator
-service and read back the live definition. Repository presence alone is not
-activation. An actor-owned schedule supplies the task and an explicit enabled
+`src/backend/workflows/repo_seed_bundles/task_continuation_workflow_seed_bundle.json`.
+For a new workflow identity, first use the existing
+`bootstrap_workflow_concept_identities` release service with a registry containing
+only that release's workflow. Then publish its graph with
+`bootstrap_repo_seed_workflow_bundle` and read back the live definition. The
+identity must exist before the graph publisher attaches its migration receipt.
+The bundle records the exact reviewed unversioned identity surface produced by
+that bootstrap; an unrelated or changed live surface still requires an explicit
+migration decision.
+Use the authorised release context and preserve its visibility; an operational
+credential does not confer global semantic publication authority.
+Repository presence alone is not activation. An actor-owned schedule supplies
+the task and an explicit enabled
 model/provider; it does not copy the task's domain programme into code.
 
 Each occurrence reads the current task, product reference and checkpoint.
@@ -122,6 +131,8 @@ responsibility. Inspect whether Von reuses earlier components, requirements
 and evidence, rather than requiring the human to reconstruct their interfaces.
 One focussed question may be useful when a material fact is unavailable;
 making the user write an execution specification is not the target experience.
+The [role test programme](role_convergence_test_programme.md#paper-email-responsibility-encounters)
+defines the corresponding continuation and changing-expectation encounters.
 
 This is a bounded continuity interface, not evidence of learned role competence.
 Use the [role convergence guide](role_learning_convergence.md) for successive
