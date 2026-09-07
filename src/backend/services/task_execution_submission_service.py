@@ -131,7 +131,9 @@ def _resolve_task_execution_conversation(
     return resolved
 
 
-def _build_task_execution_prompt(task: dict[str, Any]) -> str:
+def _build_task_execution_prompt(
+    task: dict[str, Any], *, task_execution_concept_id: str | None = None
+) -> str:
     """Project the selected task and canonical references, not a shadow product."""
     product = task.get("current_work_product") or {"status": "missing"}
     instruction = task.get("continuation_instruction", "")
@@ -140,6 +142,13 @@ def _build_task_execution_prompt(task: dict[str, Any]) -> str:
         f"Task concept ID: {task.get('task_concept_id', '')}",
         f"Title: {task.get('title') or 'Untitled task'}",
     ]
+    if task_execution_concept_id:
+        parts.append(
+            f"Current execution (this turn): {task_execution_concept_id}. "
+            "Task submission has already succeeded. An in-progress observation "
+            "of this execution refers to your own work in this turn, not another "
+            "worker to wait for."
+        )
     if instruction:
         parts.append(f"New user instruction: {instruction}")
     parts.extend(
@@ -167,7 +176,9 @@ def _enqueue_task_execution(
 
     return chat_prompt_queue_service.create_queue_record(
         scope=scope,
-        prompt_raw=_build_task_execution_prompt(task),
+        prompt_raw=_build_task_execution_prompt(
+            task, task_execution_concept_id=task_execution_concept_id
+        ),
         session_id=task["conversation_session_id"],
         session_name=task.get("conversation_name"),
         status=chat_prompt_queue_service.STATUS_QUEUED,

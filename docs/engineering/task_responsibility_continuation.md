@@ -82,6 +82,11 @@ An already active task coalesces with the existing execution. The workflow
 receipt reports submission or coalescence, with a queue and TaskExecution
 locator. Its successful termination is **not** a domain-completion claim.
 Inspect the linked execution and canonical work product for that outcome.
+The execution prompt identifies the TaskExecution belonging to the current
+turn. Observing that same execution as in progress is not evidence of a
+different worker: the launch has already succeeded and this turn carries the
+domain work. This identity is supplied by the shared queue adapter for both
+Tasks and scheduled launches, without requiring a user to explain the runtime.
 
 ## Requirements that can evolve
 
@@ -118,6 +123,11 @@ Start with the existing task/product and reasonable stated defaults. Split
 guidance into independently governed profiles only when actual consumers or
 revision needs justify it. Keep exact cursor persistence, identity, actor
 authority, queue deduplication and effect read-back in reusable mechanisms.
+Ordinary chat can use the existing `gmail_modify_labels` capability on an
+actor-authorised mailbox, with canonical read-back and lost-response
+reconciliation. It changes only the requested label sets. Completion assessment
+and whether to preserve Inbox remain contextual judgements; a historical
+ingestion workflow's disposition is not compulsory for all paper work.
 
 ## Evidence of low human burden
 

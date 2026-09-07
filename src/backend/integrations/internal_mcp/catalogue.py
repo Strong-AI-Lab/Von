@@ -41720,12 +41720,24 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 description="Gmail API modify response",
             ),
             category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_fixed_arguments={
+                "allow_mutation": True,
+                "verify_after": True,
+            },
+            ordinary_turn_trusted_argument_choice_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description=(
-                "Atomically add/remove labels on a Gmail message. Requires "
-                "allow_mutation=true and profile with gmail.modify scope. Use "
-                "verify_after=true for independent canonical state read-back and "
-                "lost-response reconciliation."
+                "Atomically add/remove labels on one authorised Gmail message. "
+                "Resolve mailbox-specific label IDs with gmail_list_labels. "
+                "Only the requested labels change: adding a completion label "
+                "does not implicitly archive or mark the message read. Choose "
+                "disposition from the user's current guidance. Requires a "
+                "profile with gmail.modify scope. Ordinary turns bind "
+                "allow_mutation=true and verify_after=true for independent "
+                "canonical state read-back and lost-response reconciliation."
             ),
         ),
         MethodDefinition(

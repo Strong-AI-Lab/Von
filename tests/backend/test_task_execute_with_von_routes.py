@@ -133,12 +133,20 @@ def test_execute_with_von_creates_one_linked_server_dispatch(monkeypatch) -> Non
             "launch_request_id": "launch-1",
             "continuation_instruction": "Check the new evidence",
             "current_work_product": {"concept_id": "#V#wrong_brief"},
+            "task_execution_concept_id": "#V#wrong_execution",
         },
     )
 
     assert "Check the new evidence" in queue_call["prompt_raw"]
     assert "#V#brief_selected" in queue_call["prompt_raw"]
     assert "#V#wrong_brief" not in queue_call["prompt_raw"]
+    current_execution = queue_call["task_execution_concept_id"]
+    assert f"Current execution (this turn): {current_execution}" in queue_call["prompt_raw"]
+    assert "#V#wrong_execution" not in queue_call["prompt_raw"]
+    assert (
+        queue_call["execution_envelope"]["workflow_inputs"]["task_execution_concept_id"]
+        == current_execution
+    )
     assert response.status_code == 201
     assert response.get_json()["task_execution"]["queue_id"] == "queue-1"
     assert reconciliation_call["user_concept_id"] == "#V#alice"
@@ -479,6 +487,7 @@ def test_execute_with_von_end_to_end_persists_one_queue_and_execution_attempt(
         # A schedule uses the same atomic active-task key as the UI, even
         # though its short launch workflow has a different instance identity.
         from types import SimpleNamespace
+
         from src.backend.security.access_control import override_current_actor
         from src.backend.workflows.action_registry import (
             WorkflowActionRequest,
