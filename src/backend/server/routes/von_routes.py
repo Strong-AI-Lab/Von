@@ -12320,6 +12320,14 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             user_concept_id
         )
 
+    from ...integrations.internal_mcp.otter_archive_proxy_mcp import (
+        otter_archive_resource_binding_for_user,
+    )
+
+    otter_archive_trusted_binding = otter_archive_resource_binding_for_user(
+        user_concept_id
+    )
+
     authorised_gmail_profile: str | None = None
     gmail_profile_trusted_binding: Mapping[str, Any] | str | None = None
     if not user_concept_id and request_gmail_profile:
@@ -12920,6 +12928,15 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
     # otherwise embeddings/quota delays can stall the browser turn before
     # workflow selection even begins.
     # ------------------------------------------------------------------
+    from ...services.conversation_image_service import authorise_images
+
+    try:
+        request_image_attachments = authorise_images(
+            data.get("image_attachment_ids"), user_concept_id
+        )
+    except (ValueError, PermissionError) as exc:
+        return jsonify(error="image_attachment_unavailable", detail=str(exc)), 400
+
     _user_message_persisted_early = False
     if history_user_id and not assistant_opening:
         _emit_context_setup_progress(
@@ -12936,6 +12953,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                     "content": prompt_text,
                     "author_user_id": user_concept_id,
                     "turn_id": f"u-{request_id}",
+                    "image_attachments": request_image_attachments,
                 },
                 namespace=history_namespace,
                 organisation_concept_id=org_concept_id,
@@ -13700,7 +13718,15 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
 
         _check_background_cancellation("direct adaptive turn entry")
         adaptive_turn_started = time.perf_counter()
-        adaptive_input_context = enhanced_context
+        adaptive_input_context = list(enhanced_context)
+        if request_image_attachments:
+            adaptive_input_context.append(
+                {
+                    "role": "user",
+                    "content": "Images attached to this request.",
+                    "image_attachments": request_image_attachments,
+                }
+            )
         trusted_turn_argument_values: dict[str, Any] = {}
         if jira_resource_trusted_binding is not None:
             trusted_turn_argument_values["jira_resource_id"] = (
@@ -13709,6 +13735,10 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
         if linkedin_resource_trusted_binding is not None:
             trusted_turn_argument_values["linkedin_resource_id"] = (
                 linkedin_resource_trusted_binding
+            )
+        if otter_archive_trusted_binding is not None:
+            trusted_turn_argument_values["otter_archive_resource_id"] = (
+                otter_archive_trusted_binding
             )
         if gmail_profile_trusted_binding is not None:
             trusted_turn_argument_values["gmail_profile"] = (
@@ -15566,6 +15596,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             timing_recorder=turn_timing_recorder,
             refresh_llm_debug_timing_fn=_refresh_llm_debug_timing_payload,
             persist_user_message=not assistant_opening,
+            user_image_attachments=request_image_attachments,
             assistant_message_metadata=(
                 {"turn_kind": "assistant_opening", "initiation_id": initiation_id}
                 if assistant_opening
@@ -15675,6 +15706,15 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 ),
             )
         )
+        final_success_body["image_attachments"] = []
+        for image_message in tool_messages:
+            try:
+                image_payload = json.loads(image_message.get("content", "{}"))
+                final_success_body["image_attachments"].extend(
+                    image_payload.get("image_attachments", [])
+                )
+            except (ValueError, TypeError, AttributeError):
+                pass
         if adaptive_delivery_success:
             _mark_background_generate_completed_if_ready(
                 background_task_id=background_task_id,
@@ -21382,3 +21422,8 @@ def _contains_openai_quota_error(message: object) -> bool:
         or "quota_exhausted" in lowered
         or ("openai quota" in lowered and "exhausted" in lowered)
     )
+
+
+from .conversation_image_routes import register_image_routes
+
+register_image_routes(von_bp)

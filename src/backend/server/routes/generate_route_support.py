@@ -339,6 +339,7 @@ def _persist_generate_turn_messages(
     refresh_llm_debug_timing_fn: Callable[[dict[str, Any]], None] | None = None,
     persist_user_message: bool = True,
     assistant_message_metadata: Mapping[str, Any] | None = None,
+    user_image_attachments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     def _maybe_span(
         *, operation_name: str, attributes: Mapping[str, Any] | None = None
@@ -403,6 +404,7 @@ def _persist_generate_turn_messages(
                     "role": "user",
                     "content": prompt_text,
                     "author_user_id": user_concept_id,
+                    "image_attachments": list(user_image_attachments or []),
                 }
                 if request_id:
                     user_message["turn_id"] = f"u-{request_id}"
@@ -432,9 +434,17 @@ def _persist_generate_turn_messages(
         if callable(refresh_llm_debug_timing_fn):
             refresh_llm_debug_timing_fn(llm_debug_payload)
         with _maybe_span(operation_name="persist_assistant_message"):
+            image_attachments = []
+            for tool_msg in tool_messages:
+                try:
+                    tool_payload = json.loads(tool_msg.get("content", "{}"))
+                    image_attachments.extend(tool_payload.get("image_attachments", []))
+                except (ValueError, TypeError, AttributeError):
+                    pass
             assistant_message = {
                 "role": "assistant",
                 "content": response_text,
+                "image_attachments": image_attachments,
                 **(
                     dict(assistant_message_metadata)
                     if isinstance(assistant_message_metadata, Mapping)

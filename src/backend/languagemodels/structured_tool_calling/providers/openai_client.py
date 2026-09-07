@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ....services.conversation_image_service import provider_image_messages
+
 import asyncio
 import hashlib
 import inspect
@@ -659,7 +661,7 @@ class OpenAIClient(LLMClient):
 
         response = await request_client.chat.completions.create(
             model=request_model,
-            messages=messages,  # type: ignore[arg-type]
+            messages=provider_image_messages(messages, surface="chat"),  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             **request_kwargs,
         )
@@ -840,7 +842,7 @@ class OpenAIClient(LLMClient):
 
         response = await request_client.responses.create(
             model=request_model,
-            input=input_items,  # type: ignore[arg-type]
+            input=provider_image_messages(input_items, surface="responses"),  # type: ignore[arg-type]
             instructions=system_message,
             tools=tools,  # type: ignore[arg-type]
             **request_kwargs,
@@ -1059,6 +1061,11 @@ class OpenAIClient(LLMClient):
         return {
             "role": role,
             "content": str(message.get("content") or ""),
+            **(
+                {"image_attachments": message["image_attachments"]}
+                if message.get("image_attachments")
+                else {}
+            ),
         }
 
     @staticmethod
@@ -1097,7 +1104,9 @@ class OpenAIClient(LLMClient):
         role = str(item.get("role") or "").strip().lower()
         content = item.get("content")
         if role and isinstance(content, str):
-            return role, content
+            return role, content + json.dumps(
+                item.get("image_attachments", []), sort_keys=True
+            )
         return None
 
     def _build_responses_input(
@@ -1166,7 +1175,17 @@ class OpenAIClient(LLMClient):
                 continue
             if role not in {"system", "developer", "user", "assistant"}:
                 role = "user"
-            items.append({"role": role, "content": str(msg.get("content") or "")})
+            items.append(
+                {
+                    "role": role,
+                    "content": str(msg.get("content") or ""),
+                    **(
+                        {"image_attachments": msg["image_attachments"]}
+                        if msg.get("image_attachments")
+                        else {}
+                    ),
+                }
+            )
         items.append({"role": "user", "content": prompt})
         return items
 
@@ -1238,7 +1257,15 @@ class OpenAIClient(LLMClient):
             role = "assistant"
         if role not in {"system", "developer", "user", "assistant"}:
             role = "user"
-        return {"role": role, "content": str(message.get("content") or "")}
+        return {
+            "role": role,
+            "content": str(message.get("content") or ""),
+            **(
+                {"image_attachments": message["image_attachments"]}
+                if message.get("image_attachments")
+                else {}
+            ),
+        }
 
     @staticmethod
     def _responses_message_signature(item: Mapping[str, Any]) -> tuple[str, str] | None:
@@ -1253,7 +1280,9 @@ class OpenAIClient(LLMClient):
             ]
             content = "".join(text_parts)
         if role and isinstance(content, str):
-            return role, content
+            return role, content + json.dumps(
+                item.get("image_attachments", []), sort_keys=True
+            )
         return None
 
     def _tool_definition_to_responses_dict(

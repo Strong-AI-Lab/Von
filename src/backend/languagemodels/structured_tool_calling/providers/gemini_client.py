@@ -42,6 +42,7 @@ from ..types import (
     LLMContinuation,
     LLMResponse,
     StructuredToolProtocolError,
+    UnsupportedStructuredToolTransportError,
     StructuredToolTransportError,
     ToolCall,
     ToolCallError,
@@ -319,6 +320,10 @@ class GeminiClient(LLMClient):
         system_message: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        if any(message.get("image_attachments") for message in (context or [])):
+            raise UnsupportedStructuredToolTransportError(
+                "Image attachments are not supported by this Gemini transport yet. Select a vision-capable OpenAI or Ollama model."
+            )
         for tool in available_tools:
             self._validate_input_schema(tool)
 

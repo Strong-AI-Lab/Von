@@ -1,5 +1,7 @@
 """Ollama client with structured tool calling support."""
 
+from ....services.conversation_image_service import provider_image_messages
+
 import asyncio
 import json
 import logging
@@ -73,7 +75,7 @@ class OllamaClient(LLMClient):
             async def _request() -> str:
                 stream = await request_client.chat(
                     model=self.config.model,
-                    messages=messages,
+                    messages=provider_image_messages(messages, surface="ollama"),
                     stream=True,
                 )
                 full_response = ""
@@ -205,6 +207,11 @@ USER REQUEST:
                         {
                             "role": msg["role"],
                             "content": msg["content"],
+                            **(
+                                {"image_attachments": msg["image_attachments"]}
+                                if msg.get("image_attachments")
+                                else {}
+                            ),
                         }
                     )
 

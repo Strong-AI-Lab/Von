@@ -3104,3 +3104,58 @@ def test_provider_capability_400_becomes_sanitised_typed_transport_error(
     assert "user:secret" not in str(error)
     assert "/private" not in str(error)
     assert "credential" not in str(error)
+
+
+@pytest.mark.parametrize("surface", ["chat", "responses"])
+def test_image_bytes_reach_sdk_with_source_reference_and_no_retained_base64(
+    monkeypatch, surface
+):
+    import base64
+    import hashlib
+    from src.backend.services import conversation_image_service as images
+    from src.backend.security.access_control import override_current_actor
+
+    data = b"synthetic original bytes, already verified by load_image"
+    descriptor = {
+        "concept_id": "#V#image",
+        "content_type": "image/png",
+        "width": 96,
+        "height": 64,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    monkeypatch.setattr(
+        images,
+        "load_image",
+        lambda cid, actor: (
+            (descriptor, data)
+            if actor == "#V#owner"
+            else pytest.fail("lost trusted actor")
+        ),
+    )
+    _install_profiles(
+        monkeypatch,
+        _registry_profiles(
+            _responses_profile() if surface == "responses" else _chat_profile()
+        ),
+    )
+    captured = _install_fake_openai(
+        monkeypatch, responses=[_text_response(model="vision-test")]
+    )
+    client = OpenAIClient(LLMClientConfig(model="vision-test", api_key="test-key"))
+    context = [{"role": "user", "content": "Read", "image_attachments": [descriptor]}]
+    with override_current_actor("#V#owner", None):
+        result = asyncio.run(
+            client.generate_with_tools(
+                prompt="What is shown?", context=context, available_tools=[]
+            )
+        )
+    request = captured[surface][0]
+    messages = request["input" if surface == "responses" else "messages"]
+    image_message = next(m for m in messages if isinstance(m.get("content"), list))
+    native = image_message["content"][1]["image_url"]
+    encoded = native["url"] if isinstance(native, dict) else native
+    assert base64.b64decode(encoded.split(",", 1)[1]) == data
+    assert "#V#image" in image_message["content"][0]["text"]
+    assert descriptor["sha256"] in image_message["content"][0]["text"]
+    assert base64.b64encode(data).decode() not in str(context)
+    assert base64.b64encode(data).decode() not in str(result.continuation)

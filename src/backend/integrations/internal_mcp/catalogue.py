@@ -41325,6 +41325,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "inclusion for direct jira_add_attachment calls."
             ),
         ),
+        *otter_archive_definitions(),
+        *conversation_image_definitions(),
         # Owner-scoped LinkedIn export search via a local external MCP server.
         MethodDefinition(
             name="linkedin_index_status",
@@ -46109,6 +46111,10 @@ def _register_dynamic_catalogue_methods(
         logger.warning(
             "[internal_mcp_catalogue] Dynamic MCP tool registration failed: %s", exc
         )
+
+
+from .conversation_image_tools import definitions as conversation_image_definitions
+from .otter_archive_tools import definitions as otter_archive_definitions
 
 
 def build_default_catalogue() -> MethodCatalogue:

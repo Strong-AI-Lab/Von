@@ -1964,13 +1964,21 @@ def _compact_context_after_limit(
         content = str(item.get("content") or "")
         if not content:
             continue
-        candidate = {"role": role, "content": content}
+        candidate = {
+            "role": role,
+            "content": content,
+            **(
+                {"image_attachments": item["image_attachments"]}
+                if item.get("image_attachments")
+                else {}
+            ),
+        }
         candidate_size = len(_json_bytes(candidate))
         if candidate_size > available:
             if available < 256:
                 continue
             bounded_content = content[: max(0, available - 128)]
-            candidate = {"role": role, "content": bounded_content}
+            candidate = {**candidate, "content": bounded_content}
             candidate_size = len(_json_bytes(candidate))
         if candidate_size <= available:
             compact.append(candidate)
@@ -2000,13 +2008,21 @@ def _compact_context_after_limit(
         content = str(item.get("content") or "")
         if not content:
             continue
-        candidate = {"role": role, "content": content}
+        candidate = {
+            "role": role,
+            "content": content,
+            **(
+                {"image_attachments": item["image_attachments"]}
+                if item.get("image_attachments")
+                else {}
+            ),
+        }
         candidate_size = len(_json_bytes(candidate))
         if candidate_size > available:
             if available < 256:
                 continue
             bounded_content = content[: max(0, available - 128)]
-            candidate = {"role": role, "content": bounded_content}
+            candidate = {**candidate, "content": bounded_content}
             candidate_size = len(_json_bytes(candidate))
         if candidate_size <= available:
             ordinary.append(candidate)
@@ -2119,7 +2135,7 @@ def _tool_definitions(
                         "description": (
                             "Exact mapping-field equality predicate. Values must be "
                             "JSON scalars; use JSON null to find null-valued fields, "
-                            "for example {\"session_name\": null}."
+                            'for example {"session_name": null}.'
                         ),
                         "additionalProperties": {
                             "type": ["string", "number", "boolean", "null"]
@@ -11130,6 +11146,10 @@ def execute_adaptive_turn(
                     status=effect_status or status,
                 )
                 envelope_payload = envelope.to_mapping()
+                if isinstance(raw_payload, Mapping) and raw_payload.get("image_attachments"):
+                    # Media references must survive evidence wrapping/projection;
+                    # the provider still checks access and hydrates canonical bytes.
+                    envelope_payload["image_attachments"] = raw_payload["image_attachments"]
                 if workflow_progress_evidence is not None:
                     envelope_payload["workflow_progress_evidence"] = dict(
                         workflow_progress_evidence
@@ -11724,6 +11744,18 @@ def execute_adaptive_turn(
             else:
                 enter_final_synthesis()
             continue
+        for image_result in correlated_results:
+            if isinstance(image_result.output, Mapping) and image_result.output.get(
+                "image_attachments"
+            ):
+                current_context.append(
+                    {
+                        "role": "user",
+                        "content": "Retrieved source image evidence from "
+                        + str(image_result.tool_name),
+                        "image_attachments": image_result.output["image_attachments"],
+                    }
+                )
         pending_results = bounded_results
         retain_model_evidence_views(pending_results)
 
