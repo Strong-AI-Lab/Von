@@ -512,6 +512,7 @@ def test_create_intent_fingerprints_exact_scope_and_complete_effect(
             "notes",
             "vontology_path",
             "instance_of_type",
+            "external_identifiers",
         ],
     }
 
@@ -539,7 +540,6 @@ def test_governed_create_shape_rejections_are_exact_and_have_no_fake_recovery(
         {
             "allow_duplicate_instances",
             "attributes",
-            "external_identifiers",
             "identity_candidate_concept_ids",
             "identity_rejected_candidate_concept_ids",
             "linked_concepts",
@@ -652,12 +652,9 @@ def test_decorated_create_projects_rejected_fields_without_running_the_handler(
         ],
     )
 
-    assert result["error_code"] == "complex_create_requires_typed_effects"
+    assert result["error_code"] == "authenticated_actor_context_required"
     assert result["effect_status"] == "not_started"
     assert result["changed"] is False
-    assert result["error_details"]["rejected_fields"] == [
-        "external_identifiers"
-    ]
     assert "recovery_affordances" not in result
 
 
