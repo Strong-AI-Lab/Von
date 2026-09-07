@@ -2451,6 +2451,18 @@ def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
 
 def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
     existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "status_cancellation_requested_id" not in existing_indexes:
+        # Recovery polls even when no cancellation is pending. Keep that empty
+        # lookup off the full queue while preserving oldest-request ordering.
+        coll.create_index(
+            [
+                ("status", ASCENDING),
+                ("cancellation_requested_at", ASCENDING),
+                ("_id", ASCENDING),
+            ],
+            name="status_cancellation_requested_id",
+            partialFilterExpression={"cancellation_requested_at": {"$type": "date"}},
+        )
     if "queue_id_1_unique" not in existing_indexes:
         coll.create_index(
             [("queue_id", ASCENDING)], name="queue_id_1_unique", unique=True

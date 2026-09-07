@@ -525,6 +525,16 @@ def test_chat_prompt_queue_indexes_support_idempotent_dispatch_and_retention() -
     mc._ensure_chat_prompt_queue_indexes(coll)
 
     indexes = {index["name"]: index for index in coll.list_indexes()}
+    cancellation = indexes["status_cancellation_requested_id"]
+    assert list(cancellation["key"].items()) == [
+        ("status", mc.ASCENDING),
+        ("cancellation_requested_at", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
+    ]
+    assert cancellation["partialFilterExpression"] == {
+        "cancellation_requested_at": {"$type": "date"}
+    }
+    assert not cancellation.get("unique", False)
     submission = indexes["scope_enqueue_submission_id_unique"]
     assert list(submission["key"].items()) == [
         ("user_concept_id", mc.ASCENDING),

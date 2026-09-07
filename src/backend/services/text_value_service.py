@@ -296,7 +296,7 @@ def create_text_value(
     tv = TextValueModel(text=stored_text, lang=lang, provenance=provenance)
 
     # Try to find by fingerprint+lang
-    existing = TextValuesRepository.find_one({"fingerprint": fp, "lang": tv.lang})
+    existing = TextValuesRepository.find_one_by_fingerprint(fp, tv.lang)
     if existing and existing.get("_id"):
         if identity_mode == "exact" and existing.get("text") != tv.text:
             raise ValueError("Exact TextValue fingerprint resolved to different bytes")
@@ -317,7 +317,7 @@ def create_text_value(
         # fingerprint/lang index remains authoritative, so reconcile to that
         # exact canonical row rather than failing an otherwise idempotent
         # upsert.
-        existing = TextValuesRepository.find_one({"fingerprint": fp, "lang": tv.lang})
+        existing = TextValuesRepository.find_one_by_fingerprint(fp, tv.lang)
         if existing and existing.get("_id"):
             if identity_mode == "exact" and existing.get("text") != tv.text:
                 raise ValueError(
@@ -1132,9 +1132,7 @@ def delete_text_relation_by_predicate_and_text(
             normalized_context["name_type"] = name_type.strip().upper()
             context = normalized_context
 
-    text_value = TextValuesRepository.find_one(
-        {"fingerprint": fingerprint, "lang": lang}
-    )
+    text_value = TextValuesRepository.find_one_by_fingerprint(fingerprint, lang)
     if not text_value:
         # Legacy fallback: direct text/lang lookup
         text_value = TextValuesRepository.find_one({"text": raw_text, "lang": lang})

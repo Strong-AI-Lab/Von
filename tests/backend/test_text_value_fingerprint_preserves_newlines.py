@@ -10,6 +10,7 @@ from src.backend.db.repositories.text_value_repository import (
 from src.backend.security.access_control import bypass_access_control
 from src.backend.services.text_value_service import (
     create_text_value,
+    delete_text_relation_by_predicate_and_text,
     upsert_text_for_concept,
 )
 
@@ -122,7 +123,7 @@ def test_create_text_value_reconciles_duplicate_key_race(monkeypatch):
     """A concurrent insert winner is returned by its canonical fingerprint row."""
 
     existing_id = ObjectId()
-    lookups: list[dict[str, str]] = []
+    lookups: list[dict[str, object]] = []
 
     def find_one(query):
         lookups.append(query)
@@ -139,6 +140,45 @@ def test_create_text_value_reconciles_duplicate_key_race(monkeypatch):
 
     text_value_id = create_text_value("Same title", lang="en-NZ")
 
-    expected = {"fingerprint": "same title||en-nz", "lang": "en-NZ"}
+    expected = {
+        "fingerprint": {"$eq": "same title||en-nz", "$type": "string"},
+        "lang": "en-NZ",
+    }
     assert text_value_id == str(existing_id)
     assert lookups == [expected, expected]
+
+
+def test_fingerprint_lookup_preserves_language_identity_and_relation_removal():
+    """Indexed lookup keeps deduplication and language-specific deletion exact."""
+
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+    concept_id = "#V#fingerprint_language_test"
+    concepts.insert_one({"concept_id": concept_id, "relationships": {}})
+
+    with bypass_access_control():
+        english = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text="Shared text",
+            lang="en",
+        )
+        french = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text="Shared text",
+            lang="fr",
+        )
+        assert create_text_value("SHARED text", lang="en") == english["text_value_id"]
+        assert english["text_value_id"] != french["text_value_id"]
+        delete_text_relation_by_predicate_and_text(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text="Shared text",
+            lang="en",
+        )
+
+    remaining = list(TextRelationsRepository.find({"subject_concept_id": concept_id}))
+    assert len(remaining) == 1
+    assert str(remaining[0]["object_text_id"]) == french["text_value_id"]
