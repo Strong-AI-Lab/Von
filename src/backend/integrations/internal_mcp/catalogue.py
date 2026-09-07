@@ -36496,6 +36496,44 @@ def _task_import_jira_issues(**kwargs):
     return report
 
 
+def _task_continuation_readback(task_id, fields, task):
+    """Verify the task editor's canonical field values, preserving its response."""
+    from ...services import task_management_service as tasks
+
+    mismatches = []
+    if task.get("task_concept_id") != tasks._normalise_task_concept_id(task_id):
+        mismatches.append("task_concept_id")
+    for key, expected in fields.items():
+        actual = task.get(key)
+        if key == "current_work_product_concept_id":
+            product = task.get("current_work_product") or {}
+            actual = product.get("concept_id")
+            expected = tasks._normalise_optional_concept_id(expected)
+            if product.get("status") in {"unavailable", "ambiguous_link"}:
+                mismatches.append(key)
+                continue
+        elif key in {"start_date", "due_date"}:
+            actual = tasks._parse_datetime(actual)
+            expected = tasks._parse_datetime(expected)
+        elif key == "task_type_ids":
+            actual = set(actual or [])
+            expected = set(tasks.normalise_task_type_ids(expected))
+        elif key in {"assignee_concept_id", "report_to_concept_id"}:
+            expected = tasks._normalise_optional_concept_id(expected)
+        elif key in {"status", "priority"}:
+            expected = str(expected or "").strip().lower()
+        else:
+            expected = tasks._normalise_optional_text(expected, field_name=key)
+        if actual != expected:
+            mismatches.append(key)
+    return {
+        "status": "verified" if not mismatches else "mismatch",
+        "verified": not mismatches,
+        "task": task,
+        "mismatched_fields": mismatches,
+    }
+
+
 def _task_update_fields(**kwargs):
     from ...services.task_management_service import (
         InvalidTaskDataError,
@@ -36600,7 +36638,9 @@ def _task_update_fields(**kwargs):
                 "effect_status": "succeeded",
                 "changed": False,
                 "idempotent_replay": True,
-                "canonical_read_back": current_task,
+                "canonical_read_back": _task_continuation_readback(
+                    task_id, kwargs["fields"], current_task
+                ),
             }
 
     try:
@@ -36611,12 +36651,18 @@ def _task_update_fields(**kwargs):
         )
         result["success"] = True
         if kwargs.get("actor_bound_continuation") is True:
+            readback = _task_continuation_readback(
+                task_id, kwargs["fields"], result["task"]
+            )
             result.update(
-                effect_status="succeeded",
+                success=readback["verified"],
+                effect_status="succeeded" if readback["verified"] else "partial",
                 changed=bool(result.get("changed_fields")),
                 idempotent_replay=not bool(result.get("changed_fields")),
-                canonical_read_back=result["task"],
+                canonical_read_back=readback,
             )
+            if not readback["verified"]:
+                result["error_code"] = "task_update_readback_mismatch"
         return result
     except TaskNotFoundError as exc:
         return make_error_response("NOT_FOUND", str(exc))

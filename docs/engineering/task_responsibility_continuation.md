@@ -54,6 +54,11 @@ and product reference. It does not start execution. The bounded ordinary-chat
 projection cannot change the creator or organisation, add an audience, or
 assign work to another person. The general parity editor remains a separate
 explicitly delegated surface.
+The ordinary editor compares the requested fields with its canonical task
+read-back, including the selected product reference. Its receipt verifies the
+edit separately from the task's domain status. A saved checkpoint can be
+verified while the paper work remains pending; contradictory field read-back
+is reported as partial progress with the mismatched fields retained.
 
 ## Recurring encounters
 
