@@ -139,6 +139,15 @@ reconciliation. It changes only the requested label sets. Completion assessment
 and whether to preserve Inbox remain contextual judgements; a historical
 ingestion workflow's disposition is not compulsory for all paper work.
 
+For a maintained brief, `upsert_singleton_text_relation` replaces the current
+base body for one predicate and language. Ordinary turns retain replaced text
+values and return their attachment context for recovery; the governed boundary
+checks both the stored content and that the selected group has one relation.
+Read and consolidate useful previous contents before replacing them. The
+additive `upsert_text_relation` remains appropriate for independent notes or
+multiple values. Neither operation changes separately scoped assertions or
+decides which contextual interpretation should prevail.
+
 ## Evidence of low human burden
 
 A detailed diagnostic prompt is useful engineering evidence, but not evidence

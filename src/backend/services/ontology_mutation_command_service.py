@@ -2367,7 +2367,9 @@ def _text_read_back(
     predicate: str | None,
     result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    relation_id = _clean_text((result or {}).get("relation_id"))
+    relation_id = _clean_text(
+        (result or {}).get("relation_id") or (result or {}).get("kept_relation_id")
+    )
     query: dict[str, Any] = {"subject_concept_id": concept_id}
     if relation_id:
         try:
@@ -2617,7 +2619,7 @@ def canonical_read_back_for_method(
         "add_names_to_concept",
         "delete_text_relation",
     }:
-        return _text_read_back(
+        state = _text_read_back(
             concept_id=_normalise_concept_id(
                 arguments.get("concept_id") or arguments.get("subject_concept_id")
             )
@@ -2625,6 +2627,22 @@ def canonical_read_back_for_method(
             predicate=_normalise_predicate(arguments.get("predicate")),
             result=result,
         )
+        if method == "upsert_singleton_text_relation":
+            from .text_value_service import get_text_relations_summary
+
+            summary = get_text_relations_summary(
+                state["concept_id"],
+                predicates=[_normalise_predicate(arguments.get("predicate")) or ""],
+                languages=[
+                    _clean_text(arguments.get("language") or arguments.get("lang"))
+                    or "en-NZ"
+                ],
+                max_relation_ids_per_group=2,
+            )
+            state["matching_relation_count"] = sum(
+                group["count"] for group in summary["groups"]
+            )
+        return state
     if method == "create_concepts":
         concept_ids = _create_read_back_concept_ids(
             arguments=arguments,
@@ -2824,6 +2842,10 @@ def _verify_method_postcondition(
             exact_relation = exact_relation and (
                 canonical_state.get("context_sha256")
                 == intent.delta.get("context_sha256")
+            )
+        if method == "upsert_singleton_text_relation":
+            exact_relation = exact_relation and (
+                canonical_state.get("matching_relation_count") == 1
             )
         return bool(expected_hash) and exact_relation
     if method == "delete_text_relation":

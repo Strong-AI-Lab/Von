@@ -1517,7 +1517,7 @@ def upsert_singleton_text_relation(
                 "subject_concept_id": subject_concept_id,
                 "predicate": predicate,
             },
-            projection={"_id": 1, "object_text_id": 1},
+            projection={"_id": 1, "object_text_id": 1, "context": 1},
         )
     )
 
@@ -1551,6 +1551,7 @@ def upsert_singleton_text_relation(
             tv_lang_by_id[str(tv.get("_id"))] = str(tv.get("lang") or "")
 
     replaced_relation_ids: List[str] = []
+    replaced_relations: list[dict[str, Any]] = []
     lang_normalised = (lang or "").strip()
     for rel in rels:
         rel_id = str(rel.get("_id"))
@@ -1570,6 +1571,13 @@ def upsert_singleton_text_relation(
             garbage_collect=garbage_collect,
         )
         replaced_relation_ids.append(rel_id)
+        replaced_relations.append(
+            {
+                "relation_id": rel_id,
+                "text_value_id": tv_id_str,
+                "context": rel.get("context") or {},
+            }
+        )
 
     return {
         "success": True,
@@ -1578,6 +1586,8 @@ def upsert_singleton_text_relation(
         "language": lang,
         "kept_relation_id": kept_relation_id,
         "replaced_relation_ids": replaced_relation_ids,
+        "replaced_relations": replaced_relations,
+        "replaced_text_values_retained": not garbage_collect,
         "replaced_count": len(replaced_relation_ids),
         "relation_created": bool(result.get("relation_created")),
         "text_value_id": result.get("text_value_id"),
