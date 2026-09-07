@@ -5052,6 +5052,9 @@ def export_concepts(
 
         concepts_list = []
         for concept_doc in concepts_cursor:
+            from ..security.access_control import can_access_concept
+            if not can_access_concept(concept_doc.get("concept_id")):
+                continue
             # Convert ObjectId to string for JSON serialization
             concept_doc["id"] = str(concept_doc.pop("_id"))
 
@@ -5121,6 +5124,25 @@ def export_concepts(
             except Exception:
                 concept_doc.setdefault("name", "")
 
+            # Export canonical text, including external identity and attribution.
+            # Legacy inline fields are not authoritative for modern concepts.
+            if direct_concept_id:
+                from .text_value_service import get_texts_for_concepts
+
+                text_limit = 100
+                while True:
+                    query_metadata = {}
+                    text_rows = get_texts_for_concepts(
+                        [direct_concept_id],
+                        limit_per_concept=text_limit,
+                        query_metadata=query_metadata,
+                        context_view="base_publication",
+                    ).get(direct_concept_id, [])
+                    if not query_metadata.get("relation_query_truncated"):
+                        break
+                    text_limit *= 2
+                concept_doc["text_relations"] = text_rows
+
             # Ensure all required fields are present (add defaults if missing)
             concept_doc.setdefault("description", None)
             # Don't set top-level notes field - use proper accessor functions
@@ -5131,6 +5153,7 @@ def export_concepts(
 
             concepts_list.append(concept_doc)
 
+        total_count = len(concepts_list)
         logger.info(
             f"Export completed successfully: {len(concepts_list)} concepts exported, total_count={total_count}"
         )

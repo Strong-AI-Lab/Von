@@ -1119,6 +1119,24 @@ def resolve_governed_ontology_arguments(
                 resolved["parent_id"] = resolved_parent_ids[0]
                 resolved["authority_resolved_parent_id"] = resolved_parent_ids[0]
 
+        from .governed_external_identity_service import bind_external_create_identity
+
+        bound_concepts = []
+        for item in canonical_concepts:
+            if isinstance(item, Mapping) and item.get("external_identifiers"):
+                complex_fields = (
+                    "attributes", "system_tags", "user_tags", "linked_concepts",
+                    "identity_candidate_concept_ids",
+                    "identity_rejected_candidate_concept_ids",
+                )
+                if not any(item.get(key) or resolved.get(key) for key in complex_fields):
+                    item = bind_external_create_identity(
+                        item, parent_id=resolved.get("parent_id"),
+                        scope_mode=canonical_scope_mode,
+                    )
+            bound_concepts.append(item)
+        resolved["concepts"] = canonical_concepts = bound_concepts
+
         collision_mode = _clean_text(resolved.get("collision_resolution_mode"))
         if collision_mode and collision_mode != ACTOR_SCOPED_REFERENT_COLLISION_MODE:
             raise OntologyMutationCommandError(
@@ -1130,6 +1148,14 @@ def resolve_governed_ontology_arguments(
                 recovery_affordances=(),
             )
         if collision_mode == ACTOR_SCOPED_REFERENT_COLLISION_MODE:
+            if any(
+                isinstance(item, Mapping) and item.get("external_identifiers")
+                for item in canonical_concepts
+            ):
+                raise OntologyMutationCommandError(
+                    "external_identity_conflicts_with_referent_recovery",
+                    "An external identity and scoped-referent recovery cannot select different create targets.",
+                )
             if canonical_scope_mode != ACTOR_SCOPED_REFERENT_SCOPE_MODE:
                 raise OntologyMutationCommandError(
                     "actor_scoped_referent_requires_user_only_scope",
@@ -1425,8 +1451,7 @@ def build_ontology_mutation_intent(
             "user_tags": concept_spec.get("user_tags") or arguments.get("user_tags"),
             "linked_concepts": concept_spec.get("linked_concepts")
             or arguments.get("linked_concepts"),
-            "external_identifiers": concept_spec.get("external_identifiers")
-            or arguments.get("external_identifiers"),
+            "external_identifiers": arguments.get("external_identifiers"),
             "identity_candidate_concept_ids": concept_spec.get(
                 "identity_candidate_concept_ids"
             )
@@ -1464,6 +1489,7 @@ def build_ontology_mutation_intent(
                         "notes",
                         "vontology_path",
                         "instance_of_type",
+                        "external_identifiers",
                     ],
                 },
             )
@@ -2136,6 +2162,9 @@ def _visible_concept_satisfies_requested_core(
             for row in texts
         )
 
+    if concept_spec.get("external_identifiers"):
+        from .governed_external_identity_service import external_identity_texts_present
+        return external_identity_texts_present(concept_spec, texts)
     return has_requested_text(
         "hasName",
         concept_spec.get("name"),
@@ -2959,6 +2988,10 @@ def _verify_method_postcondition(
                 for row in texts
             )
 
+        if spec.get("external_identifiers"):
+            from .governed_external_identity_service import external_identity_texts_present
+            if not external_identity_texts_present(spec, texts):
+                return False
         return (
             has_text("hasName", spec.get("name"), name_type="NL")
             and has_text("hasDescription", spec.get("description"))
