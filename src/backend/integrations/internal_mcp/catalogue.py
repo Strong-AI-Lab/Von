@@ -40488,7 +40488,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_effect=True,
             ordinary_turn_mutation_subject_argument="concept_id",
             description=(
-                "Add or update a canonical text relation when the actor has mutation "
+                "Attach text, reusing an identical attachment; different text adds "
+                "another row and does not replace previous contents. To maintain "
+                "one current document body, use upsert_singleton_text_relation. "
+                "Requires mutation "
                 "authority over the subject concept. On an actor-bound surface that "
                 "exposes upsert_scoped_assertion, use that capability for knowledge "
                 "about a visible concept the actor does not own. Supports hasContent, "
@@ -40550,7 +40553,24 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_upsert_singleton_text_relation_input_schema(),
             output_schema=_upsert_singleton_text_relation_output_schema(),
             category="write",
-            description="Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
+            ordinary_turn_trusted_argument_bindings={"namespace": "turn_namespace"},
+            ordinary_turn_fixed_arguments={
+                "provenance": None,
+                "garbage_collect": False,
+                "policy": "replace_others",
+            },
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="concept_id",
+            description=(
+                "Replace the current text of a maintained document or brief, "
+                "leaving one base text relation for the selected concept, predicate "
+                "and language. Read and consolidate useful previous contents first. "
+                "Other languages, predicates and scoped assertions are unaffected. "
+                "Use additive upsert_text_relation for independent notes or "
+                "multiple values. Requires mutation authority over the subject; "
+                "ordinary turns retain replaced text values and return their "
+                "attachment metadata for recovery."
+            ),
         ),
         MethodDefinition(
             name="concept_exists",
