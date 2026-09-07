@@ -341,6 +341,18 @@ def _marker_response_from_payload(
         and expected_fingerprint
         and stored_source_fingerprint == expected_fingerprint
     )
+    # Keep the legacy boolean for workflow consumers, but do not present an
+    # omitted comparison as evidence that the source changed.
+    if not expected_fingerprint:
+        source_fingerprint_comparison = "not_requested"
+    elif not marker_exists:
+        source_fingerprint_comparison = "marker_missing"
+    elif not stored_source_fingerprint:
+        source_fingerprint_comparison = "stored_fingerprint_missing"
+    else:
+        source_fingerprint_comparison = (
+            "matched" if source_fingerprint_matches else "mismatched"
+        )
     source_system = _clean_text(payload.get("source_system")).lower()
     represented_outputs_required = bool(require_represented_artifacts) or (
         source_system
@@ -391,6 +403,7 @@ def _marker_response_from_payload(
         "stored_source_fingerprint": stored_source_fingerprint or None,
         "expected_source_fingerprint": expected_fingerprint or None,
         "source_fingerprint_matches": source_fingerprint_matches,
+        "source_fingerprint_comparison": source_fingerprint_comparison,
         "processing_status": stored_processing_status or None,
         "stored_processing_authority_fingerprint": (
             stored_authority_fingerprint or None
