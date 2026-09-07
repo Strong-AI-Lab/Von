@@ -6,6 +6,36 @@ from typing import Any
 import pytest
 
 
+@pytest.mark.parametrize(
+    "exists,stored,expected,comparison,current",
+    [
+        (True, "source-1", None, "not_requested", False),
+        (True, "source-1", "source-1", "matched", True),
+        (True, "source-1", "source-2", "mismatched", False),
+        (False, None, "source-1", "marker_missing", False),
+        (True, None, "source-1", "stored_fingerprint_missing", False),
+    ],
+)
+def test_marker_distinguishes_unrequested_comparison_from_changed_source(
+    exists, stored, expected, comparison, current
+):
+    from src.backend.services import source_processing_marker_service as service
+
+    result = service._marker_response_from_payload(
+        marker_concept_id="#V#marker",
+        source_item_id="source-item",
+        marker_exists=exists,
+        evidence_payload={
+            "processing_status": "completed",
+            "source_fingerprint": stored,
+        },
+        expected_source_fingerprint=expected,
+    )
+    assert result["source_fingerprint_comparison"] == comparison
+    assert result["source_fingerprint_matches"] is current
+    assert result["source_processing_current"] is current
+
+
 def test_find_existing_concept_ids_matches_canonicalised_ids(monkeypatch) -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services import source_processing_marker_service as service

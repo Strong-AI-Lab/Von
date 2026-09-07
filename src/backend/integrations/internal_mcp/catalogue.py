@@ -11522,7 +11522,10 @@ def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema
                 "source processing marker lookup: source_system and source_item_id "
                 "identify the source item. Supply the exact stable source_profile for "
                 "profile-scoped markers; omit it only to read an historical "
-                "profileless marker."
+                "profileless marker. Supply source_fingerprint from the current "
+                "source evidence to compare currency. Without it, comparison is "
+                "not_requested; the legacy false matches/current flags do not "
+                "establish that the source changed."
             )
             if read_only
             else (
@@ -11575,6 +11578,7 @@ def _source_processing_marker_output_schema() -> Schema:
             "stored_source_fingerprint": (str, type(None)),
             "expected_source_fingerprint": (str, type(None)),
             "source_fingerprint_matches": (bool, type(None)),
+            "source_fingerprint_comparison": str,
             "source_processing_current": (bool, type(None)),
             "stored_processing_authority_fingerprint": (str, type(None)),
             "expected_processing_authority_fingerprint": (str, type(None)),
@@ -40161,7 +40165,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             description=(
                 "Read the durable Vontology marker for a source item, if one "
                 "exists. Use before repeating source-processing work so a workflow "
-                "can reuse represented evidence instead of mutating the source system."
+                "can reuse represented evidence instead of mutating the source system. "
+                "To assess currency, supply source_fingerprint from current source "
+                "evidence and, where relevant, processing_authority_fingerprint. "
+                "Omitting the expected source fingerprint returns comparison="
+                "not_requested, not evidence of a changed source. Marker existence "
+                "does not prove adequacy under a revised user expectation."
             ),
         ),
         MethodDefinition(

@@ -118,6 +118,11 @@ alone cannot establish currency under a revised expectation. Preserve earlier
 evidence and receipts; reassess and fill the demonstrated gap instead of
 discarding the representation or downloading everything again. Different uses
 may have different adequate representations of the same canonical paper.
+Marker reads distinguish `source_fingerprint_comparison=not_requested` from
+`mismatched`. The former means no expected source fingerprint was supplied;
+its legacy false matches/current flags do not establish a changed source.
+Supply current source evidence for that comparison, independently of whether
+the earlier representation meets the current user expectation.
 Privacy scope remains distinct from semantic applicability; see
 [contextual knowledge evolution](contextual_knowledge_evolution.md).
 
