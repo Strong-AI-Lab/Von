@@ -368,6 +368,7 @@ def _ontology_invocation_context(
     *,
     request: WorkflowActionRequest,
     resolved_tool_name: str,
+    invocation_id: str | None = None,
 ):
     """Bind provenance for a workflow write admitted by its mutation ceiling."""
 
@@ -414,6 +415,8 @@ def _ontology_invocation_context(
         f"workflow:{workflow_id or 'unbound_workflow'}:{effect_scope}:"
         f"{state_id}:{resolved_tool_name}"
     )
+    if invocation_id:
+        effect_id = f"{effect_id}:{invocation_id}"
     return bind_ontology_invocation(
         surface="workflow",
         executing_agent_concept_id="#V#von_system",

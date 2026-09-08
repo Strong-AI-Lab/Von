@@ -12,6 +12,7 @@ import threading
 import time
 import requests
 from contextvars import copy_context
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import (
@@ -8167,7 +8168,22 @@ class InternalMCPChatOrchestrator:
                     )
                     continue
 
-                result = self._gateway.invoke(tool_name, payload)
+                invocation_context = nullcontext()
+                if request.workflow_id and request.workflow_state_id:
+                    from ...workflows.workflow_mcp_tool_actions import (
+                        _ontology_invocation_context,
+                    )
+
+                    # Carry the same admitted, actor-bound effect provenance as
+                    # deterministic workflow tool steps. The canonical authority
+                    # resolver still checks live target/scope permissions.
+                    invocation_context = _ontology_invocation_context(
+                        request=request,
+                        resolved_tool_name=tool_name,
+                        invocation_id=call_id or str(iteration_count),
+                    )
+                with invocation_context:
+                    result = self._gateway.invoke(tool_name, payload)
                 if (
                     isinstance(result.payload, Mapping)
                     and result.payload.get("success") is not False

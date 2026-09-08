@@ -3674,6 +3674,10 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
         trace=request.trace,
         action_target_id=request.action_target_id,
         contract_concept_id=request.contract_concept_id,
+        workflow_id=request.workflow_id,
+        workflow_state_id=request.workflow_state_id,
+        workflow_state_metadata=request.workflow_state_metadata,
+        execution_scope=request.execution_scope,
     )
     try:
         plan_result = _run_llm_call_with_timeout(

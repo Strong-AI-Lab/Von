@@ -1732,6 +1732,7 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
             return "selected-model"
 
         def _action_tool_calling_plan(self, request):
+            captured["workflow_context"] = (request.workflow_id, request.workflow_state_id, request.workflow_state_metadata)
             captured["shared_prefer_default_model"] = request.data.get(
                 "prefer_default_model"
             )
@@ -1771,6 +1772,8 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
 
     request = WorkflowActionRequest(
         action_id="llm.action",
+        workflow_id="#V#slides", workflow_state_id="interpret",
+        workflow_state_metadata={"mutation_authority": "low"},
         inputs={},
         environment=WorkflowEnvironment(
             llm_client=MagicMock(),
@@ -1789,6 +1792,7 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
     result = execute_llm_step(request)
 
     assert result.status == "success"
+    assert captured["workflow_context"] == ("#V#slides", "interpret", {"mutation_authority": "low"})
     assert captured["shared_prefer_default_model"] is True
     assert captured["prefer_default_model"] is True
     llm_call = result.outputs["llm_calls"][0]
@@ -1803,8 +1807,8 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
         "schema_version": "workflow_step_output_contract.v1",
         "output_format": "json_value",
         "prompt_concept_id": None,
-        "workflow_id": None,
-        "workflow_state_id": None,
+        "workflow_id": "#V#slides",
+        "workflow_state_id": "interpret",
         "response_contract_text": None,
         "required_json_fields": [],
         "json_field_defaults": {},
