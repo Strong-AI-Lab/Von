@@ -2528,7 +2528,7 @@ def test_bootstrap_migrates_reviewed_v35_outcome_prompt_map_gap(
         limit=2,
     )
     assert any(
-        json.loads(row.get("text") or "{}").get("seed_version") == "37"
+        json.loads(row.get("text") or "{}").get("seed_version") == "39"
         for row in marker_rows
         if isinstance(row.get("text"), str)
     )
@@ -2658,7 +2658,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "37" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "39" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -4578,3 +4578,41 @@ def test_live_arxiv_paper_representation_workflow_acceptance_batch(
         "case_count": len(reports),
         "failures": failures,
     }
+
+
+@pytest.mark.parametrize("verified", [True, False, None])
+def test_article_summary_cannot_complete_without_positive_verification(
+    _canonical_seeded_mock_db: Any, verified
+):
+    from dataclasses import replace
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    summary_state = next(key for key in definition.states if key.endswith("_summarise_representation_evidence"))
+    definition = replace(definition, initial_state=summary_state)
+
+    class SummaryLLM:
+        def generate(self, prompt, context=None, model=None, llm_params=None):
+            payload = {"response_text": "Read-back result", "observations": [], "metadata_verification": {}, "reasoning": "Observed evidence"}
+            if verified is not None:
+                payload["verification_passed"] = verified
+            return json.dumps(payload)
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(), max_transitions=3
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=SummaryLLM(), user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={"paper_concept_id": "#V#existing_article", "article_readback": {"success": True}},
+    )
+    assert result.completed is (verified is True)
+    if verified is None:
+        assert "verification_passed" in str(result.error)
+    else:
+        assert result.final_state.endswith("_completed" if verified else "_failed")

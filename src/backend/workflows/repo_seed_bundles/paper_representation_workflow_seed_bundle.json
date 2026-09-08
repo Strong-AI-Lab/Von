@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "37",
+  "seed_version": "39",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#arxiv_paper_representation_workflow": {
       "18": [
@@ -51,7 +51,7 @@
       ]
     }
   },
-  "source_tag": "JVNAUTOSCI-2244",
+  "source_tag": "JVNAUTOSCI-2728",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.normalise_external_identity",
@@ -90,8 +90,8 @@
     {
       "workflow_id": "#V#scholarly_article_metadata_representation_workflow",
       "display_name": "Scholarly Article Metadata Representation Workflow",
-      "description": "Canonical compositional workflow for representing non-arXiv scholarly article metadata, DOI/source URLs, ACM/DOI pages, and pasted bibliographic metadata without requiring a source-specific PDF, arXiv identifier, or file copy.",
-      "content": "Represent a scholarly article from a DOI URL, source URL, pasted bibliographic text, or normalised metadata by extracting/coalescing metadata fields, creating or reusing a #V#scholarly_article concept through generic Vontology write tools, attaching text metadata, resolving authors/topics, attaching DOI and source identifiers, optionally linking a file copy, and reading back the materialised concept. Sparse URL-only inputs may create a provisional article representation named by DOI/source URI while preserving provenance. This workflow is the preferred execution surface for non-arXiv article representation requests before falling back to the generic tool-calling write path.",
+      "description": "Canonical compositional workflow for representing non-arXiv scholarly article metadata, DOI/source URLs, ACM/DOI pages, and pasted bibliographic metadata without requiring a source-specific PDF, arXiv identifier, or file copy. Preserve the supplied source URL as source_uri. Observe a running partial result on the same instance until terminal evidence is available; paper_concept_id is the article output key.",
+      "content": "Represent a scholarly article from a DOI URL, source URL, pasted bibliographic text, or normalised metadata by extracting/coalescing metadata fields, creating or reusing a #V#scholarly_article concept through generic Vontology write tools, attaching text metadata, resolving authors/topics, attaching DOI and source identifiers, optionally linking a file copy, and reading back the materialised concept. Sparse URL-only inputs may create a provisional article representation named by DOI/source URI while preserving provenance. This workflow is the preferred execution surface for non-arXiv article representation requests before falling back to the generic tool-calling write path. Carry any already retrieved source URL into source_uri. A partial running receipt is an observation, not completion: continue observing the same instance with workflow_get_instance(await_terminal=true) while progress remains recoverable. Read paper_concept_id from its declared outputs and verify canonical article, authorship and source metadata before reporting completion.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -1886,6 +1886,10 @@
                   "label": "Resolved author concept IDs"
                 },
                 {
+                  "context_key": "public_author_records",
+                  "label": "Resolved source-bounded public author records"
+                },
+                {
                   "context_key": "doi",
                   "label": "DOI"
                 },
@@ -1914,7 +1918,7 @@
             "validation_policy": {
               "output_format": "json_value"
             },
-            "next_state": "completed",
+            "next_state": "failed",
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
@@ -1943,6 +1947,17 @@
               "observations",
               "metadata_verification",
               "verification_passed"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "completed",
+                "reason": "representation_evidence_verified",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "verification_passed",
+                  "value": true
+                }
+              }
             ]
           },
           {

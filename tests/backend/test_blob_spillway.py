@@ -646,3 +646,27 @@ def test_compact_falls_back_to_remote_when_spillway_disabled(monkeypatch) -> Non
     blob_ref = messages_ref.get("blob_ref")
     assert isinstance(blob_ref, dict)
     assert blob_ref.get("backend") == "s3"
+
+
+def test_linked_worktree_reads_primary_pending_checkpoint(tmp_path, monkeypatch):
+    from src.backend.services import blob_spillway
+
+    primary = tmp_path / "Von"
+    runtime = tmp_path / "Von-runtime"
+    git_dir = primary / ".git" / "worktrees" / "runtime"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n")
+    runtime.mkdir()
+    (runtime / ".git").write_text(f"gitdir: {git_dir}\n")
+    monkeypatch.delenv("VON_BLOB_SPILLWAY_DIR", raising=False)
+    monkeypatch.setattr(blob_spillway, "__file__", str(primary / "src/backend/services/blob_spillway.py"))
+    original_root = blob_spillway._default_spillway_dir()
+    writer = BlobSpillwayQueue(original_root)
+    writer.enqueue(key="workflow/checkpoint.json", data=b'{"paper_concept_id":"paper"}')
+    monkeypatch.chdir(runtime)
+    monkeypatch.setattr(blob_spillway, "__file__", str(runtime / "src/backend/services/blob_spillway.py"))
+    recovered_root = blob_spillway._default_spillway_dir()
+    assert recovered_root == original_root
+    assert BlobSpillwayQueue(recovered_root).get_local_bytes("workflow/checkpoint.json") == b'{"paper_concept_id":"paper"}'
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_DIR", str(tmp_path / "isolated"))
+    assert blob_spillway._default_spillway_dir() == tmp_path / "isolated"

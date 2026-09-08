@@ -12,7 +12,7 @@ Blob location states:
 
 Env vars:
   VON_BLOB_SPILLWAY_ENABLED          — "true" (default) / "false".
-  VON_BLOB_SPILLWAY_DIR              — local root dir (default: data/blob_spillway).
+  VON_BLOB_SPILLWAY_DIR              — local root dir (default: main checkout data/blob_spillway).
   VON_BLOB_SPILLWAY_MAX_RETRIES      — int (default: 10).
   VON_BLOB_SPILLWAY_MIGRATE_INTERVAL_SECONDS — float (default: 30, used by caller).
 
@@ -404,7 +404,30 @@ class BlobSpillwayQueue:
 
 
 def _default_spillway_dir() -> Path:
-    return Path(os.getenv("VON_BLOB_SPILLWAY_DIR", _DEFAULT_SPILLWAY_DIR))
+    configured = os.getenv("VON_BLOB_SPILLWAY_DIR")
+    if configured:
+        return Path(configured)
+
+    # Linked runtime worktrees share pending checkpoints with their main
+    # checkout. A relative process working directory must not decide whether
+    # an already acknowledged blob can be recovered after deployment.
+    repo_root = Path(__file__).resolve().parents[3]
+    git_dir = repo_root / ".git"
+    try:
+        if git_dir.is_file():
+            marker = git_dir.read_text(encoding="utf-8").strip()
+            if not marker.startswith("gitdir: "):
+                raise ValueError("Invalid worktree gitdir marker")
+            git_dir = (repo_root / marker.removeprefix("gitdir: ")).resolve()
+            common_file = git_dir / "commondir"
+            if common_file.is_file():
+                git_dir = (git_dir / common_file.read_text(encoding="utf-8").strip()).resolve()
+        if git_dir.is_dir() and git_dir.name == ".git":
+            return git_dir.parent / _DEFAULT_SPILLWAY_DIR
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot resolve shared spillway checkout: %s", exc)
+    # Non-Git installations retain their configured working-directory layout.
+    return Path(_DEFAULT_SPILLWAY_DIR)
 
 
 def _default_max_retries() -> int:

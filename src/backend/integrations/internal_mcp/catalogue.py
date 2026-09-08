@@ -18530,6 +18530,10 @@ _DELEGATED_TELEMETRY_PAGE_CONTEXT_FIELDS = (
     "created_at",
     "identifier_binding",
     "history_coverage",
+    "instance_id",
+    "workflow_id",
+    "status",
+    "current_state",
 )
 
 
@@ -18586,6 +18590,20 @@ def _bounded_delegated_telemetry_payload(
 
     if not delegated:
         return dict(payload)
+    return _bounded_telemetry_payload(
+        payload, arguments=arguments, artifact_kind=artifact_kind,
+        preserve_inline_below_limit=preserve_inline_below_limit,
+    )
+
+
+def _bounded_telemetry_payload(
+    payload: Mapping[str, Any],
+    *,
+    arguments: Mapping[str, Any],
+    artifact_kind: str,
+    preserve_inline_below_limit: bool,
+) -> dict[str, Any]:
+    """Page authorised telemetry independently of its authority carrier."""
 
     import hashlib
     import json
@@ -45733,6 +45751,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             input_schema=Schema(
                 required={"instance_id": str},
                 optional={
+                    "offset": int,
+                    "limit": int,
                     "await_terminal": (bool, str, int, float),
                     "advisory_seconds": (int, float),
                     "timeout_seconds": (int, float),
@@ -45794,6 +45814,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             input_schema=Schema(
                 required={},
                 optional={
+                    "offset": int,
+                    "limit": int,
                     "execution_id": (str, type(None)),
                     "instance_id": (str, type(None)),
                 },

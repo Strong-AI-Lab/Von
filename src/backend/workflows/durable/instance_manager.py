@@ -642,12 +642,18 @@ class WorkflowInstanceManager:
                 continue
             hydrated = hydrate_workflow_payload_blob_refs(
                 hydrated_doc[field],
-                # Ordinary diagnostic/auxiliary blobs remain fail-soft even for
-                # execution.  Only provider continuation state is essential to
-                # avoid repeating tools or inventing an uncorrelated answer.
+                # Diagnostic/auxiliary blobs may remain fail-soft. The complete
+                # inputs/checkpoint and provider continuation are execution
+                # state, not optional evidence; validate them below.
                 fail_soft=True,
             )
             hydrated_doc[field] = hydrated.payload
+            if (
+                not fail_soft
+                and field in {"inputs", "workflow_data"}
+                and is_workflow_payload_blob_ref(hydrated.payload)
+            ):
+                raise RuntimeError(f"workflow_{field}_hydration_failed")
             if not fail_soft and _has_unhydrated_structured_continuation(
                 hydrated.payload
             ):
@@ -1100,9 +1106,9 @@ class WorkflowInstanceManager:
 
         Args:
             instance_id: The instance identifier.
-            for_execution: Fail closed if offloaded structured-tool
-                continuation state cannot be hydrated. Other auxiliary blob
-                failures remain visible but fail-soft.
+            for_execution: Fail closed if complete inputs/checkpoint or
+                structured-tool continuation cannot be hydrated. Auxiliary
+                diagnostic blob failures remain visible but fail-soft.
 
         Returns:
             WorkflowInstance if found, None otherwise.

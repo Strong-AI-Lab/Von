@@ -291,9 +291,8 @@ def test_actor_bound_conversation_carrier_is_paged_and_locator_stays_compact(
     ]
     canonical_json = "".join(page["json_chunk"] for page in page_metadata)
     assert len(canonical_json) == page_metadata[0]["total_chars"]
-    assert (
-        hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        == (page_metadata[0]["sha256"])
+    assert hashlib.sha256(canonical_json.encode("utf-8")).hexdigest() == (
+        page_metadata[0]["sha256"]
     )
     reconstructed_carrier = json.loads(canonical_json)
     assert reconstructed_carrier["conversation_situation"] == situation
@@ -421,9 +420,8 @@ def test_escape_heavy_carrier_pages_remain_under_real_stdio_guard(
     assert len({page["total_chars"] for page in page_metadata}) == 1
     canonical_json = "".join(page["json_chunk"] for page in page_metadata)
     assert len(canonical_json) == page_metadata[0]["total_chars"]
-    assert (
-        hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        == (page_metadata[0]["sha256"])
+    assert hashlib.sha256(canonical_json.encode("utf-8")).hexdigest() == (
+        page_metadata[0]["sha256"]
     )
     reconstructed = json.loads(canonical_json)
     assert reconstructed["segments"][0][0]["content"] == escape_heavy_content
@@ -438,7 +436,7 @@ def test_escape_heavy_carrier_pages_remain_under_real_stdio_guard(
         assert page["read_delegation"]["delegated_actor_user_id"] == "#V#actor"
 
 
-def test_stdio_raw_ids_retain_original_denials_and_actor_b_fails_closed() -> None:
+def test_untrusted_context_raw_ids_and_actor_b_fail_closed() -> None:
     actor_a_ref = build_turn_telemetry_binding(
         request_id="req-2609-a",
         delegated_actor_user_id="#V#actor_a",
@@ -448,23 +446,29 @@ def test_stdio_raw_ids_retain_original_denials_and_actor_b_fails_closed() -> Non
         organisation_concept_id="#V#org",
     )
 
-    raw_debug = _stdio_payload(
-        "chat_history_get_debug_entry",
-        {
-            "session_id": "chat-guessed",
-            "history_index": 2,
-            "namespace": "#V#actor_a@org",
-            "user_concept_id": "#V#actor_a",
-        },
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
     )
-    raw_diagnostics = _stdio_payload(
-        "turn_execution_get_diagnostics",
-        {
-            "request_id": "req-guessed",
-            "namespace": "#V#actor_a@org",
-            "user_concept_id": "#V#actor_a",
-        },
-    )
+
+    # Ordinary internal callers do not inherit the standalone local operator.
+    with bind_internal_mcp_actor_context_source("tool_payload_fallback"):
+        raw_debug = _stdio_payload(
+            "chat_history_get_debug_entry",
+            {
+                "session_id": "chat-guessed",
+                "history_index": 2,
+                "namespace": "#V#actor_a@org",
+                "user_concept_id": "#V#actor_a",
+            },
+        )
+        raw_diagnostics = _stdio_payload(
+            "turn_execution_get_diagnostics",
+            {
+                "request_id": "req-guessed",
+                "namespace": "#V#actor_a@org",
+                "user_concept_id": "#V#actor_a",
+            },
+        )
     actor_b = _stdio_payload(
         "turn_execution_get_diagnostics",
         {
@@ -477,13 +481,13 @@ def test_stdio_raw_ids_retain_original_denials_and_actor_b_fails_closed() -> Non
     )
 
     assert raw_debug["error_code"] == "authenticated_actor_context_required"
-    assert raw_diagnostics["error_code"] == (
-        "workflow_global_admin_authority_required"
-    )
+    assert raw_diagnostics["error_code"] == ("workflow_global_admin_authority_required")
     assert actor_b["error_code"] == "READ_DELEGATION_ACTOR_MISMATCH"
 
 
-def test_stdio_delegation_tamper_expiry_tool_and_target_mismatches_fail_closed() -> None:
+def test_stdio_delegation_tamper_expiry_tool_and_target_mismatches_fail_closed() -> (
+    None
+):
     issued_at = datetime.now(timezone.utc) - timedelta(minutes=5)
     expired_ref = build_turn_telemetry_binding(
         request_id="req-expired-2609",
@@ -667,9 +671,7 @@ def test_stdio_live_progress_delegation_cannot_select_another_scope(
         },
     )
 
-    assert mismatched["error_code"] == (
-        "READ_DELEGATION_CANONICAL_TARGET_MISMATCH"
-    )
+    assert mismatched["error_code"] == ("READ_DELEGATION_CANONICAL_TARGET_MISMATCH")
 
 
 def test_stdio_diagnostics_delegation_reads_owner_namespace_for_invitee(
