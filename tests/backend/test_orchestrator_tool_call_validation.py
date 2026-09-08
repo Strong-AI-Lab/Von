@@ -171,3 +171,31 @@ def test_tool_calling_loop_records_terminal_timeout_not_late_success(
         )
         is False
     )
+
+
+def test_workflow_tool_images_follow_correlated_tool_batch(monkeypatch):
+    """Durable LLM steps need native image evidence, not only descriptor JSON."""
+    monkeypatch.setattr(orchestrator_mod, 'validate_tool_target_contract',
+                        lambda **kwargs: SimpleNamespace(ok=True,resolution_evidence=()))
+    descriptor = {'concept_id':'#V#slide_image','sha256':'synthetic'}
+    catalogue = MethodCatalogue()
+    catalogue.register(MethodDefinition(name='synthetic_slide_read',
+        handler=lambda **kwargs: {'success':True,'image_attachments':[descriptor]},
+        input_schema=Schema(required={}, optional={}, allow_unknown=False),
+        category='read'))
+    gateway = InternalMCPGateway(catalogue=catalogue,transport=InternalMCPTransport(),enabled=True)
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway,max_tool_invocations=2)
+    request = WorkflowActionRequest(action_id='tool_calling.execute',inputs={},
+        environment=WorkflowEnvironment(llm_client=None,gateway=gateway,user_namespace='#V#user',max_tool_invocations=2),
+        data={'prompt':'Read the slide images','response':'','augmented_context':[],
+              'tool_calls':[{'action':'call_tool','tool':'synthetic_slide_read','payload':{},'_call_id':f'call-{i}'} for i in range(2)],
+              'method_catalogue':gateway.describe_methods(), 'tool_categories':{'synthetic_slide_read':'read'},
+              'iteration_count':0,'aux_llm_calls':[],'llm_calls':[]})
+    orchestrator._action_tool_calling_execute(request)
+    messages = request.data['tool_messages']
+    assert [m['role'] for m in messages] == ['tool','tool','user','user']
+    assert [m['tool_call_id'] for m in messages[:2]] == ['call-0','call-1']
+    assert messages[2]['image_attachments'] == [descriptor]
+    assert 'tool_call_id' not in messages[2]
+    assert request.data['augmented_context'][-2:] == messages[-2:]
+    assert 'base64' not in str(messages)

@@ -7462,6 +7462,7 @@ class InternalMCPChatOrchestrator:
         tool_categories = data.get("tool_categories", {})
         invocations = data.setdefault("invocations", [])
         tool_messages = data.setdefault("tool_messages", [])
+        batch_image_messages: list[dict[str, Any]] = []
         iteration_count = data.get("iteration_count", 0)
         allowed_write_tools: set = data.get("allowed_write_tools", set())
         recent_user_prompts = data.get("recent_user_prompts", [])
@@ -8167,6 +8168,16 @@ class InternalMCPChatOrchestrator:
                     continue
 
                 result = self._gateway.invoke(tool_name, payload)
+                if (
+                    isinstance(result.payload, Mapping)
+                    and result.payload.get("success") is not False
+                    and result.payload.get("image_attachments")
+                ):
+                    batch_image_messages.append({
+                        "role": "user",
+                        "content": "Retrieved source image evidence from " + tool_name,
+                        "image_attachments": result.payload["image_attachments"],
+                    })
                 if tool_name_key == "workflow_execute" and isinstance(
                     aux_llm_calls, list
                 ):
@@ -8464,6 +8475,13 @@ class InternalMCPChatOrchestrator:
                 if isinstance(tool_request, Mapping):
                     _append_tool_limit_result(tool_request)
             remaining_tool_calls = []
+
+        # Keep provider tool-call responses intact; images are separate source
+        # messages after the batch, hydrated and re-authorised at the provider.
+        # The adaptive chat path already does this; durable llm.action uses this
+        # execution path and otherwise receives only image descriptor JSON.
+        augmented_context.extend(batch_image_messages)
+        tool_messages.extend(batch_image_messages)
 
         # Store remaining overflow tool calls for the backfill handler.
         data["allowed_write_tools"] = allowed_write_tools
