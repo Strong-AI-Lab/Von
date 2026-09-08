@@ -114,6 +114,10 @@ class _PollManagerStub:
 
 
 class _SuccessfulWorkerManagerStub(_WorkerManagerStub):
+    def is_current_claim(self, instance_id: str, worker_id: str, token: str) -> bool:
+        instance = self.instances[instance_id]
+        return instance.locked_by == worker_id and instance.claim_token == token
+
     def __init__(self, instances: list[WorkflowInstance]) -> None:
         super().__init__()
         self.instances = {instance.instance_id: instance for instance in instances}

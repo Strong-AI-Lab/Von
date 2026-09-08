@@ -882,9 +882,17 @@ class InternalMCPGateway:
                                 payload=dict(injected_fault.payload),
                                 duration_ms=0.0,
                             )
+                        from ...workflows.durable.task_ownership import (
+                            ownership_checked_handler,
+                        )
+
                         transport_result = self._transport.execute(
                             method_name=definition.name,
-                            handler=definition.handler,
+                            handler=ownership_checked_handler(
+                                definition.handler,
+                                method_name=definition.name,
+                                category=definition.category,
+                            ),
                             payload=dict(payload_dict),
                             timeout_sec=timeout,
                             category=definition.category,

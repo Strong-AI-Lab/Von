@@ -591,7 +591,15 @@ class DurableWorkflowWorker:
             # actor bound across definition loading *and the complete workflow
             # run* so LLM prompt resolution, nested workflow loading, explicit
             # actions, and fallback tools all enforce the same authority.
-            with override_current_actor(instance.user_id, instance.org_id):
+            from .task_ownership import bind_task_claim
+
+            with (
+                override_current_actor(instance.user_id, instance.org_id),
+                bind_task_claim(
+                    self._instance_manager, instance_id, self._worker_id, claim_token
+                ),
+            ):
+
                 def _load_definition_with_authority() -> tuple[
                     Any,
                     dict[str, Any] | None,

@@ -46,6 +46,7 @@ from .models import (
     WorkflowSchedule,
 )
 from .vontology_schedule_repository import VontologyScheduleRepository
+from .task_ownership import task_key, ensure_task_ownership_index
 from .worker_identity import (
     build_claim_provenance,
     get_configured_min_worker_build,
@@ -92,6 +93,8 @@ _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "lock_expires_at": 1,
     "claimed_at": 1,
     "claimed_by_build": 1,
+    "task_ownership_key": 1,
+    "uncheckpointed_effects": 1,
     "min_worker_build": 1,
     "claim_ineligible_reason": 1,
     "claim_ineligible_detected_at": 1,
@@ -164,6 +167,7 @@ def _ensure_indexes() -> None:
             )
 
         # Worker polling: find claimable instances
+        ensure_task_ownership_index(instances_coll)
         if "status_lock_expires" not in existing:
             instances_coll.create_index(
                 [("status", ASCENDING), ("lock_expires_at", ASCENDING)],
@@ -396,11 +400,133 @@ class WorkflowInstanceManager:
         self._lock_ttl = lock_ttl_seconds
         self._schedule_repo = VontologyScheduleRepository()
         _ensure_indexes()
+        self._task_ownership_index_ready = False
 
     def _get_instances_collection(self) -> Collection | None:
         """Get the workflow_instances collection."""
         db = get_db()
         return db[WORKFLOW_INSTANCES_COLLECTION] if db is not None else None
+
+    def is_current_claim(self, instance_id: str, worker_id: str, token: str) -> bool:
+        coll = self._get_instances_collection()
+        if coll is None:
+            return False
+        doc = coll.find_one(
+            self._claim_fence_query(
+                instance_id=instance_id,
+                worker_id=worker_id,
+                claim_token=token,
+                require_unexpired=True,
+            )
+        )
+        return bool(doc and doc.get("task_ownership_active"))
+
+    def begin_claim_effect(self, instance_id, worker_id, token, method_name, payload):
+        coll = self._get_instances_collection()
+        if coll is None or not self.is_current_claim(instance_id, worker_id, token):
+            raise RuntimeError("durable_task_claim_lost")
+        effect_id = str(uuid.uuid4())
+        payload_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        effect = {
+            "effect_id": effect_id,
+            "method": method_name,
+            "payload_sha256": payload_hash,
+            "state": "started",
+            "started_at": datetime.now(timezone.utc),
+        }
+        result = coll.update_one(
+            self._claim_fence_query(
+                instance_id=instance_id,
+                worker_id=worker_id,
+                claim_token=token,
+                require_unexpired=True,
+            ),
+            {"$push": {"uncheckpointed_effects": effect}},
+        )
+        if not result.modified_count:
+            raise RuntimeError("durable_task_claim_lost")
+        return effect_id
+
+    def observe_claim_effect(self, instance_id, effect_id, result):
+        # Observations may arrive after lease expiry. They grant no execution
+        # rights and cannot rewrite checkpoints or clear reconciliation holds.
+        coll = self._get_instances_collection()
+        if coll is None:
+            raise RuntimeError("durable_effect_observation_store_unavailable")
+        receipt = {
+            key: result[key]
+            for key in ("success", "status", "error_code")
+            if isinstance(result, Mapping) and key in result
+        }
+        coll.update_one(
+            {"instance_id": instance_id, "uncheckpointed_effects.effect_id": effect_id},
+            {
+                "$set": {
+                    "uncheckpointed_effects.$.state": "returned",
+                    "uncheckpointed_effects.$.receipt": receipt,
+                }
+            },
+        )
+
+    def reconcile_claim_effects(
+        self,
+        instance_id: str,
+        *,
+        expected_effect_ids: list[str],
+        evidence: str,
+        expected_claim_token: str,
+        current_state: str,
+        workflow_data: dict[str, Any],
+        step_index: int,
+    ) -> bool:
+        """Trusted operator recovery after external read-back and worker drain.
+
+        The caller supplies the verified continuation checkpoint. This is not
+        exposed as a model-controlled bypass or inferred from a tool timeout.
+        Keep paused for ordinary authority-aware resume_instance preflight.
+        """
+        if not evidence.strip() or not current_state or not expected_effect_ids:
+            raise ValueError("effect_reconciliation_requires_evidence_and_checkpoint")
+        coll = self._get_instances_collection()
+        if coll is None:
+            return False
+        now = datetime.now(timezone.utc)
+        query = {
+            "instance_id": instance_id,
+            "claim_token": expected_claim_token,
+            "uncheckpointed_effects.effect_id": {"$all": expected_effect_ids},
+            "uncheckpointed_effects": {"$size": len(expected_effect_ids)},
+            "$or": [{"lock_expires_at": None}, {"lock_expires_at": {"$lte": now}}],
+        }
+        compacted = self._compact_instance_payload_field(
+            workflow_data, field="workflow_data", instance_id=instance_id
+        )
+        return bool(
+            coll.update_one(
+                query,
+                {
+                    "$set": {
+                        "status": "paused",
+                        "manual_resume_required": True,
+                        "locked_by": None,
+                        "lock_expires_at": None,
+                        "completed_at": None,
+                        "current_state": current_state,
+                        "workflow_data": compacted,
+                        "step_index": step_index,
+                        "uncheckpointed_effects": [],
+                        "effect_reconciliation_receipt": {
+                            "effect_ids": expected_effect_ids,
+                            "evidence": evidence,
+                            "reconciled_at": now,
+                        },
+                        "progress_message": "effects reconciled; awaiting checkpoint resume",
+                    }
+                },
+            ).modified_count
+        )
 
     @staticmethod
     def _normalise_status_filter(
@@ -850,6 +976,7 @@ class WorkflowInstanceManager:
             event_idempotency_key=event_idempotency_key,
         )
 
+        ownership_key = task_key(instance.to_doc())
         compacted_inputs = self._compact_instance_payload_field(
             instance.inputs,
             field="inputs",
@@ -882,6 +1009,7 @@ class WorkflowInstanceManager:
             )
 
         instance_doc = instance.to_doc()
+        instance_doc["task_ownership_key"] = ownership_key
         instance_doc["auto_claim_enabled"] = bool(auto_claim_enabled)
         if not auto_claim_enabled:
             # Legacy-claim shield (JVNAUTOSCI-2503): workers running builds
@@ -1604,6 +1732,11 @@ class WorkflowInstanceManager:
         worker_id_clean = str(worker_id or "").strip()
         if not worker_id_clean:
             return None
+        # Index creation is mandatory for claimants, but read-only instance
+        # diagnostics must not require schema-administration privileges.
+        if not self._task_ownership_index_ready:
+            ensure_task_ownership_index(coll)
+            self._task_ownership_index_ready = True
         normalised_build_identity = normalise_worker_build_identity(
             worker_build_identity,
             worker_id=worker_id_clean,
@@ -1639,6 +1772,15 @@ class WorkflowInstanceManager:
         # re-execute the same turn (JVNAUTOSCI-2503).
         query: dict[str, Any] = {
             "auto_claim_enabled": {"$ne": False},
+            "uncheckpointed_effects.0": {"$exists": False},
+            "$and": [
+                {
+                    "$or": [
+                        {"task_claim_retry_at": {"$exists": False}},
+                        {"task_claim_retry_at": {"$lte": now}},
+                    ]
+                }
+            ],
             "workflow_id": {"$nin": sorted(_RETIRED_AUTO_CLAIM_WORKFLOW_IDS)},
             "$or": [
                 {"status": WorkflowInstanceStatus.PENDING.value},
@@ -1699,50 +1841,76 @@ class WorkflowInstanceManager:
             *,
             claim_sort: list[tuple[str, int]],
         ) -> dict[str, Any] | None:
-            # Use $setOnInsert for started_at only if not already set
-            claimed_doc = coll.find_one_and_update(
-                {**claim_query, "started_at": None},
-                {
-                    "$set": {
-                        "status": WorkflowInstanceStatus.RUNNING.value,
-                        "locked_by": worker_id_clean,
-                        "lock_expires_at": lock_expires,
-                        "started_at": now,
-                        "claimed_at": now,
-                        "claimed_by_build": claim_provenance,
-                        "claim_token": claim_token,
-                        "claim_ineligible_reason": None,
-                        "claim_ineligible_detected_at": None,
-                        "progress_message": "running",
-                        "progress_updated_at": now,
-                    }
-                },
-                sort=claim_sort,
-                return_document=True,
-            )
-
-            # If no doc found with started_at=None, try without that constraint
-            if claimed_doc is None:
-                claimed_doc = coll.find_one_and_update(
-                    claim_query,
-                    {
-                        "$set": {
-                            "status": WorkflowInstanceStatus.RUNNING.value,
-                            "locked_by": worker_id_clean,
-                            "lock_expires_at": lock_expires,
-                            "claimed_at": now,
-                            "claimed_by_build": claim_provenance,
-                            "claim_token": claim_token,
-                            "claim_ineligible_reason": None,
-                            "claim_ineligible_detected_at": None,
-                            "progress_message": "running",
-                            "progress_updated_at": now,
-                        }
-                    },
+            excluded: list[str] = []
+            busy_keys: list[str] = []
+            for _ in range(20):
+                candidate_query = {
+                    "$and": [
+                        claim_query,
+                        {"instance_id": {"$nin": excluded}},
+                        {"task_ownership_key": {"$nin": busy_keys}},
+                    ]
+                }
+                candidate = coll.find_one(
+                    {"$and": [candidate_query, {"task_ownership_active": True}]},
                     sort=claim_sort,
-                    return_document=True,
-                )
-            return claimed_doc
+                ) or coll.find_one(candidate_query, sort=claim_sort)
+                if candidate is None:
+                    return None
+                identifier = candidate["instance_id"]
+                key = task_key(candidate)
+                try:
+                    claimed = coll.find_one_and_update(
+                        {"$and": [claim_query, {"instance_id": identifier}]},
+                        {
+                            "$set": {
+                                "status": WorkflowInstanceStatus.RUNNING.value,
+                                "locked_by": worker_id_clean,
+                                "lock_expires_at": lock_expires,
+                                "started_at": candidate.get("started_at") or now,
+                                "claimed_at": now,
+                                "claimed_by_build": claim_provenance,
+                                "claim_token": claim_token,
+                                "task_ownership_key": key,
+                                "task_ownership_active": True,
+                                "claim_ineligible_reason": None,
+                                "claim_ineligible_detected_at": None,
+                                "progress_message": "running",
+                                "progress_updated_at": now,
+                            }
+                        },
+                        return_document=True,
+                    )
+                    if claimed is not None:
+                        return claimed
+                except DuplicateKeyError:
+                    # Terminal owners can be released with a single conditional
+                    # write. A concurrent resume changes status and defeats this
+                    # release, or competes under the same unique index.
+                    released = coll.update_one(
+                        {
+                            "task_ownership_key": key,
+                            "task_ownership_active": True,
+                            "status": {"$in": ["completed", "failed", "cancelled"]},
+                            "uncheckpointed_effects.0": {"$exists": False},
+                        },
+                        {"$set": {"task_ownership_active": False}},
+                    )
+                    if released.modified_count:
+                        continue
+                    coll.update_one(
+                        {"$and": [claim_query, {"instance_id": identifier}]},
+                        {
+                            "$set": {
+                                "task_claim_retry_at": now + timedelta(seconds=5),
+                                "task_ownership_key": key,
+                                "progress_message": "waiting for task owner",
+                            }
+                        },
+                    )
+                    busy_keys.append(key)
+                excluded.append(identifier)
+            return None
 
         doc: dict[str, Any] | None = None
         if not workflow_ids:
@@ -2000,6 +2168,12 @@ class WorkflowInstanceManager:
             claim_token=claim_token,
             require_unexpired=(worker_id is not None or claim_token is not None),
         )
+        # Never persist a resumable checkpoint over a still-running or uncertain
+        # mutation. Successful checkpointing acknowledges observed effects.
+        checkpoint_query["uncheckpointed_effects"] = {
+            "$not": {"$elemMatch": {"state": "started"}}
+        }
+        update["$set"]["uncheckpointed_effects"] = []
         if projected_attestation is not None:
             checkpoint_query.update(
                 {
@@ -2180,6 +2354,11 @@ class WorkflowInstanceManager:
             claim_token=claim_token,
             require_unexpired=(worker_id is not None or claim_token is not None),
         )
+        completion_query["uncheckpointed_effects"] = {
+            "$not": {"$elemMatch": {"state": "started"}}
+        }
+        update["$set"]["task_ownership_active"] = False
+        update["$set"]["uncheckpointed_effects"] = []
         instance_before = self._find_one_and_update_instance(
             completion_query,
             update,
