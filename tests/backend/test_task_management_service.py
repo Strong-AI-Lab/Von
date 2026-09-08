@@ -474,7 +474,7 @@ class TestUpdateTaskStatus:
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
-    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service._upsert_optional_task_text")
     @patch(
         "src.backend.services.task_management_service.maybe_launch_task_status_workflow"
     )
@@ -529,7 +529,7 @@ class TestUpdateTaskStatus:
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
-    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service._upsert_optional_task_text")
     @patch("src.backend.services.task_management_service.ensure_effort_unit_ontology")
     @patch(
         "src.backend.services.task_management_service.maybe_launch_effort_unit_completed_workflow"
@@ -598,7 +598,7 @@ class TestUpdateTaskStatus:
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
-    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service._upsert_optional_task_text")
     @patch(
         "src.backend.services.task_management_service.maybe_launch_task_status_workflow"
     )
