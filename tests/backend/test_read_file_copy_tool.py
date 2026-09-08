@@ -75,8 +75,10 @@ def test_read_file_copy_accepts_matching_authenticated_namespace(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
-        lambda **kwargs: captured_kwargs.update(kwargs)
-        or {"success": True, "info": info, "data": b"ok"},
+        lambda **kwargs: (
+            captured_kwargs.update(kwargs)
+            or {"success": True, "info": info, "data": b"ok"}
+        ),
     )
 
     result = catalogue._read_file_copy(
@@ -113,8 +115,10 @@ def test_read_file_copy_returns_text(monkeypatch):
 
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
-        lambda **kwargs: captured_kwargs.update(kwargs)
-        or {"success": True, "info": info, "data": b"hello world"},
+        lambda **kwargs: (
+            captured_kwargs.update(kwargs)
+            or {"success": True, "info": info, "data": b"hello world"}
+        ),
     )
 
     result = catalogue._read_file_copy(concept_id="#V#file_copy_test", max_bytes=20)
@@ -219,3 +223,38 @@ def test_read_file_copy_preserves_typed_spreadsheet_safety_failure(monkeypatch):
     assert result["success"] is False
     assert result["error_code"] == "spreadsheet_archive_uncompressed_too_large"
     assert result["error_details"] == {"member_count": 9}
+
+
+def test_read_file_copy_recovers_renamed_pptx_without_mutating_metadata(monkeypatch):
+    from pptx import Presentation
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.services.computer_file_copy_service import FileCopyBlobInfo
+
+    deck = Presentation()
+    deck.slides.add_slide(deck.slide_layouts[1]).shapes.title.text = "Research result"
+    output = BytesIO()
+    deck.save(output)
+    data = output.getvalue()
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#owner",
+    )
+    info = FileCopyBlobInfo(
+        concept_id="#V#deck",
+        blob_key="source.bin",
+        blob_backend="local",
+        blob_uri="local://source.bin",
+        content_type="application/octet-stream",
+        original_filename="source.bin",
+        size_bytes=len(data),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
+        lambda **kwargs: {"success": True, "info": info, "data": data},
+    )
+    result = catalogue._read_file_copy(concept_id="#V#deck")
+    assert result["success"] and result["text_extraction"] == "python_pptx"
+    assert "Research result" in result["text"]
+    assert "presentationml" in result["detected_content_type"]
+    assert result["original_filename"] == "source.bin"
+    assert "bytes_base64" not in result

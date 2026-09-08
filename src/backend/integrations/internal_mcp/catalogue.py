@@ -7259,6 +7259,30 @@ def _read_file_copy(**kwargs):
             return payload
 
         if as_text:
+            from ...services.file_bytes_text_projection_service import (
+                detect_ooxml_content_type,
+                extract_file_bytes_text_projection,
+            )
+
+            detected_type = detect_ooxml_content_type(bytes(data_bytes))
+            source_type = str(payload.get("content_type") or "").lower()
+            source_name = str(payload.get("original_filename") or "").lower()
+            if (
+                detected_type
+                or source_name.endswith(".pptx")
+                or (source_type in ("", "application/octet-stream"))
+            ):
+                payload.update(
+                    extract_file_bytes_text_projection(
+                        data=bytes(data_bytes),
+                        content_type=detected_type or source_type,
+                        original_filename=source_name,
+                        max_text_chars=250_000,
+                    )
+                )
+                if detected_type:
+                    payload["detected_content_type"] = detected_type
+                return payload
             is_pdf = False
             try:
                 content_type = getattr(info, "content_type", None)
@@ -30284,6 +30308,45 @@ def _gmail_attachment_source_payload(
                 "max_bytes": max_bytes,
             },
         )
+
+    # A full-message read may issue fresh opaque attachment handles. Correlate
+    # only by actual bytes, never filename, size alone or first MIME part.
+    if not part_metadata:
+        candidates = [
+            part
+            for part in gs.list_attachment_part_metadata(message)
+            if part.get("reported_size_bytes") in (None, len(attachment_bytes))
+        ]
+        if len(candidates) > 8:
+            return make_error_response(
+                "gmail_attachment_metadata_unresolved",
+                "Too many MIME candidates; refresh the message and attachment handle.",
+            )
+        matches = []
+        for candidate in candidates:
+            candidate_raw = gs.get_attachment(
+                profile_id=profile,
+                message_id=message_id,
+                attachment_id=candidate["attachment_id"],
+                audit_context={
+                    "namespace": namespace,
+                    "source": audit_source,
+                    "tool": tool_name,
+                    "purpose": "attachment_correlation",
+                },
+            )
+            candidate_bytes = gs.decode_attachment_bytes(
+                candidate_raw, max_bytes=max_bytes
+            )
+            if candidate_bytes == attachment_bytes:
+                matches.append(candidate)
+        if len(matches) != 1:
+            return make_error_response(
+                "gmail_attachment_metadata_unresolved",
+                "Attachment bytes do not identify one MIME part; refresh the message.",
+                details={"matching_parts": len(matches)},
+            )
+        part_metadata = matches[0]
 
     content_sha256 = hashlib.sha256(attachment_bytes).hexdigest()
     content_type = part_metadata.get("content_type")

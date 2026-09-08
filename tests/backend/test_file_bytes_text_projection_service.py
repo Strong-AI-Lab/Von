@@ -294,3 +294,34 @@ def test_images_do_not_implicitly_invoke_unbounded_ocr(monkeypatch):
         "text_truncated": False,
         "text_extraction": "image_text_projection_unsupported",
     }
+
+
+def test_renamed_pptx_uses_package_evidence_not_bin_extension():
+    from pptx import Presentation
+
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[1])
+    slide.shapes.title.text = "Two-layer diffusion"
+    slide.placeholders[1].text = "Scene policy -> image policy"
+    output = io.BytesIO()
+    deck.save(output)
+    result = _project(
+        output.getvalue(),
+        content_type="application/octet-stream",
+        filename="attachment.bin",
+    )
+    assert result["text_extraction"] == "python_pptx"
+    assert "Slide 1" in result["text"]
+    assert "Two-layer diffusion" in result["text"]
+    assert "Scene policy -> image policy" in result["text"]
+    assert len(result["text"]) < 200
+
+
+def test_arbitrary_zip_is_not_decoded_as_text_or_mistaken_for_deck():
+    result = _project(
+        _zip_bytes(("notes.txt", b"hello")),
+        content_type="application/octet-stream",
+        filename="attachment.bin",
+    )
+    assert result["text_extraction"] == "unsupported_binary"
+    assert not result.get("text")

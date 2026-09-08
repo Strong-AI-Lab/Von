@@ -73,3 +73,28 @@ actual crop/cache use, latency and any failed attempts. Sparse OCR or model enri
 that a topic is absent. Cached model interpretations can be wrong; scientific claims must remain tied
 to inspectable original evidence. This integration does not reconcile the whole archive, prove
 corpus-wide OCR accuracy, cancel Otter, deploy a network archive service or grant wider access.
+
+## Original presentation decks
+
+`read_presentation_slides` accepts an actor-visible PPTX or PDF file-copy concept
+and returns up to four numbered slide images per call, native text, speaker notes
+(where present), source hashes and a next offset. Images use the existing native
+vision transport and private image viewer; original source bytes remain unchanged.
+The reader recognises Office package structure even when legacy import metadata
+says `.bin`. `read_file_copy` also uses bounded Office extraction for this case,
+with detected type reported separately from stored metadata.
+
+Install LibreOffice (`soffice` on PATH) for PPTX rendering. The converter uses an
+isolated temporary profile and a 90-second process bound. Derived PDFs are cached
+by source hash and renderer version. Optional `include_ocr` caches Tesseract output
+by image hash and engine version. Every call checks source access before reading
+derived caches. The service rejects a PPTX/rendered-PDF slide-count mismatch.
+Renderings can differ from PowerPoint in font/layout details; native text and
+rendered evidence remain separately attributed. Audio, animation and video playback
+are not reconstructed.
+
+Use the returned native images for diagram interpretation, retaining slide numbers,
+source hashes, model and prompt versions with any persisted interpretation. A cached
+render or OCR result is not a verified semantic interpretation. Reuse represented
+workflow authoring for analysis/persistence/recovery rather than treating a successful
+file import, graph creation or schedule as proof of slide understanding.

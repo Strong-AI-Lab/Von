@@ -134,6 +134,43 @@ def _zip_directory_location_before_open(data: bytes) -> tuple[int, int, int]:
     return record
 
 
+def detect_ooxml_content_type(data: bytes) -> str | None:
+    """Recognise an Office package even when imported with generic metadata.
+
+    Bound the central directory before opening it; parsers separately preflight
+    expanded content. This is format evidence, not a metadata mutation.
+    """
+    if not data.startswith(b"PK\x03\x04") or len(data) > MAX_INPUT_BYTES:
+        return None
+    try:
+        _zip_directory_location_before_open(data)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+            if "[Content_Types].xml" not in names or "_rels/.rels" not in names:
+                return None
+            kinds = [
+                mime
+                for member, mime in (
+                    (
+                        "ppt/presentation.xml",
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    ),
+                    (
+                        "word/document.xml",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ),
+                    (
+                        "xl/workbook.xml",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                )
+                if member in names
+            ]
+            return kinds[0] if len(kinds) == 1 else None
+    except (zipfile.BadZipFile, _ProjectionResourceLimit, ValueError):
+        return None
+
+
 def _preflight_ooxml_archive(data: bytes, *, document_kind: str) -> None:
     """Reject archive expansion beyond the local OOXML parser envelope."""
 
@@ -802,7 +839,9 @@ def extract_file_bytes_text_projection(
         }
 
     data_bytes = bytes(data)
-    content_type_token = _content_type_token(content_type)
+    content_type_token = detect_ooxml_content_type(data_bytes) or _content_type_token(
+        content_type
+    )
     filename_token = _filename_token(original_filename)
     stop_after_chars = max_text_chars + 1
     resource_truncated = False

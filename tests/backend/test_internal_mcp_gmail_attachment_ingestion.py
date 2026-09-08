@@ -283,9 +283,7 @@ def test_gmail_attachment_pdf_text_is_extracted_without_import(monkeypatch):
         assert "Flight EZY8159 departs at 12:15" in result["text"]
     else:
         assert result["text_extraction"] == "pdf_text_projection_unsupported"
-        assert result["text_extraction_error"] == (
-            "pdf_parser_isolation_unavailable"
-        )
+        assert result["text_extraction_error"] == ("pdf_parser_isolation_unavailable")
         assert "text" not in result
     assert "computer_file_copy" not in result
 
@@ -849,3 +847,82 @@ def test_stdio_gmail_attachment_surface_returns_same_ephemeral_projection(monkey
     assert "computer_file_copy" not in payload
     assert "data" not in payload
     assert base64.urlsafe_b64encode(source_bytes).decode("ascii") not in repr(payload)
+
+
+def test_rotated_attachment_handle_recovers_metadata_by_bytes(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    _install_actor(monkeypatch)
+    _install_gmail_source(
+        monkeypatch,
+        source_bytes=b"original deck bytes",
+        attachment_id="fresh-handle",
+        filename="deck.pptx",
+        content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    result = catalogue._gmail_attachment_source_payload(
+        profile="represented-profile",
+        message_id="message-1",
+        attachment_id="old-handle",
+        namespace="#V#michael_witbrock@sail",
+        tool_name="gmail_import_attachment",
+        max_bytes=1000,
+    )
+    assert result["success"] is True
+    assert result["filename"] == "deck.pptx"
+    assert "presentationml" in result["content_type"]
+    assert result["_bytes"] == b"original deck bytes"
+
+
+def test_rotated_handle_rejects_ambiguous_identical_attachment_parts(monkeypatch):
+    from src.backend.integrations.google import gmail_service
+    from src.backend.integrations.internal_mcp import catalogue
+
+    _install_actor(monkeypatch)
+    _install_gmail_source(monkeypatch, source_bytes=b"same", attachment_id="fresh")
+    message = _gmail_message(attachment_id="fresh", size=4)
+    message["payload"]["parts"].append(
+        {
+            "filename": "other.pptx",
+            "mimeType": "text/plain",
+            "body": {"attachmentId": "another", "size": 4},
+        }
+    )
+    monkeypatch.setattr(gmail_service, "get_message", lambda **kwargs: message)
+    result = catalogue._gmail_attachment_source_payload(
+        profile="represented-profile",
+        message_id="message-1",
+        attachment_id="old",
+        namespace="#V#michael_witbrock@sail",
+        tool_name="gmail_import_attachment",
+        max_bytes=1000,
+    )
+    assert result["success"] is False
+    assert result["error_code"] == "gmail_attachment_metadata_unresolved"
+
+
+def test_rotated_handle_does_not_associate_same_size_different_bytes(monkeypatch):
+    from src.backend.integrations.google import gmail_service
+    from src.backend.integrations.internal_mcp import catalogue
+
+    _install_actor(monkeypatch)
+    _install_gmail_source(monkeypatch, source_bytes=b"same", attachment_id="fresh")
+    monkeypatch.setattr(
+        gmail_service,
+        "get_attachment",
+        lambda **kwargs: {
+            "data": base64.urlsafe_b64encode(
+                b"same" if kwargs["attachment_id"] == "old" else b"else"
+            ).decode()
+        },
+    )
+    result = catalogue._gmail_attachment_source_payload(
+        profile="represented-profile",
+        message_id="message-1",
+        attachment_id="old",
+        namespace="#V#michael_witbrock@sail",
+        tool_name="gmail_import_attachment",
+        max_bytes=1000,
+    )
+    assert result["success"] is False
+    assert result["error_code"] == "gmail_attachment_metadata_unresolved"
