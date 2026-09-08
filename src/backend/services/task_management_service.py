@@ -2166,14 +2166,20 @@ def update_task_status(
 
     # Update status text relation
     try:
-        upsert_text_for_concept(
-            subject_concept_id=task_concept_id,
+        _upsert_optional_task_text(
+            task_concept_id=task_concept_id,
             predicate=PREDICATE_HAS_TASK_STATUS,
-            text=status,
+            value=status,
             lang="en",
         )
     except Exception as e:
         raise TaskManagementError(f"Failed to update task status: {e}") from e
+
+    # A transition must replace the current value, including when returning to
+    # a previously used status. Do not emit completion effects for a stale read.
+    persisted_task = get_task(task_concept_id)
+    if persisted_task.get("status") != status:
+        raise TaskManagementError("Task status update did not match canonical read-back")
 
     # Update timestamp
     now = _now()
@@ -4642,7 +4648,11 @@ def update_task_fields(
         changed_fields.append("current_work_product_concept_id")
 
     if "status" in fields:
-        update_task_status(task_concept_id, str(fields.get("status") or ""))
+        update_task_status(
+            task_concept_id,
+            str(fields.get("status") or ""),
+            actor_concept_id=actor_concept_id,
+        )
         changed_fields.append("status")
 
     assignee_field_present = "assignee_concept_id" in fields or "assignee_id" in fields
