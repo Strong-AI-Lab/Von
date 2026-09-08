@@ -221,24 +221,29 @@ def collect_catalogue(db, settings):
             "updated_at": 1,
             "history": {"$slice": [{"$ifNull": ["$history", []]}, -2]},
         }
-        for document in db["chat_history"].aggregate(
-            [
-                {"$match": query},
-                {"$limit": MAX_RECORDS + 1},
-                {"$project": projection},
-                {
-                    "$project": {
-                        "session_id": 1,
-                        "user_id": 1,
-                        "namespace": 1,
-                        "session_name": 1,
-                        "updated_at": 1,
-                        "history.role": 1,
-                        "history.content": 1,
-                    }
-                },
-            ]
+        for scanned, document in enumerate(
+            db["chat_history"].aggregate(
+                [
+                    {"$match": query},
+                    {"$limit": MAX_RECORDS + 1},
+                    {"$project": projection},
+                    {
+                        "$project": {
+                            "session_id": 1,
+                            "user_id": 1,
+                            "namespace": 1,
+                            "session_name": 1,
+                            "updated_at": 1,
+                            "history.role": 1,
+                            "history.content": 1,
+                        }
+                    },
+                ]
+            ),
+            start=1,
         ):
+            if scanned > MAX_RECORDS:
+                raise ValueError("conversation selection capacity exceeded")
             scope = {
                 "user_id": document.get("user_id"),
                 "namespace": document.get("namespace"),
