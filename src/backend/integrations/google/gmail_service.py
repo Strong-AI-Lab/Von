@@ -845,9 +845,7 @@ def list_messages(
         )
         if metadata_error is not None:
             projected_message["metadata_error"] = metadata_error
-            projected_message["metadata_missing_fields"] = list(
-                requested_detail_fields
-            )
+            projected_message["metadata_missing_fields"] = list(requested_detail_fields)
         projected_messages.append(projected_message)
 
     result["messages"] = projected_messages
@@ -1045,18 +1043,18 @@ def decode_attachment_bytes(
     return decoded
 
 
-def find_attachment_part_metadata(
+def list_attachment_part_metadata(
     message: Mapping[str, Any],
     *,
-    attachment_id: str,
     max_parts: int = MAX_GMAIL_ATTACHMENT_MIME_PARTS,
-) -> Dict[str, Any]:
-    """Return trusted MIME metadata for one attachment in a full Gmail message."""
+) -> list[Dict[str, Any]]:
+    """List bounded provider MIME metadata; attachment handles may rotate."""
 
     payload = message.get("payload")
     if not isinstance(payload, Mapping):
-        return {}
+        return []
 
+    results: list[Dict[str, Any]] = []
     effective_max_parts = max(1, int(max_parts))
     pending: list[Mapping[str, Any]] = [payload]
     visited_parts = 0
@@ -1072,10 +1070,12 @@ def find_attachment_part_metadata(
             )
 
         body = part.get("body")
-        if not isinstance(body, Mapping) or body.get("attachmentId") != attachment_id:
+        if not isinstance(body, Mapping) or not body.get("attachmentId"):
             continue
 
-        metadata: Dict[str, Any] = {"attachment_id": attachment_id}
+        metadata: Dict[str, Any] = {"attachment_id": body["attachmentId"]}
+        if isinstance(part.get("partId"), str):
+            metadata["part_id"] = part["partId"]
         filename = part.get("filename")
         if isinstance(filename, str) and filename.strip():
             metadata["filename"] = filename.strip()
@@ -1085,9 +1085,26 @@ def find_attachment_part_metadata(
         size = body.get("size")
         if isinstance(size, int) and size >= 0:
             metadata["reported_size_bytes"] = size
-        return metadata
+        results.append(metadata)
 
-    return {}
+    return results
+
+
+def find_attachment_part_metadata(
+    message: Mapping[str, Any],
+    *,
+    attachment_id: str,
+    max_parts: int = MAX_GMAIL_ATTACHMENT_MIME_PARTS,
+) -> Dict[str, Any]:
+    """Find the MIME part associated with a current provider handle."""
+    return next(
+        (
+            part
+            for part in list_attachment_part_metadata(message, max_parts=max_parts)
+            if part["attachment_id"] == attachment_id
+        ),
+        {},
+    )
 
 
 def list_labels(
@@ -1220,10 +1237,7 @@ def create_label(
 
     service = get_service(profile_id, profiles)
     result = (
-        service.users()
-        .labels()
-        .create(userId=profile.user_id, body=body)
-        .execute()
+        service.users().labels().create(userId=profile.user_id, body=body).execute()
         or {}
     )
     payload = dict(result)
@@ -1745,8 +1759,7 @@ def _outbound_turn_intent_request_id(
             "body_html": body_html,
             "body_language": str(body_language or "").strip().lower() or None,
             "body_authorship": (
-                str(body_authorship or "unspecified").strip().lower()
-                or "unspecified"
+                str(body_authorship or "unspecified").strip().lower() or "unspecified"
             ),
         }
     )
