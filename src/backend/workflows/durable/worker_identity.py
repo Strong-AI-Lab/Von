@@ -163,6 +163,7 @@ def build_worker_build_identity(worker_id: str) -> dict[str, Any]:
     version_info["pid"] = os.getpid()
     version_info["capabilities"] = [
         EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
+        "durable_task_ownership_v1",
     ]
     return normalise_worker_build_identity(version_info, worker_id=worker_id)
 

@@ -221,6 +221,9 @@ class WorkflowInstance:
     claimed_at: datetime | None = None
     claimed_by_build: dict[str, Any] | None = None
     claim_token: str | None = None
+    task_ownership_key: str | None = None
+    task_ownership_active: bool = False
+    uncheckpointed_effects: list[dict[str, Any]] = field(default_factory=list)
     authority_checkpoint_attestation: dict[str, Any] | None = None
     min_worker_build: str | None = None
     claim_ineligible_reason: str | None = None
@@ -314,6 +317,9 @@ class WorkflowInstance:
             "claimed_at": self.claimed_at,
             "claimed_by_build": self.claimed_by_build,
             "claim_token": self.claim_token,
+            "task_ownership_key": self.task_ownership_key,
+            "task_ownership_active": self.task_ownership_active,
+            "uncheckpointed_effects": self.uncheckpointed_effects,
             "authority_checkpoint_attestation": (self.authority_checkpoint_attestation),
             "min_worker_build": self.min_worker_build,
             "claim_ineligible_reason": self.claim_ineligible_reason,
@@ -381,6 +387,9 @@ class WorkflowInstance:
                 if isinstance(doc.get("authority_checkpoint_attestation"), dict)
                 else None
             ),
+            task_ownership_key=doc.get("task_ownership_key"),
+            task_ownership_active=bool(doc.get("task_ownership_active")),
+            uncheckpointed_effects=list(doc.get("uncheckpointed_effects") or []),
             min_worker_build=doc.get("min_worker_build"),
             claim_ineligible_reason=doc.get("claim_ineligible_reason"),
             claim_ineligible_detected_at=doc.get("claim_ineligible_detected_at"),

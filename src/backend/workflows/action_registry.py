@@ -427,6 +427,9 @@ class ActionRegistry:
             str(spec.concept_id or "").strip() if spec is not None else None
         ) or None
         try:
+            from .durable.task_ownership import assert_current_task_claim
+
+            assert_current_task_claim()
             request = WorkflowActionRequest(
                 action_id=resolved_action_id or action_target_id,
                 inputs=inputs,
