@@ -4704,6 +4704,7 @@ def test_tool_calling_backfill_finalises_when_required_tool_is_missing_at_cap(
             "aux_llm_calls": [],
             "llm_calls": [],
             "iteration_count": 1,
+            "llm_allowed_tools": ["fetch_concept", "gmail_get_message"],
             "remaining_tool_calls": [],
             "invocations": [{"tool": "fetch_concept", "status": "ok"}],
             "method_catalogue": {
@@ -4767,6 +4768,7 @@ def test_tool_calling_backfill_finalises_when_required_tool_is_missing_at_cap(
         "Tool-use limit reached: this turn reached "
         "`internal_mcp_max_tool_invocations=1` after 1 tool call(s)."
     )
+    assert "gmail_get_message" in continuation_calls[0]["authored_tool_names"]
     assert len(continuation_calls) == 1
     assert continuation_calls[0]["tool_choice_override"] == "none"
     assert [result.call_id for result in continuation_calls[0]["tool_results"]] == [

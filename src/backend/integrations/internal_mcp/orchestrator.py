@@ -6056,6 +6056,11 @@ class InternalMCPChatOrchestrator:
                     ),
                     required_prompt_tools=required_prompt_tools,
                     context_telemetry=tool_plan_context_telemetry,
+                    authored_tool_names=(
+                        tuple(sorted(allowed_tool_names))
+                        if request.action_id == "llm.action"
+                        else ()
+                    ),
                     prefer_default_model=bool(data.get("prefer_default_model")),
                     timeout_override_sec=timeout_override_sec,
                     workflow_stage_id="tool_plan",
@@ -9266,6 +9271,11 @@ class InternalMCPChatOrchestrator:
                     prompt=follow_up_prompt,
                     context=follow_up_context,
                     tool_definitions=continuation_tool_definitions,
+                    authored_tool_names=(
+                        tuple(sorted(allowed_tool_names))
+                        if request.action_id == "llm.action"
+                        else ()
+                    ),
                     default_client=llm_client,
                     default_model=structured_continuation.model,
                     policy_state=policy_state,
@@ -10848,6 +10858,7 @@ class InternalMCPChatOrchestrator:
         tool_definitions: Sequence[ToolDefinition],
         method_catalogue: Mapping[str, Any] | None,
         required_prompt_tools: Sequence[str],
+        authored_tool_names: Sequence[str] = (),
     ) -> _StructuredToolCandidateResolution:
         """Resolve deterministic tool candidates with provider-aware capping."""
 
@@ -10922,6 +10933,15 @@ class InternalMCPChatOrchestrator:
             seen_required.add(key)
             required_tools.append(candidate)
         required_lookup = {tool_name.lower() for tool_name in required_tools}
+        # An authored LLM step has already selected its bounded tool vocabulary.
+        # Follow-up family hints must not erase cross-domain tools from that set.
+        # Availability/authority filtering happens before this resolver; these
+        # names cannot add a definition that the caller did not supply.
+        authored_lookup = {
+            name.strip().lower()
+            for name in authored_tool_names
+            if isinstance(name, str) and name.strip().lower() in definitions_by_name
+        }
 
         baseline_tools: list[str] = []
         seen_baseline: set[str] = set()
@@ -10972,6 +10992,7 @@ class InternalMCPChatOrchestrator:
                 profile == "planner"
                 and _is_relation_bearing_tool(tool_name)
                 and key not in required_lookup
+                and key not in authored_lookup
                 and not relation_grounding_requested
             ):
                 _mark_excluded(tool_name, "relation_evidence_not_required")
@@ -10979,6 +11000,7 @@ class InternalMCPChatOrchestrator:
             if (
                 relation_grounding_requested
                 and key not in required_lookup
+                and key not in authored_lookup
                 and _is_inventory_only_tool(tool_name)
             ):
                 _mark_excluded(tool_name, "inventory_only_relation_grounding")
@@ -11037,6 +11059,9 @@ class InternalMCPChatOrchestrator:
         warnings: list[str] = []
 
         _append_bucket(required_tools)
+        _append_bucket(
+            [name for name in ordered_tool_names if name.lower() in authored_lookup]
+        )
         _append_bucket(baseline_tools)
         _append_bucket(family_matched_tools)
         if profile == "planner":
@@ -11069,7 +11094,7 @@ class InternalMCPChatOrchestrator:
             _append_bucket(read_tools)
             _append_bucket(write_tool_names)
 
-        if profile == "planner" and not required_tools:
+        if profile == "planner" and not required_tools and not authored_lookup:
             planner_cap = max(
                 1,
                 min(
@@ -17072,6 +17097,7 @@ class InternalMCPChatOrchestrator:
         workflow_action_id: str | None = None,
         method_catalogue: Mapping[str, Any] | None = None,
         required_prompt_tools: Sequence[str] = (),
+        authored_tool_names: Sequence[str] = (),
         context_telemetry: Mapping[str, Any] | None = None,
         prefer_default_model: bool = False,
         timeout_override_sec: float | None = None,
@@ -17408,6 +17434,7 @@ class InternalMCPChatOrchestrator:
                 tool_definitions=tool_definitions,
                 method_catalogue=method_catalogue,
                 required_prompt_tools=required_prompt_tools,
+                authored_tool_names=authored_tool_names,
             )
             available_tool_definitions = list(tool_candidates.tool_definitions)
             available_tool_name_lookup = {
