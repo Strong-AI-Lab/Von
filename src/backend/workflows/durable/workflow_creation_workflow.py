@@ -452,9 +452,7 @@ def _find_verified_named_instance_concept_ids(
     return list(dict.fromkeys(verified_ids))
 
 
-def _find_verified_person_concept_ids(
-    *, person_name: str, person_type_id: str
-) -> list[str]:
+def _find_verified_person_concept_ids(*, person_name: str, person_type_id: str) -> list[str]:
     return _find_verified_named_instance_concept_ids(
         concept_name=person_name,
         instance_of_type_id=person_type_id,
@@ -561,9 +559,7 @@ def _resolve_workflow_template_spec(
     workflow_name: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     explicit_template_id = _workflow_template_id_from_context(context)
-    request_summary = (
-        _clean_text(request_text[:160]) if request_text else "workflow_created"
-    )
+    request_summary = _clean_text(request_text[:160]) if request_text else "workflow_created"
     workflow_description = request_text
     rendered_spec, template_resolution = resolve_workflow_spec_template(
         request_text=request_text,
@@ -584,10 +580,9 @@ def _resolve_workflow_template_spec(
         rendered_spec.get("description") or workflow_description
     )
     if not fallback_description:
-        fallback_description = (
-            _clean_text(template_resolution.get("default_workflow_description"))
-            or "Workflow created from a natural-language workflow request."
-        )
+        fallback_description = _clean_text(
+            template_resolution.get("default_workflow_description")
+        ) or "Workflow created from a natural-language workflow request."
     rendered_spec["description"] = fallback_description
 
     if bool(profile.get("requires_synthesis_policy")):
@@ -667,7 +662,9 @@ def _build_step_rows(
             subworkflow_id = _clean_text(raw.get("subworkflow_id")) or None
             execution_mode = _clean_text(raw.get("execution_mode")) or None
             next_state = _normalise_slug(
-                raw.get("next_state") or raw.get("next_state_key") or raw.get("next"),
+                raw.get("next_state")
+                or raw.get("next_state_key")
+                or raw.get("next"),
                 fallback="",
             )
             on_true_state = _normalise_slug(
@@ -780,8 +777,7 @@ def _build_step_rows(
                     "on_false_state_key": on_false_state or None,
                     "on_failure_state_key": on_failure_state or None,
                     "on_unknown_state_key": on_unknown_state or None,
-                    "on_approval_required_state_key": on_approval_required_state
-                    or None,
+                    "on_approval_required_state_key": on_approval_required_state or None,
                     "on_break_state_key": on_break_state or None,
                     "on_continue_state_key": on_continue_state or None,
                     "terminal": terminal,
@@ -797,9 +793,7 @@ def _build_step_rows(
             )
 
     if not rows:
-        marker_value = (
-            _clean_text(request_text[:160]) if request_text else "workflow_created"
-        )
+        marker_value = _clean_text(request_text[:160]) if request_text else "workflow_created"
         rows = [
             {
                 "state_key": "record_request",
@@ -903,9 +897,7 @@ def _build_step_rows(
     return rows
 
 
-def _infer_postcondition_probe(
-    step_rows: Iterable[Mapping[str, Any]],
-) -> dict[str, Any]:
+def _infer_postcondition_probe(step_rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     for row in step_rows:
         action_id = _clean_text(row.get("action_id"))
         if action_id != WORKFLOW_CREATION_ACTION_EMIT_MARKER:
@@ -959,21 +951,17 @@ def _normalise_workflow_spec(
             request_text=request_text,
             workflow_id=workflow_id,
             workflow_name=authored_workflow_name
-            or _titleise(
-                workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
-            ),
+            or _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
         )
 
-    workflow_name = (
-        _clean_text(raw_spec.get("name") or raw_spec.get("workflow_name"))
-        or authored_workflow_name
-        or _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id)
+    workflow_name = _clean_text(
+        raw_spec.get("name") or raw_spec.get("workflow_name")
+    ) or authored_workflow_name or _titleise(
+        workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
     )
-    workflow_description = (
-        _clean_text(raw_spec.get("description") or raw_spec.get("workflow_description"))
-        or _clean_text(identity.get("workflow_description"))
-        or request_text
-    )
+    workflow_description = _clean_text(
+        raw_spec.get("description") or raw_spec.get("workflow_description")
+    ) or _clean_text(identity.get("workflow_description")) or request_text
     parent_type_id = _normalise_concept_id(
         raw_spec.get("parent_type_id")
         or context.get("parent_type_id")
@@ -1008,8 +996,7 @@ def _normalise_workflow_spec(
     ]
     if not required_effects and postcondition_probe:
         required_effects = [
-            f"context:{key}={value}"
-            for key, value in sorted(postcondition_probe.items())
+            f"context:{key}={value}" for key, value in sorted(postcondition_probe.items())
         ]
 
     verification_inputs_raw = raw_spec.get("verification_inputs")
@@ -1036,9 +1023,7 @@ def _normalise_workflow_spec(
         "text_relations": text_relations,
         "synthesis_policy_text": _clean_text(raw_spec.get("synthesis_policy_text")),
         "template_resolution": template_resolution,
-        "identity_inference_diagnostics": identity.get(
-            "identity_inference_diagnostics"
-        ),
+        "identity_inference_diagnostics": identity.get("identity_inference_diagnostics"),
     }
 
 
@@ -1179,9 +1164,7 @@ def _coerce_string_sequence(value: Any) -> list[str]:
                 [item.strip() for item in cleaned.split(",") if item.strip()]
             )
         return [cleaned]
-    if not isinstance(value, Iterable) or isinstance(
-        value, (bytes, bytearray, Mapping)
-    ):
+    if not isinstance(value, Iterable) or isinstance(value, (bytes, bytearray, Mapping)):
         return []
     results: list[str] = []
     seen: set[str] = set()
@@ -1254,8 +1237,8 @@ def _load_explicit_workflow_candidate_rows(
         except Exception:
             description, description_source = "", ""
         try:
-            routing_profile, routing_profile_source = resolve_workflow_routing_profile(
-                workflow_id
+            routing_profile, routing_profile_source = (
+                resolve_workflow_routing_profile(workflow_id)
             )
         except Exception:
             routing_profile, routing_profile_source = None, ""
@@ -1305,8 +1288,7 @@ def _handle_discover_existing_workflows(
 
     exclude_ids = set(
         _coerce_string_sequence(
-            inputs.get("exclude_workflow_ids")
-            or request.data.get("exclude_workflow_ids")
+            inputs.get("exclude_workflow_ids") or request.data.get("exclude_workflow_ids")
         )
     )
     exclude_ids.update(
@@ -1351,7 +1333,8 @@ def _handle_discover_existing_workflows(
     routing_rows_by_id: dict[str, dict[str, Any]] = {
         str(row.get("concept_id")): row
         for row in explicit_candidate_rows
-        if isinstance(row.get("concept_id"), str) and bool(row.get("routing_eligible"))
+        if isinstance(row.get("concept_id"), str)
+        and bool(row.get("routing_eligible"))
     }
     for row in discovered_routing_rows:
         routing_rows_by_id.setdefault(str(row.get("concept_id")), row)
@@ -1412,9 +1395,7 @@ def _handle_design_structure(request: WorkflowActionRequest) -> WorkflowActionRe
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
-def _handle_create_workflow_type(
-    request: WorkflowActionRequest,
-) -> WorkflowActionResult:
+def _handle_create_workflow_type(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
@@ -1453,9 +1434,7 @@ def _handle_ensure_workflow_identity(
     return _handle_create_workflow_type(request)
 
 
-def _handle_create_step_concepts(
-    request: WorkflowActionRequest,
-) -> WorkflowActionResult:
+def _handle_create_step_concepts(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_name = _clean_text(spec.get("workflow_name")) or "Generated Workflow"
@@ -1516,12 +1495,10 @@ def _handle_materialise_workflow_definition(
 
     try:
         definition = build_workflow_definition_from_authoring_spec(spec)
-        publication_report = (
-            workflow_authority_service.publish_workflow_definition_from_definition(
-                definition=definition,
-                create_missing=True,
-                purpose=workflow_description or workflow_name,
-            )
+        publication_report = workflow_authority_service.publish_workflow_definition_from_definition(
+            definition=definition,
+            create_missing=True,
+            purpose=workflow_description or workflow_name,
         )
     except Exception as exc:
         return WorkflowActionResult(
@@ -1540,9 +1517,7 @@ def _handle_materialise_workflow_definition(
         if isinstance(errors_by_workflow_id, Mapping)
         else ""
     )
-    validation_failures = (
-        publication_report.get("validation_failures_by_workflow_id") or {}
-    )
+    validation_failures = publication_report.get("validation_failures_by_workflow_id") or {}
     validation_failure = (
         validation_failures.get(workflow_id)
         if isinstance(validation_failures, Mapping)
@@ -1623,9 +1598,7 @@ def _handle_materialise_workflow_definition(
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
-def _handle_establish_relationships(
-    request: WorkflowActionRequest,
-) -> WorkflowActionResult:
+def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowActionResult:
     from .. import workflow_concept_authority_service as workflow_authority_service
 
     spec = _normalise_workflow_spec(request.data)
@@ -1671,9 +1644,7 @@ def _handle_establish_relationships(
         initial_step_id
     ]
     workflow_relationships[WORKFLOW_GRAPH_PREDICATE_HAS_STEP] = ordered_step_ids
-    concept_service.update_concept(
-        workflow_id, {"relationships": workflow_relationships}
-    )
+    concept_service.update_concept(workflow_id, {"relationships": workflow_relationships})
 
     graph_keys = {
         WORKFLOW_GRAPH_PREDICATE_INVOKES_ACTION,
@@ -1931,17 +1902,11 @@ def _handle_resolve_scholarly_authors(
         and isinstance(request.inputs, Mapping)
         and "author_names" in request.inputs
     ):
-        author_names = _extract_person_names_from_value(
-            request.inputs.get("author_names")
-        )
+        author_names = _extract_person_names_from_value(request.inputs.get("author_names"))
 
     _ensure_type_concept(
         person_type_id,
-        name=(
-            "Person"
-            if person_type_id == DEFAULT_PERSON_TYPE_ID
-            else _titleise(person_type_id)
-        ),
+        name="Person" if person_type_id == DEFAULT_PERSON_TYPE_ID else _titleise(person_type_id),
     )
     _ensure_predicate_concept(authored_by_predicate_id)
 
@@ -1993,9 +1958,13 @@ def _handle_resolve_scholarly_authors(
         "paper_authorship_links_written": links_written,
     }
     if paper_concept_id and not paper_exists:
-        outputs["paper_authorship_links_skipped_reason"] = "paper_concept_not_found"
+        outputs["paper_authorship_links_skipped_reason"] = (
+            "paper_concept_not_found"
+        )
     elif not paper_concept_id:
-        outputs["paper_authorship_links_skipped_reason"] = "paper_concept_id_missing"
+        outputs["paper_authorship_links_skipped_reason"] = (
+            "paper_concept_id_missing"
+        )
 
     return WorkflowActionResult(status="success", outputs=outputs)
 
@@ -2004,19 +1973,13 @@ def _handle_resolve_phd_student_candidate(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     person_type_id = _clean_text(
-        request.inputs.get("person_type_id")
-        if isinstance(request.inputs, Mapping)
-        else ""
+        request.inputs.get("person_type_id") if isinstance(request.inputs, Mapping) else ""
     ) or _clean_text(request.data.get("person_type_id"))
     if not person_type_id:
         person_type_id = DEFAULT_PERSON_TYPE_ID
     _ensure_type_concept(
         person_type_id,
-        name=(
-            "Person"
-            if person_type_id == DEFAULT_PERSON_TYPE_ID
-            else _titleise(person_type_id)
-        ),
+        name="Person" if person_type_id == DEFAULT_PERSON_TYPE_ID else _titleise(person_type_id),
     )
 
     merged_context = dict(request.data)
@@ -2122,17 +2085,13 @@ def _handle_assert_phd_student_relationships(
         )
 
     person_type_id = _clean_text(
-        request.inputs.get("person_type_id")
-        if isinstance(request.inputs, Mapping)
-        else ""
+        request.inputs.get("person_type_id") if isinstance(request.inputs, Mapping) else ""
     ) or _clean_text(request.data.get("person_type_id"))
     if not person_type_id:
         person_type_id = DEFAULT_PERSON_TYPE_ID
 
     student_type_id = _clean_text(
-        request.inputs.get("student_type_id")
-        if isinstance(request.inputs, Mapping)
-        else ""
+        request.inputs.get("student_type_id") if isinstance(request.inputs, Mapping) else ""
     ) or _clean_text(request.data.get("student_type_id"))
     if not student_type_id:
         student_type_id = DEFAULT_STUDENT_TYPE_ID
@@ -2171,19 +2130,11 @@ def _handle_assert_phd_student_relationships(
 
     _ensure_type_concept(
         person_type_id,
-        name=(
-            "Person"
-            if person_type_id == DEFAULT_PERSON_TYPE_ID
-            else _titleise(person_type_id)
-        ),
+        name="Person" if person_type_id == DEFAULT_PERSON_TYPE_ID else _titleise(person_type_id),
     )
     _ensure_type_concept(
         student_type_id,
-        name=(
-            "Student"
-            if student_type_id == DEFAULT_STUDENT_TYPE_ID
-            else _titleise(student_type_id)
-        ),
+        name="Student" if student_type_id == DEFAULT_STUDENT_TYPE_ID else _titleise(student_type_id),
     )
     _ensure_type_concept(
         phd_student_type_id,
@@ -2221,9 +2172,7 @@ def _handle_assert_phd_student_relationships(
         parent_type_id=phd_student_type_id,
     )
 
-    supervisor_names = _extract_person_names_from_value(
-        request.data.get("supervisor_names")
-    )
+    supervisor_names = _extract_person_names_from_value(request.data.get("supervisor_names"))
     if not supervisor_names and isinstance(request.inputs, Mapping):
         supervisor_names = _extract_person_names_from_value(
             request.inputs.get("supervisor_names")
@@ -2258,9 +2207,7 @@ def _handle_assert_phd_student_relationships(
                     ),
                     "ambiguous_supervisors": ambiguous_supervisor_names,
                     "matches_by_supervisor": {
-                        key: value
-                        for key, value in supervisor_matches.items()
-                        if len(value) > 1
+                        key: value for key, value in supervisor_matches.items() if len(value) > 1
                     },
                     "resolution_hint": (
                         "Provide explicit supervisor concept IDs or unique supervisor names."
@@ -2340,14 +2287,10 @@ def _handle_assert_phd_student_relationships(
         outputs={
             "phd_student_relationships_asserted": True,
             "phd_student_concept_id": student_concept_id,
-            "phd_student_supervisor_concept_ids": list(
-                dict.fromkeys(supervisor_concept_ids)
-            ),
+            "phd_student_supervisor_concept_ids": list(dict.fromkeys(supervisor_concept_ids)),
             "phd_student_supervisor_links_written": supervisor_links_written,
             "reused_supervisor_concept_ids": list(dict.fromkeys(reused_supervisor_ids)),
-            "created_supervisor_concept_ids": list(
-                dict.fromkeys(created_supervisor_ids)
-            ),
+            "created_supervisor_concept_ids": list(dict.fromkeys(created_supervisor_ids)),
             "research_topic": research_topic,
             "phd_student_research_topic_concept_id": research_topic_concept_id or None,
             "phd_student_research_topic_reused_existing": research_topic_reused_existing,
@@ -2358,9 +2301,7 @@ def _handle_assert_phd_student_relationships(
     )
 
 
-def _handle_ground_phd_student_text(
-    request: WorkflowActionRequest,
-) -> WorkflowActionResult:
+def _handle_ground_phd_student_text(request: WorkflowActionRequest) -> WorkflowActionResult:
     student_concept_id = _clean_text(request.data.get("phd_student_concept_id"))
     source_text = _clean_text(
         request.data.get("phd_student_source_text")
@@ -2499,9 +2440,7 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
             ),
         )
     )
-    if environment.gateway is not None and getattr(
-        environment.gateway, "enabled", False
-    ):
+    if environment.gateway is not None and getattr(environment.gateway, "enabled", False):
         registry.set_fallback_handler(_gateway_fallback_action)
     return registry
 
@@ -2553,9 +2492,7 @@ def _verify_postconditions(
     return True
 
 
-def _handle_verify_discoverability(
-    request: WorkflowActionRequest,
-) -> WorkflowActionResult:
+def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
@@ -2663,19 +2600,14 @@ def _handle_verify_discoverability(
                 key_text = _clean_text(key)
                 if key_text:
                     probe[key_text] = value
-        postconditions_verified = (
-            verification_result.completed
-            and _verify_postconditions(
-                workflow_data=verification_result.data,
-                probe=probe,
-            )
+        postconditions_verified = verification_result.completed and _verify_postconditions(
+            workflow_data=verification_result.data,
+            probe=probe,
         )
 
     required_effects_declared = bool(spec.get("required_effects"))
     all_verified = (
-        required_effects_declared
-        and structural_validation_passed
-        and postconditions_verified
+        required_effects_declared and structural_validation_passed and postconditions_verified
     )
     _write_workflow_publication_lifecycle(
         workflow_id=workflow_id,
@@ -2718,14 +2650,10 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
         request.data.get("workflow_concept_id") or spec.get("workflow_id") or ""
     ).strip()
     required_effects_declared = bool(request.data.get("required_effects_declared"))
-    structural_validation_passed = bool(
-        request.data.get("structural_validation_passed")
-    )
+    structural_validation_passed = bool(request.data.get("structural_validation_passed"))
     postconditions_verified = bool(request.data.get("postconditions_verified"))
     all_verified = (
-        required_effects_declared
-        and structural_validation_passed
-        and postconditions_verified
+        required_effects_declared and structural_validation_passed and postconditions_verified
     )
     if workflow_id:
         _write_workflow_publication_lifecycle(
@@ -2782,9 +2710,7 @@ def _handle_emit_marker(request: WorkflowActionRequest) -> WorkflowActionResult:
     if not marker_key:
         marker_key = "workflow_creation_marker"
     marker_value_raw = (
-        request.inputs.get("marker_value")
-        if isinstance(request.inputs, Mapping)
-        else ""
+        request.inputs.get("marker_value") if isinstance(request.inputs, Mapping) else ""
     )
     marker_value: Any
     if isinstance(marker_value_raw, bool):
@@ -2879,7 +2805,9 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
             action_id=WORKFLOW_CREATION_ACTION_FINALISE,
             handler=_handle_finalise,
             description="Apply completion gate for workflow creation.",
-            **_workflow_creation_action_spec_kwargs(WORKFLOW_CREATION_ACTION_FINALISE),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_FINALISE
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
