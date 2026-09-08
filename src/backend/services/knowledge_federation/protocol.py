@@ -17,10 +17,10 @@ from typing import Any
 
 from pymongo.errors import DuplicateKeyError
 
-VERSION = "von_knowledge_snapshot.v1"
+VERSION = "von_knowledge_snapshot.v2"
 CONFIG_VERSION = "von_federation_config.v1"
-MAX_BYTES = 4 * 1024 * 1024
-MAX_RECORDS = 1000
+MAX_BYTES = 12 * 1024 * 1024
+MAX_RECORDS = 20000
 NODE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$")
 
 
@@ -153,7 +153,12 @@ def validate_payload(
         ids.add(row["id"])
         if row["audience"] not in audiences:
             raise PermissionError("snapshot audience outside subscription")
-        if row["kind"] not in {"scoped_assertion", "public_relation"}:
+        if row["kind"] not in {
+            "scoped_assertion",
+            "public_relation",
+            "conversation",
+            "file_manifest",
+        }:
             raise ValueError("unsupported knowledge kind")
         claim = row["claim"]
         if not isinstance(claim, dict) or not isinstance(row["vocabulary"], list):
@@ -168,7 +173,11 @@ def validate_payload(
             raise PermissionError(
                 "governance content cannot enter the knowledge projection"
             )
-        if row["kind"] == "scoped_assertion":
+        if row["kind"] in {"conversation", "file_manifest"}:
+            from .continuity import validate_catalogue_record
+
+            validate_catalogue_record(row)
+        elif row["kind"] == "scoped_assertion":
             scope = claim.get("scope", {})
             expected = (
                 f"user:{scope.get('user_concept_id')}"

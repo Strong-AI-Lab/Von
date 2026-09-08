@@ -37,6 +37,9 @@ def search(
     query: str = "",
     limit: int = 50,
     source_concept_id: str | None = None,
+    federated_id: str | None = None,
+    kind: str | None = None,
+    offset: int = 0,
     config: dict | None = None,
     db=None,
 ) -> dict:
@@ -51,7 +54,7 @@ def search(
     )
 
     config = load_config() if config is None else config
-    if not 1 <= limit <= 200 or len(query) > 2000:
+    if not 1 <= limit <= 200 or len(query) > 2000 or not 0 <= offset <= 20000:
         raise ValueError("federation query/limit outside bound")
     audiences = {"public"}
     user, org = get_effective_user_concept_id(), get_effective_organisation_concept_id()
@@ -103,16 +106,24 @@ def search(
                 "state": "stale" if stale else "current",
                 "source_checked_at": snapshot["checked_at"],
                 "received_at": snapshot["received_at"],
-                "coverage": "explicit_selected_slice",
+                "coverage": "configured_native_scopes_and_explicit_selections",
                 "private_reads_expire": True,
             }
         )
         for record in visible:
+            if federated_id and federated_id != f"{origin}/{record['id']}":
+                continue
+            if kind and kind != record["kind"]:
+                continue
             if record["claim"]["status"] != "asserted":
                 continue
-            if source_concept_id and not any(
-                v.get("source_concept_id") == source_concept_id
-                for v in record["vocabulary"]
+            if (
+                source_concept_id
+                and source_concept_id != record["claim"].get("source_id")
+                and not any(
+                    v.get("source_concept_id") == source_concept_id
+                    for v in record["vocabulary"]
+                )
             ):
                 continue
             text = (
@@ -134,11 +145,26 @@ def search(
                     "execution_authority": False,
                 }
             )
-    rows.sort(key=lambda row: row["federated_id"])
+    rows.sort(
+        key=lambda row: (
+            str(row["claim"].get("updated_at") or ""),
+            row["federated_id"],
+        ),
+        reverse=True,
+    )
+    total = len(rows)
+    page = rows[offset : offset + limit]
     return {
-        "results": rows[:limit],
-        "returned": min(len(rows), limit),
-        "truncated": len(rows) > limit,
+        "results": page,
+        "returned": len(page),
+        "truncated": offset + limit < total,
+        "next_offset": offset + limit if offset + limit < total else None,
+        "pagination_consistency": "live view; concurrent reconciliation may change page order",
+        "local_only": [
+            "editable conversation originals",
+            "task and workflow execution",
+            "unsubscribed or unsupported source content",
+        ],
         "coverage": coverage,
         "complete_for": "configured_received_slices_only",
         "global_completeness": False,

@@ -13,7 +13,8 @@ It does not change canonical local assertion, concept or task collections.
 
 This is complete-slice reconciliation, not general all-history event sourcing,
 database replication or an Atlas replacement. The incumbent stores remain in
-place. The pilot transfers at most 1,000 records / 4 MiB per direction; transfer
+place. The original v1 pilot transferred at most 1,000 records / 4 MiB per direction; the
+v2 extension below raises this bounded metadata capacity. Transfer
 cost is proportional to the selected slice. It deliberately polls and transfers
 the bounded slice even when unchanged, so a fresh authenticated observation can
 renew private readability. Measure bytes and lag before adding a delta protocol.
@@ -171,3 +172,85 @@ No general vector indexing, online-only publication authority reconciliation,
 automatic semantic conflict resolution, peer mesh, all-history retention, ontology
 release migration or cross-database execution ownership is claimed. Add these only
 when a measured next capability requires them.
+
+## Practical continuity extension (JVNAUTOSCI-2731)
+
+The v2 snapshot adds automatic native scope selection and portable conversation
+and file catalogues. Both endpoints must be upgraded together before enabling the
+new configuration. Metadata capacity is 20,000 records / 12 MiB per direction;
+an over-capacity capture fails visibly and preserves the last complete generation.
+There is no silent first-N export. This remains bounded reconciliation, with two
+matching scans, not an unbounded database replica.
+
+An export may add `assertion_audiences` and `file_audiences`, each an explicit
+subset of its admitted private audiences. Newly created native assertions in those
+scopes are included on the next successful exchange without editing ID lists.
+Assertion visibility and vocabulary checks still apply. Public graph export remains
+an exact operator selection. Native file manifests require an unambiguous explicit
+user or organisation visibility relation; user visibility takes precedence over
+organisation visibility. Unsupported or unscoped legacy file visibility, conversation
+image proxy records and copies imported by federation are not automatically relayed.
+
+`conversation_users` admits owners across their current and future valid owner-prefixed
+namespaces; `conversation_scopes` can instead select exact `{user_id, namespace}`
+pairs. Missing or conflicting legacy namespaces are excluded. Discovery exports
+only owner-private session identifiers, titles, update times and previews of the
+last two user/assistant messages (at most 500 characters each). It never exposes
+system messages, tool payloads, execution diagnostics or credentials as operational
+fields. User-visible text can itself contain sensitive information and retains its
+owner's audience. Shared conversation access does not authorise copying another
+owner's carrier. Imported conversation catalogues are not editable chat sessions.
+
+Use `search_federated_knowledge` with `kind`, `query`, `federated_id` or
+`source_concept_id`. Results sort by source update time, newest first, and offer
+`next_offset`. Pagination is a live view, so concurrent reconciliation can change
+page order. Empty results mean no match within the received configured coverage,
+not global absence. Previews are not full-text conversation indexing. The result
+also names surfaces that remain local, including executable tasks and editable
+conversation originals.
+
+`read_federated_conversation` retrieves visible conversation text on demand in
+60,000-character pages. Pass both `next_offset` and `content_digest` to continue;
+a changed conversation requires restarting the read. A new local conversation can
+use this evidence to continue discussing the work, but this does not transfer a
+running workflow, task claim, editor state or browser chat history entry.
+
+`import_federated_file` fetches a discovered file of at most 32 MiB, checks its
+size and SHA256 and calls the canonical file-copy ingestion service. The local
+copy is private to the requesting trusted user and retains origin, source identity,
+source audience and content hash. Existing normal file/OCR/diagram tools can use the
+returned local concept ID. Repeated imports use the canonical user/content/source
+lookup. A materialised copy has its own lifecycle; source withdrawal removes remote
+discovery/read access but does not erase a previously authorised private copy.
+
+File manifests report `on_demand` or `source_only_metadata_or_size_limit`.
+`on_demand` means eligible for an attempted fetch, not that source connectivity or
+blob availability has been checked. Both conversation text and original file bytes
+require a reachable source. Cached catalogue previews retain the existing freshness
+lease. External Otter/LinkedIn/KnowKat archives remain separate integration sources;
+this extension does not clone them or copy their credential/resource bindings.
+
+### Content transport and recovery
+
+The standard content route uses the admitted SSH command. If the source cannot
+accept reverse SSH, run the optional operator content reader with `serve --port
+5013`. It binds only `127.0.0.1` and accepts only `/content` POSTs. Expose it to the
+other host through an SSH reverse tunnel bound there to `127.0.0.1`, for example
+`ssh -N -R 127.0.0.1:15013:127.0.0.1:5013 admitted-peer`. Configure the receiving
+node's `content_endpoints` mapping, e.g. `{"atlas-mac":
+"http://127.0.0.1:15013/content"}`. Only loopback URLs without credentials or
+redirect targets are valid; this is not a public HTTP server.
+
+Requests are signed with the admitted pairwise key and bind origin, recipient,
+request and observation time. Responses additionally bind the caller's random
+nonce and exact catalogue record digest. Source reads recheck native eligibility
+and receiver reads recheck admission after transfer. The listener cannot mutate
+configuration, import knowledge, write files or invoke workflow execution. Protect
+and supervise both reader and tunnel with the host's service manager. The same
+limitations of pairwise HMAC and trusted peer retention apply as to snapshots.
+
+A stopped tunnel produces a typed unavailable result, not a fabricated empty
+conversation or a claim that a file has been saved. Metadata exchange is independent
+of the reverse content route. Rollback stops the reader/tunnel, restores the earlier
+private configuration, and disables the extended selection before downgrading both
+nodes; retain generation heads and existing canonical data.
