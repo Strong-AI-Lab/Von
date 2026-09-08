@@ -2540,11 +2540,32 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
 
     postconditions_verified = False
     optional_test_instance_id: str | None = None
+    verification_run: dict[str, Any] | None = None
     if structural_validation_passed:
         executor = WorkflowExecutor(registry=verification_registry, max_transitions=40)
         verification_inputs_raw = request.data.get("test_run_inputs")
         if not isinstance(verification_inputs_raw, Mapping):
             verification_inputs_raw = spec.get("verification_inputs")
+        verification_data = (
+            dict(verification_inputs_raw)
+            if isinstance(verification_inputs_raw, Mapping)
+            else {}
+        )
+        # Test fixtures supply domain inputs, not a replacement execution actor.
+        # Nested LLM steps consume these runtime fields as well as environment.
+        if request.environment.user_concept_id:
+            verification_data.update(
+                user_concept_id=request.environment.user_concept_id,
+                org_concept_id=request.environment.org_concept_id,
+                organisation_concept_id=request.environment.org_concept_id,
+                namespace=request.environment.user_namespace,
+                user_namespace=request.environment.user_namespace,
+            )
+        if request.environment.model:
+            verification_data.setdefault("requested_model", request.environment.model)
+        for key in ("requested_client_type", "prefer_default_model"):
+            if key in request.data:
+                verification_data.setdefault(key, request.data[key])
         verification_result = executor.run(
             definition,
             environment=WorkflowEnvironment(
@@ -2564,10 +2585,13 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
                 org_concept_id=request.environment.org_concept_id,
                 step_callback=request.environment.step_callback,
             ),
-            data=dict(verification_inputs_raw or {})
-            if isinstance(verification_inputs_raw, Mapping)
-            else {},
+            data=verification_data,
         )
+        verification_run = {
+            "completed": verification_result.completed,
+            "final_state": verification_result.final_state,
+            "error": verification_result.error,
+        }
         optional_test_instance_id = f"local_test_{uuid.uuid4()}"
         probe: dict[str, Any] = {}
         probe_raw = spec.get("postcondition_probe")
@@ -2605,6 +2629,7 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
             "optional_test_instance_id": optional_test_instance_id,
             "workflow_discoverable_before_publish": discoverable_before_publish,
             "contract_validation": contract,
+            "verification_run": verification_run,
         },
         validated_type_name=parent_type_id,
     )
