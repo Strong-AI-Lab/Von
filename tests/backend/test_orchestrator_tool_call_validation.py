@@ -199,3 +199,47 @@ def test_workflow_tool_images_follow_correlated_tool_batch(monkeypatch):
     assert 'tool_call_id' not in messages[2]
     assert request.data['augmented_context'][-2:] == messages[-2:]
     assert 'base64' not in str(messages)
+
+
+def test_workflow_llm_write_binds_distinct_effects_only_after_admission(monkeypatch):
+    from dataclasses import fields
+    from src.backend.services.ontology_publication_authority_service import current_ontology_invocation
+    from src.backend.workflows.trace_model import WorkflowExecutionTrace
+
+    monkeypatch.setattr(orchestrator_mod, "validate_tool_target_contract",
+                        lambda **kwargs: SimpleNamespace(ok=True, resolution_evidence=()))
+    seen = []
+    catalogue = MethodCatalogue()
+    def record(**kwargs):
+        seen.append(current_ontology_invocation())
+        return {"success": True}
+    catalogue.register(MethodDefinition(name="upsert_text_relation", handler=record,
+        input_schema=Schema(required={}, optional={}, allow_unknown=True), category="write"))
+    gateway = InternalMCPGateway(catalogue=catalogue, transport=InternalMCPTransport(), enabled=True)
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway, max_tool_invocations=2)
+    policy_values = {f.name: {} for f in fields(orchestrator_mod._ResolvedWritePolicyDecision)}
+    policy_values.update(allowed_tools=frozenset({"upsert_text_relation"}), reason="admitted",
+        decision_basis="workflow", outcome="allowed", user_denial_detected=False,
+        confirmation_required_tools=frozenset(), effective_mutation_authority="unrestricted",
+        guardrail_events=(), profile_concept_id=None)
+    monkeypatch.setattr(orchestrator, "_resolve_allowed_write_tools",
+                        lambda **kwargs: orchestrator_mod._ResolvedWritePolicyDecision(**policy_values))
+    request = WorkflowActionRequest(action_id="llm.action", inputs={},
+        environment=WorkflowEnvironment(llm_client=None, gateway=gateway, max_tool_invocations=2),
+        workflow_id="#V#slides", workflow_state_id="interpret",
+        trace=WorkflowExecutionTrace(workflow_id="#V#slides", execution_id="run", instance_id="durable"),
+        data={"prompt":"Save slide evidence", "response":"", "augmented_context":[],
+              "tool_calls":[{"action":"call_tool", "tool":"upsert_text_relation", "payload":{}, "_call_id":f"call-{i}"} for i in range(2)],
+              "method_catalogue":gateway.describe_methods(), "tool_categories":{"upsert_text_relation":"write"},
+              "iteration_count":0, "aux_llm_calls":[], "llm_calls":[]})
+    orchestrator._action_tool_calling_execute(request)
+    assert len(seen) == 2
+    assert all(context.actor_bound_workflow_effect for context in seen)
+    assert [context.effect_id for context in seen] == [
+        f"workflow:#V#slides:durable:interpret:upsert_text_relation:call-{i}" for i in range(2)]
+    assert current_ontology_invocation() is None
+    seen.clear()
+    policy_values.update(allowed_tools=frozenset(), outcome="denied")
+    request.data.update(iteration_count=0, tool_calls=[{"action":"call_tool", "tool":"upsert_text_relation", "payload":{}, "_call_id":"blocked"}])
+    orchestrator._action_tool_calling_execute(request)
+    assert not seen
