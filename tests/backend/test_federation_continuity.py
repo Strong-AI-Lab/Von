@@ -347,3 +347,25 @@ def test_compact_refresh_reuses_only_authenticated_unchanged_cache(nodes):
     compact["signature"] = "forged"
     with pytest.raises(PermissionError):
         service.import_snapshot(b, "atlas", compact, db=db)
+
+
+def test_capacity_is_checked_before_filtering_legacy_namespaces(nodes, monkeypatch):
+    a, b, da, db, _ = prepare(nodes)
+    settings = a["exports"]["dgx"]
+    settings.update(
+        conversation_scopes=[], conversation_users=["#V#alice"], file_audiences=[]
+    )
+    da.chat_history.insert_one(
+        {"session_id": "legacy", "user_id": "#V#alice", "history": []}
+    )
+    da.chat_history.insert_one(
+        {
+            "session_id": "later-valid",
+            "user_id": "#V#alice",
+            "namespace": "#V#alice",
+            "history": [],
+        }
+    )
+    monkeypatch.setattr(c, "MAX_RECORDS", 2)
+    with pytest.raises(ValueError, match="capacity exceeded"):
+        c.collect_catalogue(da, settings)
