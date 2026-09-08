@@ -8,8 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shlex
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -19,52 +17,11 @@ sys.path.insert(0, str(ROOT))
 
 from src.backend.services.knowledge_federation.protocol import (
     MAX_BYTES,
-    NODE,
     encode,
     load_config,
     peer_config,
 )
-
-
-def remote(config, peer, action, payload=None):
-    transport = config.get("transports", {})[peer]
-    host = transport["ssh_host"]
-    if not NODE.fullmatch(host):
-        raise ValueError("SSH host must be an admitted config alias")
-    command = [
-        transport["python"],
-        transport["script"],
-        "--config",
-        transport["config"],
-        "--env-file",
-        transport["env_file"],
-        action,
-        "--peer" if action == "export" else "--origin",
-        config["node_id"],
-    ]
-    result = subprocess.run(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=15",
-            host,
-            shlex.join(command),
-        ],
-        input=encode(payload) if payload is not None else None,
-        capture_output=True,
-        timeout=180,
-        check=False,
-    )
-    if result.returncode:
-        # Remote stderr can contain runtime diagnostics/connection strings.
-        raise RuntimeError(
-            f"remote federation {action} failed (exit {result.returncode})"
-        )
-    if len(result.stdout) > MAX_BYTES + 1024:
-        raise ValueError("remote response exceeds pilot bound")
-    return json.loads(result.stdout)
+from src.backend.services.knowledge_federation.transport import remote
 
 
 def exchange(config, peer):
@@ -75,9 +32,18 @@ def exchange(config, peer):
 
     peer_config(config, "exports", peer)
     peer_config(config, "imports", peer)
-    outgoing = export_snapshot(config, peer)
+    from src.backend.services.knowledge_federation.protocol import compact_snapshot
+    from src.backend.services.knowledge_federation.service import REPLICAS, database
+
+    remote_head = remote(config, peer, "status")
+    outgoing = compact_snapshot(
+        export_snapshot(config, peer), remote_head.get("digest")
+    )
     pushed = remote(config, peer, "import", outgoing)
-    incoming = remote(config, peer, "export")
+    local_head = database()[REPLICAS].find_one({"_id": peer}, {"digest": 1}) or {}
+    incoming = remote(
+        config, peer, "export", {"known_digest": local_head.get("digest")}
+    )
     pulled = import_snapshot(config, peer, incoming)
     return {
         "peer": peer,
@@ -92,10 +58,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config")
     parser.add_argument("--env-file", default=str(ROOT / ".env"))
-    parser.add_argument("action", choices=["export", "import", "exchange", "watch"])
+    parser.add_argument(
+        "action",
+        choices=["export", "import", "exchange", "watch", "content", "serve", "status"],
+    )
     parser.add_argument("--peer")
     parser.add_argument("--origin")
     parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--port", type=int, default=5013)
+    parser.add_argument("--known-digest")
     args = parser.parse_args()
     from dotenv import load_dotenv
 
@@ -106,11 +77,48 @@ def main():
         import_snapshot,
     )
 
+    if args.action == "serve":
+        from src.backend.services.knowledge_federation.content_server import serve
+
+        serve(args.config, args.port)
+        return 0
+
     while True:
         config = load_config(args.config)
         try:
             if args.action == "export":
-                result = export_snapshot(config, args.peer)
+                from src.backend.services.knowledge_federation.protocol import (
+                    compact_snapshot,
+                )
+
+                result = compact_snapshot(
+                    export_snapshot(config, args.peer), args.known_digest
+                )
+            elif args.action == "status":
+                from src.backend.services.knowledge_federation.service import (
+                    REPLICAS,
+                    database,
+                )
+
+                peer_config(config, "imports", args.peer)
+                result = (
+                    database()[REPLICAS].find_one(
+                        {"_id": args.peer}, {"_id": 0, "digest": 1}
+                    )
+                    or {}
+                )
+            elif args.action == "content":
+                from src.backend.services.knowledge_federation.continuity import (
+                    serve_content,
+                )
+                from src.backend.services.knowledge_federation.service import database
+
+                raw = sys.stdin.buffer.read(8193)
+                if len(raw) > 8192:
+                    raise ValueError("content request exceeds bound")
+                result = serve_content(
+                    config, args.peer, json.loads(raw), db=database()
+                )
             elif args.action == "import":
                 raw = sys.stdin.buffer.read(MAX_BYTES + 1025)
                 if len(raw) > MAX_BYTES + 1024:

@@ -93,42 +93,97 @@ def collect_records(db, config: dict, peer: str) -> list[dict]:
     relations = settings.get("public_relations", [])
     if len(ids) + len(relations) > MAX_RECORDS or len(set(ids)) != len(ids):
         raise ValueError("explicit source selector bound exceeded/duplicate IDs")
+    automatic = settings.get("assertion_audiences", [])
+    if any(a == "public" or a not in settings["audiences"] for a in automatic):
+        raise PermissionError("automatic assertions require admitted private audiences")
+    selector = {"assertion_id": {"$in": ids}}
+    if automatic:
+        selector = {"$or": [selector, {"scope.audience_keys": {"$in": automatic}}]}
     rows = []
+    documents = list(
+        db["scoped_knowledge_assertions"]
+        .find(selector, {k: 1 for k in CLAIM_FIELDS})
+        .limit(MAX_RECORDS + 1)
+    )
+    if len(documents) > MAX_RECORDS:
+        raise ValueError("assertion selection capacity exceeded")
+    references = set()
+    for document in documents:
+        references.update(
+            document[k]
+            for k in ("subject_concept_id", "object_concept_id")
+            if document.get(k)
+        )
+        predicate = document.get("predicate")
+        if predicate:
+            references.add(
+                predicate if predicate.startswith("#V#") else "#V#" + predicate
+            )
+    for relation in relations:
+        references.update([relation["subject"], relation["object"]])
+        predicate = relation["predicate"]
+        references.add(predicate if predicate.startswith("#V#") else "#V#" + predicate)
+    concepts = {
+        d["concept_id"]: d
+        for d in db["concepts"].find(
+            {"concept_id": {"$in": sorted(references)}},
+            {
+                "concept_id": 1,
+                "relationships": 1,
+                "source": 1,
+                "provenance": 1,
+                "licence": 1,
+                "license": 1,
+                "source_uri": 1,
+                "external_ids": 1,
+            },
+        )
+    }
+    text_rows = {}
+    for relation in (
+        db["text_relations"]
+        .find(
+            {
+                "subject_concept_id": {"$in": sorted(references)},
+                "predicate": {
+                    "$in": [
+                        "hasName",
+                        "#V#hasName",
+                        "hasDescription",
+                        "#V#hasDescription",
+                    ]
+                },
+                "$or": [{"context": {}}, {"context": {"$exists": False}}],
+            },
+            {"subject_concept_id": 1, "predicate": 1, "object_text_id": 1},
+        )
+        .sort("_id", 1)
+    ):
+        bucket = text_rows.setdefault(relation["subject_concept_id"], [])
+        if len(bucket) < 5:
+            bucket.append(relation)
+    value_ids = set()
+    for bucket in text_rows.values():
+        for relation in bucket:
+            try:
+                value_ids.add(ObjectId(relation.get("object_text_id")))
+            except (TypeError, ValueError):
+                pass
+    values = {
+        str(d["_id"]): d
+        for d in db["text_values"].find(
+            {"_id": {"$in": list(value_ids)}}, {"text": 1, "lang": 1}
+        )
+    }
 
     def vocabulary(references, audience):
         result = []
         for concept_id in sorted(set(references)):
-            concept = db["concepts"].find_one({"concept_id": concept_id})
-            if not audience_can_read(concept, audience):
+            if not audience_can_read(concepts.get(concept_id), audience):
                 return None
-            # Only ordinary, unqualified canonical vocabulary text is carried.
-            # Context-qualified text needs its own scope adapter; never assume
-            # that a broadly visible concept makes all attached text public.
             texts = []
-            for relation in (
-                db["text_relations"]
-                .find(
-                    {
-                        "subject_concept_id": concept_id,
-                        "predicate": {
-                            "$in": [
-                                "hasName",
-                                "#V#hasName",
-                                "hasDescription",
-                                "#V#hasDescription",
-                            ]
-                        },
-                        "$or": [{"context": {}}, {"context": {"$exists": False}}],
-                    }
-                )
-                .sort("_id", 1)
-                .limit(5)
-            ):
-                text_id = relation.get("object_text_id")
-                try:
-                    value = db["text_values"].find_one({"_id": ObjectId(text_id)})
-                except (TypeError, ValueError):
-                    value = None
+            for relation in text_rows.get(concept_id, []):
+                value = values.get(str(relation.get("object_text_id")))
                 if value and isinstance(value.get("text"), str):
                     texts.append(
                         {
@@ -148,9 +203,7 @@ def collect_records(db, config: dict, peer: str) -> list[dict]:
             )
         return result
 
-    for document in db["scoped_knowledge_assertions"].find(
-        {"assertion_id": {"$in": ids}}
-    ):
+    for document in documents:
         scope = document.get("scope", {})
         audience = scope.get("audience_keys", [])
         if len(audience) != 1 or audience[0] not in settings["audiences"]:
@@ -197,7 +250,7 @@ def collect_records(db, config: dict, peer: str) -> list[dict]:
         )
         if not permitted_predicate(predicate):
             raise PermissionError("governance predicates are not federation knowledge")
-        concept = db["concepts"].find_one({"concept_id": subject})
+        concept = concepts.get(subject)
         if not concept or target not in concept.get("relationships", {}).get(
             predicate, []
         ):
@@ -242,6 +295,11 @@ def collect_records(db, config: dict, peer: str) -> list[dict]:
                 "vocabulary": vocab,
             }
         )
+    from .continuity import collect_catalogue
+
+    rows.extend(collect_catalogue(db, settings))
+    if len(rows) > MAX_RECORDS:
+        raise ValueError("source catalogue capacity exceeded; previous view retained")
     return sorted(rows, key=lambda row: row["id"])
 
 
